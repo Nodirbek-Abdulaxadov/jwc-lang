@@ -1,0 +1,7 @@
+// Example for: jwc diff-sql .\examples\migrate_old.jwc .\examples\migrate_new.jwc
+
+entity User {
+    id uuid pk;
+    name text(50);
+    age int(0,200);
+}

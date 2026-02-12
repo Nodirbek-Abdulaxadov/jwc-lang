@@ -1,0 +1,61 @@
+// mini_v1: single-file project (everything in one place)
+
+context AppDb : Postgres {
+    entity Todo {
+        id int pk;
+        title text;
+        done bool;
+        created_at datetime nullable;
+    }
+
+    set Todo Todos;
+}
+
+controller TodoApi {
+    route get "/" {
+        return "mini_v1 Todo API running\n";
+    }
+
+    route get "/todos" {
+        return pgQuery("select id, title, done, created_at from todo order by id", []);
+    }
+
+    route get "/todos/{id}" {
+        let json = pgQueryOne(
+            "select id, title, done, created_at from todo where id = $1::int",
+            [id]
+        );
+        if (json == "null") {
+            return [404, "Todo not found"]; 
+        }
+        return json;
+    }
+
+    route post "/todos" {
+        // body = title (text)
+        let json = pgQueryOne(
+            "insert into todo(title, done) values ($1, false) returning id, title, done, created_at",
+            [body]
+        );
+        return [201, json];
+    }
+
+    route post "/todos/{id}/done" {
+        let json = pgQueryOne(
+            "update todo set done = true where id = $1::int returning id, title, done, created_at",
+            [id]
+        );
+        if (json == "null") {
+            return [404, "Todo not found"]; 
+        }
+        return json;
+    }
+
+    route delete "/todos/{id}" {
+        let n = pgExec("delete from todo where id = $1::int", [id]);
+        if (n == 0) {
+            return [404, "Todo not found"]; 
+        }
+        return [204, ""]; 
+    }
+}

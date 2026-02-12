@@ -1,0 +1,39 @@
+controller(TodoService todoService)
+{
+    route get "/todos" {
+        var todos = todoService.getAllTodos();
+        return toJson(todos);
+    }
+
+    route get "/todos/{id}" {
+        var todo = todoService.getTodoById(id);
+        if (todo != null) {
+            return toJson(todo);
+        } else {
+            return [404, "Todo not found"];
+        }
+    }
+
+    route post "/todos" {
+        var newTodo = todoService.createTodo(body);
+        return [201, toJson(newTodo)];
+    }
+
+    route post "/todos/{id}/done" {
+        var updatedTodo = todoService.markTodoDone(id);
+        if (updatedTodo != null) {
+            return toJson(updatedTodo);
+        } else {
+            return [404, "Todo not found"];
+        }
+    }
+
+    route delete "/todos/{id}" {
+        var success = todoService.deleteTodo(id);
+        if (success) {
+            return [204, "Todo deleted"];
+        } else {
+            return [404, "Todo not found"];
+        }
+    }
+}

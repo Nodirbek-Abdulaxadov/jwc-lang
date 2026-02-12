@@ -1,0 +1,20 @@
+// Example for: jwc gen-query-sql .\examples\select.jwc
+
+entity User {
+    id uuid pk;
+    age int(0,200);
+    name text(50);
+    active bool;
+    balance decimal(18,2);
+    email text unique;
+    nickname text nullable;
+}
+
+select User from user where age >= 18;
+select * from User where age < 65;
+select * from User where name = "alice";
+select * from User where active = true;
+select * from User where balance > 12.34;
+select * from User where active = true and age >= 18 or name = "bob";
+select * from User where (active = true or name = "bob") and age >= 18;
+select id, name, balance from User where active = true;

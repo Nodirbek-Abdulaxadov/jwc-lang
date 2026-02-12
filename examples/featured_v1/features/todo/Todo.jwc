@@ -1,0 +1,6 @@
+entity TodoEntity {
+    id int pk;
+    title text(100);
+    done bool;
+    created_at timestamp;
+}

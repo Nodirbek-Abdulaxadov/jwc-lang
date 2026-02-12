@@ -1,0 +1,27 @@
+context AppContext : Postgres;
+
+entity User {
+    id uuid pk;
+    name text(50);
+    age int(0,200);
+    balance decimal(18,2);
+    created_at datetime;
+}
+
+function main() {
+    let nums = [10, 20, 30];
+    print(nums.length);
+
+    let sum = 0;
+    for (i in 0..nums.length) {
+        sum += nums[i];
+    }
+    print(sum);
+
+    let x = 2;
+    switch (x) {
+        case 1: { print("one"); }
+        case 2: { print("two"); }
+        default: { print("other"); }
+    }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "featured_v1",
+  "files": ["DbContext.jwc", "App.jwc"],
+  "dirs": ["features"],
+  "config": "config.json",
+  "migrationsDir": "migrations"
+}

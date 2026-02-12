@@ -1,0 +1,24 @@
+// Demonstrates OOP integration with the server.
+// - init() is called once at server startup
+// - each route runs with `this` bound to the init() object
+
+class App {
+    let flipped = false;
+
+    function status() {
+        if (this.flipped == false) {
+            this.flipped = true;
+            return "first";
+        } else {
+            return "again";
+        }
+    }
+}
+
+function init() {
+    return new App();
+}
+
+route get "/" {
+    return this.status();
+}

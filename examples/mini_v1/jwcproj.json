@@ -1,0 +1,7 @@
+{
+  "name": "mini_v1",
+  "version": "0.1.0",
+  "connection_strings": {
+    "postgres1": "Server=localhost;Port=5432;Database=todosdbbb;User ID=postgres;Password=1234;"
+  }
+}

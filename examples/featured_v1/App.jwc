@@ -1,0 +1,8 @@
+function main() {
+    let app = new WebApp();
+
+    // some code 
+
+    app.Listen(5000);
+    app.Run();
+}

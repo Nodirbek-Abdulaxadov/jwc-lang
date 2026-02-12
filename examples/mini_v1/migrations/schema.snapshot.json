@@ -1,0 +1,57 @@
+{
+  "entities": [
+    {
+      "name": "Todo",
+      "fields": [
+        {
+          "name": "id",
+          "ty": {
+            "name": "int",
+            "args": []
+          },
+          "mods": {
+            "nullable": false,
+            "unique": false,
+            "primary_key": true
+          }
+        },
+        {
+          "name": "title",
+          "ty": {
+            "name": "text",
+            "args": []
+          },
+          "mods": {
+            "nullable": false,
+            "unique": false,
+            "primary_key": false
+          }
+        },
+        {
+          "name": "done",
+          "ty": {
+            "name": "bool",
+            "args": []
+          },
+          "mods": {
+            "nullable": false,
+            "unique": false,
+            "primary_key": false
+          }
+        },
+        {
+          "name": "created_at",
+          "ty": {
+            "name": "datetime",
+            "args": []
+          },
+          "mods": {
+            "nullable": true,
+            "unique": false,
+            "primary_key": false
+          }
+        }
+      ]
+    }
+  ]
+}
