@@ -1,4 +1,0 @@
-context AppDatabase : Postgres
-{
-    table<TodoEntity> Todos;
-}

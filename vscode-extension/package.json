@@ -1,0 +1,70 @@
+{
+  "name": "jwc-lang",
+  "displayName": "JWC Language",
+  "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and language features",
+  "version": "0.1.0",
+  "publisher": "jwc",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets"
+  ],
+  "icon": "icon.png",
+  "keywords": [
+    "jwc",
+    "just web code",
+    "backend",
+    "web",
+    "database"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jwc-lang/jwc"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "jwc",
+        "aliases": [
+          "JWC",
+          "jwc"
+        ],
+        "extensions": [
+          ".jwc"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icon.png",
+          "dark": "./icon.png"
+        }
+      },
+      {
+        "id": "jwcproj",
+        "aliases": [
+          "JWC Project"
+        ],
+        "filenames": [
+          "jwcproj.json"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "jwc",
+        "scopeName": "source.jwc",
+        "path": "./syntaxes/jwc.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "jwc",
+        "path": "./snippets/jwc.code-snippets"
+      }
+    ],
+    "themes": [],
+    "commands": []
+  }
+}

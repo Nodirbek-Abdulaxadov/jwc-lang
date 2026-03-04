@@ -1,0 +1,4 @@
+function main() {
+    setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);
+    serve(8080);
+}

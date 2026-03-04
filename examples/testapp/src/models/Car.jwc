@@ -1,0 +1,7 @@
+entity CarEntity {
+    id      int pk;
+    model   varchar(255);
+    year    int;
+    brandId int;
+    colorId int;
+}

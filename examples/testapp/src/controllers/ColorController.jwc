@@ -1,0 +1,38 @@
+route GET "api/colors" {
+    let colors = getAllColors();
+    return json(colors);
+}
+
+route GET "api/colors/{id}" {
+    let id = path_param("id");
+    let color = getColorById(id);
+    if (color == null) {
+        return notFound();
+    }
+    return json(color);
+}
+
+route POST "api/colors" {
+    let data = body();
+    let newColor = createColor(data.name, data.hex);
+    return created(newColor);
+}
+
+route PUT "api/colors/{id}" {
+    let id = path_param("id");
+    let data = body();
+    let updated = updateColor(id, data.name, data.hex);
+    if (updated == null) {
+        return notFound();
+    }
+    return json(updated);
+}
+
+route DELETE "api/colors/{id}" {
+    let id = path_param("id");
+    let ok = deleteColor(id);
+    if (ok == false) {
+        return notFound();
+    }
+    return noContent();
+}

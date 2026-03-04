@@ -1,0 +1,295 @@
+{
+  "Route GET": {
+    "prefix": "route-get",
+    "body": [
+      "route GET \"${1:api/resource}\" {",
+      "\ttry {",
+      "\t\t${2:// handler}",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}"
+    ],
+    "description": "HTTP GET route"
+  },
+
+  "Route GET by ID": {
+    "prefix": "route-get-id",
+    "body": [
+      "route GET \"${1:api/resource}/{id}\" {",
+      "\ttry {",
+      "\t\tlet id = params.id;",
+      "\t\tlet item = select ${2:Entity} from ${3:db}.${4:Table} where ${2:Entity}.id == @id first;",
+      "\t\tif (item) {",
+      "\t\t\treturn json(item);",
+      "\t\t}",
+      "\t\treturn notFound();",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}"
+    ],
+    "description": "HTTP GET by ID route"
+  },
+
+  "Route POST": {
+    "prefix": "route-post",
+    "body": [
+      "route POST \"${1:api/resource}\" {",
+      "\ttry {",
+      "\t\tlet data = body();",
+      "\t\tlet item = new ${2:Entity}();",
+      "\t\t${3:// set fields}",
+      "\t\tinsert item into ${4:db}.${5:Table};",
+      "\t\treturn created(item);",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}"
+    ],
+    "description": "HTTP POST route"
+  },
+
+  "Route PUT": {
+    "prefix": "route-put",
+    "body": [
+      "route PUT \"${1:api/resource}/{id}\" {",
+      "\ttry {",
+      "\t\tlet id = params.id;",
+      "\t\tlet existing = select ${2:Entity} from ${3:db}.${4:Table} where ${2:Entity}.id == @id first;",
+      "\t\tif (existing) {",
+      "\t\t\tlet data = body();",
+      "\t\t\t${5:// update fields}",
+      "\t\t\tupdate existing in ${3:db}.${4:Table};",
+      "\t\t\treturn json(existing);",
+      "\t\t}",
+      "\t\treturn notFound();",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}"
+    ],
+    "description": "HTTP PUT route"
+  },
+
+  "Route DELETE": {
+    "prefix": "route-delete",
+    "body": [
+      "route DELETE \"${1:api/resource}/{id}\" {",
+      "\ttry {",
+      "\t\tlet id = params.id;",
+      "\t\tlet item = select ${2:Entity} from ${3:db}.${4:Table} where ${2:Entity}.id == @id first;",
+      "\t\tif (item) {",
+      "\t\t\tdelete item from ${3:db}.${4:Table};",
+      "\t\t\treturn noContent();",
+      "\t\t}",
+      "\t\treturn notFound();",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}"
+    ],
+    "description": "HTTP DELETE route"
+  },
+
+  "Entity": {
+    "prefix": "entity",
+    "body": [
+      "entity ${1:EntityName} {",
+      "\tid int pk auto_increment;",
+      "\t${2:field}: ${3:varchar(255)} not null;",
+      "}"
+    ],
+    "description": "JWC entity declaration"
+  },
+
+  "Entity with UUID PK": {
+    "prefix": "entity-uuid",
+    "body": [
+      "entity ${1:EntityName} {",
+      "\tid uuid pk;",
+      "\t${2:name}: varchar(255) not null;",
+      "}"
+    ],
+    "description": "JWC entity with UUID primary key"
+  },
+
+  "DbContext": {
+    "prefix": "dbcontext",
+    "body": [
+      "dbcontext ${1:AppDbContext} : ${2:Postgres};"
+    ],
+    "description": "Database context declaration"
+  },
+
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "function ${1:name}(${2:params}) {",
+      "\t${3:// body}",
+      "}"
+    ],
+    "description": "JWC function declaration"
+  },
+
+  "Async Function": {
+    "prefix": "afn",
+    "body": [
+      "async function ${1:name}(${2:params}) {",
+      "\t${3:// body}",
+      "}"
+    ],
+    "description": "JWC async function declaration"
+  },
+
+  "Select All": {
+    "prefix": "sel-all",
+    "body": [
+      "let ${1:items} = select ${2:Entity} from ${3:db}.${4:Table};"
+    ],
+    "description": "Select all records from a table"
+  },
+
+  "Select by ID": {
+    "prefix": "sel-id",
+    "body": [
+      "let ${1:item} = select ${2:Entity} from ${3:db}.${4:Table} where ${2:Entity}.id == @${5:id} first;"
+    ],
+    "description": "Select a single record by ID"
+  },
+
+  "Select with where": {
+    "prefix": "sel-where",
+    "body": [
+      "let ${1:items} = select ${2:Entity} from ${3:db}.${4:Table} where ${2:Entity}.${5:field} == @${6:value};"
+    ],
+    "description": "Select records with a where clause"
+  },
+
+  "Insert": {
+    "prefix": "db-insert",
+    "body": [
+      "let ${1:item} = new ${2:Entity}();",
+      "${1:item}.${3:field} = ${4:value};",
+      "insert ${1:item} into ${5:db}.${6:Table};"
+    ],
+    "description": "Create and insert a new entity"
+  },
+
+  "Update": {
+    "prefix": "db-update",
+    "body": [
+      "${1:item}.${2:field} = ${3:value};",
+      "update ${1:item} in ${4:db}.${5:Table};"
+    ],
+    "description": "Update an entity"
+  },
+
+  "Delete": {
+    "prefix": "db-delete",
+    "body": [
+      "delete ${1:item} from ${2:db}.${3:Table};"
+    ],
+    "description": "Delete an entity"
+  },
+
+  "If Null Check": {
+    "prefix": "ifn",
+    "body": [
+      "if (${1:value} == null) {",
+      "\treturn notFound();",
+      "}"
+    ],
+    "description": "Null check with notFound response"
+  },
+
+  "Try Catch": {
+    "prefix": "try",
+    "body": [
+      "try {",
+      "\t${1:// code}",
+      "} catch (error) {",
+      "\treturn internalError(error.message);",
+      "}"
+    ],
+    "description": "Try-catch block"
+  },
+
+  "Validate Body": {
+    "prefix": "validate",
+    "body": [
+      "validate body {",
+      "\t${1:field}: required, ${2:minLength(1)};",
+      "}"
+    ],
+    "description": "Body validation block"
+  },
+
+  "Main function": {
+    "prefix": "main",
+    "body": [
+      "function main() {",
+      "\t${1:// entry point}",
+      "}"
+    ],
+    "description": "Main entry point function"
+  },
+
+  "Full CRUD controller": {
+    "prefix": "crud",
+    "body": [
+      "// GET all ${1:items}",
+      "route GET \"api/${1:items}\" {",
+      "\ttry {",
+      "\t\tlet items = select ${2:Entity} from ${3:db}.${4:Table};",
+      "\t\treturn json(items);",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}",
+      "",
+      "// GET by id",
+      "route GET \"api/${1:items}/{id}\" {",
+      "\ttry {",
+      "\t\tlet id = params.id;",
+      "\t\tlet item = select ${2:Entity} from ${3:db}.${4:Table} where ${2:Entity}.id == @id first;",
+      "\t\tif (item) {",
+      "\t\t\treturn json(item);",
+      "\t\t}",
+      "\t\treturn notFound();",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}",
+      "",
+      "// POST create",
+      "route POST \"api/${1:items}\" {",
+      "\ttry {",
+      "\t\tlet data = body();",
+      "\t\tlet item = new ${2:Entity}();",
+      "\t\t${5:// item.field = data.field;}",
+      "\t\tinsert item into ${3:db}.${4:Table};",
+      "\t\treturn created(item);",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}",
+      "",
+      "// DELETE",
+      "route DELETE \"api/${1:items}/{id}\" {",
+      "\ttry {",
+      "\t\tlet id = params.id;",
+      "\t\tlet item = select ${2:Entity} from ${3:db}.${4:Table} where ${2:Entity}.id == @id first;",
+      "\t\tif (item) {",
+      "\t\t\tdelete item from ${3:db}.${4:Table};",
+      "\t\t\treturn noContent();",
+      "\t\t}",
+      "\t\treturn notFound();",
+      "\t} catch (error) {",
+      "\t\treturn internalError(error.message);",
+      "\t}",
+      "}"
+    ],
+    "description": "Full CRUD routes for an entity"
+  }
+}

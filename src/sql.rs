@@ -22,28 +22,14 @@ pub(crate) fn generate_postgres_table_sql(entity: &EntityDecl) -> Result<String>
     let mut lines: Vec<String> = Vec::new();
     let mut constraints: Vec<String> = Vec::new();
 
-    let mut primary_key: Option<String> = None;
-
     for field in &entity.fields {
         let (sql_type, extra_constraints) = map_type_postgres(&field.ty, &field.name)?;
-
-        let null_sql = if field.mods.nullable { "NULL" } else { "NOT NULL" };
-        lines.push(format!("    \"{}\" {} {}", field.name, sql_type, null_sql));
+        let null_suffix = if field.is_nullable { "" } else { " NOT NULL" };
+        lines.push(format!("    \"{}\" {}{}", field.name, sql_type, null_suffix));
+        if field.is_primary_key {
+            constraints.push(format!("PRIMARY KEY (\"{}\")", field.name));
+        }
         constraints.extend(extra_constraints);
-
-        if field.mods.unique {
-            constraints.push(format!(
-                "CONSTRAINT \"uq_{}_{}\" UNIQUE (\"{}\")",
-                table, field.name, field.name
-            ));
-        }
-        if field.mods.primary_key {
-            primary_key = Some(field.name.clone());
-        }
-    }
-
-    if let Some(pk) = primary_key {
-        constraints.push(format!("CONSTRAINT \"pk_{}\" PRIMARY KEY (\"{}\")", table, pk));
     }
 
     for c in constraints {
@@ -80,7 +66,7 @@ pub(crate) fn map_type_postgres(ty: &TypeSpec, field_name: &str) -> Result<(Stri
             }
             "integer".to_string()
         }
-        "text" | "string" => {
+        "text" => {
             if ty.args.len() == 1 {
                 format!("varchar({})", ty.args[0])
             } else {
@@ -142,39 +128,39 @@ mod tests {
         assert!(sql.contains("\"id\" uuid"));
         assert!(sql.contains("\"name\" varchar(50)"));
         assert!(sql.contains("CHECK (\"age\" >= 0 AND \"age\" <= 200)"));
+        assert!(sql.contains("\"id\" uuid NOT NULL"));
     }
 
     #[test]
-    fn generates_unique_and_pk_and_nullability() {
-        let src = r#"
-            entity User {
-                id uuid pk;
-                email text unique;
-                nickname text nullable;
-            }
-        "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let sql = generate_postgres_schema_sql(&program).unwrap();
-        assert!(sql.contains("PRIMARY KEY"));
-        assert!(sql.contains("UNIQUE"));
-        assert!(sql.contains("\"nickname\" text NULL"));
-        assert!(sql.contains("\"email\" text NOT NULL"));
-    }
-
-    #[test]
-    fn string_alias_maps_to_text_or_varchar() {
+    fn nullable_and_pk_are_generated() {
         let src = r#"
             entity Todo {
-                id int;
-                title string(120);
-                notes string;
+                id uuid pk;
+                description text nullable;
             }
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
         let sql = generate_postgres_schema_sql(&program).unwrap();
-        assert!(sql.contains("\"title\" varchar(120)"));
-        assert!(sql.contains("\"notes\" text"));
+        assert!(sql.contains("\"id\" uuid NOT NULL"));
+        assert!(sql.contains("PRIMARY KEY (\"id\")"));
+        assert!(sql.contains("\"description\" text"));
+        assert!(!sql.contains("\"description\" text NOT NULL"));
+    }
+
+    #[test]
+    fn varchar_and_decimal_are_generated() {
+        let src = r#"
+            entity User {
+                id uuid;
+                email varchar(120);
+                amount decimal(18,2);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let sql = generate_postgres_schema_sql(&program).unwrap();
+        assert!(sql.contains("\"email\" varchar(120) NOT NULL"));
+        assert!(sql.contains("\"amount\" numeric(18,2) NOT NULL"));
     }
 }

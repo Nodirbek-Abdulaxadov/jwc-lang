@@ -1,0 +1,39 @@
+function getAllCars() {
+    return select CarEntity from AppDbContext.Cars;
+}
+
+function getCarById(id) {
+    return select CarEntity from AppDbContext.Cars where CarEntity.id == @id first;
+}
+
+function createCar(model: string, year: int, brandId: int, colorId: int) {
+    let car = new CarEntity();
+    car.model = model;
+    car.year = year;
+    car.brandId = brandId;
+    car.colorId = colorId;
+    insert car into AppDbContext.Cars;
+    return car;
+}
+
+function updateCar(id, model: string, year: int, brandId: int, colorId: int) {
+    let car = select CarEntity from AppDbContext.Cars where CarEntity.id == @id first;
+    if (car == null) {
+        return null;
+    }
+    car.model = model;
+    car.year = year;
+    car.brandId = brandId;
+    car.colorId = colorId;
+    update car in AppDbContext.Cars;
+    return car;
+}
+
+function deleteCar(id) {
+    let car = select CarEntity from AppDbContext.Cars where CarEntity.id == @id first;
+    if (car == null) {
+        return false;
+    }
+    delete car from AppDbContext.Cars;
+    return true;
+}

@@ -1,33 +1,20 @@
 mod ast;
 mod diag;
 mod lexer;
-mod parser;
-mod sql;
 mod migrate;
-mod query_sql;
+mod parser;
+mod project;
 mod runner;
 mod server;
-mod db;
-mod config;
-mod migrations;
-mod schema_snapshot;
-mod project;
-mod manifest;
-mod scaffold;
+mod sql;
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum NewTemplateArg {
-    Minimal,
-    Api,
-}
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "jwc", version, about = "JWC (Just Web Code) prototype CLI")]
+#[command(name = "jwc", version, about = "JWC MVP CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -35,93 +22,45 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new JWC project scaffold
-    New {
-        /// Target directory to create
-        path: PathBuf,
-        /// Optional project name for jwcproj.json
-        #[arg(long)]
-        name: Option<String>,
-        /// Project template (default: minimal)
-        #[arg(long, value_enum, default_value_t = NewTemplateArg::Minimal)]
-        template: NewTemplateArg,
-    },
-    /// Parse and validate a .jwc source file
+    /// Create a new JWC project folder with jwcproj.json and main.jwc
+    New { name: String },
+    /// Parse and validate a .jwc schema file
     Check { file: PathBuf },
-    /// Generate PostgreSQL CREATE TABLE SQL from entity declarations
+    /// Generate PostgreSQL CREATE TABLE SQL from entities
     GenSql { file: PathBuf },
-    /// Generate PostgreSQL migration SQL by diffing two JWC files (old -> new)
-    DiffSql { old: PathBuf, new: PathBuf },
-
-    /// Create a new migration file by diffing current schema vs local snapshot
-    MigrateAdd {
-        file: PathBuf,
-        /// Human name for the migration (used in filename)
+    /// Run a JWC program from a .jwc file or project directory (defaults to current project)
+    Run { path: Option<PathBuf> },
+    /// Validate current project sources (searches jwcproj.json upward)
+    Test,
+    /// Build current project into bin/debug or bin/release
+    Build {
         #[arg(long)]
-        name: String,
-        /// Optional path to config file (config.json)
-        #[arg(long)]
-        config: Option<PathBuf>,
+        release: bool,
     },
-
-    /// Print the SQL that would be generated (current schema vs local snapshot)
-    MigratePlan {
-        file: PathBuf,
-        /// Optional path to config file (config.json)
-        #[arg(long)]
-        config: Option<PathBuf>,
+    /// Manage SQL migrations for Postgres
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
     },
-
-    /// Apply pending local migrations from the migrations folder to Postgres
-    MigrateApply {
-        file: PathBuf,
-        /// Optional path to config file (config.json)
-        #[arg(long)]
-        config: Option<PathBuf>,
-        /// Postgres connection string (overrides config + env + dbcontext)
-        #[arg(long)]
-        db_url: Option<String>,
-        /// Pick dbcontext by name (overrides config)
-        #[arg(long)]
-        dbcontext: Option<String>,
-    },
-
-    /// List applied migrations in Postgres (__jwc_migrations)
-    MigrateStatus {
-        /// A JWC file to read dbcontext url from (optional, but recommended)
-        file: Option<PathBuf>,
-        /// Optional path to config file (config.json)
-        #[arg(long)]
-        config: Option<PathBuf>,
-        /// Postgres connection string (overrides env + dbcontext)
-        #[arg(long)]
-        db_url: Option<String>,
-        /// Pick dbcontext by name (if dbcontext provides url)
-        #[arg(long)]
-        dbcontext: Option<String>,
-        /// Limit number of rows printed
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-    },
-    /// Generate PostgreSQL SELECT SQL for parsed select statements
-    GenQuerySql { file: PathBuf },
-    /// Run a minimal JWC program (supports function main() with print statements)
-    Run { file: PathBuf },
-    /// Start a minimal HTTP server from a JWC project manifest (jwcproj.json)
+    /// Start a real HTTP server for a JWC project
     Serve {
-        /// Project directory or manifest path (defaults to current directory)
-        project: Option<PathBuf>,
-        #[arg(long, default_value_t = 3000)]
+        /// Project directory or jwcproj.json (defaults to current dir)
+        path: Option<PathBuf>,
+        /// Port to listen on (default: 8080)
+        #[arg(long, short, default_value_t = 8080)]
         port: u16,
-        /// Optional path to config file (config.json)
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Create new migration files
+    New { name: String },
+    /// Apply pending migrations to Postgres
+    #[command(alias = "apply")]
+    Up {
         #[arg(long)]
-        config: Option<PathBuf>,
-        /// Postgres connection string (overrides config + env + dbcontext)
-        #[arg(long)]
-        db_url: Option<String>,
-        /// Pick dbcontext by name (overrides config)
-        #[arg(long)]
-        dbcontext: Option<String>,
+        database_url: Option<String>,
     },
 }
 
@@ -129,261 +68,187 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::New {
-            path,
-            name,
-            template,
-        } => {
-            let template = match template {
-                NewTemplateArg::Minimal => scaffold::NewTemplate::Minimal,
-                NewTemplateArg::Api => scaffold::NewTemplate::Api,
-            };
-            scaffold::create_new_project(&path, name.as_deref(), template)?;
-            println!("Created JWC project: {}", path.display());
-            println!("Next: jwc serve {} --port 3000", path.display());
+        Command::New { name } => {
+            let target = PathBuf::from(name);
+            project::create_new_project(&target)?;
+            println!("Created project: {}", target.display());
+            println!("Try:");
+            println!("  cd {}", target.display());
+            println!("  jwc test");
+            println!("  jwc build");
         }
         Command::Check { file } => {
-            let _loaded = project::load_program_from_path(&file)?;
+            let source = read_source(&file)?;
+            let program = parser::parse_program(&source)
+                .with_context(|| format!("Failed to parse {}", file.display()))?;
+            parser::validate_program(&program)
+                .with_context(|| format!("Validation failed for {}", file.display()))?;
             println!("OK");
         }
         Command::GenSql { file } => {
-            let loaded = project::load_schema_program_from_path(&file)?;
-            let sql = sql::generate_postgres_schema_sql(&loaded.program)?;
-            print!("{}", sql);
+            let source = read_source(&file)?;
+            let program = parser::parse_program(&source)
+                .with_context(|| format!("Failed to parse {}", file.display()))?;
+            parser::validate_program(&program)
+                .with_context(|| format!("Validation failed for {}", file.display()))?;
+            let schema_sql = sql::generate_postgres_schema_sql(&program)?;
+            print!("{}", schema_sql);
         }
-        Command::DiffSql { old, new } => {
-            let old_loaded = project::load_schema_program_from_path(&old)?;
-            let new_loaded = project::load_schema_program_from_path(&new)?;
-            let sql = migrate::generate_postgres_migration_sql(&old_loaded.program, &new_loaded.program)?;
-            print!("{}", sql);
-        }
+        Command::Run { path } => {
+            let target = path.unwrap_or(std::env::current_dir()?);
 
-        Command::MigrateAdd { file, name, config } => {
-            let loaded = project::load_schema_program_from_path(&file)?;
-            let base_dir = loaded.project_dir.clone();
-            let config = config.or(loaded.config_path.clone());
-            let mut cfg = config::load_config_in_dir(&base_dir, config)?;
-            if cfg.database_url.is_none() {
-                cfg.database_url = loaded.inline_config.database_url.clone();
-            }
-            if cfg.dbcontext.is_none() {
-                cfg.dbcontext = loaded.inline_config.dbcontext.clone();
-            }
-            if cfg.migrations_dir.is_none() {
-                cfg.migrations_dir = loaded.inline_config.migrations_dir.clone();
-            }
-            if loaded.migrations_dir.is_some() {
-                cfg.migrations_dir = loaded.migrations_dir.clone();
-            }
-            let (id, sql_path) =
-                migrations::create_migration(&base_dir, &cfg, &name, &loaded.program)?;
-            println!("Created migration: {}", id);
-            println!("SQL: {}", sql_path.display());
-        }
-
-        Command::MigratePlan { file, config } => {
-            let loaded = project::load_schema_program_from_path(&file)?;
-            let base_dir = loaded.project_dir.clone();
-            let config = config.or(loaded.config_path.clone());
-            let mut cfg = config::load_config_in_dir(&base_dir, config)?;
-            if cfg.database_url.is_none() {
-                cfg.database_url = loaded.inline_config.database_url.clone();
-            }
-            if cfg.dbcontext.is_none() {
-                cfg.dbcontext = loaded.inline_config.dbcontext.clone();
-            }
-            if cfg.migrations_dir.is_none() {
-                cfg.migrations_dir = loaded.inline_config.migrations_dir.clone();
-            }
-            if loaded.migrations_dir.is_some() {
-                cfg.migrations_dir = loaded.migrations_dir.clone();
-            }
-            let new_program = loaded.program;
-
-            let paths = migrations::migration_paths(&base_dir, &cfg);
-
-            let prev = schema_snapshot::load_snapshot(&paths.snapshot_path)?;
-            let old_program = match prev {
-                Some(s) => s.to_program(),
-                None => ast::Program::new(),
-            };
-
-            let sql = migrate::generate_postgres_migration_sql(&old_program, &new_program)?;
-            print!("{}", sql);
-        }
-
-        Command::MigrateApply {
-            file,
-            config,
-            db_url,
-            dbcontext,
-        } => {
-            let loaded = project::load_schema_program_from_path(&file)?;
-            let base_dir = loaded.project_dir.clone();
-            let config = config.or(loaded.config_path.clone());
-            let mut cfg = config::load_config_in_dir(&base_dir, config)?;
-            if cfg.database_url.is_none() {
-                cfg.database_url = loaded.inline_config.database_url.clone();
-            }
-            if cfg.dbcontext.is_none() {
-                cfg.dbcontext = loaded.inline_config.dbcontext.clone();
-            }
-            if cfg.migrations_dir.is_none() {
-                cfg.migrations_dir = loaded.inline_config.migrations_dir.clone();
-            }
-            if loaded.migrations_dir.is_some() {
-                cfg.migrations_dir = loaded.migrations_dir.clone();
-            }
-            let program = loaded.program;
-
-            let paths = migrations::migration_paths(&base_dir, &cfg);
-
-            let db_url = db::resolve_db_url(
-                &program,
-                db_url.or(cfg.database_url),
-                dbcontext.or(cfg.dbcontext),
-            )?;
-
-            let files = migrations::list_local_migration_sql_files(&paths.dir)?;
-            if files.is_empty() {
-                println!("No local migrations found in {}", paths.dir.display());
-                return Ok(());
-            }
-
-            let mut applied = 0usize;
-            for p in files {
-                let name = migrations::migration_name_from_sql_path(&p)?;
-                let sql = std::fs::read_to_string(&p)
-                    .with_context(|| format!("Failed to read {}", p.display()))?;
-                match db::apply_postgres_migration_outcome(&db_url, &name, &sql)? {
-                    db::ApplyOutcome::Applied => {
-                        applied += 1;
-                        println!("Applied: {}", name);
-                    }
-                    db::ApplyOutcome::AlreadyApplied => {
-                        println!("Skipped (already applied): {}", name);
-                    }
+            if target.is_dir() {
+                let root = project::find_project_root(&target)?;
+                project::load_dotenv(&root);
+                let loaded = project::load_project_from_root(&root)?;
+                let result = runner::run_main(&loaded.program)?;
+                if !result.output.is_empty() { print!("{}", result.output); }
+                if let Some(port) = result.serve_port {
+                    server::serve(&loaded.program, port)?;
                 }
-            }
-
-            println!("Done. Applied {} migrations.", applied);
-        }
-
-        Command::MigrateStatus {
-            file,
-            config,
-            db_url,
-            dbcontext,
-            limit,
-        } => {
-            let (_base_dir, cfg, program) = if let Some(file) = file {
-                let loaded = project::load_schema_program_from_path(&file)?;
-                let base_dir = loaded.project_dir.clone();
-                let config = config.or(loaded.config_path.clone());
-                let mut cfg = config::load_config_in_dir(&base_dir, config)?;
-                if cfg.database_url.is_none() {
-                    cfg.database_url = loaded.inline_config.database_url.clone();
+            } else if target
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case(project::PROJECT_FILE))
+                .unwrap_or(false)
+            {
+                let root = target
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid project file path"))?
+                    .to_path_buf();
+                project::load_dotenv(&root);
+                let loaded = project::load_project_from_root(&root)?;
+                let result = runner::run_main(&loaded.program)?;
+                if !result.output.is_empty() { print!("{}", result.output); }
+                if let Some(port) = result.serve_port {
+                    server::serve(&loaded.program, port)?;
                 }
-                if cfg.dbcontext.is_none() {
-                    cfg.dbcontext = loaded.inline_config.dbcontext.clone();
-                }
-                if cfg.migrations_dir.is_none() {
-                    cfg.migrations_dir = loaded.inline_config.migrations_dir.clone();
-                }
-                if loaded.migrations_dir.is_some() {
-                    cfg.migrations_dir = loaded.migrations_dir.clone();
-                }
-                (base_dir, cfg, loaded.program)
             } else {
-                let base_dir = PathBuf::from(".");
-                let cfg = config::load_config_in_dir(&base_dir, config)?;
-                (base_dir, cfg, crate::ast::Program::new())
-            };
-
-            let db_url = db::resolve_db_url(
-                &program,
-                db_url.or(cfg.database_url),
-                dbcontext.or(cfg.dbcontext),
-            )?;
-            let migrations = db::list_postgres_migrations(&db_url, limit)?;
-
-            if migrations.is_empty() {
-                println!("No migrations applied.");
-                return Ok(());
-            }
-
-            for m in migrations {
-                println!("{}\t{}\t{}", m.applied_at, m.name, m.sql_sha256);
-            }
-        }
-        Command::GenQuerySql { file } => {
-            let loaded = project::load_program_from_path(&file)?;
-            let sql = query_sql::generate_postgres_queries_sql(&loaded.program)?;
-            print!("{}", sql);
-        }
-        Command::Run { file } => {
-            let loaded = project::load_program_from_path(&file)?;
-            let output = runner::run_main(&loaded.program)?;
-            print!("{}", output);
-        }
-        Command::Serve {
-            project,
-            port,
-            config,
-            db_url,
-            dbcontext,
-        } => {
-            let project = project.unwrap_or_else(|| PathBuf::from("."));
-            let project_manifest = if project.is_dir() {
-                project.join("jwcproj.json")
-            } else {
-                project.clone()
-            };
-
-            if !manifest::is_manifest_path(&project_manifest) {
-                anyhow::bail!(
-                    "jwc serve expects a project manifest (jwcproj.json) or a project directory containing it. Got: {}",
-                    project_manifest.display()
-                );
-            }
-
-            let loaded = project::load_program_from_path(&project_manifest)?;
-            let base_dir = loaded.project_dir.clone();
-            let config = config.or(loaded.config_path.clone());
-            let mut cfg = config::load_config_in_dir(&base_dir, config)?;
-            if cfg.database_url.is_none() {
-                cfg.database_url = loaded.inline_config.database_url.clone();
-            }
-            if cfg.dbcontext.is_none() {
-                cfg.dbcontext = loaded.inline_config.dbcontext.clone();
-            }
-            if cfg.migrations_dir.is_none() {
-                cfg.migrations_dir = loaded.inline_config.migrations_dir.clone();
-            }
-            if loaded.migrations_dir.is_some() {
-                cfg.migrations_dir = loaded.migrations_dir.clone();
-            }
-
-            // Optional: only resolve DB url if one is available from flags/config/env/dbcontext.
-            let resolved = match db::resolve_db_url(
-                &loaded.program,
-                db_url.or(cfg.database_url),
-                dbcontext.or(cfg.dbcontext),
-            ) {
-                Ok(u) => Some(u),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("No database url provided") {
-                        None
-                    } else {
-                        return Err(e);
-                    }
+                let source = read_source(&target)?;
+                let program = parser::parse_program(&source)
+                    .with_context(|| format!("Failed to parse {}", target.display()))?;
+                parser::validate_program(&program)
+                    .with_context(|| format!("Validation failed for {}", target.display()))?;
+                let result = runner::run_main(&program)?;
+                if !result.output.is_empty() { print!("{}", result.output); }
+                if let Some(port) = result.serve_port {
+                    server::serve(&program, port)?;
                 }
-            };
+            }
+        }
+        Command::Test => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            let loaded = project::load_project_from_root(&root)?;
+            println!(
+                "OK: project '{}' ({} source files)",
+                loaded.manifest.name,
+                loaded.source_files.len()
+            );
+        }
+        Command::Build { release } => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            let loaded = project::load_project_from_root(&root)?;
 
-            server::serve_with_db_url(&loaded.program, port, resolved)?;
+            let profile = if release { "release" } else { "debug" };
+            let bin_dir = root.join("bin").join(profile);
+            std::fs::create_dir_all(&bin_dir)?;
+
+            let app_name = sanitize_app_name(&loaded.manifest.name);
+            let out_path = bin_dir.join(&app_name);
+            let script = build_launcher_script(&app_name);
+            std::fs::write(&out_path, script)?;
+
+            let runtime_src = std::env::current_exe()?;
+            let runtime_dst = bin_dir.join("jwc-runtime");
+            std::fs::copy(&runtime_src, &runtime_dst).with_context(|| {
+                format!(
+                    "Failed to copy runtime from {} to {}",
+                    runtime_src.display(),
+                    runtime_dst.display()
+                )
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&out_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&out_path, perms)?;
+
+                let mut runtime_perms = std::fs::metadata(&runtime_dst)?.permissions();
+                runtime_perms.set_mode(0o755);
+                std::fs::set_permissions(&runtime_dst, runtime_perms)?;
+            }
+
+            println!("Build OK ({profile})");
+            println!("Project: {}", loaded.manifest.name);
+            println!("Executable: {}", out_path.display());
+        }
+        Command::Migrate { command } => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            project::load_dotenv(&root);
+
+            match command {
+                MigrateCommand::New { name } => {
+                    let created = migrate::create_migration(&root, &name)?;
+                    println!("Migration created:");
+                    println!("  {}", created.up_path.display());
+                    println!("  {}", created.down_path.display());
+                }
+                MigrateCommand::Up { database_url } => {
+                    let report = migrate::apply_pending_migrations(&root, database_url)?;
+                    println!("Migrations applied: {}", report.applied);
+                    println!("Already applied: {}", report.skipped);
+                    println!("Total found: {}", report.total);
+                }
+            }
+        }
+        Command::Serve { path, port } => {
+            let target = path.unwrap_or(std::env::current_dir()?);
+            let root = if target.is_dir() {
+                project::find_project_root(&target)?
+            } else {
+                target
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?
+                    .to_path_buf()
+            };
+            project::load_dotenv(&root);
+            let loaded = project::load_project_from_root(&root)?;
+            server::serve(&loaded.program, port)?;
         }
     }
 
     Ok(())
+}
+
+fn read_source(path: &PathBuf) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
+}
+
+fn sanitize_app_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    if out.is_empty() {
+        "app".to_string()
+    } else {
+        out
+    }
+}
+
+fn build_launcher_script(_app_name: &str) -> String {
+    r#"#!/usr/bin/env bash
+set -euo pipefail
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SELF_DIR/jwc-runtime" run "$ROOT_DIR" "$@"
+"#
+    .to_string()
 }

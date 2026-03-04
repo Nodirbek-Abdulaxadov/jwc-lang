@@ -1,4 +1,0 @@
-jwc: listening on http://0.0.0.0:3001
-jwc: handler: function handle(method, path)
-jwc: return text => 200, or [status:int, body:text]
-jwc: controllers: enabled (this-bound routes)

@@ -1,9 +1,0 @@
-context appDatabase : Postgres
-{
-    table<TodoEntity> Todos;
-
-    protected function configure() {
-        // Configure the database connection here
-        this.connectionString = "Host=localhost;Port=5432;Database=todoapp;Username=postgres;Password=1234";
-    }
-}

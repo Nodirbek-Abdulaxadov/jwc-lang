@@ -1,0 +1,35 @@
+function getAllColors() {
+    return select ColorEntity from AppDbContext.Colors;
+}
+
+function getColorById(id) {
+    return select ColorEntity from AppDbContext.Colors where ColorEntity.id == @id first;
+}
+
+function createColor(name: string, hex: string) {
+    let color = new ColorEntity();
+    color.name = name;
+    color.hex = hex;
+    insert color into AppDbContext.Colors;
+    return color;
+}
+
+function updateColor(id, name: string, hex: string) {
+    let color = select ColorEntity from AppDbContext.Colors where ColorEntity.id == @id first;
+    if (color == null) {
+        return null;
+    }
+    color.name = name;
+    color.hex = hex;
+    update color in AppDbContext.Colors;
+    return color;
+}
+
+function deleteColor(id) {
+    let color = select ColorEntity from AppDbContext.Colors where ColorEntity.id == @id first;
+    if (color == null) {
+        return false;
+    }
+    delete color from AppDbContext.Colors;
+    return true;
+}

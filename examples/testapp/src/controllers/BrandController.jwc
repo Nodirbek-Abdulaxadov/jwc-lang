@@ -1,0 +1,38 @@
+route GET "api/brands" {
+    let brands = getAllBrands();
+    return json(brands);
+}
+
+route GET "api/brands/{id}" {
+    let id = path_param("id");
+    let brand = getBrandById(id);
+    if (brand == null) {
+        return notFound();
+    }
+    return json(brand);
+}
+
+route POST "api/brands" {
+    let data = body();
+    let newBrand = createBrand(data.name);
+    return created(newBrand);
+}
+
+route PUT "api/brands/{id}" {
+    let id = path_param("id");
+    let data = body();
+    let updated = updateBrand(id, data.name);
+    if (updated == null) {
+        return notFound();
+    }
+    return json(updated);
+}
+
+route DELETE "api/brands/{id}" {
+    let id = path_param("id");
+    let ok = deleteBrand(id);
+    if (ok == false) {
+        return notFound();
+    }
+    return noContent();
+}

@@ -1,0 +1,38 @@
+route GET "api/cars" {
+    let cars = getAllCars();
+    return json(cars);
+}
+
+route GET "api/cars/{id}" {
+    let id = path_param("id");
+    let car = getCarById(id);
+    if (car == null) {
+        return notFound();
+    }
+    return json(car);
+}
+
+route POST "api/cars" {
+    let data = body();
+    let newCar = createCar(data.model, data.year, data.brandId, data.colorId);
+    return created(newCar);
+}
+
+route PUT "api/cars/{id}" {
+    let id = path_param("id");
+    let data = body();
+    let updated = updateCar(id, data.model, data.year, data.brandId, data.colorId);
+    if (updated == null) {
+        return notFound();
+    }
+    return json(updated);
+}
+
+route DELETE "api/cars/{id}" {
+    let id = path_param("id");
+    let ok = deleteCar(id);
+    if (ok == false) {
+        return notFound();
+    }
+    return noContent();
+}
