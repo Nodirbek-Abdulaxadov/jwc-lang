@@ -1,35 +1,36 @@
 function getAllColors() {
-    return select ColorEntity from AppDbContext.Colors;
+    return select ColorEntity from AppDbContext.ColorEntity;
 }
 
-function getColorById(id) {
-    return select ColorEntity from AppDbContext.Colors where ColorEntity.id == @id first;
+function getColorById(id: int) {
+    return select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
 }
 
-function createColor(name: string, hex: string) {
+function createColor(id: int, name: string, hex: string) {
     let color = new ColorEntity();
+    color.id = id;
     color.name = name;
     color.hex = hex;
-    insert color into AppDbContext.Colors;
+    insert color into AppDbContext.ColorEntity;
     return color;
 }
 
-function updateColor(id, name: string, hex: string) {
-    let color = select ColorEntity from AppDbContext.Colors where ColorEntity.id == @id first;
+function updateColor(id: int, name: string, hex: string) {
+    let color = select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
     if (color == null) {
         return null;
     }
     color.name = name;
     color.hex = hex;
-    update color in AppDbContext.Colors;
+    update color in AppDbContext.ColorEntity;
     return color;
 }
 
-function deleteColor(id) {
-    let color = select ColorEntity from AppDbContext.Colors where ColorEntity.id == @id first;
+function deleteColor(id: int) {
+    let color = select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
     if (color == null) {
         return false;
     }
-    delete color from AppDbContext.Colors;
+    delete color from AppDbContext.ColorEntity;
     return true;
 }

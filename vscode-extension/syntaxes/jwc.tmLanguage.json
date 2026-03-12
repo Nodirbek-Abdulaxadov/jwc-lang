@@ -102,8 +102,8 @@
       "begin": "\\b(function)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\(",
       "end": "(?<=})",
       "beginCaptures": {
-        "1": { "name": "keyword.declaration.function.jwc" },
-        "2": { "name": "entity.name.function.jwc" }
+        "1": { "name": "storage.type.function.jwc" },
+        "2": { "name": "entity.name.function" }
       },
       "patterns": [
         { "include": "#comments" },
@@ -242,7 +242,7 @@
     },
 
     "type-names": {
-      "name": "support.type.jwc",
+      "name": "storage.type",
       "match": "\\b(int|bigint|bool|uuid|datetime|timestamp|json|text|varchar|decimal|string|float|List|Optional)\\b"
     },
 

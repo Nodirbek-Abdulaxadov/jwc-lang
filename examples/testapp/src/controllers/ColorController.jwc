@@ -14,7 +14,7 @@ route GET "api/colors/{id}" {
 
 route POST "api/colors" {
     let data = body();
-    let newColor = createColor(data.name, data.hex);
+    let newColor = createColor(data.id, data.name, data.hex);
     return created(newColor);
 }
 

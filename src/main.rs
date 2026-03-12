@@ -1,5 +1,6 @@
 mod ast;
 mod diag;
+mod engine;
 mod lexer;
 mod migrate;
 mod parser;
@@ -11,7 +12,7 @@ mod sql;
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "jwc", version, about = "JWC MVP CLI")]
@@ -29,7 +30,12 @@ enum Command {
     /// Generate PostgreSQL CREATE TABLE SQL from entities
     GenSql { file: PathBuf },
     /// Run a JWC program from a .jwc file or project directory (defaults to current project)
-    Run { path: Option<PathBuf> },
+    Run {
+        path: Option<PathBuf>,
+        /// Enable HTTP request logging when server starts from main()->serve()
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        request_logging: bool,
+    },
     /// Validate current project sources (searches jwcproj.json upward)
     Test,
     /// Build current project into bin/debug or bin/release
@@ -49,12 +55,16 @@ enum Command {
         /// Port to listen on (default: 8080)
         #[arg(long, short, default_value_t = 8080)]
         port: u16,
+        /// Enable HTTP request logging
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        request_logging: bool,
     },
 }
 
 #[derive(Subcommand)]
 enum MigrateCommand {
     /// Create new migration files
+    #[command(alias = "add")]
     New { name: String },
     /// Apply pending migrations to Postgres
     #[command(alias = "apply")]
@@ -94,7 +104,10 @@ fn main() -> Result<()> {
             let schema_sql = sql::generate_postgres_schema_sql(&program)?;
             print!("{}", schema_sql);
         }
-        Command::Run { path } => {
+        Command::Run {
+            path,
+            request_logging,
+        } => {
             let target = path.unwrap_or(std::env::current_dir()?);
 
             if target.is_dir() {
@@ -104,7 +117,7 @@ fn main() -> Result<()> {
                 let result = runner::run_main(&loaded.program)?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
-                    server::serve(&loaded.program, port)?;
+                    server::serve(&loaded.program, port, request_logging)?;
                 }
             } else if target
                 .file_name()
@@ -121,7 +134,7 @@ fn main() -> Result<()> {
                 let result = runner::run_main(&loaded.program)?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
-                    server::serve(&loaded.program, port)?;
+                    server::serve(&loaded.program, port, request_logging)?;
                 }
             } else {
                 let source = read_source(&target)?;
@@ -132,7 +145,7 @@ fn main() -> Result<()> {
                 let result = runner::run_main(&program)?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
-                    server::serve(&program, port)?;
+                    server::serve(&program, port, request_logging)?;
                 }
             }
         }
@@ -206,7 +219,11 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Serve { path, port } => {
+        Command::Serve {
+            path,
+            port,
+            request_logging,
+        } => {
             let target = path.unwrap_or(std::env::current_dir()?);
             let root = if target.is_dir() {
                 project::find_project_root(&target)?
@@ -218,7 +235,7 @@ fn main() -> Result<()> {
             };
             project::load_dotenv(&root);
             let loaded = project::load_project_from_root(&root)?;
-            server::serve(&loaded.program, port)?;
+            server::serve(&loaded.program, port, request_logging)?;
         }
     }
 

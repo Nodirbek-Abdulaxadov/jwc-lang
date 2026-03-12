@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
 
 use crate::ast::{Expr, FunctionDecl, Program, RouteDecl, Stmt, TypedParam};
+use crate::engine;
 
 #[derive(Debug)]
 pub struct RunMainResult {
@@ -221,40 +222,40 @@ impl<'a> Vm<'a> {
             Stmt::DbInsert { var, context_var: _, table } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
-                let database_url = db_url()?;
-                let sql = build_insert_sql(&table_name, &json_str)?;
-                let returned = run_psql_at(&database_url, &sql)?;
+                let (sql, boxed_params) = build_insert_sql(&table_name, &json_str)?;
+                let param_refs = boxed_params_to_refs(&boxed_params);
+                let returned = engine::query_text(&sql, &param_refs)?;
                 if !returned.is_empty() && returned != "null" {
                     vars.insert(var.to_lowercase(), Value::Str(returned));
                 }
+                engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
             Stmt::DbUpdate { var, context_var: _, table } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
-                let database_url = db_url()?;
-                let sql = build_update_sql(&table_name, &json_str)?;
-                let returned = run_psql_at(&database_url, &sql)?;
+                let (sql, boxed_params) = build_update_sql(&table_name, &json_str)?;
+                let param_refs = boxed_params_to_refs(&boxed_params);
+                let returned = engine::query_text(&sql, &param_refs)?;
                 if !returned.is_empty() && returned != "null" {
                     vars.insert(var.to_lowercase(), Value::Str(returned));
                 }
+                engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
             Stmt::DbDelete { var, context_var: _, table } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
-                let database_url = db_url()?;
                 let doc: serde_json::Value = serde_json::from_str(&json_str)
                     .with_context(|| "delete: value is not valid JSON")?;
                 let pk_val = doc
                     .get("id")
                     .ok_or_else(|| anyhow!("delete: object must have an 'id' field"))?;
-                let sql = format!(
-                    "DELETE FROM \"{}\" WHERE \"id\" = {};",
-                    table_name,
-                    json_value_to_sql_literal(pk_val)
-                );
-                run_psql_exec(&database_url, &sql)?;
+                let sql = format!("DELETE FROM \"{}\" WHERE \"id\" = $1;", table_name);
+                let boxed_params = vec![json_value_to_sql_param(pk_val)];
+                let param_refs = boxed_params_to_refs(&boxed_params);
+                let _ = engine::exec(&sql, &param_refs)?;
+                engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
         }
@@ -300,34 +301,12 @@ impl<'a> Vm<'a> {
             }
             Expr::DbSelect { entity: _, context_var: _, table, where_clause, first } => {
                 let table_name = crate::sql::to_snake_case(table);
-                let database_url = db_url()?;
-
-                let where_sql = if let Some(wc) = where_clause {
-                    let col = field_path_to_col(&wc.field);
-                    let rhs_val = self.eval_expr(&wc.rhs, vars)?;
-                    let lit = value_to_sql_literal(&rhs_val);
-                    Some(format!("\"{}\" {} {}", col, normalize_sql_op(&wc.op), lit))
-                } else {
-                    None
-                };
-
-                let where_str = where_sql
-                    .map(|w| format!(" WHERE {}", w))
-                    .unwrap_or_default();
-
-                let sql = if *first {
-                    format!(
-                        "SELECT row_to_json(t)::text FROM (SELECT * FROM \"{}\"{}  LIMIT 1) t;",
-                        table_name, where_str
-                    )
-                } else {
-                    format!(
-                        "SELECT COALESCE(json_agg(row_to_json(t)), '[]')::text FROM (SELECT * FROM \"{}\"{}) t;",
-                        table_name, where_str
-                    )
-                };
-
-                let result = run_psql_at(&database_url, &sql)?;
+                let (sql, boxed_params, shape_key, cache_key) =
+                    build_select_sql(table_name, where_clause.as_deref(), *first, vars, self)?;
+                let param_refs = boxed_params_to_refs(&boxed_params);
+                let compiled_sql = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
+                let result =
+                    engine::query_text_with_optional_cache(&cache_key, &compiled_sql, &param_refs)?;
                 if result == "null" || result.is_empty() {
                     Ok(Value::Null)
                 } else {
@@ -815,7 +794,8 @@ impl<'a> Vm<'a> {
             .or_else(|_| std::env::var("JWC_DATABASE_URL"))
             .map_err(|_| anyhow!("DATABASE_URL (or JWC_DATABASE_URL) is required for db_query"))?;
 
-        let value = run_psql_at(&database_url, &sql)?;
+        engine::init_engine(&database_url)?;
+        let value = engine::query_text(&sql, &[])?;
         if value.is_empty() {
             Ok(Value::Null)
         } else {
@@ -913,17 +893,18 @@ impl<'a> Vm<'a> {
         let completed = doc.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
         let due_date = json_get_opt_string(&doc, "due_date");
 
-        let sql = format!(
-            "INSERT INTO todo_entity (id, title, description, completed, due_date) VALUES ('{}'::uuid, '{}', {}, {}, {}) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, completed = EXCLUDED.completed, due_date = EXCLUDED.due_date;",
-            sql_escape(&id),
-            sql_escape(&title),
-            sql_string_or_null(description.as_deref()),
-            if completed { "true" } else { "false" },
-            sql_timestamptz_or_null(due_date.as_deref())
-        );
+        let sql = "INSERT INTO todo_entity (id, title, description, completed, due_date) VALUES ($1::uuid, $2, $3, $4, $5::timestamptz) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, completed = EXCLUDED.completed, due_date = EXCLUDED.due_date;";
+        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![
+            Box::new(id),
+            Box::new(title),
+            Box::new(description),
+            Box::new(completed),
+            Box::new(due_date),
+        ];
+        let param_refs = boxed_params_to_refs(&boxed_params);
 
-        let database_url = db_url()?;
-        run_psql_exec(&database_url, &sql)?;
+        let _ = engine::exec(sql, &param_refs)?;
+        engine::invalidate_result_cache()?;
         Ok(Value::Null)
     }
 
@@ -941,13 +922,14 @@ impl<'a> Vm<'a> {
             other => bail!("db_select_todo: id must be string, got {}", other.type_name()),
         };
 
-        let sql = format!(
-            "SELECT COALESCE((SELECT json_build_object('id', id::text, 'title', title, 'description', description, 'completed', completed, 'due_date', due_date)::text FROM todo_entity WHERE id::text = '{}' LIMIT 1), 'null');",
-            sql_escape(&id)
-        );
-
-        let database_url = db_url()?;
-        let out = run_psql_at(&database_url, &sql)?;
+        let sql = "SELECT COALESCE((SELECT json_build_object('id', id::text, 'title', title, 'description', description, 'completed', completed, 'due_date', due_date)::text FROM todo_entity WHERE id::text = $1 LIMIT 1), 'null');";
+        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![Box::new(id)];
+        let param_refs = boxed_params_to_refs(&boxed_params);
+        let out = engine::query_text_with_optional_cache(
+            "todo.select.by_id",
+            sql,
+            &param_refs,
+        )?;
         if out == "null" || out.is_empty() {
             Ok(Value::Null)
         } else {
@@ -979,17 +961,17 @@ impl<'a> Vm<'a> {
         let completed = doc.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
         let due_date = json_get_opt_string(&doc, "due_date");
 
-        let sql = format!(
-            "UPDATE todo_entity SET title = '{}', description = {}, completed = {}, due_date = {} WHERE id::text = '{}';",
-            sql_escape(&title),
-            sql_string_or_null(description.as_deref()),
-            if completed { "true" } else { "false" },
-            sql_timestamptz_or_null(due_date.as_deref()),
-            sql_escape(&id)
-        );
-
-        let database_url = db_url()?;
-        run_psql_exec(&database_url, &sql)?;
+        let sql = "UPDATE todo_entity SET title = $1, description = $2, completed = $3, due_date = $4::timestamptz WHERE id::text = $5;";
+        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![
+            Box::new(title),
+            Box::new(description),
+            Box::new(completed),
+            Box::new(due_date),
+            Box::new(id),
+        ];
+        let param_refs = boxed_params_to_refs(&boxed_params);
+        let _ = engine::exec(sql, &param_refs)?;
+        engine::invalidate_result_cache()?;
         Ok(Value::Null)
     }
 
@@ -1007,17 +989,13 @@ impl<'a> Vm<'a> {
             other => bail!("db_delete_todo: id must be string, got {}", other.type_name()),
         };
 
-        let sql = format!("DELETE FROM todo_entity WHERE id::text = '{}';", sql_escape(&id));
-        let database_url = db_url()?;
-        run_psql_exec(&database_url, &sql)?;
+        let sql = "DELETE FROM todo_entity WHERE id::text = $1;";
+        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![Box::new(id)];
+        let param_refs = boxed_params_to_refs(&boxed_params);
+        let _ = engine::exec(sql, &param_refs)?;
+        engine::invalidate_result_cache()?;
         Ok(Value::Null)
     }
-}
-
-fn db_url() -> Result<String> {
-    std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("JWC_DATABASE_URL"))
-        .map_err(|_| anyhow!("DATABASE_URL (or JWC_DATABASE_URL) is required for db access"))
 }
 
 /// Extract the column name from a field path like `"Entity.field"` → `"field"`
@@ -1042,27 +1020,6 @@ fn normalize_sql_op(op: &str) -> &str {
     }
 }
 
-/// Format a runtime `Value` as a SQL literal (safe: single-quote escaped)
-fn value_to_sql_literal(val: &Value) -> String {
-    match val {
-        Value::Int(n) => n.to_string(),
-        Value::Str(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Bool(b) => b.to_string(),
-        Value::Null | Value::Void => "NULL".to_string(),
-    }
-}
-
-/// Format a `serde_json::Value` as a SQL literal
-fn json_value_to_sql_literal(val: &serde_json::Value) -> String {
-    match val {
-        serde_json::Value::Null => "NULL".to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-        other => format!("'{}'", other.to_string().replace('\'', "''")),
-    }
-}
-
 /// Get a variable value as a JSON string, or error
 fn get_var_as_json(var: &str, vars: &HashMap<String, Value>) -> Result<String> {
     match vars.get(&var.to_lowercase()).cloned() {
@@ -1074,7 +1031,7 @@ fn get_var_as_json(var: &str, vars: &HashMap<String, Value>) -> Result<String> {
 
 /// Build `INSERT INTO "table" (...) VALUES (...) RETURNING *` from a JSON object string
 /// Uses a CTE so all columns (including SERIAL id) are returned.
-fn build_insert_sql(table: &str, json_str: &str) -> Result<String> {
+fn build_insert_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "insert: value is not valid JSON")?;
     let obj = doc
@@ -1083,26 +1040,25 @@ fn build_insert_sql(table: &str, json_str: &str) -> Result<String> {
     if obj.is_empty() {
         bail!("insert: object has no fields to insert");
     }
-    // Skip the "id" field — let SERIAL generate it
-    let filtered: Vec<(&String, &serde_json::Value)> = obj
-        .iter()
-        .filter(|(k, _)| k.as_str() != "id")
-        .collect();
-    if filtered.is_empty() {
-        bail!("insert: object has no non-id fields to insert");
-    }
+    // Keep all provided fields, including explicit primary keys.
+    // Some schemas (including example projects) use int PK without identity/default.
+    let mut filtered: Vec<(&String, &serde_json::Value)> = obj.iter().collect();
+    filtered.sort_by(|a, b| a.0.cmp(b.0));
+
     let fields: Vec<String> = filtered.iter().map(|(k, _)| format!("\"{}\"", k)).collect();
-    let values: Vec<String> = filtered.iter().map(|(_, v)| json_value_to_sql_literal(v)).collect();
-    Ok(format!(
+    let placeholders: Vec<String> = (1..=filtered.len()).map(|i| format!("${}", i)).collect();
+    let params: Vec<Box<dyn ToSql + Sync>> =
+        filtered.iter().map(|(_, v)| json_value_to_sql_param(v)).collect();
+    Ok((format!(
         "WITH _ins AS (INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING *) SELECT row_to_json(t)::text FROM _ins t;",
         table,
         fields.join(", "),
-        values.join(", "),
-    ))
+        placeholders.join(", "),
+    ), params))
 }
 
 /// Build `UPDATE "table" SET ... WHERE "id" = ... RETURNING *;` from a JSON object string
-fn build_update_sql(table: &str, json_str: &str) -> Result<String> {
+fn build_update_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "update: value is not valid JSON")?;
     let obj = doc
@@ -1113,92 +1069,156 @@ fn build_update_sql(table: &str, json_str: &str) -> Result<String> {
         .get("id")
         .ok_or_else(|| anyhow!("update: object must have an 'id' field for the WHERE clause"))?;
 
-    let sets: Vec<String> = obj
+    let mut updates: Vec<(&String, &serde_json::Value)> = obj
         .iter()
         .filter(|(k, _)| *k != "id")
-        .map(|(k, v)| format!("\"{}\" = {}", k, json_value_to_sql_literal(v)))
+        .collect();
+
+    updates.sort_by(|a, b| a.0.cmp(b.0));
+
+    let sets: Vec<String> = updates
+        .iter()
+        .enumerate()
+        .map(|(idx, (k, _))| format!("\"{}\" = ${}", k, idx + 1))
         .collect();
 
     if sets.is_empty() {
         bail!("update: no fields to update (only 'id' present in object)");
     }
 
-    Ok(format!(
+    let mut params: Vec<Box<dyn ToSql + Sync>> = updates
+        .iter()
+        .map(|(_, v)| json_value_to_sql_param(v))
+        .collect();
+    params.push(json_value_to_sql_param(pk_val));
+
+    Ok((format!(
         "WITH _upd AS (UPDATE \"{}\" SET {} WHERE \"id\" = {} RETURNING *) SELECT row_to_json(t)::text FROM _upd t;",
         table,
         sets.join(", "),
-        json_value_to_sql_literal(pk_val),
-    ))
+        format!("${}", params.len()),
+    ), params))
 }
 
-fn run_psql_at(database_url: &str, sql: &str) -> Result<String> {
-    let output = Command::new("psql")
-        .arg(database_url)
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1")
-        .arg("-At")
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .context("Failed to execute psql command")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("psql failed: {}", stderr.trim());
-    }
-
-    // Strip psql command tags (e.g. "INSERT 0 1", "UPDATE 1") which sometimes appear
-    // even with -t, keeping only lines that look like data (start with { or [ or a digit).
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let data: String = raw
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            !t.is_empty()
-                && !t.starts_with("INSERT")
-                && !t.starts_with("UPDATE")
-                && !t.starts_with("DELETE")
-                && !t.starts_with("SELECT")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(data.trim().to_string())
-}
-
-fn run_psql_exec(database_url: &str, sql: &str) -> Result<()> {
-    let output = Command::new("psql")
-        .arg(database_url)
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1")
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .context("Failed to execute psql command")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("psql failed: {}", stderr.trim());
-    }
-
-    Ok(())
-}
-
-fn sql_escape(input: &str) -> String {
-    input.replace('\'', "''")
-}
-
-fn sql_string_or_null(value: Option<&str>) -> String {
-    match value {
-        Some(v) => format!("'{}'", sql_escape(v)),
-        None => "NULL".to_string(),
+fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql + Sync> {
+    match val {
+        serde_json::Value::Null => Box::new(Option::<String>::None),
+        serde_json::Value::Bool(b) => Box::new(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&i) {
+                    Box::new(i as i32)
+                } else {
+                    Box::new(i)
+                }
+            } else if let Some(f) = n.as_f64() {
+                Box::new(f)
+            } else {
+                Box::new(n.to_string())
+            }
+        }
+        serde_json::Value::String(s) => Box::new(s.clone()),
+        other => Box::new(other.to_string()),
     }
 }
 
-fn sql_timestamptz_or_null(value: Option<&str>) -> String {
-    match value {
-        Some(v) => format!("'{}'::timestamptz", sql_escape(v)),
-        None => "NULL".to_string(),
+fn boxed_params_to_refs(params: &[Box<dyn ToSql + Sync>]) -> Vec<&(dyn ToSql + Sync)> {
+    params.iter().map(|p| p.as_ref() as &(dyn ToSql + Sync)).collect()
+}
+
+fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync> {
+    match val {
+        Value::Int(n) => {
+            if (i32::MIN as i64..=i32::MAX as i64).contains(n) {
+                Box::new(*n as i32)
+            } else {
+                Box::new(*n)
+            }
+        }
+        Value::Str(s) => Box::new(s.clone()),
+        Value::Bool(b) => Box::new(*b),
+        Value::Null | Value::Void => Box::new(Option::<String>::None),
     }
+}
+
+fn value_to_cache_fragment(val: &Value) -> String {
+    match val {
+        Value::Int(n) => format!("int:{n}"),
+        Value::Str(s) => format!("str:{s}"),
+        Value::Bool(b) => format!("bool:{b}"),
+        Value::Null => "null".to_string(),
+        Value::Void => "void".to_string(),
+    }
+}
+
+fn build_select_sql(
+    table_name: String,
+    where_clause: Option<&crate::ast::DbWhere>,
+    first: bool,
+    vars: &mut HashMap<String, Value>,
+    vm: &mut Vm,
+) -> Result<(String, Vec<Box<dyn ToSql + Sync>>, String, String)> {
+    let mut sql_where = String::new();
+    let mut shape_bits = String::new();
+    let mut cache_bits = String::new();
+    let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+
+    if let Some(wc) = where_clause {
+        let col = field_path_to_col(&wc.field);
+        let op = normalize_sql_op(&wc.op);
+        let rhs_val = vm.eval_expr(&wc.rhs, vars)?;
+
+        match rhs_val {
+            Value::Null | Value::Void => {
+                if op == "!=" {
+                    sql_where = format!(" WHERE \"{}\" IS NOT NULL", col);
+                    shape_bits = format!("where:{col}:is_not_null");
+                    cache_bits = shape_bits.clone();
+                } else {
+                    sql_where = format!(" WHERE \"{}\" IS NULL", col);
+                    shape_bits = format!("where:{col}:is_null");
+                    cache_bits = shape_bits.clone();
+                }
+            }
+            other => {
+                sql_where = format!(" WHERE \"{}\" {} $1", col, op);
+                shape_bits = format!("where:{col}:{op}:param");
+                cache_bits = format!("{shape_bits}:{}", value_to_cache_fragment(&other));
+                params.push(value_to_sql_param(&other));
+            }
+        }
+    }
+
+    let sql = if first {
+        format!(
+            "SELECT row_to_json(t)::text FROM (SELECT * FROM \"{}\"{} LIMIT 1) t;",
+            table_name, sql_where
+        )
+    } else {
+        format!(
+            "SELECT COALESCE(json_agg(row_to_json(t)), '[]')::text FROM (SELECT * FROM \"{}\"{}) t;",
+            table_name, sql_where
+        )
+    };
+
+    let shape_key = format!(
+        "select|table:{table_name}|first:{first}|{}",
+        if shape_bits.is_empty() {
+            "no_where".to_string()
+        } else {
+            shape_bits
+        }
+    );
+    let cache_key = format!(
+        "result|table:{table_name}|first:{first}|{}",
+        if cache_bits.is_empty() {
+            "no_where".to_string()
+        } else {
+            cache_bits
+        }
+    );
+
+    Ok((sql, params, shape_key, cache_key))
 }
 
 fn value_to_json(value: &Value) -> JsonValue {

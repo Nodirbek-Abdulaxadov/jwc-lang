@@ -14,7 +14,7 @@ route GET "api/brands/{id}" {
 
 route POST "api/brands" {
     let data = body();
-    let newBrand = createBrand(data.name);
+    let newBrand = createBrand(data.id, data.name);
     return created(newBrand);
 }
 

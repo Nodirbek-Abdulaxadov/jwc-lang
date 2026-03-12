@@ -14,7 +14,7 @@ route GET "api/cars/{id}" {
 
 route POST "api/cars" {
     let data = body();
-    let newCar = createCar(data.model, data.year, data.brandId, data.colorId);
+    let newCar = createCar(data.id, data.model, data.year, data.brandId, data.colorId);
     return created(newCar);
 }
 

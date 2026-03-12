@@ -1,33 +1,34 @@
 function getAllBrands() {
-    return select BrandEntity from AppDbContext.Brands;
+    return select BrandEntity from AppDbContext.BrandEntity;
 }
 
-function getBrandById(id) {
-    return select BrandEntity from AppDbContext.Brands where BrandEntity.id == @id first;
+function getBrandById(id: int) {
+    return select BrandEntity from AppDbContext.BrandEntity where BrandEntity.id == @id first;
 }
 
-function createBrand(name: string) {
+function createBrand(id: int, name: string) {
     let brand = new BrandEntity();
+    brand.id = id;
     brand.name = name;
-    insert brand into AppDbContext.Brands;
+    insert brand into AppDbContext.BrandEntity;
     return brand;
 }
 
-function updateBrand(id, name: string) {
-    let brand = select BrandEntity from AppDbContext.Brands where BrandEntity.id == @id first;
+function updateBrand(id: int, name: string) {
+    let brand = select BrandEntity from AppDbContext.BrandEntity where BrandEntity.id == @id first;
     if (brand == null) {
         return null;
     }
     brand.name = name;
-    update brand in AppDbContext.Brands;
+    update brand in AppDbContext.BrandEntity;
     return brand;
 }
 
-function deleteBrand(id) {
-    let brand = select BrandEntity from AppDbContext.Brands where BrandEntity.id == @id first;
+function deleteBrand(id: int) {
+    let brand = select BrandEntity from AppDbContext.BrandEntity where BrandEntity.id == @id first;
     if (brand == null) {
         return false;
     }
-    delete brand from AppDbContext.Brands;
+    delete brand from AppDbContext.BrandEntity;
     return true;
 }

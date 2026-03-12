@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
+use postgres::{Client, NoTls};
+use url::Url;
 
 use crate::project;
 use crate::sql;
@@ -58,10 +59,9 @@ pub fn create_migration(root: &Path, name: &str) -> Result<CreatedMigration> {
 }
 
 pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Result<ApplyReport> {
-    ensure_psql_installed()?;
-
     let url = database_url
         .or_else(|| std::env::var("DATABASE_URL").ok())
+        .or_else(|| std::env::var("JWC_DATABASE_URL").ok())
         .ok_or_else(|| {
             anyhow!("database url is required: pass --database-url or set DATABASE_URL")
         })?;
@@ -74,7 +74,12 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
         );
     }
 
-    ensure_migration_table(&url)?;
+    ensure_database_exists(&url)?;
+
+    let mut client = Client::connect(&url, NoTls)
+        .with_context(|| "Failed to connect to database for migrations")?;
+
+    ensure_migration_table(&mut client)?;
 
     let mut migration_files: Vec<PathBuf> = std::fs::read_dir(&migrations_dir)
         .with_context(|| format!("Failed to read {}", migrations_dir.display()))?
@@ -89,7 +94,7 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
 
     migration_files.sort();
 
-    let applied = read_applied_migrations(&url)?;
+    let applied = read_applied_migrations(&mut client)?;
     let mut applied_now = 0usize;
     let mut skipped = 0usize;
 
@@ -105,8 +110,7 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
             continue;
         }
 
-        run_psql_file(&url, file)?;
-        mark_migration_applied(&url, &name)?;
+        run_migration_file(&mut client, file, &name)?;
         applied_now += 1;
     }
 
@@ -142,96 +146,95 @@ fn slugify(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn ensure_psql_installed() -> Result<()> {
-    let status = Command::new("psql")
-        .arg("--version")
-        .status()
-        .context("Failed to execute 'psql --version'")?;
+fn ensure_database_exists(url: &str) -> Result<()> {
+    let parsed = Url::parse(url).with_context(|| "Invalid DATABASE_URL")?;
+    let dbname = parsed
+        .path()
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
 
-    if !status.success() {
-        bail!("psql is required to run migrations")
+    if dbname.is_empty() {
+        bail!("DATABASE_URL must include a database name");
+    }
+
+    let admin_db = std::env::var("JWC_ADMIN_DB").unwrap_or_else(|_| "postgres".to_string());
+    if dbname == admin_db {
+        return Ok(());
+    }
+
+    let mut admin_url = parsed;
+    admin_url.set_path(&format!("/{}", admin_db));
+
+    let mut admin_client = Client::connect(admin_url.as_str(), NoTls)
+        .with_context(|| "Failed to connect to admin database to ensure target database exists")?;
+
+    let exists = admin_client
+        .query_opt("SELECT 1 FROM pg_database WHERE datname = $1;", &[&dbname])
+        .with_context(|| "Failed to query pg_database")?
+        .is_some();
+
+    if !exists {
+        let create_sql = format!("CREATE DATABASE {}", quote_identifier(&dbname));
+        admin_client
+            .batch_execute(&create_sql)
+            .with_context(|| format!("Failed to create database '{}'", dbname))?;
     }
 
     Ok(())
 }
 
-fn ensure_migration_table(database_url: &str) -> Result<()> {
+fn quote_identifier(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    format!("\"{}\"", escaped)
+}
+
+fn ensure_migration_table(client: &mut Client) -> Result<()> {
     let sql = r#"
 CREATE TABLE IF NOT EXISTS _jwc_migrations (
     name text PRIMARY KEY,
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 "#;
-    run_psql_sql(database_url, sql)
+    client
+        .batch_execute(sql)
+        .with_context(|| "Failed to ensure _jwc_migrations table")
 }
 
-fn read_applied_migrations(database_url: &str) -> Result<HashSet<String>> {
-    let output = Command::new("psql")
-        .arg(database_url)
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1")
-        .arg("-At")
-        .arg("-c")
-        .arg("SELECT name FROM _jwc_migrations ORDER BY name;")
-        .output()
-        .context("Failed to execute psql for migration history")?;
+fn read_applied_migrations(client: &mut Client) -> Result<HashSet<String>> {
+    let rows = client
+        .query("SELECT name FROM _jwc_migrations ORDER BY name;", &[])
+        .with_context(|| "Failed to read applied migrations")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to read applied migrations: {}", stderr.trim());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let set = stdout
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
+    let set = rows
+        .into_iter()
+        .map(|row| row.get::<usize, String>(0))
+        .collect::<HashSet<_>>();
 
     Ok(set)
 }
 
-fn mark_migration_applied(database_url: &str, name: &str) -> Result<()> {
-    let escaped = name.replace('\'', "''");
-    let sql = format!(
-        "INSERT INTO _jwc_migrations(name) VALUES ('{}') ON CONFLICT (name) DO NOTHING;",
-        escaped
-    );
-    run_psql_sql(database_url, &sql)
-}
+fn run_migration_file(client: &mut Client, file: &Path, name: &str) -> Result<()> {
+    let sql = std::fs::read_to_string(file)
+        .with_context(|| format!("Failed to read migration file {}", file.display()))?;
 
-fn run_psql_file(database_url: &str, file: &Path) -> Result<()> {
-    let output = Command::new("psql")
-        .arg(database_url)
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1")
-        .arg("-f")
-        .arg(file)
-        .output()
-        .with_context(|| format!("Failed to execute psql for {}", file.display()))?;
+    let mut tx = client
+        .transaction()
+        .with_context(|| "Failed to start migration transaction")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Migration failed for {}: {}", file.display(), stderr.trim());
-    }
+    tx.batch_execute(&sql)
+        .with_context(|| format!("Migration failed for {}", file.display()))?;
 
-    Ok(())
-}
+    tx.execute(
+        "INSERT INTO _jwc_migrations(name) VALUES ($1) ON CONFLICT (name) DO NOTHING;",
+        &[&name],
+    )
+    .with_context(|| "Failed to record applied migration")?;
 
-fn run_psql_sql(database_url: &str, sql: &str) -> Result<()> {
-    let output = Command::new("psql")
-        .arg(database_url)
-        .arg("-v")
-        .arg("ON_ERROR_STOP=1")
-        .arg("-c")
-        .arg(sql)
-        .output()
-        .context("Failed to execute psql SQL command")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("psql command failed: {}", stderr.trim());
-    }
+    tx.commit()
+        .with_context(|| "Failed to commit migration transaction")?;
 
     Ok(())
 }
