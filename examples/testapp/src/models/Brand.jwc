@@ -1,4 +1,4 @@
-entity BrandEntity {
+entity BrandEntity of AppDbContext {
     id   int pk;
     name varchar(255);
 }

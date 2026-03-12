@@ -47,12 +47,12 @@ Server default: `http://0.0.0.0:8080`
 ## Minimal Example
 
 ```jwc
-entity Brand {
+dbcontext AppDbContext : Postgres;
+
+entity Brand of AppDbContext {
     id int pk;
     name varchar(255);
 }
-
-dbcontext AppDbContext : Postgres;
 
 function getAllBrands() {
     return select Brand from AppDbContext.Brands;
@@ -89,6 +89,30 @@ Main commands:
 - `jwc migrate up`: Apply pending migrations
 
 Request logging is disabled by default.
+
+## Compile-Time DB Validation
+
+JWC validates dbcontext and entity usage at compile-time:
+
+- `entity X of AppDbContext { ... }` binds entity to a specific dbcontext.
+- If multiple dbcontexts are declared, `of <DbContextName>` is required for entities.
+- `select/insert/update/delete` must use a known dbcontext.
+- `select Entity from Ctx.Table` checks entity-context compatibility.
+- Unknown or mismatched table/entity references fail validation early.
+
+Example:
+
+```jwc
+dbcontext AppDbContext : Postgres;
+entity TodoEntity of AppDbContext {
+    id uuid pk;
+    title varchar(200);
+}
+
+function getAll() {
+    return select TodoEntity from AppDbContext.TodoEntity;
+}
+```
 
 ## Example Project: testapp
 
@@ -155,3 +179,27 @@ After install, open a new terminal if `jwc` is not found immediately.
 
 - `.env` is loaded automatically from project root.
 - `jwc run -- test` is not the same as `jwc test`; use `jwc test` for project validation.
+
+## Error Handling
+
+JWC CLI now prints detailed errors in a `try/catch`-style format:
+
+- Top-level message
+- Full cause chain (`Caused by[0]`, `Caused by[1]`, ...)
+- Optional backtrace hint
+
+Example:
+
+```bash
+jwc check missing-file.jwc
+```
+
+Output shape:
+
+```text
+Unhandled JWC error:
+    Message: Failed to read missing-file.jwc
+    Caused by[0]: The system cannot find the file specified. (os error 2)
+```
+
+For runtime HTTP errors, JWC logs detailed error chain to console and returns a safe JSON error response.

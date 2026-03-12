@@ -1,4 +1,4 @@
-entity CarEntity {
+entity CarEntity of AppDbContext {
     id      int pk;
     model   varchar(255);
     year    int;

@@ -1,4 +1,4 @@
-entity ColorEntity {
+entity ColorEntity of AppDbContext {
     id   int pk;
     name varchar(255);
     hex  varchar(7);

@@ -98,10 +98,12 @@ Context:
 
 # 🧩 Entity system (DB-first)
 
-Entity = database table + model.
+Entity = database table + model, va u aniq dbcontextga bog'lanadi.
 
 ```
-entity User {
+dbcontext AppDbContext : Postgres;
+
+entity User of AppDbContext {
     id uuid;
     name text(50);
     age int(0,200);

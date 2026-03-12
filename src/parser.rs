@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Result};
 
@@ -86,6 +86,7 @@ fn normalize_webapi_compat(source: &str) -> String {
 
 pub fn validate_program(program: &Program) -> Result<()> {
     let mut ctx_names = HashSet::new();
+    let mut ctx_drivers: HashMap<String, String> = HashMap::new();
     for ctx in &program.dbcontexts {
         let key = ctx.name.to_lowercase();
         if !ctx_names.insert(key) {
@@ -94,23 +95,35 @@ pub fn validate_program(program: &Program) -> Result<()> {
         if ctx.driver.trim().is_empty() {
             bail!("dbcontext '{}' has empty driver", ctx.name);
         }
+        ctx_drivers.insert(ctx.name.to_lowercase(), ctx.driver.to_lowercase());
     }
 
     let mut entity_names = HashSet::new();
+    let mut entity_contexts: HashMap<String, Option<String>> = HashMap::new();
+    let mut db_tables: HashSet<(String, String)> = HashSet::new();
     for entity in &program.entities {
         let key = entity.name.to_lowercase();
         if !entity_names.insert(key) {
             bail!("Duplicate entity name: {}", entity.name);
         }
 
+        let resolved_context = resolve_entity_context_name(program, entity, &ctx_names)?;
+        let resolved_context_lc = resolved_context.as_ref().map(|v| v.to_lowercase());
+        entity_contexts.insert(entity.name.to_lowercase(), resolved_context_lc.clone());
+        if let Some(ctx_name) = resolved_context_lc {
+            db_tables.insert((ctx_name.clone(), entity.name.to_lowercase()));
+            db_tables.insert((ctx_name, to_snake_case(&entity.name).to_lowercase()));
+        }
+
         let mut field_names = HashSet::new();
+        let resolved_driver = resolve_entity_driver(program, entity, &ctx_drivers)?;
         for field in &entity.fields {
             let field_key = field.name.to_lowercase();
             if !field_names.insert(field_key) {
                 bail!("Duplicate field '{}' in entity '{}'", field.name, entity.name);
             }
 
-            validate_type_spec(&field.ty)
+            validate_type_spec_for_driver(&field.ty, &resolved_driver)
                 .map_err(|err| anyhow!("Entity '{}', field '{}': {err}", entity.name, field.name))?;
         }
     }
@@ -156,12 +169,280 @@ pub fn validate_program(program: &Program) -> Result<()> {
                 bail!("Route handler '{}' is not defined as a function", handler);
             }
         }
+
+        if route.handler.is_none() {
+            validate_stmts(&route.body, &ctx_names, &entity_contexts, &db_tables)?;
+        }
+    }
+
+    for function in &program.functions {
+        validate_stmts(&function.body, &ctx_names, &entity_contexts, &db_tables)
+            .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
     }
 
     Ok(())
 }
 
-fn validate_type_spec(ty: &TypeSpec) -> Result<()> {
+fn validate_stmts(
+    stmts: &[Stmt],
+    ctx_names: &HashSet<String>,
+    entity_contexts: &HashMap<String, Option<String>>,
+    db_tables: &HashSet<(String, String)>,
+) -> Result<()> {
+    for stmt in stmts {
+        validate_stmt(stmt, ctx_names, entity_contexts, db_tables)?;
+    }
+    Ok(())
+}
+
+fn validate_stmt(
+    stmt: &Stmt,
+    ctx_names: &HashSet<String>,
+    entity_contexts: &HashMap<String, Option<String>>,
+    db_tables: &HashSet<(String, String)>,
+) -> Result<()> {
+    match stmt {
+        Stmt::Let { value, .. } => validate_expr(value, ctx_names, entity_contexts, db_tables),
+        Stmt::Assign { value, .. } => validate_expr(value, ctx_names, entity_contexts, db_tables),
+        Stmt::FieldAssign { value, .. } => {
+            validate_expr(value, ctx_names, entity_contexts, db_tables)
+        }
+        Stmt::Print(value) => validate_expr(value, ctx_names, entity_contexts, db_tables),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            validate_expr(cond, ctx_names, entity_contexts, db_tables)?;
+            validate_stmts(then_body, ctx_names, entity_contexts, db_tables)?;
+            if let Some(else_body) = else_body {
+                validate_stmts(else_body, ctx_names, entity_contexts, db_tables)?;
+            }
+            Ok(())
+        }
+        Stmt::While { cond, body } => {
+            validate_expr(cond, ctx_names, entity_contexts, db_tables)?;
+            validate_stmts(body, ctx_names, entity_contexts, db_tables)
+        }
+        Stmt::Break | Stmt::Continue => Ok(()),
+        Stmt::Expr(expr) => validate_expr(expr, ctx_names, entity_contexts, db_tables),
+        Stmt::Return(None) => Ok(()),
+        Stmt::Return(Some(expr)) => validate_expr(expr, ctx_names, entity_contexts, db_tables),
+        Stmt::DbInsert {
+            context_var, table, ..
+        }
+        | Stmt::DbUpdate {
+            context_var, table, ..
+        }
+        | Stmt::DbDelete {
+            context_var, table, ..
+        } => {
+            let ctx_key = validate_context_exists(context_var, ctx_names)?;
+            validate_table_in_context(&ctx_key, table, db_tables)
+        }
+    }
+}
+
+fn validate_expr(
+    expr: &Expr,
+    ctx_names: &HashSet<String>,
+    entity_contexts: &HashMap<String, Option<String>>,
+    db_tables: &HashSet<(String, String)>,
+) -> Result<()> {
+    match expr {
+        Expr::Int(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) => Ok(()),
+        Expr::Call { args, .. } => {
+            for arg in args {
+                validate_expr(arg, ctx_names, entity_contexts, db_tables)?;
+            }
+            Ok(())
+        }
+        Expr::FieldGet { .. } | Expr::NewEntity { .. } => Ok(()),
+        Expr::DbSelect {
+            entity,
+            context_var,
+            table,
+            where_clause,
+            ..
+        } => {
+            let ctx_key = validate_context_exists(context_var, ctx_names)?;
+
+            if entity != "*" {
+                let entity_key = entity.to_lowercase();
+                let expected_ctx = entity_contexts.get(&entity_key).ok_or_else(|| {
+                    anyhow!("Unknown entity '{}' used in select expression", entity)
+                })?;
+
+                if let Some(expected_ctx) = expected_ctx {
+                    if &ctx_key != expected_ctx {
+                        bail!(
+                            "Entity '{}' is bound to dbcontext '{}', but select uses '{}'",
+                            entity,
+                            expected_ctx,
+                            context_var
+                        );
+                    }
+                }
+
+                if !table_matches_entity(table, entity) {
+                    bail!(
+                        "select {} from {}.{} has table/entity mismatch",
+                        entity,
+                        context_var,
+                        table
+                    );
+                }
+            }
+
+            validate_table_in_context(&ctx_key, table, db_tables)?;
+
+            if let Some(where_clause) = where_clause {
+                validate_expr(&where_clause.rhs, ctx_names, entity_contexts, db_tables)?;
+            }
+
+            Ok(())
+        }
+        Expr::Add(l, r)
+        | Expr::Sub(l, r)
+        | Expr::Mul(l, r)
+        | Expr::Div(l, r)
+        | Expr::Mod(l, r)
+        | Expr::Eq(l, r)
+        | Expr::Neq(l, r)
+        | Expr::Lt(l, r)
+        | Expr::Lte(l, r)
+        | Expr::Gt(l, r)
+        | Expr::Gte(l, r)
+        | Expr::And(l, r)
+        | Expr::Or(l, r) => {
+            validate_expr(l, ctx_names, entity_contexts, db_tables)?;
+            validate_expr(r, ctx_names, entity_contexts, db_tables)
+        }
+        Expr::Neg(inner) => validate_expr(inner, ctx_names, entity_contexts, db_tables),
+    }
+}
+
+fn validate_context_exists(context_var: &str, ctx_names: &HashSet<String>) -> Result<String> {
+    if ctx_names.is_empty() {
+        return Ok(context_var.to_lowercase());
+    }
+
+    let key = context_var.to_lowercase();
+    if !ctx_names.contains(&key) {
+        bail!("Unknown dbcontext '{}' used in DB statement", context_var);
+    }
+    Ok(key)
+}
+
+fn validate_table_in_context(
+    context_var_lc: &str,
+    table: &str,
+    db_tables: &HashSet<(String, String)>,
+) -> Result<()> {
+    if db_tables.is_empty() {
+        return Ok(());
+    }
+
+    let table_key = table.to_lowercase();
+    if db_tables.contains(&(context_var_lc.to_string(), table_key.clone())) {
+        return Ok(());
+    }
+
+    let snake = to_snake_case(table).to_lowercase();
+    if db_tables.contains(&(context_var_lc.to_string(), snake)) {
+        return Ok(());
+    }
+
+    bail!(
+        "Unknown table/entity '{}.{}' for compile-time DB validation",
+        context_var_lc,
+        table
+    )
+}
+
+fn table_matches_entity(table: &str, entity: &str) -> bool {
+    if table.eq_ignore_ascii_case(entity) {
+        return true;
+    }
+    to_snake_case(table).eq_ignore_ascii_case(&to_snake_case(entity))
+}
+
+fn to_snake_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for (idx, ch) in input.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if idx != 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn resolve_entity_driver(
+    program: &Program,
+    entity: &EntityDecl,
+    ctx_drivers: &HashMap<String, String>,
+) -> Result<String> {
+    let known_ctx_names = ctx_drivers.keys().cloned().collect::<HashSet<_>>();
+    if let Some(context_name) = resolve_entity_context_name(program, entity, &known_ctx_names)? {
+        let key = context_name.to_lowercase();
+        let driver = ctx_drivers.get(&key).ok_or_else(|| {
+            anyhow!(
+                "Entity '{}' references unknown dbcontext '{}'",
+                entity.name,
+                context_name
+            )
+        })?;
+        return Ok(driver.clone());
+    }
+
+    Ok("postgres".to_string())
+}
+
+fn resolve_entity_context_name(
+    program: &Program,
+    entity: &EntityDecl,
+    ctx_names: &HashSet<String>,
+) -> Result<Option<String>> {
+    if let Some(context_name) = &entity.context_name {
+        let key = context_name.to_lowercase();
+        if !ctx_names.contains(&key) {
+            bail!(
+                "Entity '{}' references unknown dbcontext '{}'",
+                entity.name,
+                context_name
+            );
+        }
+        return Ok(Some(context_name.clone()));
+    }
+
+    if program.dbcontexts.len() == 1 {
+        return Ok(Some(program.dbcontexts[0].name.clone()));
+    }
+
+    if program.dbcontexts.len() > 1 {
+        bail!(
+            "Entity '{}' must specify 'of <DbContextName>' when multiple dbcontexts are declared",
+            entity.name
+        );
+    }
+
+    Ok(None)
+}
+
+fn validate_type_spec_for_driver(ty: &TypeSpec, driver: &str) -> Result<()> {
+    if driver.eq_ignore_ascii_case("postgres") {
+        return validate_type_spec_postgres(ty);
+    }
+
+    bail!("Unsupported db driver '{driver}' for compile-time type validation")
+}
+
+fn validate_type_spec_postgres(ty: &TypeSpec) -> Result<()> {
     match ty.name.as_str() {
         "int" => {
             if !(ty.args.is_empty() || ty.args.len() == 2) {
@@ -312,6 +593,18 @@ impl<'a> Parser<'a> {
     fn parse_entity_decl(&mut self) -> Result<EntityDecl> {
         self.expect_keyword(Keyword::Entity)?;
         let name = self.expect_ident("expected entity name")?;
+
+        let context_name = if let TokenKind::Ident(v) = &self.current.kind {
+            if v.eq_ignore_ascii_case("of") {
+                self.bump()?;
+                Some(self.expect_ident("expected dbcontext name after 'of'")?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         self.expect_symbol('{')?;
 
         let mut fields = Vec::new();
@@ -345,7 +638,11 @@ impl<'a> Parser<'a> {
         }
 
         self.expect_symbol('}')?;
-        Ok(EntityDecl { name, fields })
+        Ok(EntityDecl {
+            name,
+            context_name,
+            fields,
+        })
     }
 
     fn parse_route_decl(&mut self) -> Result<RouteDecl> {
@@ -1006,7 +1303,7 @@ mod tests {
         let src = r#"
             dbcontext AppDb : Postgres;
 
-            entity User {
+            entity User of AppDb {
                 id uuid;
                 name text(50);
                 balance decimal(18,2);
@@ -1016,7 +1313,60 @@ mod tests {
         let program = parse_program(src).unwrap();
         assert_eq!(program.dbcontexts.len(), 1);
         assert_eq!(program.entities.len(), 1);
+        assert_eq!(program.entities[0].context_name.as_deref(), Some("AppDb"));
         validate_program(&program).unwrap();
+    }
+
+    #[test]
+    fn fails_when_entity_references_unknown_dbcontext() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of MissingDb { id uuid; }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("unknown dbcontext"));
+    }
+
+    #[test]
+    fn fails_when_select_uses_wrong_context_for_entity() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            dbcontext AuditDb : Postgres;
+
+            entity User of AppDb {
+                id uuid;
+            }
+
+            function bad() {
+                let x = select User from AuditDb.User;
+                return x;
+            }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("bound to dbcontext"));
+    }
+
+    #[test]
+    fn fails_when_db_statement_targets_unknown_table_in_context() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+
+            entity User of AppDb {
+                id uuid;
+            }
+
+            function bad(user) {
+                insert user into AppDb.Todo;
+            }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Unknown table/entity"));
     }
 
     #[test]

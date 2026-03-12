@@ -1,6 +1,7 @@
 mod ast;
 mod diag;
 mod engine;
+mod error_report;
 mod lexer;
 mod migrate;
 mod parser;
@@ -74,7 +75,31 @@ enum MigrateCommand {
     },
 }
 
-fn main() -> Result<()> {
+fn main() {
+    let run_result = std::panic::catch_unwind(real_main);
+
+    match run_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            error_report::print_cli_error(&err);
+            std::process::exit(1);
+        }
+        Err(panic_payload) => {
+            let message = if let Some(msg) = panic_payload.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = panic_payload.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "Unknown panic payload".to_string()
+            };
+            eprintln!("\nUnhandled panic: {message}");
+            eprintln!("Tip: set RUST_BACKTRACE=1 to include panic backtrace details.");
+            std::process::exit(101);
+        }
+    }
+}
+
+fn real_main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {

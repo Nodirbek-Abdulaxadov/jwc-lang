@@ -3,6 +3,7 @@ use tiny_http::{Header, Response, Server};
 
 use crate::ast::Program;
 use crate::engine;
+use crate::error_report;
 use crate::runner;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -195,7 +196,11 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
             // Dispatch to JWC route
             let (status, response_body) = runner::run_request(&program, &method, &path, body)
                 .unwrap_or_else(|e| {
-                    let msg = format!("{e:#}").replace('"', "'");
+                    error_report::log_runtime_error(
+                        &format!("HTTP {} {} failed", method, path),
+                        &e,
+                    );
+                    let msg = error_report::to_single_line(&e).replace('"', "'");
                     (500, format!("{{\"error\":\"{msg}\"}}"))
                 });
 

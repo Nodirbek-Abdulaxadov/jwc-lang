@@ -23,6 +23,8 @@ pub struct DbContextDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityDecl {
     pub name: String,
+    /// Optional owning dbcontext name from: `entity X of AppDbContext { ... }`
+    pub context_name: Option<String>,
     pub fields: Vec<FieldDecl>,
 }
 
