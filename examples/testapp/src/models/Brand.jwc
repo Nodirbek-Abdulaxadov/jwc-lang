@@ -2,3 +2,12 @@ entity BrandEntity of AppDbContext {
     id   int pk;
     name varchar(255);
 }
+
+class BrandCreateRequest {
+    id int;
+    name string;
+}
+
+class BrandUpdateRequest {
+    name string;
+}

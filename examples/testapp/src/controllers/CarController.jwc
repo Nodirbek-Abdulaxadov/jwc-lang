@@ -1,11 +1,11 @@
 route GET "api/cars" {
-    let cars = getAllCars();
+    let cars = CarService.getAllCars();
     return json(cars);
 }
 
 route GET "api/cars/{id}" {
     let id = path_param("id");
-    let car = getCarById(id);
+    let car = CarService.getCarById(id);
     if (car == null) {
         return notFound();
     }
@@ -13,15 +13,13 @@ route GET "api/cars/{id}" {
 }
 
 route POST "api/cars" {
-    let data = body();
-    let newCar = createCar(data.id, data.model, data.year, data.brandId, data.colorId);
+    let newCar = CarService.createCar(body());
     return created(newCar);
 }
 
 route PUT "api/cars/{id}" {
     let id = path_param("id");
-    let data = body();
-    let updated = updateCar(id, data.model, data.year, data.brandId, data.colorId);
+    let updated = CarService.updateCar(id, body());
     if (updated == null) {
         return notFound();
     }
@@ -30,7 +28,7 @@ route PUT "api/cars/{id}" {
 
 route DELETE "api/cars/{id}" {
     let id = path_param("id");
-    let ok = deleteCar(id);
+    let ok = CarService.deleteCar(id);
     if (ok == false) {
         return notFound();
     }

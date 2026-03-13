@@ -1,11 +1,11 @@
 route GET "api/brands" {
-    let brands = getAllBrands();
+    let brands = BrandService.getAllBrands();
     return json(brands);
 }
 
 route GET "api/brands/{id}" {
     let id = path_param("id");
-    let brand = getBrandById(id);
+    let brand = BrandService.getBrandById(id);
     if (brand == null) {
         return notFound();
     }
@@ -13,15 +13,13 @@ route GET "api/brands/{id}" {
 }
 
 route POST "api/brands" {
-    let data = body();
-    let newBrand = createBrand(data.id, data.name);
+    let newBrand = BrandService.createBrand(body());
     return created(newBrand);
 }
 
 route PUT "api/brands/{id}" {
     let id = path_param("id");
-    let data = body();
-    let updated = updateBrand(id, data.name);
+    let updated = BrandService.updateBrand(id, body());
     if (updated == null) {
         return notFound();
     }
@@ -30,7 +28,7 @@ route PUT "api/brands/{id}" {
 
 route DELETE "api/brands/{id}" {
     let id = path_param("id");
-    let ok = deleteBrand(id);
+    let ok = BrandService.deleteBrand(id);
     if (ok == false) {
         return notFound();
     }

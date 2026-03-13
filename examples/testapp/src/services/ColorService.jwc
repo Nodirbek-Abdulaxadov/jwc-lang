@@ -1,36 +1,38 @@
-function getAllColors() {
-    return select ColorEntity from AppDbContext.ColorEntity;
-}
-
-function getColorById(id: int) {
-    return select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
-}
-
-function createColor(id: int, name: string, hex: string) {
-    let color = new ColorEntity();
-    color.id = id;
-    color.name = name;
-    color.hex = hex;
-    insert color into AppDbContext.ColorEntity;
-    return color;
-}
-
-function updateColor(id: int, name: string, hex: string) {
-    let color = select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
-    if (color == null) {
-        return null;
+dome ColorService {
+    function getAllColors(): ColorEntity {
+        return select ColorEntity from AppDbContext.ColorEntity;
     }
-    color.name = name;
-    color.hex = hex;
-    update color in AppDbContext.ColorEntity;
-    return color;
-}
 
-function deleteColor(id: int) {
-    let color = select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
-    if (color == null) {
-        return false;
+    function getColorById(id: int): ColorEntity {
+        return select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
     }
-    delete color from AppDbContext.ColorEntity;
-    return true;
+
+    function createColor(data: ColorCreateRequest): ColorEntity {
+        let color = new ColorEntity();
+        color.id = data.id;
+        color.name = data.name;
+        color.hex = data.hex;
+        insert color into AppDbContext.ColorEntity;
+        return color;
+    }
+
+    function updateColor(id: int, data: ColorUpdateRequest): ColorEntity {
+        let color = select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
+        if (color == null) {
+            return null;
+        }
+        color.name = data.name;
+        color.hex = data.hex;
+        update color in AppDbContext.ColorEntity;
+        return color;
+    }
+
+    function deleteColor(id: int) {
+        let color = select ColorEntity from AppDbContext.ColorEntity where ColorEntity.id == @id first;
+        if (color == null) {
+            return false;
+        }
+        delete color from AppDbContext.ColorEntity;
+        return true;
+    }
 }

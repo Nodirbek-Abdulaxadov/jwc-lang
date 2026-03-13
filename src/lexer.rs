@@ -13,8 +13,10 @@ pub enum Keyword {
     Context,
     DbContext,
     Entity,
+    Class,
     Route,
     Function,
+    Dome,
     Let,
     Return,
     Print,
@@ -36,7 +38,7 @@ pub enum Keyword {
 pub enum TokenKind {
     Keyword(Keyword),
     Ident(String),
-    Number(i64),
+    Number(String),
     String(String),
     /// Backtick template string: ``\`hello ${expr}\` ``
     TemplateStr(Vec<TemplatePart>),
@@ -77,8 +79,10 @@ impl<'a> Lexer<'a> {
                 "context" => TokenKind::Keyword(Keyword::Context),
                 "dbcontext" => TokenKind::Keyword(Keyword::DbContext),
                 "entity" => TokenKind::Keyword(Keyword::Entity),
+                "class" => TokenKind::Keyword(Keyword::Class),
                 "route" => TokenKind::Keyword(Keyword::Route),
                 "function" => TokenKind::Keyword(Keyword::Function),
+                "dome" => TokenKind::Keyword(Keyword::Dome),
                 "let" => TokenKind::Keyword(Keyword::Let),
                 "return" => TokenKind::Keyword(Keyword::Return),
                 "print" => TokenKind::Keyword(Keyword::Print),
@@ -177,7 +181,7 @@ impl<'a> Lexer<'a> {
         self.src[start..self.i].to_string()
     }
 
-    fn consume_number(&mut self) -> Result<i64> {
+    fn consume_number(&mut self) -> Result<String> {
         let start = self.i;
         while let Some(ch) = self.peek_char() {
             if ch.is_ascii_digit() {
@@ -186,9 +190,30 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        self.src[start..self.i]
-            .parse::<i64>()
-            .map_err(|_| anyhow!("Invalid integer literal"))
+
+        // Optional fractional part: digits '.' digits
+        if self.peek_char() == Some('.') {
+            let mut it = self.src[self.i..].chars();
+            let _dot = it.next();
+            let next = it.next();
+            if matches!(next, Some(c) if c.is_ascii_digit()) {
+                self.i += 1; // consume '.'
+                while let Some(ch) = self.peek_char() {
+                    if ch.is_ascii_digit() {
+                        self.i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let token = &self.src[start..self.i];
+        if token.parse::<f64>().is_err() {
+            return Err(anyhow!("Invalid numeric literal"));
+        }
+
+        Ok(token.to_string())
     }
 
     fn consume_template_string(&mut self) -> Result<Vec<TemplatePart>> {
@@ -315,5 +340,18 @@ mod tests {
             TokenKind::Keyword(Keyword::DbContext)
         ));
         assert!(matches!(lexer.next_token().unwrap().kind, TokenKind::Ident(_)));
+    }
+
+    #[test]
+    fn lexes_decimal_number_literal() {
+        let mut lexer = Lexer::new("let x = 0.25;");
+        let _ = lexer.next_token().unwrap(); // let
+        let _ = lexer.next_token().unwrap(); // x
+        let _ = lexer.next_token().unwrap(); // =
+        let tok = lexer.next_token().unwrap();
+        match tok.kind {
+            TokenKind::Number(v) => assert_eq!(v, "0.25"),
+            other => panic!("expected Number token, got {other:?}"),
+        }
     }
 }

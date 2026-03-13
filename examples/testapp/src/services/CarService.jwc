@@ -1,40 +1,42 @@
-function getAllCars() {
-    return select CarEntity from AppDbContext.CarEntity;
-}
-
-function getCarById(id: int) {
-    return select CarEntity from AppDbContext.CarEntity where CarEntity.id == @id first;
-}
-
-function createCar(id: int, model: string, year: int, brandId: int, colorId: int) {
-    let car = new CarEntity();
-    car.id = id;
-    car.model = model;
-    car.year = year;
-    car.brandId = brandId;
-    car.colorId = colorId;
-    insert car into AppDbContext.CarEntity;
-    return car;
-}
-
-function updateCar(id: int, model: string, year: int, brandId: int, colorId: int) {
-    let car = select CarEntity from AppDbContext.CarEntity where CarEntity.id == @id first;
-    if (car == null) {
-        return null;
+dome CarService {
+    function getAllCars(): CarEntity {
+        return select CarEntity from AppDbContext.CarEntity;
     }
-    car.model = model;
-    car.year = year;
-    car.brandId = brandId;
-    car.colorId = colorId;
-    update car in AppDbContext.CarEntity;
-    return car;
-}
 
-function deleteCar(id: int) {
-    let car = select CarEntity from AppDbContext.CarEntity where CarEntity.id == @id first;
-    if (car == null) {
-        return false;
+    function getCarById(id: int): CarEntity {
+        return select CarEntity from AppDbContext.CarEntity where CarEntity.id == @id first;
     }
-    delete car from AppDbContext.CarEntity;
-    return true;
+
+    function createCar(data: CarCreateRequest): CarEntity {
+        let car = new CarEntity();
+        car.id = data.id;
+        car.model = data.model;
+        car.year = data.year;
+        car.brandId = data.brandId;
+        car.colorId = data.colorId;
+        insert car into AppDbContext.CarEntity;
+        return car;
+    }
+
+    function updateCar(id: int, data: CarUpdateRequest): CarEntity {
+        let car = select CarEntity from AppDbContext.CarEntity where CarEntity.id == @id first;
+        if (car == null) {
+            return null;
+        }
+        car.model = data.model;
+        car.year = data.year;
+        car.brandId = data.brandId;
+        car.colorId = data.colorId;
+        update car in AppDbContext.CarEntity;
+        return car;
+    }
+
+    function deleteCar(id: int) {
+        let car = select CarEntity from AppDbContext.CarEntity where CarEntity.id == @id first;
+        if (car == null) {
+            return false;
+        }
+        delete car from AppDbContext.CarEntity;
+        return true;
+    }
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Result};
 
-use crate::ast::{EntityDecl, Program, TypeSpec};
+use crate::ast::{ModelDecl, ModelKind, Program, TypeSpec};
 
 pub fn generate_postgres_schema_sql(program: &Program) -> Result<String> {
     let mut out = String::new();
@@ -14,7 +14,13 @@ pub fn generate_postgres_schema_sql(program: &Program) -> Result<String> {
         .map(|ctx| (ctx.name.to_lowercase(), ctx.driver.to_lowercase()))
         .collect::<HashMap<_, _>>();
 
-    for (idx, entity) in program.entities.iter().enumerate() {
+    let entities = program
+        .models
+        .iter()
+        .filter(|m| m.kind == ModelKind::Entity)
+        .collect::<Vec<_>>();
+
+    for (idx, entity) in entities.iter().enumerate() {
         let driver = resolve_entity_driver(program, entity, &ctx_drivers)?;
         if !driver.eq_ignore_ascii_case("postgres") {
             let ctx_name = entity.context_name.as_deref().unwrap_or("<implicit>");
@@ -38,7 +44,7 @@ pub fn generate_postgres_schema_sql(program: &Program) -> Result<String> {
 
 fn resolve_entity_driver(
     program: &Program,
-    entity: &EntityDecl,
+    entity: &ModelDecl,
     ctx_drivers: &HashMap<String, String>,
 ) -> Result<String> {
     if let Some(context_name) = &entity.context_name {
@@ -67,7 +73,7 @@ fn resolve_entity_driver(
     Ok("postgres".to_string())
 }
 
-pub(crate) fn generate_postgres_table_sql(entity: &EntityDecl) -> Result<String> {
+pub(crate) fn generate_postgres_table_sql(entity: &ModelDecl) -> Result<String> {
     let table = to_snake_case(&entity.name);
     let mut lines: Vec<String> = Vec::new();
     let mut constraints: Vec<String> = Vec::new();

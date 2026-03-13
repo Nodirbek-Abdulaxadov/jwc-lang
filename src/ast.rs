@@ -1,9 +1,15 @@
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Program {
     pub dbcontexts: Vec<DbContextDecl>,
-    pub entities: Vec<EntityDecl>,
+    pub models: Vec<ModelDecl>,
     pub routes: Vec<RouteDecl>,
     pub functions: Vec<FunctionDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelKind {
+    Entity,
+    Class,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +27,8 @@ pub struct DbContextDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntityDecl {
+pub struct ModelDecl {
+    pub kind: ModelKind,
     pub name: String,
     /// Optional owning dbcontext name from: `entity X of AppDbContext { ... }`
     pub context_name: Option<String>,
@@ -103,6 +110,8 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Int(i64),
+    /// Decimal literal kept as source text (e.g. `0.2`) and parsed at runtime.
+    Float(String),
     Str(String),
     Bool(bool),
     Null,

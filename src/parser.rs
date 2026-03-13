@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 
 use crate::ast::{
-    DbContextDecl, DbWhere, EntityDecl, Expr, FieldDecl, FunctionDecl, Program, RouteDecl, Stmt,
-    TypeSpec, TypedParam,
+    DbContextDecl, DbWhere, Expr, FieldDecl, FunctionDecl, ModelDecl, ModelKind, Program,
+    RouteDecl, Stmt, TypeSpec, TypedParam,
 };
 use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
@@ -98,33 +98,42 @@ pub fn validate_program(program: &Program) -> Result<()> {
         ctx_drivers.insert(ctx.name.to_lowercase(), ctx.driver.to_lowercase());
     }
 
+    let mut model_names = HashSet::new();
     let mut entity_names = HashSet::new();
     let mut entity_contexts: HashMap<String, Option<String>> = HashMap::new();
     let mut db_tables: HashSet<(String, String)> = HashSet::new();
-    for entity in &program.entities {
-        let key = entity.name.to_lowercase();
-        if !entity_names.insert(key) {
-            bail!("Duplicate entity name: {}", entity.name);
+    for model in &program.models {
+        let model_key = model.name.to_lowercase();
+        if !model_names.insert(model_key) {
+            bail!("Duplicate model name: {}", model.name);
         }
 
-        let resolved_context = resolve_entity_context_name(program, entity, &ctx_names)?;
+        if model.kind != ModelKind::Entity {
+            continue;
+        }
+        let key = model.name.to_lowercase();
+        if !entity_names.insert(key) {
+            bail!("Duplicate entity name: {}", model.name);
+        }
+
+        let resolved_context = resolve_entity_context_name(program, model, &ctx_names)?;
         let resolved_context_lc = resolved_context.as_ref().map(|v| v.to_lowercase());
-        entity_contexts.insert(entity.name.to_lowercase(), resolved_context_lc.clone());
+        entity_contexts.insert(model.name.to_lowercase(), resolved_context_lc.clone());
         if let Some(ctx_name) = resolved_context_lc {
-            db_tables.insert((ctx_name.clone(), entity.name.to_lowercase()));
-            db_tables.insert((ctx_name, to_snake_case(&entity.name).to_lowercase()));
+            db_tables.insert((ctx_name.clone(), model.name.to_lowercase()));
+            db_tables.insert((ctx_name, to_snake_case(&model.name).to_lowercase()));
         }
 
         let mut field_names = HashSet::new();
-        let resolved_driver = resolve_entity_driver(program, entity, &ctx_drivers)?;
-        for field in &entity.fields {
+        let resolved_driver = resolve_entity_driver(program, model, &ctx_drivers)?;
+        for field in &model.fields {
             let field_key = field.name.to_lowercase();
             if !field_names.insert(field_key) {
-                bail!("Duplicate field '{}' in entity '{}'", field.name, entity.name);
+                bail!("Duplicate field '{}' in entity '{}'", field.name, model.name);
             }
 
             validate_type_spec_for_driver(&field.ty, &resolved_driver)
-                .map_err(|err| anyhow!("Entity '{}', field '{}': {err}", entity.name, field.name))?;
+                .map_err(|err| anyhow!("Entity '{}', field '{}': {err}", model.name, field.name))?;
         }
     }
 
@@ -250,7 +259,7 @@ fn validate_expr(
     db_tables: &HashSet<(String, String)>,
 ) -> Result<()> {
     match expr {
-        Expr::Int(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) => Ok(()),
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) => Ok(()),
         Expr::Call { args, .. } => {
             for arg in args {
                 validate_expr(arg, ctx_names, entity_contexts, db_tables)?;
@@ -384,7 +393,7 @@ fn to_snake_case(input: &str) -> String {
 
 fn resolve_entity_driver(
     program: &Program,
-    entity: &EntityDecl,
+    entity: &ModelDecl,
     ctx_drivers: &HashMap<String, String>,
 ) -> Result<String> {
     let known_ctx_names = ctx_drivers.keys().cloned().collect::<HashSet<_>>();
@@ -405,7 +414,7 @@ fn resolve_entity_driver(
 
 fn resolve_entity_context_name(
     program: &Program,
-    entity: &EntityDecl,
+    entity: &ModelDecl,
     ctx_names: &HashSet<String>,
 ) -> Result<Option<String>> {
     if let Some(context_name) = &entity.context_name {
@@ -513,17 +522,23 @@ impl<'a> Parser<'a> {
                     program.dbcontexts.push(self.parse_dbcontext_decl()?);
                 }
                 TokenKind::Keyword(Keyword::Entity) => {
-                    program.entities.push(self.parse_entity_decl()?);
+                    program.models.push(self.parse_model_decl(ModelKind::Entity)?);
+                }
+                TokenKind::Keyword(Keyword::Class) => {
+                    program.models.push(self.parse_model_decl(ModelKind::Class)?);
                 }
                 TokenKind::Keyword(Keyword::Route) => {
                     program.routes.push(self.parse_route_decl()?);
                 }
                 TokenKind::Keyword(Keyword::Function) => {
-                    program.functions.push(self.parse_function_decl()?);
+                    program.functions.push(self.parse_function_decl(None)?);
+                }
+                TokenKind::Keyword(Keyword::Dome) => {
+                    self.parse_dome_decl(&mut program)?;
                 }
                 _ => {
                     return Err(self.error_here(
-                        "expected import, namespace, dbcontext, entity, route, or function",
+                        "expected import, namespace, dbcontext, entity/class, route, function, or dome",
                     ));
                 }
             }
@@ -590,14 +605,22 @@ impl<'a> Parser<'a> {
         Ok(parts.join("."))
     }
 
-    fn parse_entity_decl(&mut self) -> Result<EntityDecl> {
-        self.expect_keyword(Keyword::Entity)?;
-        let name = self.expect_ident("expected entity name")?;
+    fn parse_model_decl(&mut self, kind: ModelKind) -> Result<ModelDecl> {
+        match kind {
+            ModelKind::Entity => self.expect_keyword(Keyword::Entity)?,
+            ModelKind::Class => self.expect_keyword(Keyword::Class)?,
+        }
 
-        let context_name = if let TokenKind::Ident(v) = &self.current.kind {
-            if v.eq_ignore_ascii_case("of") {
-                self.bump()?;
-                Some(self.expect_ident("expected dbcontext name after 'of'")?)
+        let name = self.expect_ident("expected model name")?;
+
+        let context_name = if kind == ModelKind::Entity {
+            if let TokenKind::Ident(v) = &self.current.kind {
+                if v.eq_ignore_ascii_case("of") {
+                    self.bump()?;
+                    Some(self.expect_ident("expected dbcontext name after 'of'")?)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -638,11 +661,32 @@ impl<'a> Parser<'a> {
         }
 
         self.expect_symbol('}')?;
-        Ok(EntityDecl {
+        Ok(ModelDecl {
+            kind,
             name,
             context_name,
             fields,
         })
+    }
+
+    fn parse_dome_decl(&mut self, program: &mut Program) -> Result<()> {
+        self.expect_keyword(Keyword::Dome)?;
+        let dome_name = self.expect_ident("expected dome name")?;
+        self.expect_symbol('{')?;
+
+        while !self.check_symbol('}') {
+            match &self.current.kind {
+                TokenKind::Keyword(Keyword::Function) => {
+                    program.functions.push(self.parse_function_decl(Some(&dome_name))?);
+                }
+                _ => {
+                    return Err(self.error_here("expected function declaration inside dome block"))
+                }
+            }
+        }
+
+        self.expect_symbol('}')?;
+        Ok(())
     }
 
     fn parse_route_decl(&mut self) -> Result<RouteDecl> {
@@ -653,7 +697,7 @@ impl<'a> Parser<'a> {
         if self.check_symbol('-') {
             self.expect_symbol('-')?;
             self.expect_symbol('>')?;
-            let handler = self.expect_ident("expected route handler function name")?;
+            let handler = self.parse_qualified_name()?;
             self.expect_symbol(';')?;
             return Ok(RouteDecl {
                 method,
@@ -700,9 +744,15 @@ impl<'a> Parser<'a> {
         Ok(sign * number)
     }
 
-    fn parse_function_decl(&mut self) -> Result<FunctionDecl> {
+    fn parse_function_decl(&mut self, dome_name: Option<&str>) -> Result<FunctionDecl> {
         self.expect_keyword(Keyword::Function)?;
-        let name = self.expect_ident("expected function name")?;
+
+        let base_name = self.expect_ident("expected function name")?;
+        let name = if let Some(dome_name) = dome_name {
+            format!("{}.{}", dome_name, base_name)
+        } else {
+            base_name
+        };
         self.expect_symbol('(')?;
 
         let mut params = Vec::new();
@@ -828,13 +878,22 @@ impl<'a> Parser<'a> {
                 };
                 self.bump()?;
                 if self.check_symbol('.') {
-                    // name.field = value;
                     self.bump()?;
-                    let field = self.expect_ident("expected field name after '.'")?;
-                    self.expect_symbol('=')?;
-                    let value = self.parse_expr()?;
-                    self.expect_symbol(';')?;
-                    Ok(Stmt::FieldAssign { var: name, field, value })
+                    let member = self.expect_ident("expected member name after '.'")?;
+                    if self.check_symbol('(') {
+                        let call = self.parse_call_after_name(format!("{}.{}", name, member))?;
+                        self.expect_symbol(';')?;
+                        Ok(Stmt::Expr(call))
+                    } else {
+                        self.expect_symbol('=')?;
+                        let value = self.parse_expr()?;
+                        self.expect_symbol(';')?;
+                        Ok(Stmt::FieldAssign {
+                            var: name,
+                            field: member,
+                            value,
+                        })
+                    }
                 } else if self.check_symbol('=') {
                     self.expect_symbol('=')?;
                     let value = self.parse_expr()?;
@@ -1032,7 +1091,14 @@ impl<'a> Parser<'a> {
         match self.current.kind.clone() {
             TokenKind::Number(value) => {
                 self.bump()?;
-                Ok(Expr::Int(value))
+                if value.contains('.') {
+                    Ok(Expr::Float(value))
+                } else {
+                    let int_value = value
+                        .parse::<i64>()
+                        .map_err(|_| self.error_here("invalid integer literal"))?;
+                    Ok(Expr::Int(int_value))
+                }
             }
             TokenKind::String(value) => {
                 self.bump()?;
@@ -1083,8 +1149,15 @@ impl<'a> Parser<'a> {
                     self.parse_call_after_name(name)
                 } else if self.check_symbol('.') {
                     self.bump()?;
-                    let field = self.expect_ident("expected field name after '.'")?;
-                    Ok(Expr::FieldGet { var: name, field })
+                    let member = self.expect_ident("expected field or function name after '.'")?;
+                    if self.check_symbol('(') {
+                        self.parse_call_after_name(format!("{}.{}", name, member))
+                    } else {
+                        Ok(Expr::FieldGet {
+                            var: name,
+                            field: member,
+                        })
+                    }
                 } else {
                     Ok(Expr::Var(name))
                 }
@@ -1259,7 +1332,10 @@ impl<'a> Parser<'a> {
         match self.current.kind.clone() {
             TokenKind::Number(value) => {
                 self.bump()?;
-                Ok(value)
+                if value.contains('.') {
+                    return Err(self.error_here("expected integer number"));
+                }
+                value.parse::<i64>().map_err(|_| self.error_here(msg))
             }
             _ => Err(self.error_here(msg)),
         }
@@ -1312,8 +1388,13 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         assert_eq!(program.dbcontexts.len(), 1);
-        assert_eq!(program.entities.len(), 1);
-        assert_eq!(program.entities[0].context_name.as_deref(), Some("AppDb"));
+        let entities = program
+            .models
+            .iter()
+            .filter(|m| m.kind == ModelKind::Entity)
+            .collect::<Vec<_>>();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].context_name.as_deref(), Some("AppDb"));
         validate_program(&program).unwrap();
     }
 
@@ -1419,7 +1500,7 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         let err = validate_program(&program).unwrap_err().to_string();
-        assert!(err.contains("Duplicate entity name"));
+        assert!(err.contains("Duplicate model name"));
     }
 
     #[test]
@@ -1567,5 +1648,63 @@ mod tests {
         assert!(msg.contains("Type error"));
         assert!(msg.contains("'x'"));
         assert!(msg.contains("int"));
+    }
+
+    #[test]
+    fn parses_dome_functions_and_qualified_calls() {
+        let src = r#"
+            dome BrandService {
+                function getAll() {
+                    return 42;
+                }
+            }
+
+            function main() {
+                let x = BrandService.getAll();
+                print(x);
+            }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        assert!(program
+            .functions
+            .iter()
+            .any(|f| f.name == "BrandService.getAll"));
+    }
+
+    #[test]
+    fn parses_class_models() {
+        let src = r#"
+            class BrandDto {
+                id int;
+                name string;
+            }
+
+            function main() {
+                let dto = new BrandDto();
+                dto.name = "A";
+                print(dto.name);
+            }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        assert!(program
+            .models
+            .iter()
+            .any(|m| m.kind == ModelKind::Class && m.name == "BrandDto"));
+    }
+
+    #[test]
+    fn fails_on_type_keyword_model_decl() {
+        let src = r#"
+            type BrandView {
+                id int;
+            }
+        "#;
+
+        let err = parse_program(src).unwrap_err().to_string();
+        assert!(err.contains("expected import, namespace, dbcontext, entity/class"));
     }
 }

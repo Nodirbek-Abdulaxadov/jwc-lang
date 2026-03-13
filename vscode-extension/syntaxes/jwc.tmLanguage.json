@@ -8,7 +8,7 @@
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#route-declaration" },
-    { "include": "#entity-declaration" },
+    { "include": "#model-declaration" },
     { "include": "#function-declaration" },
     { "include": "#dbcontext-declaration" },
     { "include": "#db-statements" },
@@ -79,9 +79,9 @@
       ]
     },
 
-    "entity-declaration": {
-      "comment": "entity EntityName { ... }",
-      "begin": "\\b(entity)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{",
+    "model-declaration": {
+      "comment": "entity/class Name { ... }",
+      "begin": "\\b(entity|class)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{",
       "end": "\\}",
       "beginCaptures": {
         "1": { "name": "keyword.declaration.entity.jwc" },
@@ -208,7 +208,7 @@
         },
         {
           "name": "keyword.control.import.jwc",
-          "match": "\\b(import|namespace)\\b"
+          "match": "\\b(import|namespace|dome|class)\\b"
         }
       ]
     },

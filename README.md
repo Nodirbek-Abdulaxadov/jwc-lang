@@ -55,7 +55,7 @@ entity Brand of AppDbContext {
 }
 
 function getAllBrands() {
-    return select Brand from AppDbContext.Brands;
+    return select BrandEntity from AppDbContext.BrandEntity;
 }
 
 route GET "api/brands" {
@@ -65,6 +65,66 @@ route GET "api/brands" {
 function main() {
     setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);
     serve(8080);
+}
+```
+
+## OOP-Style Grouping (dome)
+
+JWC now supports static-class style function grouping with `dome`.
+
+- Functions declared inside a `dome` are not global.
+- They must be called via `DomeName.functionName(...)`.
+
+Example:
+
+```jwc
+dome BrandService {
+    function getAll() {
+        return select BrandEntity from AppDbContext.BrandEntity;
+    }
+}
+
+function main() {
+    let brands = BrandService.getAll();
+    print(brands);
+}
+```
+
+## DTO / View Models (class)
+
+Besides DB `entity`, JWC supports non-persistent model declarations:
+
+- `class Name { ... }`
+
+These are useful for DTO/View modeling and typed parameters, while SQL generation remains scoped to `entity` declarations only.
+
+When a function parameter or return type is annotated with a known `class`/`entity` type, JWC now validates JSON payloads automatically:
+
+- `body()` values are parsed/validated automatically for typed params.
+- `select ...` JSON results are also validated when passed/returned as typed models.
+
+Practical example:
+
+```jwc
+class BrandCreateRequest {
+    id int;
+    name string;
+}
+
+dome BrandService {
+    function createBrand(data: BrandCreateRequest): BrandEntity {
+        let brand = new BrandEntity();
+        brand.id = data.id;
+        brand.name = data.name;
+        insert brand into AppDbContext.BrandEntity;
+        return brand;
+    }
+}
+
+route POST "api/brands" {
+    // body() is validated/mapped against BrandCreateRequest automatically
+    let createdBrand = BrandService.createBrand(body());
+    return created(createdBrand);
 }
 ```
 
@@ -179,6 +239,7 @@ After install, open a new terminal if `jwc` is not found immediately.
 
 - `.env` is loaded automatically from project root.
 - `jwc run -- test` is not the same as `jwc test`; use `jwc test` for project validation.
+- If `jwc run` fails with `os error 10048`, port `8080` is already in use. Stop the process using that port, or run on another port: `jwc serve --port 8081`.
 
 ## Error Handling
 

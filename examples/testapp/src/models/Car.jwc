@@ -5,3 +5,18 @@ entity CarEntity of AppDbContext {
     brandId int;
     colorId int;
 }
+
+class CarCreateRequest {
+    id int;
+    model string;
+    year int;
+    brandId int;
+    colorId int;
+}
+
+class CarUpdateRequest {
+    model string;
+    year int;
+    brandId int;
+    colorId int;
+}

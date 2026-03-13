@@ -3,3 +3,14 @@ entity ColorEntity of AppDbContext {
     name varchar(255);
     hex  varchar(7);
 }
+
+class ColorCreateRequest {
+    id int;
+    name string;
+    hex string;
+}
+
+class ColorUpdateRequest {
+    name string;
+    hex string;
+}

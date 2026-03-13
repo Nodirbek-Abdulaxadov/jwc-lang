@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
 
-use crate::ast::{Expr, FunctionDecl, Program, RouteDecl, Stmt, TypedParam};
+use crate::ast::{Expr, FunctionDecl, ModelDecl, ModelKind, Program, RouteDecl, Stmt, TypedParam};
 use crate::engine;
 
 #[derive(Debug)]
@@ -38,9 +38,8 @@ pub fn run_request(
 
 struct Vm<'a> {
     functions: HashMap<String, &'a FunctionDecl>,
-    /// Entity schema map — used for compile-time checks and future typed queries
-    #[allow(dead_code)]
-    entities: HashMap<String, &'a crate::ast::EntityDecl>,
+    /// Model schema map (entity + class) for runtime JSON validation on typed params/returns.
+    models: HashMap<String, &'a ModelDecl>,
     routes: Vec<&'a RouteDecl>,
     current_path_params: Option<HashMap<String, String>>,
     output: String,
@@ -58,16 +57,18 @@ impl<'a> Vm<'a> {
             functions.insert(function.name.to_lowercase(), function);
         }
 
-        let mut entities = HashMap::new();
-        for entity in &program.entities {
-            entities.insert(entity.name.to_lowercase(), entity);
+        let mut models = HashMap::new();
+        for model in &program.models {
+            if matches!(model.kind, ModelKind::Entity | ModelKind::Class) {
+                models.insert(model.name.to_lowercase(), model);
+            }
         }
 
         let routes = program.routes.iter().collect();
 
         Self {
             functions,
-            entities,
+            models,
             routes,
             current_path_params: None,
             output: String::new(),
@@ -102,7 +103,7 @@ impl<'a> Vm<'a> {
 
         let mut vars = HashMap::new();
         for (param, value) in function.params.iter().zip(args.into_iter()) {
-            let value = check_param_type(param, value)?;
+            let value = self.check_param_type(param, value)?;
             vars.insert(param.name.to_lowercase(), value);
         }
 
@@ -111,9 +112,162 @@ impl<'a> Vm<'a> {
 
         match flow {
             Flow::Continue => Ok(None),
-            Flow::Return(v) => Ok(v),
+            Flow::Return(v) => {
+                if let Some(return_ty) = &function.return_type {
+                    let checked = self.check_typed_value(
+                        &format!("return of function '{}'", function.name),
+                        return_ty,
+                        v.unwrap_or(Value::Null),
+                    )?;
+                    if checked == Value::Null {
+                        Ok(None)
+                    } else {
+                        Ok(Some(checked))
+                    }
+                } else {
+                    Ok(v)
+                }
+            }
             Flow::Break => bail!("'break' used outside loop"),
             Flow::ContinueLoop => bail!("'continue' used outside loop"),
+        }
+    }
+
+    fn check_param_type(&self, param: &TypedParam, value: Value) -> Result<Value> {
+        let ty = match &param.ty {
+            None => return Ok(value),
+            Some(t) => t,
+        };
+        self.check_typed_value(&format!("parameter '{}'", param.name), ty, value)
+    }
+
+    fn check_typed_value(&self, subject: &str, ty: &str, value: Value) -> Result<Value> {
+        match ty {
+            "string" | "str" => match &value {
+                Value::Str(_) => Ok(value),
+                Value::Int(n) => Ok(Value::Str(n.to_string())),
+                Value::Float(n) => Ok(Value::Str(format_float(*n))),
+                _ => bail!("Type error: {subject} expects string, got {}", value.type_name()),
+            },
+            "int" | "integer" | "number" => match &value {
+                Value::Int(_) => Ok(value),
+                Value::Float(n) if n.fract() == 0.0 => Ok(Value::Int(*n as i64)),
+                Value::Str(s) => s
+                    .parse::<i64>()
+                    .map(Value::Int)
+                    .map_err(|_| anyhow!("Type error: {subject} expects int, got string \"{}\"", s)),
+                _ => bail!("Type error: {subject} expects int, got {}", value.type_name()),
+            },
+            "double" | "float" => match &value {
+                Value::Float(_) => Ok(value),
+                Value::Int(n) => Ok(Value::Float(*n as f64)),
+                Value::Str(s) => s
+                    .parse::<f64>()
+                    .map(Value::Float)
+                    .map_err(|_| anyhow!("Type error: {subject} expects double, got string \"{}\"", s)),
+                _ => bail!("Type error: {subject} expects double, got {}", value.type_name()),
+            },
+            "bool" | "boolean" => match &value {
+                Value::Bool(_) => Ok(value),
+                _ => bail!("Type error: {subject} expects bool, got {}", value.type_name()),
+            },
+            model_ty => {
+                let model = self.models.get(&model_ty.to_lowercase());
+                if model.is_none() {
+                    return Ok(value);
+                }
+
+                match value {
+                    Value::Null => Ok(Value::Null),
+                    Value::Str(raw) => {
+                        let parsed: JsonValue = serde_json::from_str(&raw).map_err(|_| {
+                            anyhow!("Type error: {subject} expects {model_ty}, got non-json string")
+                        })?;
+
+                        self.validate_json_against_model(subject, model.unwrap(), &parsed)?;
+                        Ok(Value::Str(parsed.to_string()))
+                    }
+                    other => bail!(
+                        "Type error: {subject} expects {}, got {}",
+                        model_ty,
+                        other.type_name()
+                    ),
+                }
+            }
+        }
+    }
+
+    fn validate_json_against_model(
+        &self,
+        subject: &str,
+        model: &ModelDecl,
+        value: &JsonValue,
+    ) -> Result<()> {
+        if let Some(arr) = value.as_array() {
+            for item in arr {
+                self.validate_model_object(subject, model, item)?;
+            }
+            return Ok(());
+        }
+
+        self.validate_model_object(subject, model, value)
+    }
+
+    fn validate_model_object(&self, subject: &str, model: &ModelDecl, value: &JsonValue) -> Result<()> {
+        let Some(obj) = value.as_object() else {
+            bail!("Type error: {subject} expects {}, got non-object json", model.name);
+        };
+
+        for field in &model.fields {
+            let Some(v) = obj.get(&field.name) else {
+                if field.is_nullable {
+                    continue;
+                }
+                bail!(
+                    "Type error: {subject} expects field '{}' for {}",
+                    field.name,
+                    model.name
+                );
+            };
+
+            if v.is_null() {
+                if !field.is_nullable {
+                    bail!(
+                        "Type error: {subject} field '{}' cannot be null for {}",
+                        field.name,
+                        model.name
+                    );
+                }
+                continue;
+            }
+
+            if !self.json_value_matches_type(v, &field.ty.name) {
+                bail!(
+                    "Type error: {subject} field '{}' has invalid type for {}",
+                    field.name,
+                    model.name
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn json_value_matches_type(&self, value: &JsonValue, type_name: &str) -> bool {
+        match type_name.to_ascii_lowercase().as_str() {
+            "string" | "str" | "text" | "varchar" | "uuid" | "datetime" | "timestamp" => {
+                value.is_string()
+            }
+            "int" | "integer" | "number" | "bigint" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "double" | "float" | "decimal" => value.is_number(),
+            "bool" | "boolean" => value.is_boolean(),
+            "json" => value.is_object() || value.is_array(),
+            other => {
+                if let Some(model) = self.models.get(other) {
+                    return self.validate_json_against_model("nested model", model, value).is_ok();
+                }
+                true
+            }
         }
     }
 
@@ -264,6 +418,12 @@ impl<'a> Vm<'a> {
     fn eval_expr(&mut self, expr: &Expr, vars: &mut HashMap<String, Value>) -> Result<Value> {
         match expr {
             Expr::Int(v) => Ok(Value::Int(*v)),
+            Expr::Float(v) => {
+                let parsed = v
+                    .parse::<f64>()
+                    .map_err(|_| anyhow!("Invalid float literal: {v}"))?;
+                Ok(Value::Float(parsed))
+            }
             Expr::Str(v) => Ok(Value::Str(v.clone())),
             Expr::Bool(v) => Ok(Value::Bool(*v)),
             Expr::Null => Ok(Value::Null),
@@ -284,7 +444,13 @@ impl<'a> Vm<'a> {
                         match doc.get(field.as_str()) {
                             Some(serde_json::Value::String(s)) => Ok(Value::Str(s.clone())),
                             Some(serde_json::Value::Number(n)) => {
-                                Ok(Value::Int(n.as_i64().unwrap_or(0)))
+                                if let Some(i) = n.as_i64() {
+                                    Ok(Value::Int(i))
+                                } else if let Some(f) = n.as_f64() {
+                                    Ok(Value::Float(f))
+                                } else {
+                                    Ok(Value::Null)
+                                }
                             }
                             Some(serde_json::Value::Bool(b)) => Ok(Value::Bool(*b)),
                             Some(serde_json::Value::Null) | None => Ok(Value::Null),
@@ -473,20 +639,33 @@ impl<'a> Vm<'a> {
                 let right = self.eval_expr(right, vars)?;
                 match (left, right) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
                     (Value::Str(a), b) => Ok(Value::Str(format!("{a}{}", b.as_string()))),
                     (a, Value::Str(b)) => Ok(Value::Str(format!("{}{b}", a.as_string()))),
                     (a, b) => bail!("Unsupported '+' for {} and {}", a.type_name(), b.type_name()),
                 }
             }
-            Expr::Sub(left, right) => self.eval_int_bin(left, right, vars, |a, b| a - b),
-            Expr::Mul(left, right) => self.eval_int_bin(left, right, vars, |a, b| a * b),
+            Expr::Sub(left, right) => {
+                self.eval_numeric_bin(left, right, vars, |a, b| a - b, |a, b| a - b)
+            }
+            Expr::Mul(left, right) => {
+                self.eval_numeric_bin(left, right, vars, |a, b| a * b, |a, b| a * b)
+            }
             Expr::Div(left, right) => {
                 let l = self.eval_expr(left, vars)?;
                 let r = self.eval_expr(right, vars)?;
                 match (l, r) {
                     (Value::Int(_), Value::Int(0)) => bail!("division by zero"),
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
+                    (Value::Float(_), Value::Float(0.0)) => bail!("division by zero"),
+                    (Value::Int(_), Value::Float(0.0)) => bail!("division by zero"),
+                    (Value::Float(_), Value::Int(0)) => bail!("division by zero"),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
                     (a, b) => bail!("Unsupported '/' for {} and {}", a.type_name(), b.type_name()),
                 }
             }
@@ -496,6 +675,12 @@ impl<'a> Vm<'a> {
                 match (l, r) {
                     (Value::Int(_), Value::Int(0)) => bail!("modulo by zero"),
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
+                    (Value::Float(_), Value::Float(0.0)) => bail!("modulo by zero"),
+                    (Value::Int(_), Value::Float(0.0)) => bail!("modulo by zero"),
+                    (Value::Float(_), Value::Int(0)) => bail!("modulo by zero"),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float((a as f64) % b)),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a % (b as f64))),
                     (a, b) => bail!("Unsupported '%' for {} and {}", a.type_name(), b.type_name()),
                 }
             }
@@ -503,6 +688,7 @@ impl<'a> Vm<'a> {
                 let value = self.eval_expr(inner, vars)?;
                 match value {
                     Value::Int(v) => Ok(Value::Int(-v)),
+                    Value::Float(v) => Ok(Value::Float(-v)),
                     other => bail!("Unsupported unary '-' for {}", other.type_name()),
                 }
             }
@@ -516,10 +702,10 @@ impl<'a> Vm<'a> {
                 let r = self.eval_expr(right, vars)?;
                 Ok(Value::Bool(l != r))
             }
-            Expr::Lt(left, right) => self.eval_int_cmp(left, right, vars, |a, b| a < b),
-            Expr::Lte(left, right) => self.eval_int_cmp(left, right, vars, |a, b| a <= b),
-            Expr::Gt(left, right) => self.eval_int_cmp(left, right, vars, |a, b| a > b),
-            Expr::Gte(left, right) => self.eval_int_cmp(left, right, vars, |a, b| a >= b),
+            Expr::Lt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a < b),
+            Expr::Lte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a <= b),
+            Expr::Gt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a > b),
+            Expr::Gte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a >= b),
             Expr::And(left, right) => {
                 let l = self.eval_expr(left, vars)?;
                 match l {
@@ -551,25 +737,30 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_int_bin<F>(
+    fn eval_numeric_bin<FInt, FFloat>(
         &mut self,
         left: &Expr,
         right: &Expr,
         vars: &mut HashMap<String, Value>,
-        func: F,
+        int_func: FInt,
+        float_func: FFloat,
     ) -> Result<Value>
     where
-        F: FnOnce(i64, i64) -> i64,
+        FInt: Fn(i64, i64) -> i64,
+        FFloat: Fn(f64, f64) -> f64,
     {
         let l = self.eval_expr(left, vars)?;
         let r = self.eval_expr(right, vars)?;
         match (l, r) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(func(a, b))),
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_func(a, b))),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_func(a, b))),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_func(a as f64, b))),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_func(a, b as f64))),
             (a, b) => bail!("Unsupported numeric op for {} and {}", a.type_name(), b.type_name()),
         }
     }
 
-    fn eval_int_cmp<F>(
+    fn eval_numeric_cmp<F>(
         &mut self,
         left: &Expr,
         right: &Expr,
@@ -577,12 +768,15 @@ impl<'a> Vm<'a> {
         func: F,
     ) -> Result<Value>
     where
-        F: FnOnce(i64, i64) -> bool,
+        F: Fn(f64, f64) -> bool,
     {
         let l = self.eval_expr(left, vars)?;
         let r = self.eval_expr(right, vars)?;
         match (l, r) {
-            (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(func(a, b))),
+            (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(func(a as f64, b as f64))),
+            (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(func(a, b))),
+            (Value::Int(a), Value::Float(b)) => Ok(Value::Bool(func(a as f64, b))),
+            (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(func(a, b as f64))),
             (a, b) => bail!("Unsupported comparison for {} and {}", a.type_name(), b.type_name()),
         }
     }
@@ -1136,6 +1330,7 @@ fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync> {
             }
         }
         Value::Str(s) => Box::new(s.clone()),
+        Value::Float(n) => Box::new(*n),
         Value::Bool(b) => Box::new(*b),
         Value::Null | Value::Void => Box::new(Option::<String>::None),
     }
@@ -1144,6 +1339,7 @@ fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync> {
 fn value_to_cache_fragment(val: &Value) -> String {
     match val {
         Value::Int(n) => format!("int:{n}"),
+        Value::Float(n) => format!("float:{}", format_float(*n)),
         Value::Str(s) => format!("str:{s}"),
         Value::Bool(b) => format!("bool:{b}"),
         Value::Null => "null".to_string(),
@@ -1224,6 +1420,7 @@ fn build_select_sql(
 fn value_to_json(value: &Value) -> JsonValue {
     match value {
         Value::Int(v) => json!(v),
+        Value::Float(v) => json!(v),
         Value::Str(v) => json!(v),
         Value::Bool(v) => json!(v),
         Value::Null | Value::Void => JsonValue::Null,
@@ -1280,9 +1477,10 @@ enum Flow {
     ContinueLoop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Value {
     Int(i64),
+    Float(f64),
     Str(String),
     Bool(bool),
     Null,
@@ -1293,6 +1491,7 @@ impl Value {
     fn as_string(&self) -> String {
         match self {
             Value::Int(v) => v.to_string(),
+            Value::Float(v) => format_float(*v),
             Value::Str(v) => v.clone(),
             Value::Bool(v) => v.to_string(),
             Value::Null => "null".to_string(),
@@ -1303,6 +1502,7 @@ impl Value {
     fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "int",
+            Value::Float(_) => "double",
             Value::Str(_) => "string",
             Value::Bool(_) => "bool",
             Value::Null => "null",
@@ -1311,50 +1511,18 @@ impl Value {
     }
 }
 
-/// Runtime type guard for typed function parameters.
-/// If the param has no type annotation, the value passes through unchanged.
-/// For known primitive types a coercion is attempted before raising an error.
-fn check_param_type(param: &TypedParam, value: Value) -> Result<Value> {
-    let ty = match &param.ty {
-        None => return Ok(value),
-        Some(t) => t.as_str(),
-    };
-
-    match ty {
-        "string" | "str" => match &value {
-            Value::Str(_) => Ok(value),
-            Value::Int(n) => Ok(Value::Str(n.to_string())),
-            _ => bail!(
-                "Type error: parameter '{}' expects string, got {}",
-                param.name,
-                value.type_name()
-            ),
-        },
-        "int" | "integer" | "number" => match &value {
-            Value::Int(_) => Ok(value),
-            Value::Str(s) => s
-                .parse::<i64>()
-                .map(Value::Int)
-                .map_err(|_| anyhow!(
-                    "Type error: parameter '{}' expects int, got string \"{}\"",
-                    param.name, s
-                )),
-            _ => bail!(
-                "Type error: parameter '{}' expects int, got {}",
-                param.name,
-                value.type_name()
-            ),
-        },
-        "bool" | "boolean" => match &value {
-            Value::Bool(_) => Ok(value),
-            _ => bail!(
-                "Type error: parameter '{}' expects bool, got {}",
-                param.name,
-                value.type_name()
-            ),
-        },
-        // Entity types and unknown types — pass through at runtime (checked by validator later)
-        _ => Ok(value),
+fn format_float(value: f64) -> String {
+    let mut s = format!("{value:.15}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    if s == "-0" {
+        "0".to_string()
+    } else {
+        s
     }
 }
 
@@ -1396,6 +1564,23 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).unwrap();
         assert_eq!(out.output, "42\n");
+    }
+
+    #[test]
+    fn supports_float_literals_and_arithmetic() {
+        let src = r#"
+            function main() {
+                let a = 0.2;
+                let b = 0.1;
+                let sum = a + b;
+                print(sum);
+            }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap();
+        assert_eq!(out.output, "0.3\n");
     }
 
     #[test]
@@ -1543,5 +1728,71 @@ mod tests {
         validate_program(&program).unwrap();
         let (status, _body) = run_request(&program, "GET", "/missing", None).unwrap();
         assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn body_is_auto_parsed_for_typed_class_param() {
+        let src = r#"
+            class BrandInput {
+                id int;
+                name string;
+            }
+
+            function echoBrand(input: BrandInput): BrandInput {
+                return input;
+            }
+
+            route POST "/brands" {
+                let payload = echoBrand(body());
+                return json(payload);
+            }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        let (status, body) = run_request(
+            &program,
+            "POST",
+            "/brands",
+            Some("{\"id\":1,\"name\":\"Acme\"}".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"id\":1,\"name\":\"Acme\"}");
+    }
+
+    #[test]
+    fn body_parse_fails_when_typed_class_missing_required_field() {
+        let src = r#"
+            class BrandInput {
+                id int;
+                name string;
+            }
+
+            function createBrand(input: BrandInput) {
+                return input;
+            }
+
+            route POST "/brands" {
+                let payload = createBrand(body());
+                return json(payload);
+            }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        let err = run_request(
+            &program,
+            "POST",
+            "/brands",
+            Some("{\"id\":1}".to_string()),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("expects field 'name'"));
     }
 }

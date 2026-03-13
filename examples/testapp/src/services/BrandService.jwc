@@ -1,34 +1,42 @@
-function getAllBrands() {
-    return select BrandEntity from AppDbContext.BrandEntity;
-}
-
-function getBrandById(id: int) {
-    return select BrandEntity from AppDbContext.BrandEntity where BrandEntity.id == @id first;
-}
-
-function createBrand(id: int, name: string) {
-    let brand = new BrandEntity();
-    brand.id = id;
-    brand.name = name;
-    insert brand into AppDbContext.BrandEntity;
-    return brand;
-}
-
-function updateBrand(id: int, name: string) {
-    let brand = select BrandEntity from AppDbContext.BrandEntity where BrandEntity.id == @id first;
-    if (brand == null) {
-        return null;
+dome BrandService {
+    function getAllBrands(): BrandEntity {
+        return select BrandEntity from AppDbContext.BrandEntity;
     }
-    brand.name = name;
-    update brand in AppDbContext.BrandEntity;
-    return brand;
-}
 
-function deleteBrand(id: int) {
-    let brand = select BrandEntity from AppDbContext.BrandEntity where BrandEntity.id == @id first;
-    if (brand == null) {
-        return false;
+    function getBrandById(id: int): BrandEntity {
+        return select BrandEntity 
+               from AppDbContext.BrandEntity 
+               where BrandEntity.id == @id first;
     }
-    delete brand from AppDbContext.BrandEntity;
-    return true;
+
+    function createBrand(data: BrandCreateRequest): BrandEntity {
+        let brand = new BrandEntity();
+        brand.id = data.id;
+        brand.name = data.name;
+        insert brand into AppDbContext.BrandEntity;
+        return brand;
+    }
+
+    function updateBrand(id: int, data: BrandUpdateRequest): BrandEntity {
+        let brand = select BrandEntity 
+                    from AppDbContext.BrandEntity 
+                    where BrandEntity.id == @id first;
+        if (brand == null) {
+            return null;
+        }
+        brand.name = data.name;
+        update brand in AppDbContext.BrandEntity;
+        return brand;
+    }
+
+    function deleteBrand(id: int) {
+        let brand = select BrandEntity 
+                    from AppDbContext.BrandEntity 
+                    where BrandEntity.id == @id first;
+        if (brand == null) {
+            return false;
+        }
+        delete brand from AppDbContext.BrandEntity;
+        return true;
+    }
 }

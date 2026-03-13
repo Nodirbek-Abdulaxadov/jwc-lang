@@ -1,11 +1,11 @@
 route GET "api/colors" {
-    let colors = getAllColors();
+    let colors = ColorService.getAllColors();
     return json(colors);
 }
 
 route GET "api/colors/{id}" {
     let id = path_param("id");
-    let color = getColorById(id);
+    let color = ColorService.getColorById(id);
     if (color == null) {
         return notFound();
     }
@@ -13,15 +13,13 @@ route GET "api/colors/{id}" {
 }
 
 route POST "api/colors" {
-    let data = body();
-    let newColor = createColor(data.id, data.name, data.hex);
+    let newColor = ColorService.createColor(body());
     return created(newColor);
 }
 
 route PUT "api/colors/{id}" {
     let id = path_param("id");
-    let data = body();
-    let updated = updateColor(id, data.name, data.hex);
+    let updated = ColorService.updateColor(id, body());
     if (updated == null) {
         return notFound();
     }
@@ -30,7 +28,7 @@ route PUT "api/colors/{id}" {
 
 route DELETE "api/colors/{id}" {
     let id = path_param("id");
-    let ok = deleteColor(id);
+    let ok = ColorService.deleteColor(id);
     if (ok == false) {
         return notFound();
     }
