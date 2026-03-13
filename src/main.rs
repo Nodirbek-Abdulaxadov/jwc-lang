@@ -100,6 +100,10 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
+    if try_run_embedded_app()? {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -139,6 +143,7 @@ fn real_main() -> Result<()> {
                 let root = project::find_project_root(&target)?;
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
+                let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = runner::run_main(&loaded.program)?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
@@ -156,6 +161,7 @@ fn real_main() -> Result<()> {
                     .to_path_buf();
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
+                let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = runner::run_main(&loaded.program)?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
@@ -188,37 +194,8 @@ fn real_main() -> Result<()> {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             let loaded = project::load_project_from_root(&root)?;
-
             let profile = if release { "release" } else { "debug" };
-            let bin_dir = root.join("bin").join(profile);
-            std::fs::create_dir_all(&bin_dir)?;
-
-            let app_name = sanitize_app_name(&loaded.manifest.name);
-            let out_path = bin_dir.join(&app_name);
-            let script = build_launcher_script(&app_name);
-            std::fs::write(&out_path, script)?;
-
-            let runtime_src = std::env::current_exe()?;
-            let runtime_dst = bin_dir.join("jwc-runtime");
-            std::fs::copy(&runtime_src, &runtime_dst).with_context(|| {
-                format!(
-                    "Failed to copy runtime from {} to {}",
-                    runtime_src.display(),
-                    runtime_dst.display()
-                )
-            })?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&out_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&out_path, perms)?;
-
-                let mut runtime_perms = std::fs::metadata(&runtime_dst)?.permissions();
-                runtime_perms.set_mode(0o755);
-                std::fs::set_permissions(&runtime_dst, runtime_perms)?;
-            }
+            let out_path = build_project_native_artifact(&root, &loaded.manifest.name, release)?;
 
             println!("Build OK ({profile})");
             println!("Project: {}", loaded.manifest.name);
@@ -285,7 +262,8 @@ fn sanitize_app_name(name: &str) -> String {
     }
 }
 
-fn build_launcher_script(_app_name: &str) -> String {
+#[cfg(not(windows))]
+fn build_launcher_script() -> String {
     r#"#!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -293,4 +271,109 @@ SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SELF_DIR/jwc-runtime" run "$ROOT_DIR" "$@"
 "#
     .to_string()
+}
+
+fn build_project_native_artifact(root: &PathBuf, manifest_name: &str, release: bool) -> Result<PathBuf> {
+    let profile = if release { "release" } else { "debug" };
+    let bin_dir = root.join("bin").join(profile);
+    std::fs::create_dir_all(&bin_dir)?;
+
+    let app_name = sanitize_app_name(manifest_name);
+    let runtime_src = std::env::current_exe()?;
+
+    #[cfg(windows)]
+    {
+        let out_path = bin_dir.join(format!("{app_name}.exe"));
+        std::fs::copy(&runtime_src, &out_path).with_context(|| {
+            format!(
+                "Failed to copy runtime from {} to {}",
+                runtime_src.display(),
+                out_path.display()
+            )
+        })?;
+
+        // Clean up legacy sidecar from older builds; executable now self-resolves project root.
+        let root_meta = bin_dir.join(format!("{app_name}.jwcroot"));
+        if root_meta.is_file() {
+            let _ = std::fs::remove_file(&root_meta);
+        }
+
+        return Ok(out_path);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let out_path = bin_dir.join(&app_name);
+        let script = build_launcher_script();
+        std::fs::write(&out_path, script)?;
+
+        let runtime_dst = bin_dir.join("jwc-runtime");
+        std::fs::copy(&runtime_src, &runtime_dst).with_context(|| {
+            format!(
+                "Failed to copy runtime from {} to {}",
+                runtime_src.display(),
+                runtime_dst.display()
+            )
+        })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&out_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&out_path, perms)?;
+
+            let mut runtime_perms = std::fs::metadata(&runtime_dst)?.permissions();
+            runtime_perms.set_mode(0o755);
+            std::fs::set_permissions(&runtime_dst, runtime_perms)?;
+        }
+
+        Ok(out_path)
+    }
+}
+
+fn try_run_embedded_app() -> Result<bool> {
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.len() > 1 {
+        return Ok(false);
+    }
+
+    let exe = std::env::current_exe()?;
+    let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) else {
+        return Ok(false);
+    };
+
+    // Only treat non-CLI app launchers as embedded apps.
+    if stem.eq_ignore_ascii_case("jwc") {
+        return Ok(false);
+    }
+
+    let meta_path = exe.with_file_name(format!("{stem}.jwcroot"));
+    let root = if meta_path.is_file() {
+        let root_str = std::fs::read_to_string(&meta_path)
+            .with_context(|| format!("Failed to read {}", meta_path.display()))?;
+        PathBuf::from(root_str.trim())
+    } else {
+        let exe_dir = exe
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid executable path"))?
+            .to_path_buf();
+        project::find_project_root(&exe_dir)?
+    };
+
+    if !root.is_dir() {
+        anyhow::bail!("Embedded app root does not exist: {}", root.display());
+    }
+
+    project::load_dotenv(&root);
+    let loaded = project::load_project_from_root(&root)?;
+    let result = runner::run_main(&loaded.program)?;
+    if !result.output.is_empty() {
+        print!("{}", result.output);
+    }
+    if let Some(port) = result.serve_port {
+        server::serve(&loaded.program, port, false)?;
+    }
+
+    Ok(true)
 }

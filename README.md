@@ -235,6 +235,47 @@ Linux/macOS:
 
 After install, open a new terminal if `jwc` is not found immediately.
 
+## Native Build (Debug/Release)
+
+Build uses your current machine OS/architecture automatically.
+
+Windows (PowerShell):
+
+```powershell
+./build.ps1 -Debug
+./build.ps1 -Release
+```
+
+Windows (cmd):
+
+```bat
+build.cmd --debug
+build.cmd --release
+```
+
+Linux/macOS:
+
+```bash
+./build.sh --debug
+./build.sh --release
+```
+
+Output binaries:
+
+- Windows debug: `target/debug/jwc.exe`
+- Windows release: `target/release/jwc.exe`
+- Linux/macOS debug: `target/debug/jwc`
+- Linux/macOS release: `target/release/jwc`
+
+Project-level native artifacts:
+
+- `jwc build` now generates a native project launcher inside `bin/debug`.
+- `jwc build --release` generates it inside `bin/release`.
+- On Windows this output is a real `.exe` (for example: `bin/debug/myapp.exe`).
+- `jwc run` on a project also refreshes the debug launcher automatically.
+
+This keeps interpreter-style development flow (`jwc run`) and also gives compiled native artifacts for distribution.
+
 ## Notes
 
 - `.env` is loaded automatically from project root.
