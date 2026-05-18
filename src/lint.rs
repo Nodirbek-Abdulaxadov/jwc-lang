@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::ast::{Expr, Program, Stmt};
+use crate::ast::{Expr, Program, Stmt, WhereExpr};
 
 #[derive(Debug, Clone)]
 pub struct LintWarning {
@@ -139,7 +139,7 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
             ..
         } => {
             if let Some(wc) = where_clause {
-                collect_calls_expr(&wc.rhs, out);
+                collect_calls_where(wc, out);
             }
             if let Some(l) = limit {
                 collect_calls_expr(l, out);
@@ -156,6 +156,16 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
         | Expr::Var(_)
         | Expr::FieldGet { .. }
         | Expr::NewEntity { .. } => {}
+    }
+}
+
+fn collect_calls_where(wc: &WhereExpr, out: &mut std::collections::HashSet<String>) {
+    match wc {
+        WhereExpr::Atom(atom) => collect_calls_expr(&atom.rhs, out),
+        WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
+            collect_calls_where(l, out);
+            collect_calls_where(r, out);
+        }
     }
 }
 

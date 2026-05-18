@@ -141,6 +141,7 @@ Main commands:
 - `jwc run [path] --request-logging`: Enable per-request console logs
 - `jwc serve [path] --port 8080`: Start HTTP server directly
 - `jwc serve [path] --request-logging`: Enable per-request console logs
+- `jwc serve [path] --watch`: Watch `.jwc` files and restart on change
 - `jwc test`: Validate project
 - `jwc lint`: Validate + emit dead-code warnings (unused functions, unused middleware)
 - `jwc check <file>`: Parse/validate one file
@@ -183,7 +184,7 @@ route GET "users/{id}" -> getUser;
 ## Validating Request Bodies
 
 Use a `validate body { ... }` block inside a route or handler. Supported rules:
-`required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`.
+`required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`, `pattern("regex")`.
 
 ```jwc
 route POST "users" {
@@ -204,14 +205,44 @@ On failure, JWC short-circuits and returns:
 
 with HTTP status **400**.
 
-## SQL Clauses
-
-`select` supports `where`, `orderby`, `limit`, `offset`, and `first`:
+## HTTP Client
 
 ```jwc
-function listLatest(country) {
+let res = http_get("https://api.example.com/users");
+print(res);                          // { "status": 200, "body": { ... } }
+
+let posted = http_post(
+    "https://api.example.com/users",
+    "{\"name\":\"Najim\"}",
+    "{\"x-api-key\":\"abc\"}"
+);
+```
+
+- Returns `{ "status": N, "body": <JSON or string> }`.
+- 2nd arg of `http_post` is the request body; pass `null` for empty.
+- 3rd arg (optional) is a JSON object of headers.
+
+## JWT (HS256)
+
+```jwc
+let token = jwt_sign("{\"sub\":\"u-1\",\"exp\":9999999999}", "secret");
+let claims = jwt_verify(token, "secret");      // returns payload JSON
+```
+
+- Algorithm: `HS256`. Tokens from other algorithms are rejected.
+- `jwt_verify` returns the decoded payload on success and throws on
+  signature mismatch / expired secret / malformed token — pair it with
+  `try { ... } catch (e) { return unauthorized(); }`.
+
+## SQL Clauses
+
+`select` supports `where` (with `and`/`or`/parens), `orderby`, `limit`, `offset`, and `first`:
+
+```jwc
+function listAdults(country, min) {
     return select User from db.Users
-        where User.country == @country
+        where (User.age >= @min and User.country == @country)
+           or User.is_admin == true
         orderby User.created_at desc
         limit 20 offset 0;
 }
@@ -221,6 +252,7 @@ function findOne(id) {
 }
 ```
 
+- Compound `where`: `and`/`or` with parentheses; `and` binds tighter than `or`.
 - `orderby <field> [asc|desc]` — default direction is ascending.
 - `limit N` / `offset N` accept integer literals or `@param` references.
 - `first` forces `LIMIT 1` and returns a single row instead of an array.

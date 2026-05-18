@@ -7,7 +7,7 @@ use serde_json::{json, Value as JsonValue};
 
 use crate::ast::{
     DbOrderBy, Expr, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, Program, RouteDecl,
-    SortDir, Stmt, TypedParam, ValidateField, ValidateRule,
+    SortDir, Stmt, TypedParam, ValidateField, ValidateRule, WhereExpr,
 };
 use crate::engine;
 
@@ -726,6 +726,22 @@ impl<'a> Vm<'a> {
                     return self.eval_context_set_call(args, vars);
                 }
 
+                if name.eq_ignore_ascii_case("http_get") {
+                    return self.eval_http_get_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("http_post") {
+                    return self.eval_http_post_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("jwt_sign") {
+                    return self.eval_jwt_sign_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("jwt_verify") {
+                    return self.eval_jwt_verify_call(args, vars);
+                }
+
                 if name.eq_ignore_ascii_case("unauthorized") {
                     return Ok(Value::Str(
                         r#"{"status":401,"error":"Unauthorized"}"#.to_string(),
@@ -1315,6 +1331,147 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn eval_http_get_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 2 {
+            bail!("http_get(url[, headers_json]) expects 1 or 2 args");
+        }
+        let url = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!("http_get(url): url must be string, got {}", other.type_name()),
+        };
+
+        let headers_json = if let Some(arg) = args.get(1) {
+            match self.eval_expr(arg, vars)? {
+                Value::Str(s) => Some(s),
+                Value::Null => None,
+                other => bail!(
+                    "http_get(url, headers): headers must be json string or null, got {}",
+                    other.type_name()
+                ),
+            }
+        } else {
+            None
+        };
+
+        let mut req = ureq::get(&url);
+        if let Some(json_str) = headers_json {
+            req = apply_headers(req, &json_str)?;
+        }
+
+        let response = req
+            .call()
+            .map_err(|e| anyhow!("http_get({url}) failed: {e}"))?;
+        Ok(Value::Str(http_response_to_json_string(response)?))
+    }
+
+    fn eval_http_post_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 3 {
+            bail!("http_post(url[, body[, headers_json]]) expects 1, 2 or 3 args");
+        }
+        let url = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "http_post(url): url must be string, got {}",
+                other.type_name()
+            ),
+        };
+
+        let body_str = match args.get(1) {
+            None => None,
+            Some(arg) => match self.eval_expr(arg, vars)? {
+                Value::Str(s) => Some(s),
+                Value::Null => None,
+                other => Some(other.as_string()),
+            },
+        };
+
+        let headers_json = if let Some(arg) = args.get(2) {
+            match self.eval_expr(arg, vars)? {
+                Value::Str(s) => Some(s),
+                Value::Null => None,
+                other => bail!(
+                    "http_post(url, body, headers): headers must be json string or null, got {}",
+                    other.type_name()
+                ),
+            }
+        } else {
+            None
+        };
+
+        let mut req = ureq::post(&url);
+        if let Some(json_str) = headers_json {
+            req = apply_headers(req, &json_str)?;
+        }
+
+        let body_is_json = body_str
+            .as_deref()
+            .map(|s| serde_json::from_str::<JsonValue>(s).is_ok())
+            .unwrap_or(false);
+        if body_is_json {
+            req = req.set("content-type", "application/json");
+        }
+
+        let response = match body_str {
+            Some(b) => req.send_string(&b),
+            None => req.call(),
+        }
+        .map_err(|e| anyhow!("http_post({url}) failed: {e}"))?;
+
+        Ok(Value::Str(http_response_to_json_string(response)?))
+    }
+
+    fn eval_jwt_sign_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("jwt_sign(payload_json, secret) expects exactly 2 args");
+        }
+        let payload = self.eval_expr(&args[0], vars)?.as_string();
+        let secret = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "jwt_sign(payload, secret): secret must be string, got {}",
+                other.type_name()
+            ),
+        };
+        Ok(Value::Str(crate::jwt::sign_hs256(&payload, &secret)?))
+    }
+
+    fn eval_jwt_verify_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("jwt_verify(token, secret) expects exactly 2 args");
+        }
+        let token = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "jwt_verify(token, secret): token must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let secret = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "jwt_verify(token, secret): secret must be string, got {}",
+                other.type_name()
+            ),
+        };
+        Ok(Value::Str(crate::jwt::verify_hs256(&token, &secret)?))
+    }
+
     fn eval_header_call(
         &mut self,
         args: &[Expr],
@@ -1633,7 +1790,7 @@ fn value_to_cache_fragment(val: &Value) -> String {
 
 fn build_select_sql(
     table_name: String,
-    where_clause: Option<&crate::ast::DbWhere>,
+    where_clause: Option<&WhereExpr>,
     order_by: Option<&DbOrderBy>,
     limit: Option<&Expr>,
     offset: Option<&Expr>,
@@ -1647,29 +1804,15 @@ fn build_select_sql(
     let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
 
     if let Some(wc) = where_clause {
-        let col = field_path_to_col(&wc.field);
-        let op = normalize_sql_op(&wc.op);
-        let rhs_val = vm.eval_expr(&wc.rhs, vars)?;
-
-        match rhs_val {
-            Value::Null | Value::Void => {
-                if op == "!=" {
-                    sql_where = format!(" WHERE \"{}\" IS NOT NULL", col);
-                    shape_bits.push(format!("where:{col}:is_not_null"));
-                    cache_bits.push(format!("where:{col}:is_not_null"));
-                } else {
-                    sql_where = format!(" WHERE \"{}\" IS NULL", col);
-                    shape_bits.push(format!("where:{col}:is_null"));
-                    cache_bits.push(format!("where:{col}:is_null"));
-                }
-            }
-            other => {
-                params.push(value_to_sql_param(&other));
-                sql_where = format!(" WHERE \"{}\" {} ${}", col, op, params.len());
-                shape_bits.push(format!("where:{col}:{op}:param"));
-                cache_bits.push(format!("where:{col}:{op}:{}", value_to_cache_fragment(&other)));
-            }
-        }
+        let where_sql = build_where_sql(
+            wc,
+            &mut params,
+            &mut shape_bits,
+            &mut cache_bits,
+            vars,
+            vm,
+        )?;
+        sql_where = format!(" WHERE {}", where_sql);
     }
 
     let mut sql_order = String::new();
@@ -1737,6 +1880,61 @@ fn build_select_sql(
     Ok((sql, params, shape_key, cache_key))
 }
 
+fn build_where_sql(
+    expr: &WhereExpr,
+    params: &mut Vec<Box<dyn ToSql + Sync>>,
+    shape: &mut Vec<String>,
+    cache: &mut Vec<String>,
+    vars: &mut HashMap<String, Value>,
+    vm: &mut Vm,
+) -> Result<String> {
+    match expr {
+        WhereExpr::Atom(wc) => {
+            let col = field_path_to_col(&wc.field);
+            let op = normalize_sql_op(&wc.op);
+            let rhs_val = vm.eval_expr(&wc.rhs, vars)?;
+
+            Ok(match rhs_val {
+                Value::Null | Value::Void => {
+                    if op == "!=" {
+                        shape.push(format!("where:{col}:is_not_null"));
+                        cache.push(format!("where:{col}:is_not_null"));
+                        format!("\"{}\" IS NOT NULL", col)
+                    } else {
+                        shape.push(format!("where:{col}:is_null"));
+                        cache.push(format!("where:{col}:is_null"));
+                        format!("\"{}\" IS NULL", col)
+                    }
+                }
+                other => {
+                    params.push(value_to_sql_param(&other));
+                    let idx = params.len();
+                    shape.push(format!("where:{col}:{op}:param"));
+                    cache.push(format!(
+                        "where:{col}:{op}:{}",
+                        value_to_cache_fragment(&other)
+                    ));
+                    format!("\"{}\" {} ${}", col, op, idx)
+                }
+            })
+        }
+        WhereExpr::And(l, r) => {
+            let ls = build_where_sql(l, params, shape, cache, vars, vm)?;
+            shape.push("AND".to_string());
+            cache.push("AND".to_string());
+            let rs = build_where_sql(r, params, shape, cache, vars, vm)?;
+            Ok(format!("({} AND {})", ls, rs))
+        }
+        WhereExpr::Or(l, r) => {
+            let ls = build_where_sql(l, params, shape, cache, vars, vm)?;
+            shape.push("OR".to_string());
+            cache.push("OR".to_string());
+            let rs = build_where_sql(r, params, shape, cache, vars, vm)?;
+            Ok(format!("({} OR {})", ls, rs))
+        }
+    }
+}
+
 fn value_to_positive_int(value: &Value, clause: &str) -> Result<i64> {
     match value {
         Value::Int(n) if *n >= 0 => Ok(*n),
@@ -1763,6 +1961,43 @@ fn value_to_json(value: &Value) -> JsonValue {
         Value::Bool(v) => json!(v),
         Value::Null | Value::Void => JsonValue::Null,
     }
+}
+
+/// Apply a JSON object of `{"Header-Name": "value"}` pairs onto a ureq request.
+fn apply_headers(mut req: ureq::Request, headers_json: &str) -> Result<ureq::Request> {
+    let parsed: JsonValue = serde_json::from_str(headers_json)
+        .map_err(|_| anyhow!("headers must be a JSON object literal, got invalid json"))?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| anyhow!("headers must be a JSON object, got non-object"))?;
+    for (k, v) in obj {
+        let val = match v {
+            JsonValue::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        req = req.set(k, &val);
+    }
+    Ok(req)
+}
+
+/// Wrap a ureq response into a JSON envelope `{"status": N, "body": "..."}` —
+/// JSON body is preserved as-is when parseable, otherwise stored as a string.
+fn http_response_to_json_string(response: ureq::Response) -> Result<String> {
+    let status = response.status();
+    let body = response
+        .into_string()
+        .map_err(|e| anyhow!("failed to read response body: {e}"))?;
+
+    let body_value = match serde_json::from_str::<JsonValue>(&body) {
+        Ok(v) => v,
+        Err(_) => JsonValue::String(body),
+    };
+
+    let envelope = json!({
+        "status": status,
+        "body": body_value,
+    });
+    Ok(envelope.to_string())
 }
 
 /// Returns the candidate from `candidates` closest to `target` by Levenshtein
@@ -1926,6 +2161,21 @@ fn check_rule(rule: &ValidateRule, value: Option<&JsonValue>) -> Option<String> 
         },
         ValidateRule::Min(bound) => check_numeric_bound(value, bound, true),
         ValidateRule::Max(bound) => check_numeric_bound(value, bound, false),
+        ValidateRule::Pattern(regex_src) => match value {
+            Some(JsonValue::String(s)) => {
+                let re = match regex::Regex::new(regex_src) {
+                    Ok(re) => re,
+                    Err(_) => return Some(format!("pattern({regex_src}): invalid regex")),
+                };
+                if re.is_match(s) {
+                    None
+                } else {
+                    Some(format!("pattern({regex_src})"))
+                }
+            }
+            None | Some(JsonValue::Null) => None,
+            _ => Some(format!("pattern({regex_src}): not a string")),
+        },
     }
 }
 

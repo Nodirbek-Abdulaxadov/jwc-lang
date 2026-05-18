@@ -99,7 +99,7 @@ pub struct FunctionDecl {
     pub is_async: bool,
 }
 
-/// WHERE clause in a DB select: `field op value`
+/// Single comparison: `field op value`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbWhere {
     /// Column path, e.g. `"Entity.field"` or `"field"`. Runner strips the entity prefix.
@@ -108,6 +108,15 @@ pub struct DbWhere {
     pub op: String,
     /// Right-hand side value expression
     pub rhs: Expr,
+}
+
+/// Boolean tree over comparisons — supports `and`/`or` and parenthesised
+/// sub-expressions. Builds SQL like `(a = $1 AND (b > $2 OR c IS NULL))`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WhereExpr {
+    Atom(DbWhere),
+    And(Box<WhereExpr>, Box<WhereExpr>),
+    Or(Box<WhereExpr>, Box<WhereExpr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +144,8 @@ pub enum ValidateRule {
     Min(String),
     /// Numeric value must be ≤ n.
     Max(String),
+    /// String must match the given regular expression (full-match semantics).
+    Pattern(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,14 +210,14 @@ pub enum Expr {
     FieldGet { var: String, field: String },
     /// `new EntityName()` — creates an empty JSON object `{}`
     NewEntity { entity: String },
-    /// `select [Entity|*] from CTX.TABLE [where FIELD OP EXPR]
+    /// `select [Entity|*] from CTX.TABLE [where COND [and|or COND ...]]
     ///                                    [orderby FIELD [asc|desc]]
     ///                                    [limit N] [offset N] [first]`
     DbSelect {
         entity: String,
         context_var: String,
         table: String,
-        where_clause: Option<Box<DbWhere>>,
+        where_clause: Option<Box<WhereExpr>>,
         order_by: Option<DbOrderBy>,
         limit: Option<Box<Expr>>,
         offset: Option<Box<Expr>>,

@@ -13,9 +13,9 @@
 | Phase 0 — Texnik qarz (legacy hack’larni tozalash) | ✅ Done |
 | Phase 1 — MVP Core | ✅ Done |
 | Phase 2 — Language Completeness | ✅ Done (auto-JOIN + real async deferred) |
-| Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean done; LSP/fmt/watch/pkg deferred) |
+| Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean + serve --watch done; LSP/fmt/pkg deferred) |
 | Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
-| Phase 5 — Ecosystem | ⬜ Not started |
+| Phase 5 — Ecosystem | ⏳ Partial (Http + JWT stdlib done; cache/queue/wasm/hub deferred) |
 
 ---
 
@@ -70,9 +70,9 @@
 
 ### 1.5 `validate body` bloki ✅
 - Yangi keyword `validate` (lexer), `Stmt::ValidateBody { fields }` (AST), parser bloki.
-- Qoidalar: `required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`.
+- Qoidalar: `required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`, `pattern("regex")`.
 - Xatolik bo‘lsa, route 400 status va `{"errors": {"field": "rule"}}` javob qaytaradi.
-- Regex tayinli `pattern("...")` keyingi iterazda (regex paketi qo‘shilgach).
+- Regex `regex` crate orqali compile-time va runtime'da ishlatiladi.
 
 ### 1.6 Route handler signaturalari ✅
 - `route GET "users/{id}" -> getUser;` endi `getUser` ning typed params’ini path/query orqali avtomatik to‘ldiradi (`Vm::build_handler_args`).
@@ -90,10 +90,11 @@
 - Runtime check `runner.rs::check_typed_value` + JSON-level `json_value_matches_type`.
 - **Qoldi (kichik):** Kompayl-vaqt type checking (assignment/call args/return) — hozir runtime. `byte[]` turi, explicit koersiyalar — keyingi iterazda.
 
-### 2.2 SQL syntax kengaytmasi ✅ (asosiy clauses)
+### 2.2 SQL syntax kengaytmasi ✅
 - `orderby <field> [asc|desc]`, `limit N`, `offset N` AST + parser + runner.
 - `@param` referensi `limit`/`offset` ichida.
-- **Qoldi:** `join`, `where` ichida `and/or/in/between` (hozir bitta condition), kompayl-vaqt column existence check.
+- Compound `where` — `and`/`or` + qavslar, `and` `or`dan yuqori precedence.
+- **Qoldi:** `join`, `in`/`between` operatorlari.
 
 ### 2.3 `try / catch` ✅
 - Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.
@@ -138,8 +139,8 @@
 ### 3.3 CLI ⏳ qisman
 - ✅ `jwc lint` — `lint.rs::lint_program`: unused function (W001) va unused middleware (W002).
 - ✅ `jwc migrate down` (Phase 0.3 dan).
+- ✅ `jwc serve --watch` — `notify` crate file watcher; parent process child `jwc serve` ni kuzatadi va `.jwc` o‘zgarsa qayta ishga tushiradi.
 - ⬜ `jwc fmt` — formatlash. AST → source qayta chiqaruvi. Comment preservation muammosi.
-- ⬜ `jwc serve --watch` — `notify` crate orqali file watcher + soft restart.
 - ⬜ `jwc add <pkg>` — paket qo‘shish (3.4 ga bog‘liq).
 
 ### 3.4 Package sistemasi ⬜ deferred
@@ -181,7 +182,10 @@
 
 **Maqsad:** JWC ni global backend tiliga aylantirish.
 
-- **Standard library:** `Http`, `Auth` (JWT/OAuth2), `Cache`, `Queue`, `Email`, `Storage`, `Websocket`.
+- **Standard library ⏳ partial:**
+  - ✅ Http client: `http_get(url[, headers])`, `http_post(url[, body[, headers]])` — `ureq` orqali, JSON envelope qaytaradi.
+  - ✅ Auth: `jwt_sign(payload_json, secret)` / `jwt_verify(token, secret)` — HS256 (hmac + sha2 + base64).
+  - ⬜ Qoldi: Cache (Redis), Queue (BullMQ-like), Email, Storage, Websocket.
 - **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
 - **JWC Hub:** `hub.jwc.dev` — paket registry.
 - **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.

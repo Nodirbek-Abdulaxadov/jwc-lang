@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use crate::ast::{
     DbContextDecl, DbOrderBy, DbWhere, Expr, FieldDecl, FieldReference, FunctionDecl,
     MiddlewareDecl, ModelDecl, ModelKind, OnDeleteAction, Program, RouteDecl, SortDir, Stmt,
-    TypeSpec, TypedParam, ValidateField, ValidateRule,
+    TypeSpec, TypedParam, ValidateField, ValidateRule, WhereExpr,
 };
 use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
@@ -439,15 +439,7 @@ fn validate_expr(
             let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
             if let Some(fields) = fields {
                 if let Some(wc) = where_clause {
-                    let col = strip_entity_prefix(&wc.field);
-                    if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
-                        bail!(
-                            "Unknown column '{}' in WHERE of {}.{}",
-                            col,
-                            context_var,
-                            table
-                        );
-                    }
+                    check_where_columns(wc, fields, context_var, table)?;
                 }
                 if let Some(ob) = order_by {
                     let col = strip_entity_prefix(&ob.field);
@@ -463,8 +455,8 @@ fn validate_expr(
             }
 
             if let Some(where_clause) = where_clause {
-                validate_expr(
-                    &where_clause.rhs,
+                validate_where_expr(
+                    where_clause,
                     ctx_names,
                     entity_contexts,
                     db_tables,
@@ -522,6 +514,54 @@ fn validate_expr(
             db_tables,
             entity_fields_by_table,
         ),
+    }
+}
+
+fn check_where_columns(
+    expr: &WhereExpr,
+    fields: &[String],
+    context_var: &str,
+    table: &str,
+) -> Result<()> {
+    match expr {
+        WhereExpr::Atom(wc) => {
+            let col = strip_entity_prefix(&wc.field);
+            if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
+                bail!(
+                    "Unknown column '{}' in WHERE of {}.{}",
+                    col,
+                    context_var,
+                    table
+                );
+            }
+            Ok(())
+        }
+        WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
+            check_where_columns(l, fields, context_var, table)?;
+            check_where_columns(r, fields, context_var, table)
+        }
+    }
+}
+
+fn validate_where_expr(
+    expr: &WhereExpr,
+    ctx_names: &HashSet<String>,
+    entity_contexts: &HashMap<String, Option<String>>,
+    db_tables: &HashSet<(String, String)>,
+    entity_fields_by_table: &HashMap<(String, String), Vec<String>>,
+) -> Result<()> {
+    match expr {
+        WhereExpr::Atom(wc) => validate_expr(
+            &wc.rhs,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
+        WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
+            validate_where_expr(l, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+            validate_where_expr(r, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
+        }
     }
 }
 
@@ -1352,6 +1392,15 @@ impl<'a> Parser<'a> {
                 let n = self.parse_number_arg("max")?;
                 Ok(ValidateRule::Max(n))
             }
+            "pattern" => {
+                self.expect_symbol('(')?;
+                let regex_src = self.expect_string("expected regex string argument for pattern")?;
+                self.expect_symbol(')')?;
+                if regex::Regex::new(&regex_src).is_err() {
+                    return Err(self.error_here("invalid regex passed to pattern()"));
+                }
+                Ok(ValidateRule::Pattern(regex_src))
+            }
             other => Err(self.error_here(&format!("unknown validation rule '{other}'"))),
         }
     }
@@ -1670,23 +1719,10 @@ impl<'a> Parser<'a> {
 
         let (ctx, table) = self.parse_db_ref()?;
 
-        // optional `where FIELD OP EXPR`
-        let where_clause = if let TokenKind::Ident(ref kw) = self.current.kind.clone() {
-            if kw.eq_ignore_ascii_case("where") {
-                self.bump()?;
-                let field = self.parse_field_path()?;
-                let op = self.parse_cmp_op()?;
-                let rhs = if self.check_symbol('@') {
-                    self.bump()?;
-                    let param = self.expect_ident("expected parameter name after '@'")?;
-                    Expr::Var(param)
-                } else {
-                    self.parse_expr()?
-                };
-                Some(Box::new(DbWhere { field, op, rhs }))
-            } else {
-                None
-            }
+        // optional `where COND [and|or COND ...]`
+        let where_clause = if self.check_ident_eq("where") {
+            self.bump()?;
+            Some(Box::new(self.parse_where_or()?))
         } else {
             None
         };
@@ -1743,6 +1779,46 @@ impl<'a> Parser<'a> {
             offset,
             first,
         })
+    }
+
+    fn parse_where_or(&mut self) -> Result<WhereExpr> {
+        let mut left = self.parse_where_and()?;
+        while self.current.kind == TokenKind::Keyword(Keyword::Or) {
+            self.bump()?;
+            let right = self.parse_where_and()?;
+            left = WhereExpr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_where_and(&mut self) -> Result<WhereExpr> {
+        let mut left = self.parse_where_atom()?;
+        while self.current.kind == TokenKind::Keyword(Keyword::And) {
+            self.bump()?;
+            let right = self.parse_where_atom()?;
+            left = WhereExpr::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_where_atom(&mut self) -> Result<WhereExpr> {
+        if self.check_symbol('(') {
+            self.expect_symbol('(')?;
+            let inner = self.parse_where_or()?;
+            self.expect_symbol(')')?;
+            return Ok(inner);
+        }
+
+        let field = self.parse_field_path()?;
+        let op = self.parse_cmp_op()?;
+        let rhs = if self.check_symbol('@') {
+            self.bump()?;
+            let param = self.expect_ident("expected parameter name after '@'")?;
+            Expr::Var(param)
+        } else {
+            self.parse_expr()?
+        };
+        Ok(WhereExpr::Atom(DbWhere { field, op, rhs }))
     }
 
     /// Accepts `@param`, integer literal, or any expression — runtime ensures
@@ -2054,8 +2130,12 @@ mod tests {
                 crate::ast::Expr::DbSelect { where_clause, first, .. } => {
                     assert!(first);
                     let wc = where_clause.as_ref().unwrap();
-                    assert_eq!(wc.field, "CarEntity.id");
-                    assert_eq!(wc.op, "==");
+                    let atom = match wc.as_ref() {
+                        crate::ast::WhereExpr::Atom(a) => a,
+                        _ => panic!("expected atom"),
+                    };
+                    assert_eq!(atom.field, "CarEntity.id");
+                    assert_eq!(atom.op, "==");
                 }
                 _ => panic!("expected DbSelect"),
             },
@@ -2148,6 +2228,39 @@ mod tests {
                     assert_eq!(ob.dir, crate::ast::SortDir::Desc);
                     assert!(matches!(limit.as_deref(), Some(crate::ast::Expr::Int(20))));
                     assert!(matches!(offset.as_deref(), Some(crate::ast::Expr::Int(10))));
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn parses_compound_where_with_and_or_and_parens() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                age int;
+                country varchar(2);
+                is_admin bool;
+            }
+
+            function pick(country, min) {
+                let xs = select User from AppDb.User
+                    where (User.age >= @min and User.country == @country)
+                       or User.is_admin == true;
+                return xs;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect { where_clause, .. } => {
+                    let wc = where_clause.as_ref().unwrap();
+                    assert!(matches!(wc.as_ref(), crate::ast::WhereExpr::Or(_, _)));
                 }
                 _ => panic!("expected DbSelect"),
             },
