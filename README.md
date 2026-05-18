@@ -517,7 +517,14 @@ Database:
 DB engine tuning:
 
 - `JWC_DB_POOL_SIZE` (default `16`)
+- `JWC_DB_MIN_IDLE` (optional — keeps at least N idle connections warm)
+- `JWC_DB_MAX_LIFETIME_SECS` (default `1800` / 30 min, `0` disables)
+- `JWC_DB_IDLE_TIMEOUT_SECS` (default `600` / 10 min, `0` disables)
+- `JWC_DB_CONNECTION_TIMEOUT_SECS` (default `5`)
 - `JWC_QUERY_CACHE_TTL_SECS` (optional, enables result cache when `> 0`)
+
+> JWC currently connects with `NoTls`. TLS-required Postgres deployments need
+> the `tls` feature work tracked on the roadmap.
 
 Server tuning:
 

@@ -102,8 +102,14 @@
 - PK: `update var in ...` va `delete var from ...` entity'da belgilangan `pk` field(lar)ni hisobga oladi (composite PK qo'llab-quvvatlanadi). Ad-hoc table uchun `id` fallback.
 - Dirty-field tracking: `var.field = X; update var in ...` faqat o'zgargan maydonlarni SET qiladi. O'zgarishsiz `update` aniq xato.
 - Bulk delete: `delete from CTX.Table where ...;` — variable kerakmas, `where` majburiy (xavfsizlik).
-- `transaction { ... }` bloki — thread-local connection, BEGIN/COMMIT, uncaught error → ROLLBACK.
+- `transaction { ... }` bloki — `TxGuard` RAII (Drop'da `ROLLBACK`), thread-local connection. Worker thread reuse'da leak yo'q.
 - `raw_sql(sql, params_json)` — parameterized escape hatch; SELECT'da text natija, mutationda affected rows count qaytaradi.
+
+### 2.2c DB operatsion sifat ✅
+- Pool to'liq env-sozlanadigan: `JWC_DB_POOL_SIZE`, `JWC_DB_MIN_IDLE`, `JWC_DB_MAX_LIFETIME_SECS` (default 30 min), `JWC_DB_IDLE_TIMEOUT_SECS` (default 10 min), `JWC_DB_CONNECTION_TIMEOUT_SECS` (default 5s). Stale connection muammosi yumshatildi.
+- Migration session advisory lock (`pg_try_advisory_lock`) — bir vaqtning o'zida ikkita `migrate up/down` ishlasa "already in progress" xato, race yo'q.
+- **TLS deferred:** Hozir `NoTls`. `postgres-native-tls` yoki `rustls` integratsiyasi — keyingi iteratsiyada (Windows'da native deps masalasi bor).
+- **Integration tests deferred:** Hozir parse + SQL builder testlari. Real Postgres bilan smoke test (testcontainers-rs / docker-compose CI) — kelajakda.
 
 ### 2.3 `try / catch` ✅
 - Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.

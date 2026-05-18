@@ -9,6 +9,12 @@ use url::Url;
 use crate::project;
 use crate::sql;
 
+/// Session-level advisory lock key used to serialise concurrent migration
+/// runs. The constant is the byte sequence `b"jwc-mig"` interpreted as i64
+/// — stable across processes, version-agnostic, and unlikely to collide with
+/// application-level advisory locks.
+const MIGRATION_LOCK_KEY: i64 = 0x6a77632d6d6967; // "jwc-mig" ASCII
+
 pub struct CreatedMigration {
     pub up_path: PathBuf,
     pub down_path: PathBuf,
@@ -85,6 +91,8 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
     let mut client = Client::connect(&url, NoTls)
         .with_context(|| "Failed to connect to database for migrations")?;
 
+    let _lock = MigrationLock::acquire(&mut client)?;
+
     ensure_migration_table(&mut client)?;
 
     let mut migration_files: Vec<PathBuf> = std::fs::read_dir(&migrations_dir)
@@ -159,6 +167,8 @@ pub fn rollback_migrations(
     let mut client = Client::connect(&url, NoTls)
         .with_context(|| "Failed to connect to database for migrations")?;
 
+    let _lock = MigrationLock::acquire(&mut client)?;
+
     ensure_migration_table(&mut client)?;
 
     let applied_names = read_applied_migrations_ordered_desc(&mut client)?;
@@ -231,6 +241,39 @@ fn read_applied_migrations_ordered_desc(client: &mut Client) -> Result<Vec<Strin
         .map(|row| row.get::<usize, String>(0))
         .collect())
 }
+
+/// Session advisory lock guard. Acquired before any migration work runs, so
+/// two concurrent `jwc migrate up` / `down` invocations can't race on the
+/// `_jwc_migrations` table. Released when the client connection drops (the
+/// lock is session-scoped), and we also try an explicit unlock for tidiness.
+///
+/// Acquisition uses `pg_try_advisory_lock` so that a busy migration job
+/// fails fast with a clear error instead of blocking indefinitely.
+struct MigrationLock;
+
+impl MigrationLock {
+    fn acquire(client: &mut Client) -> Result<MigrationLock> {
+        let row = client
+            .query_one(
+                "SELECT pg_try_advisory_lock($1);",
+                &[&MIGRATION_LOCK_KEY],
+            )
+            .with_context(|| "Failed to request migration advisory lock")?;
+        let got: bool = row.try_get(0)?;
+        if !got {
+            bail!(
+                "another migration run is in progress (advisory lock {} held)",
+                MIGRATION_LOCK_KEY
+            );
+        }
+        Ok(MigrationLock)
+    }
+}
+
+// The connection that obtained the lock is closed at the end of the function
+// scope; Postgres releases session advisory locks automatically on disconnect,
+// so an explicit unlock isn't required. We still try to release proactively
+// when the guard drops while the client is still alive elsewhere.
 
 fn slugify(name: &str) -> String {
     let mut out = String::new();

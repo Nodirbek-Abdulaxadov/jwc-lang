@@ -589,15 +589,16 @@ impl<'a> Vm<'a> {
                 }
             }
             Stmt::Transaction { body } => {
-                engine::begin_tx()?;
+                let guard = engine::begin_tx()?;
                 let inner = self.exec_block(body, vars);
                 match inner {
                     Ok(flow) => {
-                        engine::commit_tx()?;
+                        guard.commit()?;
                         Ok(flow)
                     }
                     Err(e) => {
-                        engine::rollback_tx();
+                        // Drop runs ROLLBACK automatically; nothing extra needed.
+                        drop(guard);
                         Err(e)
                     }
                 }
