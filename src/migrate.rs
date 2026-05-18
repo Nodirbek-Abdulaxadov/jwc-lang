@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use postgres::{Client, NoTls};
+use postgres::Client;
 use url::Url;
 
+use crate::engine;
 use crate::project;
-use crate::sql;
+use crate::schema_diff;
 
 /// Session-level advisory lock key used to serialise concurrent migration
 /// runs. The constant is the byte sequence `b"jwc-mig"` interpreted as i64
@@ -34,11 +35,18 @@ pub struct RollbackReport {
 
 pub fn create_migration(root: &Path, name: &str) -> Result<CreatedMigration> {
     let loaded = project::load_project_from_root(root)?;
-    let schema_sql = sql::generate_postgres_schema_sql(&loaded.program)?;
 
     let migrations_dir = root.join("migrations");
     std::fs::create_dir_all(&migrations_dir)
         .with_context(|| format!("Failed to create {}", migrations_dir.display()))?;
+
+    // Schema diff: reconstruct the previously-applied state from the
+    // `migrations/` directory and compare it against the current entity
+    // definitions. This keeps each migration scoped to what actually
+    // changed, instead of re-emitting the full schema every time.
+    let old_snapshots = schema_diff::read_latest_snapshot(&migrations_dir)?;
+    let new_snapshots = schema_diff::program_to_snapshots(&loaded.program)?;
+    let diff = schema_diff::compute_diff(&old_snapshots, &new_snapshots);
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -54,10 +62,13 @@ pub fn create_migration(root: &Path, name: &str) -> Result<CreatedMigration> {
     let up_path = migrations_dir.join(format!("{}.up.sql", base));
     let down_path = migrations_dir.join(format!("{}.down.sql", base));
 
-    let up_content = if schema_sql.trim().is_empty() {
-        "-- empty migration\n".to_string()
+    let up_content = if diff.is_empty() {
+        // No schema changes detected — leave a placeholder so the
+        // migration file still exists for the user to fill in manually
+        // (e.g. data migrations) without re-emitting the whole schema.
+        "-- no schema changes\n".to_string()
     } else {
-        schema_sql
+        schema_diff::diff_to_sql(&diff)
     };
 
     let down_content = "-- Write rollback SQL here\n".to_string();
@@ -88,8 +99,7 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
 
     ensure_database_exists(&url)?;
 
-    let mut client = Client::connect(&url, NoTls)
-        .with_context(|| "Failed to connect to database for migrations")?;
+    let mut client = engine::connect_for_migrations(&url)?;
 
     let _lock = MigrationLock::acquire(&mut client)?;
 
@@ -164,8 +174,7 @@ pub fn rollback_migrations(
 
     ensure_database_exists(&url)?;
 
-    let mut client = Client::connect(&url, NoTls)
-        .with_context(|| "Failed to connect to database for migrations")?;
+    let mut client = engine::connect_for_migrations(&url)?;
 
     let _lock = MigrationLock::acquire(&mut client)?;
 
@@ -322,7 +331,7 @@ fn ensure_database_exists(url: &str) -> Result<()> {
     let mut admin_url = parsed;
     admin_url.set_path(&format!("/{}", admin_db));
 
-    let mut admin_client = Client::connect(admin_url.as_str(), NoTls)
+    let mut admin_client = engine::connect_for_migrations(admin_url.as_str())
         .with_context(|| "Failed to connect to admin database to ensure target database exists")?;
 
     let exists = admin_client

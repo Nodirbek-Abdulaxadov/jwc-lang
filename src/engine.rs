@@ -4,12 +4,56 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use native_tls::TlsConnector;
 use postgres::types::ToSql;
-use postgres::{Config, NoTls};
+use postgres::{Client, Config, NoTls, Row, Statement};
+use postgres_native_tls::MakeTlsConnector;
 use r2d2::{Pool, PooledConnection};
 use r2d2_postgres::PostgresConnectionManager;
 
-type PgConn = PooledConnection<PostgresConnectionManager<NoTls>>;
+/// Pooled Postgres connection that abstracts over the `NoTls` and
+/// `MakeTlsConnector` variants of the underlying r2d2 manager.
+///
+/// The two pool types are not interchangeable at the type level, but the
+/// `postgres::Client` API they hand out is identical — so we wrap them in
+/// an enum and forward every operation we actually use to the inner client.
+pub enum PgConn {
+    NoTls(PooledConnection<PostgresConnectionManager<NoTls>>),
+    Tls(PooledConnection<PostgresConnectionManager<MakeTlsConnector>>),
+}
+
+impl PgConn {
+    fn client_mut(&mut self) -> &mut Client {
+        match self {
+            PgConn::NoTls(c) => &mut **c,
+            PgConn::Tls(c) => &mut **c,
+        }
+    }
+
+    pub fn prepare(&mut self, sql: &str) -> Result<Statement, postgres::Error> {
+        self.client_mut().prepare(sql)
+    }
+
+    pub fn query(
+        &mut self,
+        stmt: &Statement,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>, postgres::Error> {
+        self.client_mut().query(stmt, params)
+    }
+
+    pub fn execute(
+        &mut self,
+        stmt: &Statement,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, postgres::Error> {
+        self.client_mut().execute(stmt, params)
+    }
+
+    pub fn batch_execute(&mut self, sql: &str) -> Result<(), postgres::Error> {
+        self.client_mut().batch_execute(sql)
+    }
+}
 
 thread_local! {
     /// Holds a pooled connection while the current thread is inside a
@@ -24,8 +68,31 @@ struct CachedResult {
     expires_at: Instant,
 }
 
+/// Inner pool — homogeneous variant chosen once at `init_engine` time based
+/// on whether TLS is enabled via env. Each branch carries its own concrete
+/// `PostgresConnectionManager<...>` type so r2d2's generics are satisfied.
+enum JwcPool {
+    NoTls(Pool<PostgresConnectionManager<NoTls>>),
+    Tls(Pool<PostgresConnectionManager<MakeTlsConnector>>),
+}
+
+impl JwcPool {
+    fn get(&self) -> Result<PgConn> {
+        match self {
+            JwcPool::NoTls(p) => p
+                .get()
+                .map(PgConn::NoTls)
+                .with_context(|| "Failed to checkout DB connection from pool"),
+            JwcPool::Tls(p) => p
+                .get()
+                .map(PgConn::Tls)
+                .with_context(|| "Failed to checkout DB connection from pool"),
+        }
+    }
+}
+
 pub struct JwcEngine {
-    pool: Pool<PostgresConnectionManager<NoTls>>,
+    pool: JwcPool,
     query_cache: RwLock<HashMap<String, String>>,
     result_cache: RwLock<HashMap<String, CachedResult>>,
     result_ttl: Option<Duration>,
@@ -85,6 +152,43 @@ fn parse_result_ttl() -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+fn parse_bool_flag(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Returns `true` when `JWC_DB_TLS` is set to a truthy value
+/// (`1` / `true` / `yes` / `on`, case-insensitive). Otherwise the engine
+/// keeps its historical `NoTls` behaviour.
+pub fn should_use_tls() -> bool {
+    std::env::var("JWC_DB_TLS")
+        .map(|v| parse_bool_flag(&v))
+        .unwrap_or(false)
+}
+
+/// Returns `true` when `JWC_DB_TLS_INSECURE_SKIP_VERIFY` is truthy. Only
+/// meant for local development against self-signed certificates — production
+/// deployments should keep verification on.
+pub fn should_skip_tls_verify() -> bool {
+    std::env::var("JWC_DB_TLS_INSECURE_SKIP_VERIFY")
+        .map(|v| parse_bool_flag(&v))
+        .unwrap_or(false)
+}
+
+fn build_tls_connector() -> Result<MakeTlsConnector> {
+    let mut builder = TlsConnector::builder();
+    if should_skip_tls_verify() {
+        builder.danger_accept_invalid_certs(true);
+        builder.danger_accept_invalid_hostnames(true);
+    }
+    let connector = builder
+        .build()
+        .with_context(|| "Failed to build native-tls connector")?;
+    Ok(MakeTlsConnector::new(connector))
+}
+
 pub fn init_engine(database_url: &str) -> Result<()> {
     if ENGINE.get().is_some() {
         return Ok(());
@@ -93,7 +197,6 @@ pub fn init_engine(database_url: &str) -> Result<()> {
     let cfg: Config = database_url
         .parse()
         .with_context(|| "Invalid DATABASE_URL")?;
-    let manager = PostgresConnectionManager::new(cfg, NoTls);
 
     // Default `max_lifetime` = 30 min, `idle_timeout` = 10 min — these mitigate
     // stale connections after Postgres restarts or LB-level idle kills. Either
@@ -101,20 +204,38 @@ pub fn init_engine(database_url: &str) -> Result<()> {
     let max_lifetime = parse_optional_secs("JWC_DB_MAX_LIFETIME_SECS", 30 * 60);
     let idle_timeout = parse_optional_secs("JWC_DB_IDLE_TIMEOUT_SECS", 10 * 60);
     let connection_timeout = parse_connection_timeout();
+    let max_size = parse_pool_size();
+    let min_idle = parse_pool_min_idle();
 
-    let mut builder = Pool::builder()
-        .max_size(parse_pool_size())
-        .max_lifetime(max_lifetime)
-        .idle_timeout(idle_timeout)
-        .connection_timeout(connection_timeout);
-
-    if let Some(min_idle) = parse_pool_min_idle() {
-        builder = builder.min_idle(Some(min_idle));
-    }
-
-    let pool = builder
-        .build(manager)
-        .with_context(|| "Failed to initialize Postgres connection pool")?;
+    let pool = if should_use_tls() {
+        let manager = PostgresConnectionManager::new(cfg, build_tls_connector()?);
+        let mut builder = Pool::builder()
+            .max_size(max_size)
+            .max_lifetime(max_lifetime)
+            .idle_timeout(idle_timeout)
+            .connection_timeout(connection_timeout);
+        if let Some(min) = min_idle {
+            builder = builder.min_idle(Some(min));
+        }
+        let pool = builder
+            .build(manager)
+            .with_context(|| "Failed to initialize Postgres TLS connection pool")?;
+        JwcPool::Tls(pool)
+    } else {
+        let manager = PostgresConnectionManager::new(cfg, NoTls);
+        let mut builder = Pool::builder()
+            .max_size(max_size)
+            .max_lifetime(max_lifetime)
+            .idle_timeout(idle_timeout)
+            .connection_timeout(connection_timeout);
+        if let Some(min) = min_idle {
+            builder = builder.min_idle(Some(min));
+        }
+        let pool = builder
+            .build(manager)
+            .with_context(|| "Failed to initialize Postgres connection pool")?;
+        JwcPool::NoTls(pool)
+    };
 
     let engine = JwcEngine {
         pool,
@@ -147,11 +268,24 @@ fn engine() -> Result<&'static JwcEngine> {
         .ok_or_else(|| anyhow!("DB engine initialization failed"))
 }
 
-pub fn get_connection() -> Result<PooledConnection<PostgresConnectionManager<NoTls>>> {
-    engine()?
-        .pool
-        .get()
-        .with_context(|| "Failed to checkout DB connection from pool")
+pub fn get_connection() -> Result<PgConn> {
+    engine()?.pool.get()
+}
+
+/// Build a single (non-pooled) `postgres::Client` for migration runs.
+///
+/// Migrations only need one connection for a short period, so this skips the
+/// r2d2 pool entirely. TLS settings are re-read from the env each call so the
+/// migrate CLI behaves consistently with the runtime engine.
+pub fn connect_for_migrations(url: &str) -> Result<Client> {
+    if should_use_tls() {
+        let connector = build_tls_connector()?;
+        Client::connect(url, connector)
+            .with_context(|| "Failed to connect to database (TLS) for migrations")
+    } else {
+        Client::connect(url, NoTls)
+            .with_context(|| "Failed to connect to database for migrations")
+    }
 }
 
 /// RAII guard that owns the in-progress thread-local transaction.
@@ -368,4 +502,75 @@ pub fn invalidate_result_cache() -> Result<()> {
         .map_err(|_| anyhow!("Result cache lock poisoned"))?
         .clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `std::env::set_var` is process-global; serialise tests that mutate it so
+    // they don't fight each other when run in parallel.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn should_use_tls_defaults_off() {
+        with_env("JWC_DB_TLS", None, || {
+            assert!(!should_use_tls());
+        });
+    }
+
+    #[test]
+    fn should_use_tls_accepts_truthy_values() {
+        for raw in ["1", "true", "TRUE", "True", "yes", "YES", "on", "On"] {
+            with_env("JWC_DB_TLS", Some(raw), || {
+                assert!(
+                    should_use_tls(),
+                    "expected JWC_DB_TLS={} to enable TLS",
+                    raw
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn should_use_tls_rejects_other_values() {
+        for raw in ["0", "false", "no", "off", "", "maybe", "2"] {
+            with_env("JWC_DB_TLS", Some(raw), || {
+                assert!(
+                    !should_use_tls(),
+                    "expected JWC_DB_TLS={} to leave TLS disabled",
+                    raw
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn should_skip_tls_verify_defaults_off() {
+        with_env("JWC_DB_TLS_INSECURE_SKIP_VERIFY", None, || {
+            assert!(!should_skip_tls_verify());
+        });
+    }
+
+    #[test]
+    fn should_skip_tls_verify_accepts_truthy() {
+        with_env("JWC_DB_TLS_INSECURE_SKIP_VERIFY", Some("true"), || {
+            assert!(should_skip_tls_verify());
+        });
+    }
 }

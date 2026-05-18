@@ -523,8 +523,18 @@ DB engine tuning:
 - `JWC_DB_CONNECTION_TIMEOUT_SECS` (default `5`)
 - `JWC_QUERY_CACHE_TTL_SECS` (optional, enables result cache when `> 0`)
 
-> JWC currently connects with `NoTls`. TLS-required Postgres deployments need
-> the `tls` feature work tracked on the roadmap.
+TLS:
+
+- `JWC_DB_TLS` — set to `1` / `true` / `yes` / `on` (case-insensitive) to
+  open Postgres connections over TLS via `native-tls`. Required for hosted
+  deployments that enforce SSL (Heroku Postgres, AWS RDS with `rds.force_ssl`,
+  Supabase, etc.). Default is off — connections use `NoTls`.
+- `JWC_DB_TLS_INSECURE_SKIP_VERIFY` — set to `1` / `true` to disable
+  certificate and hostname verification. **Development only** — never enable
+  this in production. The flag has no effect unless `JWC_DB_TLS` is also on.
+
+Both the runtime pool and the `jwc migrate up` / `down` CLI honour these
+flags, so a single env setting covers app traffic and schema migrations.
 
 Server tuning:
 

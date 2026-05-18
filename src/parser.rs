@@ -663,7 +663,9 @@ fn validate_expr(
             limit,
             offset,
             first: _,
-            with_relations,
+            // `with_relations` is validated in `check_with_relations_in_expr`,
+            // a separate walk that has access to `entity_navigations`.
+            with_relations: _,
         } => {
             let ctx_key = validate_context_exists(context_var, ctx_names)?;
 

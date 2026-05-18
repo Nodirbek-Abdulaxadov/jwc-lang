@@ -108,8 +108,9 @@
 ### 2.2c DB operatsion sifat ✅
 - Pool to'liq env-sozlanadigan: `JWC_DB_POOL_SIZE`, `JWC_DB_MIN_IDLE`, `JWC_DB_MAX_LIFETIME_SECS` (default 30 min), `JWC_DB_IDLE_TIMEOUT_SECS` (default 10 min), `JWC_DB_CONNECTION_TIMEOUT_SECS` (default 5s). Stale connection muammosi yumshatildi.
 - Migration session advisory lock (`pg_try_advisory_lock`) — bir vaqtning o'zida ikkita `migrate up/down` ishlasa "already in progress" xato, race yo'q.
-- **TLS deferred:** Hozir `NoTls`. `postgres-native-tls` yoki `rustls` integratsiyasi — keyingi iteratsiyada (Windows'da native deps masalasi bor).
-- **Integration tests deferred:** Hozir parse + SQL builder testlari. Real Postgres bilan smoke test (testcontainers-rs / docker-compose CI) — kelajakda.
+- TLS Postgres: `JWC_DB_TLS=1` yoqadi (`postgres-native-tls`), `JWC_DB_TLS_INSECURE_SKIP_VERIFY=1` self-signed sert uchun. Pool va migration ulanishlari bir xil TLS bilan ishlaydi.
+- Schema diff: `jwc migrate new` endi oldingi `.up.sql` faylni parse qilib joriy entity'lar bilan diff hisoblaydi va faqat ALTER (yoki CREATE TABLE yangi entity uchun) chiqaradi. Diff bo'lmasa "-- no schema changes".
+- Integration tests: `tests/integration_db.rs` — testcontainers-rs orqali Docker Postgres'da 6 ta scenario (basic query, tx commit, tx rollback on drop, migrate up/down, advisory lock concurrency, full CRUD). Docker yo'q hostda graceful skip.
 
 ### 2.3 `try / catch` ✅
 - Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.

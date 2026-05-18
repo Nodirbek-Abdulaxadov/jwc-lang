@@ -1,17 +1,6 @@
-mod ast;
-mod diag;
-mod engine;
-mod error_report;
-mod jwt;
-mod lexer;
-mod lint;
-mod migrate;
-mod parser;
-mod password;
-mod project;
-mod runner;
-mod server;
-mod sql;
+use jwc::{
+    error_report, lint, migrate, parser, project, runner, server, sql,
+};
 
 use std::{fs, path::PathBuf};
 

@@ -3,6 +3,14 @@ name = "jwc"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "jwc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jwc"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }
@@ -10,8 +18,10 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 hmac = "0.12"
 lazy_static = "1.5.0"
+native-tls = "0.2"
 notify = "6"
 postgres = "0.19.12"
+postgres-native-tls = "0.5"
 r2d2 = "0.8.10"
 r2d2_postgres = "0.18.2"
 regex = "1"
@@ -21,3 +31,7 @@ sha2 = "0.10"
 tiny_http = "0.12"
 ureq = { version = "2", features = ["json"] }
 url = "2"
+
+[dev-dependencies]
+testcontainers = { version = "0.20", features = ["blocking"] }
+testcontainers-modules = { version = "0.8", features = ["postgres", "blocking"] }
