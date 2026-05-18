@@ -96,6 +96,10 @@ fn collect_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
                 collect_calls(body, out);
                 collect_calls(catch_body, out);
             }
+            Stmt::Transaction { body } => collect_calls(body, out),
+            Stmt::DbDeleteWhere { where_clause, .. } => {
+                collect_calls_where(where_clause, out);
+            }
             Stmt::Return(None)
             | Stmt::Break
             | Stmt::Continue
@@ -153,6 +157,11 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
                 collect_calls_where(wc, out);
             }
         }
+        Expr::DbAggregate { where_clause, .. } => {
+            if let Some(wc) = where_clause {
+                collect_calls_where(wc, out);
+            }
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)
@@ -171,6 +180,10 @@ fn collect_calls_where(wc: &WhereExpr, out: &mut std::collections::HashSet<Strin
             for v in values {
                 collect_calls_expr(v, out);
             }
+        }
+        WhereExpr::Between { low, high, .. } => {
+            collect_calls_expr(low, out);
+            collect_calls_expr(high, out);
         }
         WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
             collect_calls_where(l, out);

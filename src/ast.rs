@@ -42,6 +42,26 @@ pub struct ModelDecl {
     /// Optional owning dbcontext name from: `entity X of AppDbContext { ... }`
     pub context_name: Option<String>,
     pub fields: Vec<FieldDecl>,
+    /// Navigation properties (relations) declared inside this entity.
+    /// Empty for plain DTO classes.
+    pub navigations: Vec<NavigationField>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavigationKind {
+    /// `name: List<Other> via Other.fk_col;`
+    OneToMany,
+    /// `name: Other via Other.fk_col;` — at most one matching row.
+    OneToOne,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavigationField {
+    pub name: String,
+    pub kind: NavigationKind,
+    pub target_entity: String,
+    /// The FK column on the target entity that points back at this entity's PK.
+    pub target_field: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +137,12 @@ pub enum WhereExpr {
     Atom(DbWhere),
     /// `field in (expr1, expr2, ...)` — SQL `"field" IN ($1, $2, ...)`.
     InList { field: String, values: Vec<Expr> },
+    /// `field between @low and @high` — SQL `"field" BETWEEN $1 AND $2`.
+    Between {
+        field: String,
+        low: Expr,
+        high: Expr,
+    },
     And(Box<WhereExpr>, Box<WhereExpr>),
     Or(Box<WhereExpr>, Box<WhereExpr>),
 }
@@ -125,6 +151,14 @@ pub enum WhereExpr {
 pub enum SortDir {
     Asc,
     Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateKind {
+    Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,12 +224,24 @@ pub enum Stmt {
         catch_type: Option<String>,
         catch_body: Vec<Stmt>,
     },
+    /// `transaction { ... }` — all DB statements inside run on a single
+    /// pooled connection wrapped in a SQL transaction; an uncaught error
+    /// rolls back, otherwise commits at the end of the block.
+    Transaction { body: Vec<Stmt> },
     /// `insert VAR into CTX.TABLE;`
     DbInsert { var: String, context_var: String, table: String },
     /// `update VAR in CTX.TABLE;`
     DbUpdate { var: String, context_var: String, table: String },
     /// `delete VAR from CTX.TABLE;`
     DbDelete { var: String, context_var: String, table: String },
+    /// `delete from CTX.TABLE where COND ...;` — bulk delete without a
+    /// preloaded object. `where` is required (a missing where would wipe the
+    /// whole table) and is enforced at parse time.
+    DbDeleteWhere {
+        context_var: String,
+        table: String,
+        where_clause: Box<WhereExpr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,9 +264,19 @@ pub enum Expr {
         table: String,
         where_clause: Option<Box<WhereExpr>>,
     },
-    /// `select [Entity|*] from CTX.TABLE [where COND [and|or COND ...]]
-    ///                                    [orderby FIELD [asc|desc]]
-    ///                                    [limit N] [offset N] [first]`
+    /// `select sum|avg|min|max(Entity.col) from CTX.TABLE [where COND ...]`.
+    /// Result is parsed to int/float/string depending on the SQL response.
+    DbAggregate {
+        kind: AggregateKind,
+        field: String,
+        context_var: String,
+        table: String,
+        where_clause: Option<Box<WhereExpr>>,
+    },
+    /// `select [Entity|*] [with rel, ...] from CTX.TABLE
+    ///        [where COND [and|or COND ...]]
+    ///        [orderby FIELD [asc|desc]]
+    ///        [limit N] [offset N] [first]`
     DbSelect {
         entity: String,
         context_var: String,
@@ -230,6 +286,8 @@ pub enum Expr {
         limit: Option<Box<Expr>>,
         offset: Option<Box<Expr>>,
         first: bool,
+        /// Navigation property names to eagerly join (`with posts, comments`).
+        with_relations: Vec<String>,
     },
     /// `await expr` — placeholder for the future async runtime; today this
     /// is a transparent pass-through that evaluates the inner expression.

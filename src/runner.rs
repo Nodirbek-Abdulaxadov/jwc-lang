@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -6,8 +6,9 @@ use postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
 
 use crate::ast::{
-    DbOrderBy, Expr, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, Program, RouteDecl,
-    SortDir, Stmt, TypedParam, ValidateField, ValidateRule, WhereExpr,
+    AggregateKind, DbOrderBy, Expr, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind,
+    NavigationKind, Program, RouteDecl, SortDir, Stmt, TypedParam, ValidateField, ValidateRule,
+    WhereExpr,
 };
 use crate::engine;
 
@@ -60,6 +61,13 @@ struct Vm<'a> {
     models: HashMap<String, &'a ModelDecl>,
     routes: Vec<&'a RouteDecl>,
     middlewares: HashMap<String, &'a MiddlewareDecl>,
+    /// Primary-key columns per table (keyed by both `Entity` name and its snake_case form).
+    /// Empty Vec means no `pk` declared on that entity — falls back to a single `"id"` column.
+    pk_by_table: HashMap<String, Vec<String>>,
+    /// Per-call dirty field tracking: var name (lower-cased) → fields assigned
+    /// via `var.field = ...` since the variable entered scope. Used by
+    /// `update var in ...` to SET only the modified columns.
+    dirty_fields: HashMap<String, HashSet<String>>,
     current_path_params: Option<HashMap<String, String>>,
     /// Query-string params parsed from the request URL (`?a=1&b=hello`).
     current_query_params: Option<HashMap<String, String>>,
@@ -96,11 +104,28 @@ impl<'a> Vm<'a> {
             middlewares.insert(mw.name.to_lowercase(), mw);
         }
 
+        let mut pk_by_table = HashMap::new();
+        for model in &program.models {
+            if model.kind != ModelKind::Entity {
+                continue;
+            }
+            let pks: Vec<String> = model
+                .fields
+                .iter()
+                .filter(|f| f.is_primary_key)
+                .map(|f| f.name.clone())
+                .collect();
+            pk_by_table.insert(model.name.to_lowercase(), pks.clone());
+            pk_by_table.insert(crate::sql::to_snake_case(&model.name).to_lowercase(), pks);
+        }
+
         Self {
             functions,
             models,
             routes,
             middlewares,
+            pk_by_table,
+            dirty_fields: HashMap::new(),
             current_path_params: None,
             current_query_params: None,
             current_headers: None,
@@ -147,7 +172,10 @@ impl<'a> Vm<'a> {
             vars.insert(param.name.to_lowercase(), value);
         }
 
-        let flow = self.exec_block(&function.body, &mut vars)?;
+        let saved_dirty = std::mem::take(&mut self.dirty_fields);
+        let flow_result = self.exec_block(&function.body, &mut vars);
+        self.dirty_fields = saved_dirty;
+        let flow = flow_result?;
         self.depth -= 1;
 
         match flow {
@@ -428,7 +456,9 @@ impl<'a> Vm<'a> {
                     bail!("Duplicate variable declaration: {name}");
                 }
                 let evaluated = self.eval_expr(value, vars)?;
-                vars.insert(key, evaluated);
+                vars.insert(key.clone(), evaluated);
+                // New binding has no modified fields yet.
+                self.dirty_fields.remove(&key);
                 Ok(Flow::Continue)
             }
             Stmt::Assign { name, value } => {
@@ -437,7 +467,9 @@ impl<'a> Vm<'a> {
                     bail!("Assignment to undefined variable: {name}");
                 }
                 let evaluated = self.eval_expr(value, vars)?;
-                vars.insert(key, evaluated);
+                vars.insert(key.clone(), evaluated);
+                // Full rebind resets the modified-field set.
+                self.dirty_fields.remove(&key);
                 Ok(Flow::Continue)
             }
             Stmt::Print(expr) => {
@@ -509,7 +541,11 @@ impl<'a> Vm<'a> {
                 if let Some(obj) = doc.as_object_mut() {
                     obj.insert(field.clone(), value_to_json(&new_val));
                 }
-                vars.insert(key, Value::Str(doc.to_string()));
+                vars.insert(key.clone(), Value::Str(doc.to_string()));
+                self.dirty_fields
+                    .entry(key)
+                    .or_default()
+                    .insert(field.clone());
                 Ok(Flow::Continue)
             }
             Stmt::Try {
@@ -552,6 +588,20 @@ impl<'a> Vm<'a> {
                     }
                 }
             }
+            Stmt::Transaction { body } => {
+                engine::begin_tx()?;
+                let inner = self.exec_block(body, vars);
+                match inner {
+                    Ok(flow) => {
+                        engine::commit_tx()?;
+                        Ok(flow)
+                    }
+                    Err(e) => {
+                        engine::rollback_tx();
+                        Err(e)
+                    }
+                }
+            }
             Stmt::ValidateBody { fields } => {
                 let body = self.request_body.clone().unwrap_or_default();
                 let parsed: JsonValue = if body.trim().is_empty() {
@@ -588,26 +638,54 @@ impl<'a> Vm<'a> {
             Stmt::DbUpdate { var, context_var: _, table } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
-                let (sql, boxed_params) = build_update_sql(&table_name, &json_str)?;
+                let pk_fields = self.resolve_pk_fields(table);
+                let key = var.to_lowercase();
+                let dirty_snapshot = self.dirty_fields.get(&key).cloned();
+                let (sql, boxed_params) = build_update_sql(
+                    &table_name,
+                    &json_str,
+                    &pk_fields,
+                    dirty_snapshot.as_ref(),
+                )?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let returned = engine::query_text(&sql, &param_refs)?;
                 if !returned.is_empty() && returned != "null" {
-                    vars.insert(var.to_lowercase(), Value::Str(returned));
+                    vars.insert(key.clone(), Value::Str(returned));
                 }
+                // Persisted to DB → object is now clean.
+                self.dirty_fields.remove(&key);
                 engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
             Stmt::DbDelete { var, context_var: _, table } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
-                let doc: serde_json::Value = serde_json::from_str(&json_str)
-                    .with_context(|| "delete: value is not valid JSON")?;
-                let pk_val = doc
-                    .get("id")
-                    .ok_or_else(|| anyhow!("delete: object must have an 'id' field"))?;
-                let sql = format!("DELETE FROM \"{}\" WHERE \"id\" = $1;", table_name);
-                let boxed_params = vec![json_value_to_sql_param(pk_val)];
+                let pk_fields = self.resolve_pk_fields(table);
+                let (sql, boxed_params) = build_delete_sql(&table_name, &json_str, &pk_fields)?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
+                let _ = engine::exec(&sql, &param_refs)?;
+                engine::invalidate_result_cache()?;
+                Ok(Flow::Continue)
+            }
+            Stmt::DbDeleteWhere {
+                context_var: _,
+                table,
+                where_clause,
+            } => {
+                let table_name = crate::sql::to_snake_case(table);
+                let mut shape_bits: Vec<String> = Vec::new();
+                let mut cache_bits: Vec<String> = Vec::new();
+                let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+                let where_sql = build_where_sql(
+                    where_clause,
+                    &mut params,
+                    &mut shape_bits,
+                    &mut cache_bits,
+                    vars,
+                    self,
+                )?;
+                let sql = format!("DELETE FROM \"{}\" WHERE {};", table_name, where_sql);
+                let param_refs = boxed_params_to_refs(&params);
                 let _ = engine::exec(&sql, &param_refs)?;
                 engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
@@ -668,6 +746,70 @@ impl<'a> Vm<'a> {
                     ),
                 }
             }
+            Expr::DbAggregate {
+                kind,
+                field,
+                context_var: _,
+                table,
+                where_clause,
+            } => {
+                let table_name = crate::sql::to_snake_case(table);
+                let col = field_path_to_col(field);
+                let agg_sql = match kind {
+                    AggregateKind::Sum => format!("SUM(\"{}\")", col),
+                    AggregateKind::Avg => format!("AVG(\"{}\")", col),
+                    AggregateKind::Min => format!("MIN(\"{}\")", col),
+                    AggregateKind::Max => format!("MAX(\"{}\")", col),
+                };
+                let kind_tag = match kind {
+                    AggregateKind::Sum => "sum",
+                    AggregateKind::Avg => "avg",
+                    AggregateKind::Min => "min",
+                    AggregateKind::Max => "max",
+                };
+
+                let mut shape_bits: Vec<String> = vec![format!("agg:{kind_tag}:{col}")];
+                let mut cache_bits: Vec<String> = vec![format!("agg:{kind_tag}:{col}")];
+                let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+
+                let where_sql = if let Some(wc) = where_clause {
+                    let s = build_where_sql(
+                        wc,
+                        &mut params,
+                        &mut shape_bits,
+                        &mut cache_bits,
+                        vars,
+                        self,
+                    )?;
+                    format!(" WHERE {}", s)
+                } else {
+                    String::new()
+                };
+
+                let sql = format!(
+                    "SELECT ({})::text FROM \"{}\"{};",
+                    agg_sql, table_name, where_sql
+                );
+                let shape_key = format!("aggregate|table:{table_name}|{}", shape_bits.join("|"));
+                let cache_key =
+                    format!("result|aggregate|table:{table_name}|{}", cache_bits.join("|"));
+
+                let param_refs = boxed_params_to_refs(&params);
+                let compiled = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
+                let result =
+                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs)?;
+                let trimmed = result.trim();
+                if trimmed.is_empty() || trimmed == "null" {
+                    return Ok(Value::Null);
+                }
+                if let Ok(i) = trimmed.parse::<i64>() {
+                    return Ok(Value::Int(i));
+                }
+                if let Ok(f) = trimmed.parse::<f64>() {
+                    return Ok(Value::Float(f));
+                }
+                Ok(Value::Str(trimmed.to_string()))
+            }
             Expr::DbCount {
                 context_var: _,
                 table,
@@ -723,7 +865,7 @@ impl<'a> Vm<'a> {
                 Ok(Value::Int(n))
             }
             Expr::DbSelect {
-                entity: _,
+                entity,
                 context_var: _,
                 table,
                 where_clause,
@@ -731,8 +873,16 @@ impl<'a> Vm<'a> {
                 limit,
                 offset,
                 first,
+                with_relations,
             } => {
                 let table_name = crate::sql::to_snake_case(table);
+                let nav_subqueries = build_navigation_subqueries(
+                    entity,
+                    &table_name,
+                    with_relations,
+                    &self.models,
+                    &self.pk_by_table,
+                )?;
                 let (sql, boxed_params, shape_key, cache_key) = build_select_sql(
                     table_name,
                     where_clause.as_deref(),
@@ -740,6 +890,7 @@ impl<'a> Vm<'a> {
                     limit.as_deref(),
                     offset.as_deref(),
                     *first,
+                    &nav_subqueries,
                     vars,
                     self,
                 )?;
@@ -818,6 +969,10 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("db_query") {
                     return self.eval_db_query_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("raw_sql") {
+                    return self.eval_raw_sql_call(args, vars);
                 }
 
                 if name.eq_ignore_ascii_case("request_body") {
@@ -1132,6 +1287,7 @@ impl<'a> Vm<'a> {
 
         let previous = self.current_path_params.take();
         let previous_query = self.current_query_params.take();
+        let previous_dirty = std::mem::take(&mut self.dirty_fields);
         self.current_path_params = Some(found_params);
         self.current_query_params = Some(query_params);
 
@@ -1170,6 +1326,7 @@ impl<'a> Vm<'a> {
 
         self.current_path_params = previous;
         self.current_query_params = previous_query;
+        self.dirty_fields = previous_dirty;
 
         let body = response_str.unwrap_or_else(|| "null".to_string());
 
@@ -1276,6 +1433,25 @@ impl<'a> Vm<'a> {
             method, path
         ));
         Ok(Value::Bool(false))
+    }
+
+    /// Look up the primary-key column names for `table` (matching the entity
+    /// name or its snake_case form). Falls back to `["id"]` when no `pk` is
+    /// declared, so ad-hoc tables not modelled as JWC entities still work.
+    fn resolve_pk_fields(&self, table: &str) -> Vec<String> {
+        let lc = table.to_lowercase();
+        if let Some(pks) = self.pk_by_table.get(&lc) {
+            if !pks.is_empty() {
+                return pks.clone();
+            }
+        }
+        let snake = crate::sql::to_snake_case(table).to_lowercase();
+        if let Some(pks) = self.pk_by_table.get(&snake) {
+            if !pks.is_empty() {
+                return pks.clone();
+            }
+        }
+        vec!["id".to_string()]
     }
 
     /// Execute a middleware by name. Returns `Some(response_body)` when the
@@ -1639,6 +1815,57 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
+    fn eval_raw_sql_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 2 {
+            bail!("raw_sql(sql[, params_json]) expects 1 or 2 args");
+        }
+        let sql = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!("raw_sql(sql, ...): sql must be string, got {}", other.type_name()),
+        };
+
+        let mut boxed_params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+        if let Some(arg) = args.get(1) {
+            let raw = match self.eval_expr(arg, vars)? {
+                Value::Str(s) => s,
+                Value::Null => "[]".to_string(),
+                other => bail!(
+                    "raw_sql(sql, params): params must be a JSON array string, got {}",
+                    other.type_name()
+                ),
+            };
+            let parsed: JsonValue = serde_json::from_str(&raw)
+                .map_err(|_| anyhow!("raw_sql: params must be a JSON array, got invalid json"))?;
+            let arr = parsed
+                .as_array()
+                .ok_or_else(|| anyhow!("raw_sql: params must be a JSON array"))?;
+            for v in arr {
+                boxed_params.push(json_value_to_sql_param(v));
+            }
+        }
+
+        let param_refs = boxed_params_to_refs(&boxed_params);
+        let lowered = sql.trim_start().to_ascii_lowercase();
+        // For SELECT-shaped queries return the first column as text; everything
+        // else routes through `exec` to also support write statements.
+        if lowered.starts_with("select") || lowered.starts_with("with") {
+            let result = engine::query_text(&sql, &param_refs)?;
+            if result.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Str(result))
+            }
+        } else {
+            let affected = engine::exec(&sql, &param_refs)?;
+            engine::invalidate_result_cache()?;
+            Ok(Value::Int(affected as i64))
+        }
+    }
+
     fn eval_db_query_call(
         &mut self,
         args: &[Expr],
@@ -1757,6 +1984,7 @@ fn normalize_sql_op(op: &str) -> &str {
         ">" => ">",
         ">=" => ">=",
         "like" => "LIKE",
+        "ilike" => "ILIKE",
         _ => "=",
     }
 }
@@ -1798,24 +2026,59 @@ fn build_insert_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn 
     ), params))
 }
 
-/// Build `UPDATE "table" SET ... WHERE "id" = ... RETURNING *;` from a JSON object string
-fn build_update_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
+/// Build `UPDATE "table" SET ... WHERE <pk-cols> = ... RETURNING *;` from a
+/// JSON object string. PK columns are excluded from the SET clause and used in
+/// the WHERE filter; with composite PKs all of them are required in the JSON.
+///
+/// `dirty_fields` — when `Some`, only those columns are included in SET (the
+/// natural "modified-since-load" semantics). When `None`, every non-PK field
+/// from the JSON is updated (used for objects materialised entirely from code).
+fn build_update_sql(
+    table: &str,
+    json_str: &str,
+    pk_fields: &[String],
+    dirty_fields: Option<&HashSet<String>>,
+) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "update: value is not valid JSON")?;
     let obj = doc
         .as_object()
         .ok_or_else(|| anyhow!("update: value must be a JSON object"))?;
 
-    let pk_val = obj
-        .get("id")
-        .ok_or_else(|| anyhow!("update: object must have an 'id' field for the WHERE clause"))?;
+    if pk_fields.is_empty() {
+        bail!("update: table '{}' has no primary key declared", table);
+    }
+    let mut pk_values: Vec<&serde_json::Value> = Vec::with_capacity(pk_fields.len());
+    for pk in pk_fields {
+        let v = obj.get(pk).ok_or_else(|| {
+            anyhow!(
+                "update: object must have field '{}' for the primary-key WHERE clause",
+                pk
+            )
+        })?;
+        pk_values.push(v);
+    }
 
+    let pk_set: std::collections::HashSet<String> = pk_fields
+        .iter()
+        .map(|p| p.to_lowercase())
+        .collect();
     let mut updates: Vec<(&String, &serde_json::Value)> = obj
         .iter()
-        .filter(|(k, _)| *k != "id")
+        .filter(|(k, _)| !pk_set.contains(&k.to_lowercase()))
+        .filter(|(k, _)| match dirty_fields {
+            None => true,
+            Some(d) => d.contains(*k) || d.contains(&k.to_lowercase()),
+        })
         .collect();
-
     updates.sort_by(|a, b| a.0.cmp(b.0));
+
+    if updates.is_empty() {
+        if dirty_fields.is_some() {
+            bail!("update: no fields have been modified since the object was loaded");
+        }
+        bail!("update: no fields to update (only primary key present in object)");
+    }
 
     let sets: Vec<String> = updates
         .iter()
@@ -1823,22 +2086,65 @@ fn build_update_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn 
         .map(|(idx, (k, _))| format!("\"{}\" = ${}", k, idx + 1))
         .collect();
 
-    if sets.is_empty() {
-        bail!("update: no fields to update (only 'id' present in object)");
-    }
-
     let mut params: Vec<Box<dyn ToSql + Sync>> = updates
         .iter()
         .map(|(_, v)| json_value_to_sql_param(v))
         .collect();
-    params.push(json_value_to_sql_param(pk_val));
+    let mut where_parts = Vec::with_capacity(pk_fields.len());
+    for (idx, pk) in pk_fields.iter().enumerate() {
+        params.push(json_value_to_sql_param(pk_values[idx]));
+        where_parts.push(format!("\"{}\" = ${}", pk, params.len()));
+    }
 
-    Ok((format!(
-        "WITH _upd AS (UPDATE \"{}\" SET {} WHERE \"id\" = {} RETURNING *) SELECT row_to_json(t)::text FROM _upd t;",
-        table,
-        sets.join(", "),
-        format!("${}", params.len()),
-    ), params))
+    Ok((
+        format!(
+            "WITH _upd AS (UPDATE \"{}\" SET {} WHERE {} RETURNING *) SELECT row_to_json(t)::text FROM _upd t;",
+            table,
+            sets.join(", "),
+            where_parts.join(" AND "),
+        ),
+        params,
+    ))
+}
+
+/// Build `DELETE FROM "table" WHERE <pk-cols> = $N [AND ...];` from a JSON
+/// object string. Composite primary keys are supported when all pk fields are
+/// present in the JSON.
+fn build_delete_sql(
+    table: &str,
+    json_str: &str,
+    pk_fields: &[String],
+) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
+    let doc: serde_json::Value =
+        serde_json::from_str(json_str).with_context(|| "delete: value is not valid JSON")?;
+    let obj = doc
+        .as_object()
+        .ok_or_else(|| anyhow!("delete: value must be a JSON object"))?;
+
+    if pk_fields.is_empty() {
+        bail!("delete: table '{}' has no primary key declared", table);
+    }
+    let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::with_capacity(pk_fields.len());
+    let mut where_parts = Vec::with_capacity(pk_fields.len());
+    for pk in pk_fields {
+        let v = obj.get(pk).ok_or_else(|| {
+            anyhow!(
+                "delete: object must have field '{}' for the primary-key WHERE clause",
+                pk
+            )
+        })?;
+        params.push(json_value_to_sql_param(v));
+        where_parts.push(format!("\"{}\" = ${}", pk, params.len()));
+    }
+
+    Ok((
+        format!(
+            "DELETE FROM \"{}\" WHERE {};",
+            table,
+            where_parts.join(" AND ")
+        ),
+        params,
+    ))
 }
 
 fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql + Sync> {
@@ -1901,6 +2207,7 @@ fn build_select_sql(
     limit: Option<&Expr>,
     offset: Option<&Expr>,
     first: bool,
+    nav_subqueries: &[NavigationSubquery],
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm,
 ) -> Result<(String, Vec<Box<dyn ToSql + Sync>>, String, String)> {
@@ -1953,19 +2260,38 @@ fn build_select_sql(
         cache_bits.push(format!("offset:{n}"));
     }
 
+    // Build the inner SELECT projection. When `with rel` is requested we
+    // emit `t.*` plus correlated json subqueries that materialise each
+    // related collection inline.
+    let projection = if nav_subqueries.is_empty() {
+        "*".to_string()
+    } else {
+        let mut bits: Vec<String> = vec!["t.*".to_string()];
+        for nav in nav_subqueries {
+            bits.push(format!(
+                "{} AS \"{}\"",
+                nav.sql_fragment("t"),
+                nav.alias()
+            ));
+            shape_bits.push(format!("with:{}", nav.alias()));
+            cache_bits.push(format!("with:{}", nav.alias()));
+        }
+        bits.join(", ")
+    };
+
     let inner_sql = format!(
-        "SELECT * FROM \"{}\"{}{}{}",
-        table_name, sql_where, sql_order, sql_limit_offset
+        "SELECT {} FROM \"{}\" t{}{}{}",
+        projection, table_name, sql_where, sql_order, sql_limit_offset
     );
 
     let sql = if first {
         format!(
-            "SELECT row_to_json(t)::text FROM ({}) t;",
+            "SELECT row_to_json(r)::text FROM ({}) r;",
             inner_sql.trim_end()
         )
     } else {
         format!(
-            "SELECT COALESCE(json_agg(row_to_json(t)), '[]')::text FROM ({}) t;",
+            "SELECT COALESCE(json_agg(row_to_json(r)), '[]')::text FROM ({}) r;",
             inner_sql.trim_end()
         )
     };
@@ -1984,6 +2310,77 @@ fn build_select_sql(
     let cache_key = format!("result|table:{table_name}|first:{first}|{cache_suffix}");
 
     Ok((sql, params, shape_key, cache_key))
+}
+
+struct NavigationSubquery {
+    name: String,
+    kind: NavigationKind,
+    target_table: String,
+    target_fk_col: String,
+    source_pk_col: String,
+}
+
+impl NavigationSubquery {
+    fn alias(&self) -> &str {
+        &self.name
+    }
+
+    fn sql_fragment(&self, source_alias: &str) -> String {
+        match self.kind {
+            NavigationKind::OneToMany => format!(
+                "COALESCE((SELECT json_agg(row_to_json(c)) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"), '[]'::json)",
+                self.target_table, self.target_fk_col, source_alias, self.source_pk_col
+            ),
+            NavigationKind::OneToOne => format!(
+                "(SELECT row_to_json(c) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\" LIMIT 1)",
+                self.target_table, self.target_fk_col, source_alias, self.source_pk_col
+            ),
+        }
+    }
+}
+
+fn build_navigation_subqueries(
+    entity: &str,
+    _source_table_name: &str,
+    requested: &[String],
+    models: &HashMap<String, &ModelDecl>,
+    pk_by_table: &HashMap<String, Vec<String>>,
+) -> Result<Vec<NavigationSubquery>> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+    if entity == "*" {
+        bail!("'with' clause requires a named entity, not '*'");
+    }
+    let entity_key = entity.to_lowercase();
+    let model = models
+        .get(&entity_key)
+        .ok_or_else(|| anyhow!("unknown entity '{}' for 'with' clause", entity))?;
+
+    let source_pk_col = pk_by_table
+        .get(&entity_key)
+        .and_then(|v| v.first().cloned())
+        .unwrap_or_else(|| "id".to_string());
+
+    let mut out = Vec::with_capacity(requested.len());
+    for rel in requested {
+        let rel_key = rel.to_lowercase();
+        let nav = model
+            .navigations
+            .iter()
+            .find(|n| n.name.to_lowercase() == rel_key)
+            .ok_or_else(|| {
+                anyhow!("entity '{}' has no navigation '{}'", entity, rel)
+            })?;
+        out.push(NavigationSubquery {
+            name: nav.name.clone(),
+            kind: nav.kind,
+            target_table: crate::sql::to_snake_case(&nav.target_entity),
+            target_fk_col: nav.target_field.clone(),
+            source_pk_col: source_pk_col.clone(),
+        });
+    }
+    Ok(out)
 }
 
 fn build_where_sql(
@@ -2023,6 +2420,25 @@ fn build_where_sql(
                     format!("\"{}\" {} ${}", col, op, idx)
                 }
             })
+        }
+        WhereExpr::Between { field, low, high } => {
+            let col = field_path_to_col(field);
+            let low_v = vm.eval_expr(low, vars)?;
+            let high_v = vm.eval_expr(high, vars)?;
+            params.push(value_to_sql_param(&low_v));
+            let low_idx = params.len();
+            params.push(value_to_sql_param(&high_v));
+            let high_idx = params.len();
+            shape.push(format!("where:{col}:between"));
+            cache.push(format!(
+                "where:{col}:between:{}..{}",
+                value_to_cache_fragment(&low_v),
+                value_to_cache_fragment(&high_v)
+            ));
+            Ok(format!(
+                "\"{}\" BETWEEN ${} AND ${}",
+                col, low_idx, high_idx
+            ))
         }
         WhereExpr::InList { field, values } => {
             let col = field_path_to_col(field);

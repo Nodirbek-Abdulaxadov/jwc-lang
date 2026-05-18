@@ -12,7 +12,7 @@
 |-------|--------|
 | Phase 0 — Texnik qarz (legacy hack’larni tozalash) | ✅ Done |
 | Phase 1 — MVP Core | ✅ Done |
-| Phase 2 — Language Completeness | ✅ Done (auto-JOIN + real async deferred) |
+| Phase 2 — Language Completeness | ✅ Done (real async deferred) |
 | Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean + serve --watch done; LSP/fmt/pkg deferred) |
 | Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
 | Phase 5 — Ecosystem | ⏳ Partial (Http + JWT stdlib done; cache/queue/wasm/hub deferred) |
@@ -94,9 +94,16 @@
 - `orderby <field> [asc|desc]`, `limit N`, `offset N` AST + parser + runner.
 - `@param` referensi `limit`/`offset` ichida.
 - Compound `where` — `and`/`or` + qavslar, `and` `or`dan yuqori precedence.
-- Operatorlar: `like @p`, `in (@a, @b, ...)`.
-- `select count(*) from CTX.Table [where ...]` → `int`.
-- **Qoldi:** `join`, `between`.
+- Operatorlar: `like @p`, `ilike @p`, `in (@a, @b, ...)`, `between @a and @b`, `is null`, `is not null`.
+- Aggregatsiyalar: `select count(*)`, `select sum|avg|min|max(Entity.col) from ...`.
+- **Qoldi:** `group by` + `having` (projection sintaksis bilan), `join` (navigatsiya bilan qoplandi).
+
+### 2.2b DB business-logic primitivlari ✅
+- PK: `update var in ...` va `delete var from ...` entity'da belgilangan `pk` field(lar)ni hisobga oladi (composite PK qo'llab-quvvatlanadi). Ad-hoc table uchun `id` fallback.
+- Dirty-field tracking: `var.field = X; update var in ...` faqat o'zgargan maydonlarni SET qiladi. O'zgarishsiz `update` aniq xato.
+- Bulk delete: `delete from CTX.Table where ...;` — variable kerakmas, `where` majburiy (xavfsizlik).
+- `transaction { ... }` bloki — thread-local connection, BEGIN/COMMIT, uncaught error → ROLLBACK.
+- `raw_sql(sql, params_json)` — parameterized escape hatch; SELECT'da text natija, mutationda affected rows count qaytaradi.
 
 ### 2.3 `try / catch` ✅
 - Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.
@@ -110,10 +117,11 @@
 - Middleware qaytaradigan qiymat butun routeni qisqartiradi (short-circuit).
 - Server'dan inbound headers `runner::run_request_with_headers` orqali keladi.
 
-### 2.5 Entity relationships ⏳ partial
-- `field uuid references EntityName.column [on delete cascade|restrict|set null]` qabul qilinadi.
-- SQL generator FK CONSTRAINT chiqaradi va validator target entity+column mavjudligini tekshiradi.
-- **Qoldi:** Navigation property (`posts: List<Post> via Post.user_id`) va `select User with posts ...` auto-JOIN — keyingi iterazga.
+### 2.5 Entity relationships ✅
+- `field uuid references EntityName.column [on delete cascade|restrict|set null]` — FK CONSTRAINT.
+- Navigation property: `posts: List<Post> via Post.user_id;` (one-to-many) / `profile: Profile via Profile.user_id;` (one-to-one) — entity body ichida.
+- `select User with posts, profile from AppDb.User ...` — correlated `json_agg` subquery, kompayl-vaqt nav nomini tekshirish.
+- Validator: target entity + FK column + nav nomi mavjudligi tekshiriladi.
 
 ### 2.6 async/await ⏳ syntax-only
 - Lexer: `async`, `await` keywordlar.

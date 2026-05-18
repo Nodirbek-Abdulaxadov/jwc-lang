@@ -1,12 +1,23 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use postgres::types::ToSql;
 use postgres::{Config, NoTls};
 use r2d2::{Pool, PooledConnection};
 use r2d2_postgres::PostgresConnectionManager;
+
+type PgConn = PooledConnection<PostgresConnectionManager<NoTls>>;
+
+thread_local! {
+    /// Holds a pooled connection while the current thread is inside a
+    /// `transaction { ... }` block. All `query_text` / `exec` calls
+    /// transparently route through this connection so they are part of the
+    /// same SQL transaction (started with a `BEGIN` statement).
+    static TX_CONN: RefCell<Option<PgConn>> = const { RefCell::new(None) };
+}
 
 struct CachedResult {
     value: String,
@@ -96,6 +107,45 @@ pub fn get_connection() -> Result<PooledConnection<PostgresConnectionManager<NoT
         .with_context(|| "Failed to checkout DB connection from pool")
 }
 
+/// Begin a SQL transaction on the current thread. All subsequent
+/// `query_text` / `exec` calls on this thread run on the held connection
+/// until `commit_tx` or `rollback_tx` is invoked.
+pub fn begin_tx() -> Result<()> {
+    TX_CONN.with(|cell| {
+        if cell.borrow().is_some() {
+            bail!("transaction already in progress on this thread (nested transactions are not supported)");
+        }
+        let mut conn = get_connection()?;
+        conn.batch_execute("BEGIN;")
+            .with_context(|| "Failed to BEGIN transaction")?;
+        *cell.borrow_mut() = Some(conn);
+        Ok(())
+    })
+}
+
+pub fn commit_tx() -> Result<()> {
+    TX_CONN.with(|cell| {
+        let mut held = cell.borrow_mut();
+        let Some(mut conn) = held.take() else {
+            return Ok(());
+        };
+        drop(held);
+        conn.batch_execute("COMMIT;")
+            .with_context(|| "Failed to COMMIT transaction")?;
+        Ok(())
+    })
+}
+
+pub fn rollback_tx() {
+    TX_CONN.with(|cell| {
+        let mut held = cell.borrow_mut();
+        if let Some(mut conn) = held.take() {
+            drop(held);
+            let _ = conn.batch_execute("ROLLBACK;");
+        }
+    });
+}
+
 pub fn get_or_compile_sql<F>(cache_key: &str, compiler: F) -> Result<String>
 where
     F: FnOnce() -> Result<String>,
@@ -126,7 +176,30 @@ where
 }
 
 pub fn query_text(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<String> {
+    // Inside `transaction { ... }` route through the held connection so the
+    // query participates in the open SQL transaction; otherwise fall back to
+    // the connection pool.
+    let routed = TX_CONN.with(|cell| {
+        let mut held = cell.borrow_mut();
+        if let Some(conn) = held.as_mut() {
+            Some(query_text_on_conn(conn, sql, params))
+        } else {
+            None
+        }
+    });
+    if let Some(result) = routed {
+        return result;
+    }
+
     let mut conn = get_connection()?;
+    query_text_on_conn(&mut conn, sql, params)
+}
+
+fn query_text_on_conn(
+    conn: &mut PgConn,
+    sql: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<String> {
     let stmt = conn
         .prepare(sql)
         .with_context(|| "Failed to prepare SQL statement")?;
@@ -189,7 +262,27 @@ pub fn query_text_with_optional_cache(
 }
 
 pub fn exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
+    let routed = TX_CONN.with(|cell| {
+        let mut held = cell.borrow_mut();
+        if let Some(conn) = held.as_mut() {
+            Some(exec_on_conn(conn, sql, params))
+        } else {
+            None
+        }
+    });
+    if let Some(result) = routed {
+        return result;
+    }
+
     let mut conn = get_connection()?;
+    exec_on_conn(&mut conn, sql, params)
+}
+
+fn exec_on_conn(
+    conn: &mut PgConn,
+    sql: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<u64> {
     let stmt = conn
         .prepare(sql)
         .with_context(|| "Failed to prepare SQL statement")?;

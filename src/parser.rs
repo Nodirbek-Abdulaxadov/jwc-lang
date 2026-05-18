@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 
 use crate::ast::{
-    DbContextDecl, DbOrderBy, DbWhere, Expr, FieldDecl, FieldReference, FunctionDecl,
-    MiddlewareDecl, ModelDecl, ModelKind, OnDeleteAction, Program, RouteDecl, SortDir, Stmt,
-    TypeSpec, TypedParam, ValidateField, ValidateRule, WhereExpr,
+    AggregateKind, DbContextDecl, DbOrderBy, DbWhere, Expr, FieldDecl, FieldReference,
+    FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, NavigationField, NavigationKind,
+    OnDeleteAction, Program, RouteDecl, SortDir, Stmt, TypeSpec, TypedParam, ValidateField,
+    ValidateRule, WhereExpr,
 };
 use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
@@ -34,6 +35,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
     let mut entity_contexts: HashMap<String, Option<String>> = HashMap::new();
     let mut db_tables: HashSet<(String, String)> = HashSet::new();
     let mut entity_fields_by_table: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut entity_navigations: HashMap<String, HashMap<String, NavigationField>> = HashMap::new();
     for model in &program.models {
         let model_key = model.name.to_lowercase();
         if !model_names.insert(model_key) {
@@ -80,6 +82,59 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
             validate_type_spec_for_driver(&field.ty, &resolved_driver)
                 .map_err(|err| anyhow!("Entity '{}', field '{}': {err}", model.name, field.name))?;
+        }
+
+        if !model.navigations.is_empty() {
+            let mut nav_names: HashSet<String> = HashSet::new();
+            let mut nav_map: HashMap<String, NavigationField> = HashMap::new();
+            for nav in &model.navigations {
+                let key = nav.name.to_lowercase();
+                if !nav_names.insert(key.clone()) {
+                    bail!(
+                        "Entity '{}': duplicate navigation '{}'",
+                        model.name,
+                        nav.name
+                    );
+                }
+                nav_map.insert(key, nav.clone());
+            }
+            entity_navigations.insert(model.name.to_lowercase(), nav_map);
+        }
+    }
+
+    // After all entities are registered: resolve each navigation's target.
+    for model in &program.models {
+        if model.kind != ModelKind::Entity {
+            continue;
+        }
+        for nav in &model.navigations {
+            let target_key = nav.target_entity.to_lowercase();
+            let target = program
+                .models
+                .iter()
+                .find(|m| m.kind == ModelKind::Entity && m.name.to_lowercase() == target_key)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Entity '{}' navigation '{}' references unknown entity '{}'",
+                        model.name,
+                        nav.name,
+                        nav.target_entity
+                    )
+                })?;
+            let field_key = nav.target_field.to_lowercase();
+            if !target
+                .fields
+                .iter()
+                .any(|f| f.name.to_lowercase() == field_key)
+            {
+                bail!(
+                    "Entity '{}' navigation '{}' references unknown column '{}.{}'",
+                    model.name,
+                    nav.name,
+                    nav.target_entity,
+                    nav.target_field
+                );
+            }
         }
     }
 
@@ -217,7 +272,129 @@ pub fn validate_program(program: &Program) -> Result<()> {
         }
     }
 
+    // After the main pass, walk every DbSelect's `with_relations` and verify
+    // each name is a real navigation declared on the queried entity.
+    for function in &program.functions {
+        check_with_relations_in_stmts(&function.body, &entity_navigations)?;
+    }
+    for route in &program.routes {
+        check_with_relations_in_stmts(&route.body, &entity_navigations)?;
+    }
+    for mw in &program.middlewares {
+        check_with_relations_in_stmts(&mw.body, &entity_navigations)?;
+    }
+
     Ok(())
+}
+
+fn check_with_relations_in_stmts(
+    stmts: &[Stmt],
+    entity_navigations: &HashMap<String, HashMap<String, NavigationField>>,
+) -> Result<()> {
+    for stmt in stmts {
+        check_with_relations_in_stmt(stmt, entity_navigations)?;
+    }
+    Ok(())
+}
+
+fn check_with_relations_in_stmt(
+    stmt: &Stmt,
+    entity_navigations: &HashMap<String, HashMap<String, NavigationField>>,
+) -> Result<()> {
+    match stmt {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::FieldAssign { value, .. }
+        | Stmt::Print(value)
+        | Stmt::Expr(value)
+        | Stmt::Return(Some(value)) => {
+            check_with_relations_in_expr(value, entity_navigations)
+        }
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            check_with_relations_in_expr(cond, entity_navigations)?;
+            check_with_relations_in_stmts(then_body, entity_navigations)?;
+            if let Some(b) = else_body {
+                check_with_relations_in_stmts(b, entity_navigations)?;
+            }
+            Ok(())
+        }
+        Stmt::While { cond, body } => {
+            check_with_relations_in_expr(cond, entity_navigations)?;
+            check_with_relations_in_stmts(body, entity_navigations)
+        }
+        Stmt::Try {
+            body, catch_body, ..
+        } => {
+            check_with_relations_in_stmts(body, entity_navigations)?;
+            check_with_relations_in_stmts(catch_body, entity_navigations)
+        }
+        Stmt::Transaction { body } => check_with_relations_in_stmts(body, entity_navigations),
+        _ => Ok(()),
+    }
+}
+
+fn check_with_relations_in_expr(
+    expr: &Expr,
+    entity_navigations: &HashMap<String, HashMap<String, NavigationField>>,
+) -> Result<()> {
+    match expr {
+        Expr::DbSelect {
+            entity,
+            with_relations,
+            ..
+        } => {
+            if !with_relations.is_empty() {
+                if entity == "*" {
+                    bail!("select * cannot use 'with <relation>' — name the entity explicitly");
+                }
+                let entity_key = entity.to_lowercase();
+                let nav_map = entity_navigations.get(&entity_key);
+                for rel in with_relations {
+                    let rel_key = rel.to_lowercase();
+                    let known = nav_map.map(|m| m.contains_key(&rel_key)).unwrap_or(false);
+                    if !known {
+                        bail!(
+                            "Entity '{}' has no navigation property '{}' (used in 'select ... with {}')",
+                            entity,
+                            rel,
+                            rel
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expr::Await(inner) | Expr::Neg(inner) => {
+            check_with_relations_in_expr(inner, entity_navigations)
+        }
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Eq(a, b)
+        | Expr::Neq(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Lte(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Gte(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b) => {
+            check_with_relations_in_expr(a, entity_navigations)?;
+            check_with_relations_in_expr(b, entity_navigations)
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                check_with_relations_in_expr(a, entity_navigations)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn validate_stmts(
@@ -363,6 +540,13 @@ fn validate_stmt(
                 entity_fields_by_table,
             )
         }
+        Stmt::Transaction { body } => validate_stmts(
+            body,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
         Stmt::DbInsert {
             context_var, table, ..
         }
@@ -374,6 +558,25 @@ fn validate_stmt(
         } => {
             let ctx_key = validate_context_exists(context_var, ctx_names)?;
             validate_table_in_context(&ctx_key, table, db_tables)
+        }
+        Stmt::DbDeleteWhere {
+            context_var,
+            table,
+            where_clause,
+        } => {
+            let ctx_key = validate_context_exists(context_var, ctx_names)?;
+            validate_table_in_context(&ctx_key, table, db_tables)?;
+            let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
+            if let Some(fields) = fields {
+                check_where_columns(where_clause, fields, context_var, table)?;
+            }
+            validate_where_expr(
+                where_clause,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
         }
     }
 }
@@ -416,6 +619,41 @@ fn validate_expr(
             }
             Ok(())
         }
+        Expr::DbAggregate {
+            kind: _,
+            field,
+            context_var,
+            table,
+            where_clause,
+        } => {
+            let ctx_key = validate_context_exists(context_var, ctx_names)?;
+            validate_table_in_context(&ctx_key, table, db_tables)?;
+            let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
+            if let Some(fields) = fields {
+                let col = strip_entity_prefix(field);
+                if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
+                    bail!(
+                        "Unknown column '{}' in aggregate over {}.{}",
+                        col,
+                        context_var,
+                        table
+                    );
+                }
+                if let Some(wc) = where_clause.as_deref() {
+                    check_where_columns(wc, fields, context_var, table)?;
+                }
+            }
+            if let Some(wc) = where_clause {
+                validate_where_expr(
+                    wc,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
+            }
+            Ok(())
+        }
         Expr::DbSelect {
             entity,
             context_var,
@@ -425,6 +663,7 @@ fn validate_expr(
             limit,
             offset,
             first: _,
+            with_relations,
         } => {
             let ctx_key = validate_context_exists(context_var, ctx_names)?;
 
@@ -558,7 +797,7 @@ fn check_where_columns(
             }
             Ok(())
         }
-        WhereExpr::InList { field, .. } => {
+        WhereExpr::InList { field, .. } | WhereExpr::Between { field, .. } => {
             let col = strip_entity_prefix(field);
             if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                 bail!(
@@ -597,6 +836,10 @@ fn validate_where_expr(
                 validate_expr(v, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
             }
             Ok(())
+        }
+        WhereExpr::Between { low, high, .. } => {
+            validate_expr(low, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+            validate_expr(high, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
         }
         WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
             validate_where_expr(l, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
@@ -941,8 +1184,18 @@ impl<'a> Parser<'a> {
         self.expect_symbol('{')?;
 
         let mut fields = Vec::new();
+        let mut navigations = Vec::new();
         while !self.check_symbol('}') {
             let field_name = self.expect_ident("expected field name")?;
+
+            // `field: TypeRef via Target.col;` — navigation property.
+            if self.check_symbol(':') {
+                self.bump()?;
+                let nav = self.parse_navigation_remainder(&field_name)?;
+                navigations.push(nav);
+                continue;
+            }
+
             let ty = self.parse_type_spec()?;
             let mut is_nullable = false;
             let mut is_primary_key = false;
@@ -982,6 +1235,43 @@ impl<'a> Parser<'a> {
             name,
             context_name,
             fields,
+            navigations,
+        })
+    }
+
+    /// Parse the rest of `name: List<Target> via Target.col;` or
+    /// `name: Target via Target.col;` after the `:` has been consumed.
+    fn parse_navigation_remainder(&mut self, field_name: &str) -> Result<NavigationField> {
+        let head = self.expect_ident("expected target type after ':'")?;
+        let (kind, target_entity) = if head.eq_ignore_ascii_case("List") {
+            self.expect_symbol('<')?;
+            let inner = self.expect_ident("expected entity name inside List<...>")?;
+            self.expect_symbol('>')?;
+            (NavigationKind::OneToMany, inner)
+        } else {
+            (NavigationKind::OneToOne, head)
+        };
+
+        let via_kw = self.expect_ident("expected 'via' in navigation declaration")?;
+        if !via_kw.eq_ignore_ascii_case("via") {
+            return Err(self.error_here("expected 'via' in navigation declaration"));
+        }
+
+        let target = self.expect_ident("expected target entity name after 'via'")?;
+        self.expect_symbol('.')?;
+        let target_col = self.expect_ident("expected target column name after '.'")?;
+        if !target.eq_ignore_ascii_case(&target_entity) {
+            return Err(self.error_here(
+                "navigation 'via' must reference the same entity declared on the left side",
+            ));
+        }
+        self.expect_symbol(';')?;
+
+        Ok(NavigationField {
+            name: field_name.to_string(),
+            kind,
+            target_entity,
+            target_field: target_col,
         })
     }
 
@@ -1206,6 +1496,11 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Keyword(Keyword::Validate) => self.parse_validate_body_stmt(),
             TokenKind::Keyword(Keyword::Try) => self.parse_try_stmt(),
+            TokenKind::Keyword(Keyword::Transaction) => {
+                self.bump()?;
+                let body = self.parse_block()?;
+                Ok(Stmt::Transaction { body })
+            }
             TokenKind::Keyword(Keyword::Let) => {
                 self.bump()?;
                 let name = self.expect_ident("expected variable name")?;
@@ -1269,6 +1564,26 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(s) if s.eq_ignore_ascii_case("delete") => {
                 self.bump()?;
+
+                if self.check_ident_eq("from") {
+                    // Bulk form: `delete from CTX.Table where ... ;`
+                    self.bump()?;
+                    let (ctx, table) = self.parse_db_ref()?;
+                    if !self.check_ident_eq("where") {
+                        return Err(self.error_here(
+                            "bulk 'delete from CTX.Table' requires a 'where' clause",
+                        ));
+                    }
+                    self.bump()?;
+                    let where_clause = Box::new(self.parse_where_or()?);
+                    self.expect_symbol(';')?;
+                    return Ok(Stmt::DbDeleteWhere {
+                        context_var: ctx,
+                        table,
+                        where_clause,
+                    });
+                }
+
                 let var = self.expect_ident("expected variable name after 'delete'")?;
                 let kw = self.expect_ident("expected 'from'")?;
                 if !kw.eq_ignore_ascii_case("from") {
@@ -1768,12 +2083,62 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // `sum|avg|min|max(Entity.col)` aggregation form
+        let agg_kind = if self.check_ident_eq("sum") {
+            Some(AggregateKind::Sum)
+        } else if self.check_ident_eq("avg") {
+            Some(AggregateKind::Avg)
+        } else if self.check_ident_eq("min") {
+            Some(AggregateKind::Min)
+        } else if self.check_ident_eq("max") {
+            Some(AggregateKind::Max)
+        } else {
+            None
+        };
+        if let Some(kind) = agg_kind {
+            self.bump()?;
+            self.expect_symbol('(')?;
+            let field = self.parse_field_path()?;
+            self.expect_symbol(')')?;
+            let from_kw = self.expect_ident("expected 'from' after aggregate(...)")?;
+            if !from_kw.eq_ignore_ascii_case("from") {
+                return Err(self.error_here("expected 'from' after aggregate(...)"));
+            }
+            let (ctx, table) = self.parse_db_ref()?;
+            let where_clause = if self.check_ident_eq("where") {
+                self.bump()?;
+                Some(Box::new(self.parse_where_or()?))
+            } else {
+                None
+            };
+            return Ok(Expr::DbAggregate {
+                kind,
+                field,
+                context_var: ctx,
+                table,
+                where_clause,
+            });
+        }
+
         // entity name or `*`
         let entity = if self.check_symbol('*') {
             self.bump()?;
             "*".to_string()
         } else {
             self.expect_ident("expected entity name or '*' after 'select'")?
+        };
+
+        // optional `with rel1, rel2, ...`
+        let with_relations = if self.check_ident_eq("with") {
+            self.bump()?;
+            let mut rels = vec![self.expect_ident("expected navigation name after 'with'")?];
+            while self.check_symbol(',') {
+                self.expect_symbol(',')?;
+                rels.push(self.expect_ident("expected navigation name after ','")?);
+            }
+            rels
+        } else {
+            Vec::new()
         };
 
         // `from`
@@ -1843,6 +2208,7 @@ impl<'a> Parser<'a> {
             limit,
             offset,
             first,
+            with_relations,
         })
     }
 
@@ -1876,6 +2242,17 @@ impl<'a> Parser<'a> {
 
         let field = self.parse_field_path()?;
 
+        if self.check_ident_eq("between") {
+            self.bump()?;
+            let low = self.parse_in_value()?;
+            if self.current.kind != TokenKind::Keyword(Keyword::And) {
+                return Err(self.error_here("expected 'and' between bounds in 'between ... and ...'"));
+            }
+            self.bump()?;
+            let high = self.parse_in_value()?;
+            return Ok(WhereExpr::Between { field, low, high });
+        }
+
         if self.check_ident_eq("in") {
             self.bump()?;
             self.expect_symbol('(')?;
@@ -1894,9 +2271,35 @@ impl<'a> Parser<'a> {
             return Ok(WhereExpr::InList { field, values });
         }
 
+        // `is null` / `is not null` — surface syntax for IS NULL / IS NOT NULL.
+        // Encoded as an Atom with rhs=Null and op `==`/`!=`; the SQL builder
+        // already translates that to IS NULL / IS NOT NULL.
+        if self.check_ident_eq("is") {
+            self.bump()?;
+            let negated = if self.check_ident_eq("not") {
+                self.bump()?;
+                true
+            } else {
+                false
+            };
+            if !self.check_ident_eq("null") {
+                return Err(self.error_here("expected 'null' after 'is' or 'is not'"));
+            }
+            self.bump()?;
+            let op = if negated { "!=" } else { "==" }.to_string();
+            return Ok(WhereExpr::Atom(DbWhere {
+                field,
+                op,
+                rhs: Expr::Null,
+            }));
+        }
+
         let op = if self.check_ident_eq("like") {
             self.bump()?;
             "like".to_string()
+        } else if self.check_ident_eq("ilike") {
+            self.bump()?;
+            "ilike".to_string()
         } else {
             self.parse_cmp_op()?
         };
@@ -2332,6 +2735,92 @@ mod tests {
             },
             _ => panic!("expected Let stmt"),
         }
+    }
+
+    #[test]
+    fn parses_entity_navigation_and_with_clause() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(60);
+                posts: List<Post> via Post.user_id;
+                profile: Profile via Profile.user_id;
+            }
+
+            entity Post of AppDb {
+                id uuid pk;
+                user_id uuid references User.id;
+                title varchar(200);
+            }
+
+            entity Profile of AppDb {
+                id uuid pk;
+                user_id uuid references User.id;
+                bio varchar(300);
+            }
+
+            function getOne(id) {
+                let u = select User with posts, profile from AppDb.User
+                    where User.id == @id first;
+                return u;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        let user = program
+            .models
+            .iter()
+            .find(|m| m.name == "User")
+            .unwrap();
+        assert_eq!(user.navigations.len(), 2);
+        assert_eq!(user.navigations[0].name, "posts");
+        assert_eq!(user.navigations[0].kind, crate::ast::NavigationKind::OneToMany);
+        assert_eq!(user.navigations[0].target_entity, "Post");
+        assert_eq!(user.navigations[0].target_field, "user_id");
+        assert_eq!(user.navigations[1].kind, crate::ast::NavigationKind::OneToOne);
+
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect { with_relations, .. } => {
+                    assert_eq!(with_relations, &vec!["posts".to_string(), "profile".to_string()]);
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn unknown_navigation_in_with_clause_fails_validation() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb { id uuid pk; name varchar(60); }
+
+            function bad() {
+                let u = select User with ghosts from AppDb.User first;
+                return u;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("no navigation property 'ghosts'"));
+    }
+
+    #[test]
+    fn navigation_to_unknown_entity_fails_validation() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                ghosts: List<Ghost> via Ghost.user_id;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("unknown entity 'Ghost'"));
     }
 
     #[test]

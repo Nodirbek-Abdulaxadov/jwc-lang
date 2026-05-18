@@ -278,11 +278,71 @@ function totalIn(country) {
 ```
 
 - Compound `where`: `and`/`or` with parentheses; `and` binds tighter than `or`.
-- Operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `like`, `in (...)`.
+- Operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `like`, `ilike`, `in (...)`,
+  `between @a and @b`, `is null`, `is not null`.
 - `orderby <field> [asc|desc]` — default direction is ascending.
 - `limit N` / `offset N` accept integer literals or `@param` references.
 - `first` forces `LIMIT 1` and returns a single row instead of an array.
-- `select count(*) from CTX.Table [where ...]` returns an `int`.
+- Aggregations: `select count(*)`, `select sum|avg|min|max(Entity.col) from ...`.
+
+## Entity relations (navigation + auto-JOIN)
+
+Declare navigation properties on the entity and pull them in with `select ... with`:
+
+```jwc
+entity User of AppDb {
+    id uuid pk;
+    name varchar(60);
+    posts: List<Post> via Post.user_id;       // one-to-many
+    profile: Profile via Profile.user_id;     // one-to-one
+}
+
+entity Post of AppDb {
+    id uuid pk;
+    user_id uuid references User.id on delete cascade;
+    title varchar(200);
+}
+
+function getUserWithPosts(id) {
+    return select User with posts, profile from AppDb.User
+        where User.id == @id first;
+}
+```
+
+- `List<T> via T.fk` materialises into a JSON array via a correlated
+  `json_agg(...)` subquery (empty array when there are no children).
+- `T via T.fk` materialises into a single nested object (or `null`).
+- The navigation name, the target entity, and the FK column on the target are
+  all checked at compile time.
+
+## Transactions
+
+Wrap a sequence of DML statements in `transaction { ... }` to run them
+atomically — an uncaught error rolls back, success commits.
+
+```jwc
+transaction {
+    insert user into AppDb.User;
+    insert profile into AppDb.Profile;
+}
+```
+
+Nested transactions are not supported; queries inside the block route through
+the held connection automatically.
+
+## Raw SQL escape hatch
+
+```jwc
+let rows = raw_sql(
+    "SELECT json_agg(row_to_json(t))::text FROM users t WHERE created_at > $1",
+    "[\"2026-01-01T00:00:00Z\"]"
+);
+let n_changed = raw_sql("DELETE FROM logs WHERE level = $1", "[\"debug\"]");
+```
+
+- Second argument is a JSON array of bound parameters — fully parameterized.
+- `SELECT`/`WITH` shape returns the first column as text; other shapes return
+  the affected row count.
 
 ## Async / Await (forward-compatible syntax)
 

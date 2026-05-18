@@ -38,6 +38,7 @@ pub enum Keyword {
     Use,
     Async,
     Await,
+    Transaction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,7 @@ impl<'a> Lexer<'a> {
                 "use" => TokenKind::Keyword(Keyword::Use),
                 "async" => TokenKind::Keyword(Keyword::Async),
                 "await" => TokenKind::Keyword(Keyword::Await),
+                "transaction" => TokenKind::Keyword(Keyword::Transaction),
                 _ => TokenKind::Ident(ident),
             };
             return Ok(Token { kind, offset });
