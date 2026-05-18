@@ -394,6 +394,28 @@ fn validate_expr(
             Ok(())
         }
         Expr::FieldGet { .. } | Expr::NewEntity { .. } => Ok(()),
+        Expr::DbCount {
+            context_var,
+            table,
+            where_clause,
+        } => {
+            let ctx_key = validate_context_exists(context_var, ctx_names)?;
+            validate_table_in_context(&ctx_key, table, db_tables)?;
+            let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
+            if let (Some(fields), Some(wc)) = (fields, where_clause.as_deref()) {
+                check_where_columns(wc, fields, context_var, table)?;
+            }
+            if let Some(wc) = where_clause {
+                validate_where_expr(
+                    wc,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
+            }
+            Ok(())
+        }
         Expr::DbSelect {
             entity,
             context_var,
@@ -536,6 +558,18 @@ fn check_where_columns(
             }
             Ok(())
         }
+        WhereExpr::InList { field, .. } => {
+            let col = strip_entity_prefix(field);
+            if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
+                bail!(
+                    "Unknown column '{}' in WHERE of {}.{}",
+                    col,
+                    context_var,
+                    table
+                );
+            }
+            Ok(())
+        }
         WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
             check_where_columns(l, fields, context_var, table)?;
             check_where_columns(r, fields, context_var, table)
@@ -558,6 +592,12 @@ fn validate_where_expr(
             db_tables,
             entity_fields_by_table,
         ),
+        WhereExpr::InList { values, .. } => {
+            for v in values {
+                validate_expr(v, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+            }
+            Ok(())
+        }
         WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
             validate_where_expr(l, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
             validate_where_expr(r, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
@@ -1698,11 +1738,36 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse `select [Entity|*] from CTX.TABLE
-    ///        [where FIELD OP EXPR]
+    /// Parse `select [Entity|*|count(*)] from CTX.TABLE
+    ///        [where COND [and|or COND ...]]
     ///        [orderby FIELD [asc|desc]]
     ///        [limit N] [offset N] [first]`
     fn parse_select_expr(&mut self) -> Result<Expr> {
+        // `count(*)` aggregation form
+        if self.check_ident_eq("count") {
+            self.bump()?;
+            self.expect_symbol('(')?;
+            self.expect_symbol('*')?;
+            self.expect_symbol(')')?;
+
+            let from_kw = self.expect_ident("expected 'from' after count(*)")?;
+            if !from_kw.eq_ignore_ascii_case("from") {
+                return Err(self.error_here("expected 'from' after count(*)"));
+            }
+            let (ctx, table) = self.parse_db_ref()?;
+            let where_clause = if self.check_ident_eq("where") {
+                self.bump()?;
+                Some(Box::new(self.parse_where_or()?))
+            } else {
+                None
+            };
+            return Ok(Expr::DbCount {
+                context_var: ctx,
+                table,
+                where_clause,
+            });
+        }
+
         // entity name or `*`
         let entity = if self.check_symbol('*') {
             self.bump()?;
@@ -1810,7 +1875,32 @@ impl<'a> Parser<'a> {
         }
 
         let field = self.parse_field_path()?;
-        let op = self.parse_cmp_op()?;
+
+        if self.check_ident_eq("in") {
+            self.bump()?;
+            self.expect_symbol('(')?;
+            let mut values = Vec::new();
+            if !self.check_symbol(')') {
+                values.push(self.parse_in_value()?);
+                while self.check_symbol(',') {
+                    self.expect_symbol(',')?;
+                    values.push(self.parse_in_value()?);
+                }
+            }
+            self.expect_symbol(')')?;
+            if values.is_empty() {
+                return Err(self.error_here("'in (...)' must list at least one value"));
+            }
+            return Ok(WhereExpr::InList { field, values });
+        }
+
+        let op = if self.check_ident_eq("like") {
+            self.bump()?;
+            "like".to_string()
+        } else {
+            self.parse_cmp_op()?
+        };
+
         let rhs = if self.check_symbol('@') {
             self.bump()?;
             let param = self.expect_ident("expected parameter name after '@'")?;
@@ -1819,6 +1909,15 @@ impl<'a> Parser<'a> {
             self.parse_expr()?
         };
         Ok(WhereExpr::Atom(DbWhere { field, op, rhs }))
+    }
+
+    fn parse_in_value(&mut self) -> Result<Expr> {
+        if self.check_symbol('@') {
+            self.bump()?;
+            let name = self.expect_ident("expected parameter name after '@' in 'in (...)'")?;
+            return Ok(Expr::Var(name));
+        }
+        self.parse_expr()
     }
 
     /// Accepts `@param`, integer literal, or any expression — runtime ensures
@@ -2233,6 +2332,135 @@ mod tests {
             },
             _ => panic!("expected Let stmt"),
         }
+    }
+
+    #[test]
+    fn parses_select_count_aggregation() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                country varchar(2);
+            }
+
+            function total(country) {
+                let n = select count(*) from AppDb.User where User.country == @country;
+                return n;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbCount {
+                    table,
+                    where_clause,
+                    ..
+                } => {
+                    assert_eq!(table, "User");
+                    assert!(where_clause.is_some());
+                }
+                _ => panic!("expected DbCount"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn count_with_unknown_column_in_where_fails_validation() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb { id uuid pk; }
+
+            function total() {
+                let n = select count(*) from AppDb.User where User.missing == 1;
+                return n;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Unknown column 'missing'"));
+    }
+
+    #[test]
+    fn parses_where_with_like_operator() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                email varchar(120);
+            }
+
+            function search(q) {
+                let xs = select User from AppDb.User where User.email like @q;
+                return xs;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect { where_clause, .. } => {
+                    let wc = where_clause.as_ref().unwrap();
+                    let atom = match wc.as_ref() {
+                        crate::ast::WhereExpr::Atom(a) => a,
+                        _ => panic!("expected atom"),
+                    };
+                    assert_eq!(atom.op, "like");
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn parses_where_with_in_list() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                role varchar(20);
+            }
+
+            function admins() {
+                let xs = select User from AppDb.User where User.role in ("admin", "owner");
+                return xs;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect { where_clause, .. } => {
+                    let wc = where_clause.as_ref().unwrap();
+                    match wc.as_ref() {
+                        crate::ast::WhereExpr::InList { field, values } => {
+                            assert_eq!(field, "User.role");
+                            assert_eq!(values.len(), 2);
+                        }
+                        _ => panic!("expected InList"),
+                    }
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn in_with_empty_list_fails_to_parse() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb { id uuid pk; }
+
+            function empty() {
+                let xs = select User from AppDb.User where User.id in ();
+                return xs;
+            }
+        "#;
+        let err = parse_program(src).unwrap_err().to_string();
+        assert!(err.contains("at least one value"));
     }
 
     #[test]

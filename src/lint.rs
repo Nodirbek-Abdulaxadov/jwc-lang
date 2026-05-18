@@ -148,6 +148,11 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
                 collect_calls_expr(o, out);
             }
         }
+        Expr::DbCount { where_clause, .. } => {
+            if let Some(wc) = where_clause {
+                collect_calls_where(wc, out);
+            }
+        }
         Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)
@@ -162,6 +167,11 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
 fn collect_calls_where(wc: &WhereExpr, out: &mut std::collections::HashSet<String>) {
     match wc {
         WhereExpr::Atom(atom) => collect_calls_expr(&atom.rhs, out),
+        WhereExpr::InList { values, .. } => {
+            for v in values {
+                collect_calls_expr(v, out);
+            }
+        }
         WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
             collect_calls_where(l, out);
             collect_calls_where(r, out);

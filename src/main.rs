@@ -7,6 +7,7 @@ mod lexer;
 mod lint;
 mod migrate;
 mod parser;
+mod password;
 mod project;
 mod runner;
 mod server;

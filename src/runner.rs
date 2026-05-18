@@ -668,6 +668,60 @@ impl<'a> Vm<'a> {
                     ),
                 }
             }
+            Expr::DbCount {
+                context_var: _,
+                table,
+                where_clause,
+            } => {
+                let table_name = crate::sql::to_snake_case(table);
+                let mut shape_bits: Vec<String> = Vec::new();
+                let mut cache_bits: Vec<String> = Vec::new();
+                let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+
+                let where_sql = if let Some(wc) = where_clause {
+                    let s = build_where_sql(
+                        wc,
+                        &mut params,
+                        &mut shape_bits,
+                        &mut cache_bits,
+                        vars,
+                        self,
+                    )?;
+                    format!(" WHERE {}", s)
+                } else {
+                    String::new()
+                };
+
+                let sql = format!(
+                    "SELECT COUNT(*)::text FROM \"{}\"{};",
+                    table_name, where_sql
+                );
+                let shape_key = format!(
+                    "count|table:{table_name}|{}",
+                    if shape_bits.is_empty() {
+                        "no_where".to_string()
+                    } else {
+                        shape_bits.join("|")
+                    }
+                );
+                let cache_key = format!(
+                    "result|count|table:{table_name}|{}",
+                    if cache_bits.is_empty() {
+                        "no_where".to_string()
+                    } else {
+                        cache_bits.join("|")
+                    }
+                );
+
+                let param_refs = boxed_params_to_refs(&params);
+                let compiled = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
+                let result =
+                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs)?;
+                let n = result.trim().parse::<i64>().with_context(|| {
+                    format!("count(*): expected integer text, got '{}'", result.trim())
+                })?;
+                Ok(Value::Int(n))
+            }
             Expr::DbSelect {
                 entity: _,
                 context_var: _,
@@ -740,6 +794,14 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("jwt_verify") {
                     return self.eval_jwt_verify_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("hash_password") {
+                    return self.eval_hash_password_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("verify_password") {
+                    return self.eval_verify_password_call(args, vars);
                 }
 
                 if name.eq_ignore_ascii_case("unauthorized") {
@@ -1472,6 +1534,49 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(crate::jwt::verify_hs256(&token, &secret)?))
     }
 
+    fn eval_hash_password_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("hash_password(pwd) expects exactly 1 arg");
+        }
+        let pwd = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "hash_password(pwd): pwd must be string, got {}",
+                other.type_name()
+            ),
+        };
+        Ok(Value::Str(crate::password::hash_password(&pwd)?))
+    }
+
+    fn eval_verify_password_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("verify_password(pwd, stored_hash) expects exactly 2 args");
+        }
+        let pwd = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "verify_password(pwd, hash): pwd must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let stored = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "verify_password(pwd, hash): hash must be string, got {}",
+                other.type_name()
+            ),
+        };
+        Ok(Value::Bool(crate::password::verify_password(&pwd, &stored)?))
+    }
+
     fn eval_header_call(
         &mut self,
         args: &[Expr],
@@ -1651,6 +1756,7 @@ fn normalize_sql_op(op: &str) -> &str {
         "<=" => "<=",
         ">" => ">",
         ">=" => ">=",
+        "like" => "LIKE",
         _ => "=",
     }
 }
@@ -1917,6 +2023,23 @@ fn build_where_sql(
                     format!("\"{}\" {} ${}", col, op, idx)
                 }
             })
+        }
+        WhereExpr::InList { field, values } => {
+            let col = field_path_to_col(field);
+            if values.is_empty() {
+                bail!("WHERE 'in (...)' must have at least one value");
+            }
+            let mut placeholders = Vec::with_capacity(values.len());
+            let mut cache_parts = Vec::with_capacity(values.len());
+            for value_expr in values {
+                let v = vm.eval_expr(value_expr, vars)?;
+                params.push(value_to_sql_param(&v));
+                placeholders.push(format!("${}", params.len()));
+                cache_parts.push(value_to_cache_fragment(&v));
+            }
+            shape.push(format!("where:{col}:in({})", values.len()));
+            cache.push(format!("where:{col}:in[{}]", cache_parts.join(",")));
+            Ok(format!("\"{}\" IN ({})", col, placeholders.join(", ")))
         }
         WhereExpr::And(l, r) => {
             let ls = build_where_sql(l, params, shape, cache, vars, vm)?;

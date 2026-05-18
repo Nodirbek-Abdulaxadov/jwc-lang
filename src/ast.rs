@@ -115,6 +115,8 @@ pub struct DbWhere {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhereExpr {
     Atom(DbWhere),
+    /// `field in (expr1, expr2, ...)` — SQL `"field" IN ($1, $2, ...)`.
+    InList { field: String, values: Vec<Expr> },
     And(Box<WhereExpr>, Box<WhereExpr>),
     Or(Box<WhereExpr>, Box<WhereExpr>),
 }
@@ -210,6 +212,12 @@ pub enum Expr {
     FieldGet { var: String, field: String },
     /// `new EntityName()` — creates an empty JSON object `{}`
     NewEntity { entity: String },
+    /// `select count(*) from CTX.TABLE [where COND ...]` — returns `int`.
+    DbCount {
+        context_var: String,
+        table: String,
+        where_clause: Option<Box<WhereExpr>>,
+    },
     /// `select [Entity|*] from CTX.TABLE [where COND [and|or COND ...]]
     ///                                    [orderby FIELD [asc|desc]]
     ///                                    [limit N] [offset N] [first]`

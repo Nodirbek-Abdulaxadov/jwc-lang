@@ -94,7 +94,9 @@
 - `orderby <field> [asc|desc]`, `limit N`, `offset N` AST + parser + runner.
 - `@param` referensi `limit`/`offset` ichida.
 - Compound `where` — `and`/`or` + qavslar, `and` `or`dan yuqori precedence.
-- **Qoldi:** `join`, `in`/`between` operatorlari.
+- Operatorlar: `like @p`, `in (@a, @b, ...)`.
+- `select count(*) from CTX.Table [where ...]` → `int`.
+- **Qoldi:** `join`, `between`.
 
 ### 2.3 `try / catch` ✅
 - Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.
@@ -185,6 +187,7 @@
 - **Standard library ⏳ partial:**
   - ✅ Http client: `http_get(url[, headers])`, `http_post(url[, body[, headers]])` — `ureq` orqali, JSON envelope qaytaradi.
   - ✅ Auth: `jwt_sign(payload_json, secret)` / `jwt_verify(token, secret)` — HS256 (hmac + sha2 + base64).
+  - ✅ Password hashing: `hash_password(pwd)` / `verify_password(pwd, hash)` — Argon2id (argon2 crate).
   - ⬜ Qoldi: Cache (Redis), Queue (BullMQ-like), Email, Storage, Websocket.
 - **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
 - **JWC Hub:** `hub.jwc.dev` — paket registry.

@@ -222,6 +222,19 @@ let posted = http_post(
 - 2nd arg of `http_post` is the request body; pass `null` for empty.
 - 3rd arg (optional) is a JSON object of headers.
 
+## Password hashing (Argon2id)
+
+```jwc
+let hash = hash_password("hunter2");          // PHC-format string
+let ok   = verify_password("hunter2", hash);  // → true
+let bad  = verify_password("wrong", hash);    // → false
+```
+
+- `hash_password` uses Argon2id with a freshly generated random salt — each
+  call returns a different hash even for the same input.
+- `verify_password` returns a bool; it throws only if the stored hash is
+  malformed, so wrap it in `try` only when reading untrusted hash storage.
+
 ## JWT (HS256)
 
 ```jwc
@@ -250,12 +263,26 @@ function listAdults(country, min) {
 function findOne(id) {
     return select User from db.Users where User.id == @id first;
 }
+
+function searchByEmail(prefix) {
+    return select User from db.Users where User.email like @prefix;
+}
+
+function admins() {
+    return select User from db.Users where User.role in ("admin", "owner");
+}
+
+function totalIn(country) {
+    return select count(*) from db.Users where User.country == @country;
+}
 ```
 
 - Compound `where`: `and`/`or` with parentheses; `and` binds tighter than `or`.
+- Operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `like`, `in (...)`.
 - `orderby <field> [asc|desc]` — default direction is ascending.
 - `limit N` / `offset N` accept integer literals or `@param` references.
 - `first` forces `LIMIT 1` and returns a single row instead of an array.
+- `select count(*) from CTX.Table [where ...]` returns an `int`.
 
 ## Async / Await (forward-compatible syntax)
 

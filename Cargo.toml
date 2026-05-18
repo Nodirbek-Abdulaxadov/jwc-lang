@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+argon2 = { version = "0.5", features = ["std"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 hmac = "0.12"
