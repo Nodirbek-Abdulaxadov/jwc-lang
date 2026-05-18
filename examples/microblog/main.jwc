@@ -1,0 +1,237 @@
+// microblog — exercises: dbcontext, entities + FK + navigation, classes,
+// middleware (JWT auth), transactions, validate body, password hashing,
+// JWT sign/verify, cache, projection, compound where + like + count,
+// pagination, body validation. Real backend touch test.
+
+dbcontext AppDb : Postgres;
+
+entity User of AppDb {
+    id uuid pk;
+    username varchar(40);
+    email varchar(120);
+    password_hash varchar(255);
+    created_at datetime;
+    posts: List<Post> via Post.author_id;
+}
+
+entity Post of AppDb {
+    id uuid pk;
+    author_id uuid references User.id on delete cascade;
+    title varchar(200);
+    body text;
+    created_at datetime;
+    comments: List<Comment> via Comment.post_id;
+}
+
+entity Comment of AppDb {
+    id uuid pk;
+    post_id uuid references Post.id on delete cascade;
+    author_id uuid references User.id on delete cascade;
+    body text;
+    created_at datetime;
+}
+
+class RegisterReq {
+    username string;
+    email string;
+    password string;
+}
+
+class LoginReq {
+    username string;
+    password string;
+}
+
+class PostCreateReq {
+    title string;
+    body string;
+}
+
+class CommentCreateReq {
+    body string;
+}
+
+// -------------------- middleware --------------------
+
+middleware AuthMw {
+    let token = header("authorization");
+    if (token == null) {
+        return unauthorized();
+    }
+    // Try cache first to avoid repeated jwt_verify cost on hot paths.
+    let cached_user = cache_get("session:" + token);
+    if (cached_user != null) {
+        setContext("userId", cached_user);
+    } else {
+        try {
+            let claims = jwt_verify(token, env("JWT_SECRET"));
+            let sub = claims.sub;
+            cache_set("session:" + token, sub, 60);
+            setContext("userId", sub);
+        } catch (e) {
+            return unauthorized();
+        }
+    }
+}
+
+// -------------------- auth --------------------
+
+route POST "register" {
+    validate body {
+        username: required, minLength(3), maxLength(40);
+        email: required, pattern("^[^@]+@[^@]+\\.[^@]+$");
+        password: required, minLength(8), maxLength(200);
+    }
+
+    let req = body();
+    transaction {
+        let u = new User();
+        u.id = uuid();
+        u.username = req.username;
+        u.email = req.email;
+        u.password_hash = hash_password(req.password);
+        u.created_at = now();
+        insert u into AppDb.User;
+    }
+    return created(json("registered"));
+}
+
+route POST "login" {
+    validate body {
+        username: required;
+        password: required;
+    }
+    let req = body();
+    let uname = req.username;
+    let u = select User from AppDb.User where User.username == @uname first;
+    if (u == null) {
+        return unauthorized();
+    }
+    let ok = verify_password(req.password, u.password_hash);
+    if (ok == false) {
+        return unauthorized();
+    }
+    let payload = "{\"sub\":\"" + u.id + "\"}";
+    let token = jwt_sign(payload, env("JWT_SECRET"));
+    return json("{\"token\":\"" + token + "\"}");
+}
+
+route GET "me" use AuthMw {
+    let id = context("userId");
+    let u = select User { id, username, email, created_at }
+        from AppDb.User where User.id == @id first;
+    if (u == null) { return notFound(); }
+    return json(u);
+}
+
+// -------------------- posts CRUD --------------------
+
+route POST "posts" use AuthMw {
+    validate body {
+        title: required, minLength(1), maxLength(200);
+        body: required, minLength(1);
+    }
+    let req = body();
+    let author = context("userId");
+    let p = new Post();
+    p.id = uuid();
+    p.author_id = author;
+    p.title = req.title;
+    p.body = req.body;
+    p.created_at = now();
+    insert p into AppDb.Post;
+    return created(p);
+}
+
+route GET "posts" {
+    let q = query_param("q");
+    let limit = query_param("limit", "20");
+    let offset = query_param("offset", "0");
+
+    let items = select Post from AppDb.Post
+        where Post.title like @q
+        orderby Post.created_at desc
+        limit @limit offset @offset;
+
+    let total = select count(*) from AppDb.Post where Post.title like @q;
+
+    return json("{\"items\":" + items + ",\"total\":" + total + "}");
+}
+
+route GET "posts/{id}" {
+    let id = path_param("id");
+    let p = select Post with comments from AppDb.Post
+        where Post.id == @id first;
+    if (p == null) { return notFound(); }
+    return json(p);
+}
+
+route DELETE "posts/{id}" use AuthMw {
+    let id = path_param("id");
+    let owner = context("userId");
+    let p = select Post from AppDb.Post where Post.id == @id first;
+    if (p == null) { return notFound(); }
+    if (p.author_id != owner) {
+        return forbidden();
+    }
+    delete from AppDb.Post where Post.id == @id;
+    return noContent();
+}
+
+// -------------------- comments --------------------
+
+route POST "posts/{id}/comments" use AuthMw {
+    validate body {
+        body: required, minLength(1), maxLength(1000);
+    }
+    let id = path_param("id");
+    let req = body();
+    let author = context("userId");
+    let c = new Comment();
+    c.id = uuid();
+    c.post_id = id;
+    c.author_id = author;
+    c.body = req.body;
+    c.created_at = now();
+    insert c into AppDb.Comment;
+    return created(c);
+}
+
+route DELETE "posts/{post_id}/comments/{id}" use AuthMw {
+    let id = path_param("id");
+    let owner = context("userId");
+    let c = select Comment from AppDb.Comment where Comment.id == @id first;
+    if (c == null) { return notFound(); }
+    if (c.author_id != owner) {
+        return forbidden();
+    }
+    delete from AppDb.Comment where Comment.id == @id;
+    return noContent();
+}
+
+// -------------------- stats --------------------
+
+route GET "stats" {
+    let users = select count(*) from AppDb.User;
+    let posts = select count(*) from AppDb.Post;
+    let comments = select count(*) from AppDb.Comment;
+    return json(
+        "{\"users\":" + users +
+        ",\"posts\":" + posts +
+        ",\"comments\":" + comments + "}"
+    );
+}
+
+// -------------------- helpers --------------------
+
+function now(): datetime {
+    // Postgres-side now() would be cleaner; this is a stand-in placeholder
+    // until JWC ships a real `datetime` helper or a way to bind SQL-side
+    // defaults to entity fields.
+    return "2026-05-19T12:00:00Z";
+}
+
+function main() {
+    setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);
+    serve(8080);
+}
