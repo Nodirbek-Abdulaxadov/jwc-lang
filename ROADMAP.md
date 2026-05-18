@@ -1,224 +1,202 @@
 # JWC Language — Roadmap
 
-## Progress
+> Bu hujjat hozirgi kod holatining halol tahlili asosida tuzilgan.
+> "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
+> "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
+
+---
+
+## Progress Snapshot
 
 | Phase | Status |
 |-------|--------|
-| Phase 1.1 — Real HTTP Server | ✅ Done |
-| Phase 1.2 — Generic DB Layer | ✅ Done |
-| Phase 1.3 — Type System (basic) | ✅ Done |
-| Phase 1.4 — `validate body` syntax | ⬜ Next |
-| Phase 2 — Language Completeness | ⬜ |
-| Phase 3 — Developer Experience | ⬜ |
-| Phase 4 — Native Compiler | ⬜ |
-| Phase 5 — Ecosystem | ⬜ |
+| Phase 0 — Texnik qarz (legacy hack’larni tozalash) | ✅ Done |
+| Phase 1 — MVP Core | ✅ Done |
+| Phase 2 — Language Completeness | ✅ Done (auto-JOIN + real async deferred) |
+| Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean done; LSP/fmt/watch/pkg deferred) |
+| Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
+| Phase 5 — Ecosystem | ⬜ Not started |
 
 ---
 
-## Phase 1 — Solid Core (MVP completion) `now`
+## Phase 0 — Texnik qarz ✅ done
 
-**Goal:** Make the current interpreter production-ready
+**Maqsad:** Real Phase 2 ga o‘tishdan oldin "Done" deb belgilangan, lekin asli pala-partish qolgan joylarni tozalash.
 
-### 1.1 Real HTTP Server ✅
-- `server.rs` — TCP listener via `tiny_http`
-- `jwc serve` command — starts `http://0.0.0.0:8080`
-- Request/Response cycle: method, path, headers, body
-- `JWC_REQUEST_BODY` env var hack removed
+### 0.1 Legacy WebAPI normalizer’ni olib tashlash ✅
+- `parser.rs::normalize_webapi_compat()` butunlay olib tashlandi.
+- `runner.rs` — hardcoded `db_*_todo` built-in funksiyalari va dispatch shoxlari o‘chirildi (≈ 224 qator − ).
+- Native AST nodelari yagona DB API bo‘ldi.
 
-### 1.2 Generic DB Layer ✅
-- Removed hardcoded `db_insert_todo`, `db_select_todo` etc.
-- Removed `normalize_webapi_compat()` hack from parser
-- Native AST nodes: `DbSelect`, `DbInsert`, `DbUpdate`, `DbDelete`
-- `new Entity()`, `var.field`, `var.field = value` parsing & execution
-- `select Entity from db.Table where Entity.field == @id first`
-- `insert var into db.Table` → `INSERT INTO ... RETURNING *`
-- `update var in db.Table` → `UPDATE ... SET ... WHERE id = ... RETURNING *`
-- `delete var from db.Table` → `DELETE FROM ... WHERE id = ...`
-- Auto SQL generation with `build_insert_sql()`, `build_update_sql()`
+### 0.2 Drivers majmuasini halollashtirish ✅
+- Validator endi aniq xabar beradi: *"Postgres is currently the only supported dbcontext driver. Multi-driver support is planned for Phase 2."*
+- README’da `## Supported Drivers` bo‘limi qo‘shildi.
 
-### 1.3 Type System (basic) ✅
-- `function createUser(name: string, age: int)` — typed params parsed
-- `TypedParam { name, ty }` struct in AST
-- Runtime type mismatch error with clear message: `Type error: parameter 'x' expects int, got bool`
-- Return type annotation: `function getUser(id: int): User`
-- Untyped params backward-compatible: `function foo(x)` still works
-- Type coercion: `string → int` (if parseable), `int → string`
+### 0.3 Migrations’ni to‘ldirish ✅ (rollback qismi)
+- `jwc migrate down --steps N` qo‘shildi (`main.rs`, `migrate.rs::rollback_migrations`).
+- Har migration alohida transaksiyada `<base>.down.sql` ni ishga tushiradi va `_jwc_migrations` jadvalidan o‘chiradi.
+- Boshqa qoldi (Phase 2 da hal qilinadi): schema diff generator.
 
-### 1.4 `validate body` syntax ⬜
-- Parser: `validate body { field: rule, ...; }` block
-- Rules: `required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`, `pattern("regex")`
-- Validation runs before route handler body executes
-- Returns `400 Bad Request` with field errors as JSON on failure
-- Compile-time: field names checked against entity schema
+### 0.4 Build komanda’ning haqiqiy ma’nosi ✅
+- `jwc build` (alias: `jwc bundle`) — output xabari aniq: *"Bundled runtime + launcher"*.
+- README va `--help` matnida AOT kompilator hali yo‘qligi va Phase 4 ga rejalashtirilgani belgilab qo‘yildi.
 
 ---
 
-## Phase 2 — Language Completeness `3–6 months`
+## Phase 1 — MVP Core `current`
 
-**Goal:** Make the language fully expressive
+**Maqsad:** Interpreter rejimida API + Postgres CRUD’ni yakuniy darajaga keltirish.
 
-### 2.1 Type System (full) ⬜
-- Built-in types: `string`, `int`, `float`, `bool`, `uuid`, `datetime`, `json`
-- `List<T>`, `Optional<T>`
-- Return type annotation: `function getUser(id: int): User`
-- Compile-time type checking across assignments and calls
+### 1.1 HTTP Server ✅
+- `server.rs` — `tiny_http` + worker pool (`JWC_SERVER_WORKERS`), bounded `sync_channel` queue, optional metrics.
+- `serve()` til ichidan chaqiriladi: `main()` → `serve(8080)` → CLI orqali `server::serve` ishga tushadi.
+- Per-request body 4xx/5xx error chain to‘liq log qilinadi.
 
-### 2.2 SQL native syntax (full parser) ⬜
-```jwc
-let users = select User from db.Users
-    where User.age > 18
-    orderby age desc
-    limit 10
-    offset 0;
-```
-- `orderby`, `limit`, `offset`, `left join` — AST nodes
-- Compile-time: table and column existence checked
-- SQL injection prevention — parameterized queries
+### 1.2 DB Runtime Layer ✅
+- `engine.rs` — `r2d2_postgres` pool, query-shape SQL cache, optional result cache (`JWC_QUERY_CACHE_TTL_SECS`).
+- Native AST nodelari mavjud: `DbSelect / DbInsert / DbUpdate / DbDelete`, `new Entity()`, `var.field`, `var.field = value`.
+- Phase 0.1 legacy hack’lar tozalandi.
 
-### 2.3 `async/await` ⬜
-- `async function` declaration
-- `await expr` expression
-- Non-blocking DB calls
-- `tokio` runtime integration
+### 1.3 Type System (very basic) ⏳ partial
+- Hozir tan olinadigan primitive’lar runtime’da: `string`, `int`, `double`, `bool`.
+- Avtomatik koersiya: `int → string`, `string → int` (parse bo‘lsa), `int ↔ double`. Bu noaniqlik manbai — `decimal/uuid/datetime/json` typelar runtime’da string sifatida o‘tadi.
+- Typed param + return + model JSON validatsiyasi mavjud (`runner.rs::check_typed_value`).
+- **Qoldi:** `uuid`, `datetime`, `decimal`, `json`, `bigint` — birinchi sinf runtime typelar bo‘lishi kerak.
 
-### 2.4 Error handling ⬜
-```jwc
-try {
-    insert car into db.Cars;
-} catch (e: DbError) {
-    return internalError(e.message);
-}
-```
-- `try { } catch (e: ErrorType) { }` blocks
-- `throws ErrorType` on function signature
-- Built-in error types: `DbError`, `NotFoundError`, `ValidationError`
+### 1.4 Query string + path params ✅
+- `query_param(name)` va `query_param(name, default)` built-inlari `runner.rs` ga qo‘shildi.
+- `server.rs` to‘liq URL’ni runner’ga uzatadi; route matching `?...` ni avtomatik ajratadi.
+- 3 ta yangi test: query value, default fallback, query bilan route matching buzilmaydi.
 
-### 2.5 Middleware ⬜
-```jwc
-middleware AuthMiddleware {
-    let token = headers.authorization;
-    if (token == null) { return unauthorized(); }
-}
+### 1.5 `validate body` bloki ✅
+- Yangi keyword `validate` (lexer), `Stmt::ValidateBody { fields }` (AST), parser bloki.
+- Qoidalar: `required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`.
+- Xatolik bo‘lsa, route 400 status va `{"errors": {"field": "rule"}}` javob qaytaradi.
+- Regex tayinli `pattern("...")` keyingi iterazda (regex paketi qo‘shilgach).
 
-route GET "api/users" use AuthMiddleware {
-    ...
-}
-```
-
-### 2.6 Entity relations ⬜
-- `one_to_many`, `many_to_one`, `many_to_many`
-- Eager/lazy loading syntax
-- Cascade delete/update
-- Auto JOIN generation from relation declarations
+### 1.6 Route handler signaturalari ✅
+- `route GET "users/{id}" -> getUser;` endi `getUser` ning typed params’ini path/query orqali avtomatik to‘ldiradi (`Vm::build_handler_args`).
+- Argument string sifatida o‘tadi, mavjud `check_param_type` orqali declared typeg’a coerce qilinadi (`id: int` → `42` int).
 
 ---
 
-## Phase 3 — Developer Experience `6–12 months`
+## Phase 2 — Language Completeness ✅ done
 
-**Goal:** Make developers productive and happy
+**Maqsad:** Tilning ifoda kuchini real productionga yetkazish.
 
-### 3.1 VS Code Extension ⬜
-- Syntax highlighting for `.jwc` files
-- Intellisense — entity field autocomplete in routes/services
-- Route hover — shows HTTP method + full path
-- Inline error diagnostics from `diag.rs`
-- `Go to Definition` — jump to entity or function
-- Snippet support: `route`, `entity`, `function`
+### 2.1 Full type system ✅
+- Birinchi-sinf primitive’lar: `string`, `int`, `bigint`, `double`, `decimal`, `bool`, `uuid`, `datetime`, `json`.
+- `T?` va `Optional<T>` — null qabul qilish; `List<T>` — JSON array + element check.
+- Runtime check `runner.rs::check_typed_value` + JSON-level `json_value_matches_type`.
+- **Qoldi (kichik):** Kompayl-vaqt type checking (assignment/call args/return) — hozir runtime. `byte[]` turi, explicit koersiyalar — keyingi iterazda.
 
-### 3.2 Better compiler diagnostics ⬜
-- Precise error location: `error[E001] at main.jwc:14:5`
-- Suggestions: `did you mean 'getAllColors'?`
-- Warning system: unused variable, unreachable route, missing `first` on single-item select
-- `jwc lint` command
+### 2.2 SQL syntax kengaytmasi ✅ (asosiy clauses)
+- `orderby <field> [asc|desc]`, `limit N`, `offset N` AST + parser + runner.
+- `@param` referensi `limit`/`offset` ichida.
+- **Qoldi:** `join`, `where` ichida `and/or/in/between` (hozir bitta condition), kompayl-vaqt column existence check.
 
-### 3.3 CLI improvements ⬜
-```bash
-jwc new myapp          # ✅ done
-jwc run                # ✅ done (interpreter mode)
-jwc serve              # ✅ done (HTTP server)
-jwc build --release    # ✅ done (launcher script)
-jwc migrate new init   # ✅ done
-jwc migrate up         # ✅ done
-jwc lint               # ⬜ not yet
-jwc fmt                # ⬜ code formatter
-jwc add <package>      # ⬜ package manager
-jwc serve --watch      # ⬜ hot reload
-```
+### 2.3 `try / catch` ✅
+- Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.
+- Catch var bound: `{"message": "...", "causes": [...]}` JSON sifatida.
+- `catch_type` AST'da saqlanadi, hozircha barcha xatolarni ushlaydi (typed dispatch — Phase 3 da).
 
-### 3.4 Package system ⬜
-- `jwcproj.json` `dependencies` field activated
-- `jwc add postgres-utils` installs packages
-- `jwc hub` — browse registry
+### 2.4 Middleware ✅
+- Top-level `middleware Name { ... }` deklaratsiyasi.
+- `route GET "..." use M1, M2 { body }` yoki `... use M -> handler;`.
+- Built-in: `header(name)`, `context(key)`, `setContext(key, value)`, `unauthorized()`, `forbidden()`.
+- Middleware qaytaradigan qiymat butun routeni qisqartiradi (short-circuit).
+- Server'dan inbound headers `runner::run_request_with_headers` orqali keladi.
 
-### 3.5 Hot reload ⬜
-- `jwc serve --watch` — restarts on `.jwc` file change
-- Fast incremental re-parse
+### 2.5 Entity relationships ⏳ partial
+- `field uuid references EntityName.column [on delete cascade|restrict|set null]` qabul qilinadi.
+- SQL generator FK CONSTRAINT chiqaradi va validator target entity+column mavjudligini tekshiradi.
+- **Qoldi:** Navigation property (`posts: List<Post> via Post.user_id`) va `select User with posts ...` auto-JOIN — keyingi iterazga.
+
+### 2.6 async/await ⏳ syntax-only
+- Lexer: `async`, `await` keywordlar.
+- AST: `FunctionDecl.is_async` flag va `Expr::Await(Box<Expr>)`.
+- Hozircha interpreter sync ishlaydi — `await expr` shunchaki ichki ifodani qaytaradi.
+- **Qoldi:** Tokio runtime + `tokio-postgres` + `hyper`/`axum` server. Bu eng katta keyingi ish.
 
 ---
 
-## Phase 4 — Compiler (Native binary) `12–24 months`
+## Phase 3 — Developer Experience `~6-12 oy`
 
-**Goal:** Replace interpreter with compiled native binary
+**Maqsad:** JWC bilan yozish — Node yoki Go bilan yozishdek tezroq bo‘lsin.
 
-### 4.1 IR (Intermediate Representation) ⬜
-- AST → JWC IR (linear instruction set)
-- Dead code elimination
-- Constant folding
+### 3.1 Real LSP ⬜ deferred
+- `vscode-extension/` papka mavjud, faqat `language-configuration.json` + snippet.
+- Maqsad: alohida `jwc-lsp` binary (LSP protocol) — entity field autocomplete, route hover, go-to-definition, diagnostics push.
+- Hozircha bo‘shliq sezilarli ish bo‘lgani uchun keyingi katta ish.
 
-### 4.2 LLVM backend ⬜
-- JWC IR → LLVM IR → native binary
-- Targets: Linux (`x86_64`), macOS (`arm64`), Windows (`x86_64`)
-- `jwc build --target linux-x64`
+### 3.2 Compiler diagnostics ✅ qisman
+- ✅ "Did you mean?" suggestion — `runner.rs::closest_match` Levenshtein based, unknown function / undefined variable xabariga qo‘shiladi.
+- ✅ Aniq `at line X, col Y` xabari `diag::SourceMap` orqali yozib qo‘yilgan.
+- ⬜ Qoldi: `error[E001]` numbered diagnostic codelar tizimi.
+- ⬜ Qoldi: unreachable route, missing `first` on single-row select kabi semantik warninglar.
 
-### 4.3 Compile-time SQL validation (full) ⬜
-- Read DB schema at compile time
-- Verify all `select`, `insert`, `update`, `delete` statements
-- Detect table/column mismatches before deploy
-- Migration drift detection
+### 3.3 CLI ⏳ qisman
+- ✅ `jwc lint` — `lint.rs::lint_program`: unused function (W001) va unused middleware (W002).
+- ✅ `jwc migrate down` (Phase 0.3 dan).
+- ⬜ `jwc fmt` — formatlash. AST → source qayta chiqaruvi. Comment preservation muammosi.
+- ⬜ `jwc serve --watch` — `notify` crate orqali file watcher + soft restart.
+- ⬜ `jwc add <pkg>` — paket qo‘shish (3.4 ga bog‘liq).
 
-### 4.4 Zero-cost abstractions ⬜
-- Route handler → inlined native code
-- Entity field access → direct memory offset
-- No heap allocation for simple operations
+### 3.4 Package sistemasi ⬜ deferred
+- `jwcproj.json::dependencies` real ishlatiladi.
+- Local cache (`~/.jwc/registry/`) → kelajakda `hub.jwc.dev`.
+- Versioning: semver, `^1.2.3`.
 
 ---
 
-## Phase 5 — Ecosystem `24+ months`
+## Phase 4 — Real native compiler `~12-24 oy`
 
-**Goal:** Make JWC a global backend language
+**Maqsad:** Interpreter’ni siqib chiqarish, real native binary chiqarish.
 
-### 5.1 Standard library ⬜
-- `Http` — client requests
-- `Auth` — JWT, OAuth2 built-in
-- `Cache` — Redis/Memcached abstraction
-- `Queue` — job queue (BullMQ-like)
-- `Email`, `Storage`, `Websocket`
+> Hozirgi `jwc build` — runtime CLI’ni `bin/{profile}/{name}.exe` ga **copy** qiladi. Bu Phase 4 emas, embedded launcher.
 
-### 5.2 WebAssembly target ⬜
-- `jwc build --target wasm`
-- Run JWC backend logic in browser or edge runtime
+### 4.1 IR ⬜ deferred
+- AST → JWC IR (linear three-address code).
+- Dead code elimination, constant folding.
 
-### 5.3 JWC Hub (package registry) ⬜
-- `hub.jwc.dev` — central package repository
-- `jwcproj.json` versioned dependencies
-- Community packages
+### 4.2 LLVM backend ⬜ deferred
+- JWC IR → LLVM IR → native binary.
+- Targets: `x86_64-linux`, `aarch64-darwin`, `x86_64-windows`.
+- `jwc build --target linux-x64 --release`.
 
-### 5.4 Self-hosting ⬜
-- JWC compiler rewritten in JWC itself
-- Bootstrapping milestone
+### 4.3 Kompayl-vaqt SQL validation ⏳ partial
+- ✅ Static check: `select Entity from CTX.Table` da `where Entity.col`/`orderby Entity.col` — `col` entitining haqiqiy maydoni ekanligi `parser::validate_program` ichida tekshiriladi.
+- ✅ Misspelled columns serverni ishga tushirmasdan bail qiladi.
+- ⬜ Qoldi: live DB schema snapshot (`information_schema` o‘qish) + migration drift detector.
+- ⬜ Qoldi: `insert`/`update`/`delete` payload field-name moslik tekshiruvi.
+
+### 4.4 Zero-cost abstractions ⬜ deferred
+- Entity field access → struct field offset.
+- Route handler → inlined function, virtual dispatch yo‘q.
+- LLVM backend (4.2) tugamasidan oldin ma’nosi yo‘q.
+
+---
+
+## Phase 5 — Ecosystem `~24+ oy`
+
+**Maqsad:** JWC ni global backend tiliga aylantirish.
+
+- **Standard library:** `Http`, `Auth` (JWT/OAuth2), `Cache`, `Queue`, `Email`, `Storage`, `Websocket`.
+- **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
+- **JWC Hub:** `hub.jwc.dev` — paket registry.
+- **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.
 
 ---
 
 ## Priority Timeline
 
 ```
-Now         →  Phase 1.3 (Type system, basic)
-             + Phase 1.4 (validate body)
-1–2 months  →  Phase 2.1–2.2 (Full types + SQL)
-3–6 months  →  Phase 2.3–2.6 (async, errors, middleware, relations)
-6–12 months →  Phase 3 (VS Code ext, CLI, hot reload)
-12–24 months→  Phase 4 (Native compiler, LLVM)
-24+ months  →  Phase 5 (Ecosystem, self-hosting)
+hozir   →  Phase 0 (legacy hack’lar tozalanadi)
+1-2 oy  →  Phase 1.4 / 1.5 / 1.6 (query, validate, typed handlers)
+3-6 oy  →  Phase 2.1 / 2.2 / 2.3 (types, SQL, try/catch)
+6-12 oy →  Phase 2.4-2.6 + Phase 3 (middleware, relations, LSP, package)
+12-24 oy→  Phase 4 (IR + LLVM + native + compile-time SQL)
+24+ oy  →  Phase 5 (stdlib, wasm, hub, self-hosting)
 ```
 
 ---
@@ -227,3 +205,22 @@ Now         →  Phase 1.3 (Type system, basic)
 
 > Web backend yozish → config yozish darajasida oson.
 > Performance → Rust/Go darajasida.
+
+---
+
+## Kod xaritasi (orientir uchun)
+
+```
+src/
+  lexer.rs    317  tokenizer + template string + comment skip
+  ast.rs      135  Program / Model / Route / Function / Stmt / Expr
+  parser.rs  1541  full parser + program validator
+  runner.rs  1621  tree-walking interpreter + HTTP request dispatch
+  engine.rs   178  Postgres pool + SQL cache + result TTL cache
+  server.rs   210  tiny_http worker pool + metrics
+  sql.rs      199  Postgres DDL generator
+  migrate.rs  192  migrate add / up (down hali yo‘q)
+  project.rs  236  jwcproj parser + dotenv loader + source walker
+  diag.rs      27  byte offset → (line, col)
+  main.rs     345  CLI subcommands + embedded launcher
+```

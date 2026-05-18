@@ -5,6 +5,7 @@ use crate::ast::Program;
 use crate::engine;
 use crate::error_report;
 use crate::runner;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -178,10 +179,19 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
             let started_at = Instant::now();
 
             let method = request.method().to_string();
-            let url = request.url().to_string();
+            // Full URL including query string. The runner parses `?...` itself
+            // so route matching uses the path portion and `query_param(name)`
+            // can read individual query values.
+            let path = request.url().to_string();
 
-            // Strip query string from path
-            let path = url.split('?').next().unwrap_or(&url).to_string();
+            // Snapshot request headers (lower-cased keys) for the runner.
+            let mut header_map: HashMap<String, String> = HashMap::new();
+            for header in request.headers() {
+                header_map.insert(
+                    header.field.as_str().as_str().to_ascii_lowercase(),
+                    header.value.as_str().to_string(),
+                );
+            }
 
             // Read request body
             let mut body_bytes = Vec::new();
@@ -194,15 +204,16 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
             };
 
             // Dispatch to JWC route
-            let (status, response_body) = runner::run_request(&program, &method, &path, body)
-                .unwrap_or_else(|e| {
-                    error_report::log_runtime_error(
-                        &format!("HTTP {} {} failed", method, path),
-                        &e,
-                    );
-                    let msg = error_report::to_single_line(&e).replace('"', "'");
-                    (500, format!("{{\"error\":\"{msg}\"}}"))
-                });
+            let (status, response_body) =
+                runner::run_request_with_headers(&program, &method, &path, body, header_map)
+                    .unwrap_or_else(|e| {
+                        error_report::log_runtime_error(
+                            &format!("HTTP {} {} failed", method, path),
+                            &e,
+                        );
+                        let msg = error_report::to_single_line(&e).replace('"', "'");
+                        (500, format!("{{\"error\":\"{msg}\"}}"))
+                    });
 
             if request_logging {
                 eprintln!("[JWC] {} {} -> {}", method, path, status);

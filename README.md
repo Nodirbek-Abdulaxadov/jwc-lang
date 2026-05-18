@@ -142,13 +142,190 @@ Main commands:
 - `jwc serve [path] --port 8080`: Start HTTP server directly
 - `jwc serve [path] --request-logging`: Enable per-request console logs
 - `jwc test`: Validate project
+- `jwc lint`: Validate + emit dead-code warnings (unused functions, unused middleware)
 - `jwc check <file>`: Parse/validate one file
 - `jwc gen-sql <file>`: Generate PostgreSQL schema SQL from entities
 - `jwc migrate add <name>`: Alias for creating migration files
 - `jwc migrate new <name>`: Create migration files
 - `jwc migrate up`: Apply pending migrations
+- `jwc migrate down [--steps N]`: Rollback the most recent applied migration(s)
 
 Request logging is disabled by default.
+
+## Query and Path Parameters
+
+```jwc
+route GET "users/{id}" {
+    let id = path_param("id");
+    let limit = query_param("limit", "20");  // 2nd arg is a default
+    return json("user=" + id + ",limit=" + limit);
+}
+```
+
+- `path_param(name)` reads a `{name}` placeholder from the route path.
+- `query_param(name)` reads `?name=...` from the URL. Returns `null` if missing,
+  or the provided default when a 2nd argument is given.
+
+### Typed handler routes
+
+When you bind a handler with `route GET "..." -> fn;`, JWC matches the
+handler's typed parameters against the route's path placeholders (and
+query string, as a fallback), and coerces each value to the declared type:
+
+```jwc
+function getUser(id: int) {
+    return "user=" + id;
+}
+
+route GET "users/{id}" -> getUser;
+```
+
+## Validating Request Bodies
+
+Use a `validate body { ... }` block inside a route or handler. Supported rules:
+`required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`.
+
+```jwc
+route POST "users" {
+    validate body {
+        name: required, minLength(2), maxLength(60);
+        age: min(0), max(150);
+    }
+    let payload = body();
+    return created(payload);
+}
+```
+
+On failure, JWC short-circuits and returns:
+
+```json
+{ "errors": { "name": "required" } }
+```
+
+with HTTP status **400**.
+
+## SQL Clauses
+
+`select` supports `where`, `orderby`, `limit`, `offset`, and `first`:
+
+```jwc
+function listLatest(country) {
+    return select User from db.Users
+        where User.country == @country
+        orderby User.created_at desc
+        limit 20 offset 0;
+}
+
+function findOne(id) {
+    return select User from db.Users where User.id == @id first;
+}
+```
+
+- `orderby <field> [asc|desc]` — default direction is ascending.
+- `limit N` / `offset N` accept integer literals or `@param` references.
+- `first` forces `LIMIT 1` and returns a single row instead of an array.
+
+## Async / Await (forward-compatible syntax)
+
+```jwc
+async function fetchUser(id: uuid): User {
+    let row = await select User from db.Users where User.id == @id first;
+    return row;
+}
+```
+
+The parser accepts `async function` and `await expr` so existing code can adopt
+the syntax now, but JWC still executes everything synchronously today — there
+is no real future or scheduler. The actual non-blocking runtime (`tokio` +
+`hyper`) is tracked as the next major effort, after Phase 2 ships.
+
+## Middleware
+
+Declare reusable request-time logic with `middleware Name { ... }` and attach
+it to a route using `use`:
+
+```jwc
+middleware AuthMw {
+    let token = header("authorization");
+    if (token == null) {
+        return unauthorized();
+    }
+    setContext("userId", verifyJwt(token));
+}
+
+route GET "api/me" use AuthMw {
+    return json({ id: context("userId") });
+}
+```
+
+- A middleware that `return`s a value short-circuits the request with that
+  body and status (derived from the `status` JSON field, default 200).
+- `header(name)` (case-insensitive) reads inbound headers.
+- `setContext(key, value)` / `context(key)` share per-request state between
+  middleware and the handler.
+- Multiple middlewares: `route GET "..." use AuthMw, RateLimitMw { ... }`.
+
+## Type System
+
+Built-in types recognised in function signatures and JSON body validation:
+
+| Type | Notes |
+|------|-------|
+| `string`, `int`, `bigint`, `double`, `decimal`, `bool` | primitives |
+| `uuid` | RFC 4122 textual form (`8-4-4-4-12`) |
+| `datetime` | ISO 8601 string (year-month-day prefix is validated) |
+| `json` | any valid JSON value |
+| `T?` / `Optional<T>` | nullable — `null` accepted |
+| `List<T>` | JSON array; every element must match `T` |
+| Custom `class` / `entity` names | runtime JSON schema check |
+
+```jwc
+function createUser(id: uuid, joined: datetime, tags: List<string>): User? {
+    ...
+}
+```
+
+## Error Handling
+
+Wrap fallible statements in `try { ... } catch (var) { ... }`. The catch
+variable is bound to a JSON object `{ "message": "...", "causes": [...] }`
+which you can pass to `internalError(e)` or inspect via field access.
+
+```jwc
+try {
+    insert car into db.Cars;
+} catch (e) {
+    return internalError(e);
+}
+```
+
+> Typed catch (`catch (e: DbError)`) parses but currently matches all errors —
+> first-class error types come with Phase 2.1.
+
+## Foreign Keys
+
+Declare relations directly on an entity field using `references EntityName.column`.
+JWC emits the matching `FOREIGN KEY ... REFERENCES ...` constraint when generating
+schema SQL and validates the reference at compile time.
+
+```jwc
+entity User of AppDbContext {
+    id uuid pk;
+    email varchar(120);
+}
+
+entity Post of AppDbContext {
+    id uuid pk;
+    title varchar(200);
+    author_id uuid references User.id on delete cascade;
+}
+```
+
+Supported actions: `on delete cascade`, `on delete restrict`, `on delete set null`.
+If omitted, the database default (`NO ACTION`) applies.
+
+> Navigation properties and an auto-JOIN `select User with posts ...` syntax
+> are tracked for a follow-up iteration.
 
 ## Compile-Time DB Validation
 
@@ -159,6 +336,8 @@ JWC validates dbcontext and entity usage at compile-time:
 - `select/insert/update/delete` must use a known dbcontext.
 - `select Entity from Ctx.Table` checks entity-context compatibility.
 - Unknown or mismatched table/entity references fail validation early.
+- `where Entity.col == ...` and `orderby Entity.col` check that `col` is a real
+  column on the entity. Misspelled columns fail before the server starts.
 
 Example:
 
@@ -189,6 +368,15 @@ Optional request logs:
 
 ```bash
 jwc run --request-logging
+```
+
+## Supported Drivers
+
+PostgreSQL is currently the only supported `dbcontext` driver. Multi-driver
+support (Redis, Clickhouse, etc.) is on the Phase 2 roadmap.
+
+```jwc
+dbcontext AppDbContext : Postgres;   // only this works today
 ```
 
 ## Database Runtime
@@ -235,9 +423,14 @@ Linux/macOS:
 
 After install, open a new terminal if `jwc` is not found immediately.
 
-## Native Build (Debug/Release)
+## Build (Bundle) — Debug/Release
 
-Build uses your current machine OS/architecture automatically.
+`jwc build` (alias: `jwc bundle`) packages your project together with the JWC
+runtime into `bin/{debug,release}`. This is **not** native AOT compilation yet —
+the launcher invokes the embedded runtime to execute your `.jwc` sources.
+A real native compiler is on Phase 4 of `ROADMAP.md`.
+
+The build uses your current machine OS/architecture automatically.
 
 Windows (PowerShell):
 

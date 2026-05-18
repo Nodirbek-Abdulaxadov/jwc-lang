@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Result};
 
-use crate::ast::{ModelDecl, ModelKind, Program, TypeSpec};
+use crate::ast::{ModelDecl, ModelKind, OnDeleteAction, Program, TypeSpec};
 
 pub fn generate_postgres_schema_sql(program: &Program) -> Result<String> {
     let mut out = String::new();
@@ -84,6 +84,20 @@ pub(crate) fn generate_postgres_table_sql(entity: &ModelDecl) -> Result<String> 
         lines.push(format!("    \"{}\" {}{}", field.name, sql_type, null_suffix));
         if field.is_primary_key {
             constraints.push(format!("PRIMARY KEY (\"{}\")", field.name));
+        }
+        if let Some(reference) = &field.references {
+            let target_table = to_snake_case(&reference.entity);
+            let mut fk = format!(
+                "CONSTRAINT \"fk_{}_{}\" FOREIGN KEY (\"{}\") REFERENCES \"{}\" (\"{}\")",
+                table, field.name, field.name, target_table, reference.column
+            );
+            match reference.on_delete {
+                OnDeleteAction::NoAction => {}
+                OnDeleteAction::Cascade => fk.push_str(" ON DELETE CASCADE"),
+                OnDeleteAction::Restrict => fk.push_str(" ON DELETE RESTRICT"),
+                OnDeleteAction::SetNull => fk.push_str(" ON DELETE SET NULL"),
+            }
+            constraints.push(fk);
         }
         constraints.extend(extra_constraints);
     }
@@ -202,6 +216,39 @@ mod tests {
         assert!(sql.contains("PRIMARY KEY (\"id\")"));
         assert!(sql.contains("\"description\" text"));
         assert!(!sql.contains("\"description\" text NOT NULL"));
+    }
+
+    #[test]
+    fn foreign_key_with_cascade_is_generated() {
+        let src = r#"
+            entity User {
+                id uuid pk;
+            }
+            entity Post {
+                id uuid pk;
+                user_id uuid references User.id on delete cascade;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let sql = generate_postgres_schema_sql(&program).unwrap();
+        assert!(sql.contains(
+            "CONSTRAINT \"fk_post_user_id\" FOREIGN KEY (\"user_id\") REFERENCES \"user\" (\"id\")"
+        ));
+        assert!(sql.contains("ON DELETE CASCADE"));
+    }
+
+    #[test]
+    fn fk_to_unknown_entity_fails_validation() {
+        let src = r#"
+            entity Post {
+                id uuid pk;
+                user_id uuid references Ghost.id;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("unknown entity"));
     }
 
     #[test]

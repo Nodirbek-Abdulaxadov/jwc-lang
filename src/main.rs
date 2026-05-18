@@ -3,6 +3,7 @@ mod diag;
 mod engine;
 mod error_report;
 mod lexer;
+mod lint;
 mod migrate;
 mod parser;
 mod project;
@@ -39,7 +40,11 @@ enum Command {
     },
     /// Validate current project sources (searches jwcproj.json upward)
     Test,
-    /// Build current project into bin/debug or bin/release
+    /// Run lint checks (validation + dead-code warnings) on the current project
+    Lint,
+    /// Bundle the project: copies JWC runtime + launcher into bin/{debug,release}
+    /// (this is NOT a native AOT compiler yet — see Phase 4 in ROADMAP.md)
+    #[command(alias = "bundle")]
     Build {
         #[arg(long)]
         release: bool,
@@ -70,6 +75,14 @@ enum MigrateCommand {
     /// Apply pending migrations to Postgres
     #[command(alias = "apply")]
     Up {
+        #[arg(long)]
+        database_url: Option<String>,
+    },
+    /// Rollback the most recent applied migration(s)
+    Down {
+        /// Number of migrations to roll back (default 1)
+        #[arg(long, short, default_value_t = 1)]
+        steps: usize,
         #[arg(long)]
         database_url: Option<String>,
     },
@@ -190,6 +203,25 @@ fn real_main() -> Result<()> {
                 loaded.source_files.len()
             );
         }
+        Command::Lint => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            let loaded = project::load_project_from_root(&root)?;
+            let warnings = lint::lint_program(&loaded.program);
+            if warnings.is_empty() {
+                println!(
+                    "No lint warnings for project '{}' ({} source files).",
+                    loaded.manifest.name,
+                    loaded.source_files.len()
+                );
+            } else {
+                for w in &warnings {
+                    println!("warning[{code}]: {message}", code = w.code, message = w.message);
+                }
+                println!();
+                println!("{} warning(s) found.", warnings.len());
+            }
+        }
         Command::Build { release } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
@@ -197,9 +229,11 @@ fn real_main() -> Result<()> {
             let profile = if release { "release" } else { "debug" };
             let out_path = build_project_native_artifact(&root, &loaded.manifest.name, release)?;
 
-            println!("Build OK ({profile})");
+            println!("Bundled runtime + launcher ({profile})");
             println!("Project: {}", loaded.manifest.name);
-            println!("Executable: {}", out_path.display());
+            println!("Launcher: {}", out_path.display());
+            println!("Note: this bundles the JWC runtime alongside your project.");
+            println!("      Native AOT compilation is on Phase 4 of the roadmap.");
         }
         Command::Migrate { command } => {
             let cwd = std::env::current_dir()?;
@@ -218,6 +252,15 @@ fn real_main() -> Result<()> {
                     println!("Migrations applied: {}", report.applied);
                     println!("Already applied: {}", report.skipped);
                     println!("Total found: {}", report.total);
+                }
+                MigrateCommand::Down { steps, database_url } => {
+                    if steps == 0 {
+                        println!("No-op (steps=0)");
+                    } else {
+                        let report = migrate::rollback_migrations(&root, database_url, steps)?;
+                        println!("Rolled back: {}", report.rolled_back);
+                        println!("Previously applied: {}", report.total_applied);
+                    }
                 }
             }
         }

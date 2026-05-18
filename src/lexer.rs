@@ -10,7 +10,6 @@ pub enum TemplatePart {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Keyword {
-    Context,
     DbContext,
     Entity,
     Class,
@@ -32,6 +31,13 @@ pub enum Keyword {
     True,
     False,
     Null,
+    Validate,
+    Try,
+    Catch,
+    Middleware,
+    Use,
+    Async,
+    Await,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +82,6 @@ impl<'a> Lexer<'a> {
         if is_ident_start(ch) {
             let ident = self.consume_while(is_ident_continue);
             let kind = match ident.as_str() {
-                "context" => TokenKind::Keyword(Keyword::Context),
                 "dbcontext" => TokenKind::Keyword(Keyword::DbContext),
                 "entity" => TokenKind::Keyword(Keyword::Entity),
                 "class" => TokenKind::Keyword(Keyword::Class),
@@ -98,6 +103,13 @@ impl<'a> Lexer<'a> {
                 "true" => TokenKind::Keyword(Keyword::True),
                 "false" => TokenKind::Keyword(Keyword::False),
                 "null" => TokenKind::Keyword(Keyword::Null),
+                "validate" => TokenKind::Keyword(Keyword::Validate),
+                "try" => TokenKind::Keyword(Keyword::Try),
+                "catch" => TokenKind::Keyword(Keyword::Catch),
+                "middleware" => TokenKind::Keyword(Keyword::Middleware),
+                "use" => TokenKind::Keyword(Keyword::Use),
+                "async" => TokenKind::Keyword(Keyword::Async),
+                "await" => TokenKind::Keyword(Keyword::Await),
                 _ => TokenKind::Ident(ident),
             };
             return Ok(Token { kind, offset });

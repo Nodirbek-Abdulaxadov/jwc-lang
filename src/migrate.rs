@@ -20,6 +20,12 @@ pub struct ApplyReport {
     pub skipped: usize,
 }
 
+#[derive(Debug)]
+pub struct RollbackReport {
+    pub total_applied: usize,
+    pub rolled_back: usize,
+}
+
 pub fn create_migration(root: &Path, name: &str) -> Result<CreatedMigration> {
     let loaded = project::load_project_from_root(root)?;
     let schema_sql = sql::generate_postgres_schema_sql(&loaded.program)?;
@@ -119,6 +125,111 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
         applied: applied_now,
         skipped,
     })
+}
+
+pub fn rollback_migrations(
+    root: &Path,
+    database_url: Option<String>,
+    steps: usize,
+) -> Result<RollbackReport> {
+    if steps == 0 {
+        return Ok(RollbackReport {
+            total_applied: 0,
+            rolled_back: 0,
+        });
+    }
+
+    let url = database_url
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .or_else(|| std::env::var("JWC_DATABASE_URL").ok())
+        .ok_or_else(|| {
+            anyhow!("database url is required: pass --database-url or set DATABASE_URL")
+        })?;
+
+    let migrations_dir = root.join("migrations");
+    if !migrations_dir.is_dir() {
+        bail!(
+            "migrations directory not found: {}",
+            migrations_dir.display()
+        );
+    }
+
+    ensure_database_exists(&url)?;
+
+    let mut client = Client::connect(&url, NoTls)
+        .with_context(|| "Failed to connect to database for migrations")?;
+
+    ensure_migration_table(&mut client)?;
+
+    let applied_names = read_applied_migrations_ordered_desc(&mut client)?;
+    let total_applied = applied_names.len();
+
+    if total_applied == 0 {
+        bail!("no migrations have been applied yet");
+    }
+
+    let to_rollback: Vec<String> = applied_names.into_iter().take(steps).collect();
+    let mut rolled_back = 0usize;
+
+    for name in &to_rollback {
+        let down_filename = name
+            .strip_suffix(".up.sql")
+            .map(|base| format!("{}.down.sql", base))
+            .unwrap_or_else(|| format!("{}.down.sql", name));
+
+        let down_path = migrations_dir.join(&down_filename);
+        if !down_path.is_file() {
+            bail!("no rollback SQL for migration {}", name);
+        }
+
+        let sql = std::fs::read_to_string(&down_path)
+            .with_context(|| format!("Failed to read {}", down_path.display()))?;
+
+        let sql_trimmed = sql
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if sql_trimmed.is_empty() {
+            bail!("no rollback SQL for migration {}", name);
+        }
+
+        let mut tx = client
+            .transaction()
+            .with_context(|| "Failed to start rollback transaction")?;
+
+        tx.batch_execute(&sql)
+            .with_context(|| format!("Rollback failed for {}", down_path.display()))?;
+
+        tx.execute(
+            "DELETE FROM _jwc_migrations WHERE name = $1;",
+            &[name],
+        )
+        .with_context(|| "Failed to remove rolled-back migration record")?;
+
+        tx.commit()
+            .with_context(|| "Failed to commit rollback transaction")?;
+
+        rolled_back += 1;
+    }
+
+    Ok(RollbackReport {
+        total_applied,
+        rolled_back,
+    })
+}
+
+fn read_applied_migrations_ordered_desc(client: &mut Client) -> Result<Vec<String>> {
+    let rows = client
+        .query("SELECT name FROM _jwc_migrations ORDER BY name DESC;", &[])
+        .with_context(|| "Failed to read applied migrations")?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<usize, String>(0))
+        .collect())
 }
 
 fn slugify(name: &str) -> String {

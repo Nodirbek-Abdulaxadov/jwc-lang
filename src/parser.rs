@@ -3,85 +3,16 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 
 use crate::ast::{
-    DbContextDecl, DbWhere, Expr, FieldDecl, FunctionDecl, ModelDecl, ModelKind, Program,
-    RouteDecl, Stmt, TypeSpec, TypedParam,
+    DbContextDecl, DbOrderBy, DbWhere, Expr, FieldDecl, FieldReference, FunctionDecl,
+    MiddlewareDecl, ModelDecl, ModelKind, OnDeleteAction, Program, RouteDecl, SortDir, Stmt,
+    TypeSpec, TypedParam, ValidateField, ValidateRule,
 };
 use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
 
 pub fn parse_program(source: &str) -> Result<Program> {
-    let normalized = normalize_webapi_compat(source);
-    let mut parser = Parser::new(&normalized)?;
+    let mut parser = Parser::new(source)?;
     parser.parse_program()
-}
-
-fn normalize_webapi_compat(source: &str) -> String {
-    let mut out = source.to_string();
-
-    let replacements = [
-        (
-            "let todos = select * from appDatabase.Todos;",
-            "let todos = db_query(\"SELECT COALESCE(json_agg(json_build_object('id', id::text, 'title', title, 'description', description, 'completed', completed, 'due_date', due_date) ORDER BY id), '[]'::json)::text FROM todo_entity;\");",
-        ),
-        ("return todos as json;", "return todos;"),
-        (
-            "let newTodo = request.body as TodoEntity;",
-            "let newTodo = request_body();",
-        ),
-        (
-            "newTodo.id = uuid();",
-            "newTodo = set_json_field(newTodo, \"id\", uuid());",
-        ),
-        (
-            "insert into appDatabase.Todos values (newTodo);",
-            "db_insert_todo(newTodo);",
-        ),
-        ("return newTodo as json;", "return newTodo;"),
-        (
-            "let id = request.pathParams.id;",
-            "let id = path_param(\"id\");",
-        ),
-        (
-            "let todo = select * from appDatabase.Todos where id = id;",
-            "let todo = db_select_todo(id);",
-        ),
-        ("return todo as json;", "return todo;"),
-        (
-            "let existingTodo = select * from appDatabase.Todos where id = id;",
-            "let existingTodo = db_select_todo(id);",
-        ),
-        (
-            "updatedTodo.id = id; // Ensure the ID remains the same",
-            "updatedTodo = set_json_field(updatedTodo, \"id\", id);",
-        ),
-        (
-            "update appDatabase.Todos set title = updatedTodo.title, description = updatedTodo.description, completed = updatedTodo.completed, due_date = updatedTodo.due_date where id = id;",
-            "db_update_todo(id, updatedTodo);",
-        ),
-        ("return updatedTodo as json;", "return updatedTodo;"),
-        (
-            "delete from appDatabase.Todos where id = id;",
-            "db_delete_todo(id);",
-        ),
-        (
-            "return [404, \"Todo not found\"];",
-            "return \"{\\\"status\\\":404,\\\"message\\\":\\\"Todo not found\\\"}\";",
-        ),
-        (
-            "return [204, \"Todo deleted\"];",
-            "return \"{\\\"status\\\":204,\\\"message\\\":\\\"Todo deleted\\\"}\";",
-        ),
-        (
-            "let updatedTodo = request.body as TodoEntity;",
-            "let updatedTodo = request_body();",
-        ),
-    ];
-
-    for (from, to) in replacements {
-        out = out.replace(from, to);
-    }
-
-    out
 }
 
 pub fn validate_program(program: &Program) -> Result<()> {
@@ -102,6 +33,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
     let mut entity_names = HashSet::new();
     let mut entity_contexts: HashMap<String, Option<String>> = HashMap::new();
     let mut db_tables: HashSet<(String, String)> = HashSet::new();
+    let mut entity_fields_by_table: HashMap<(String, String), Vec<String>> = HashMap::new();
     for model in &program.models {
         let model_key = model.name.to_lowercase();
         if !model_names.insert(model_key) {
@@ -121,7 +53,21 @@ pub fn validate_program(program: &Program) -> Result<()> {
         entity_contexts.insert(model.name.to_lowercase(), resolved_context_lc.clone());
         if let Some(ctx_name) = resolved_context_lc {
             db_tables.insert((ctx_name.clone(), model.name.to_lowercase()));
-            db_tables.insert((ctx_name, to_snake_case(&model.name).to_lowercase()));
+            db_tables.insert((ctx_name.clone(), to_snake_case(&model.name).to_lowercase()));
+
+            let fields: Vec<String> = model
+                .fields
+                .iter()
+                .map(|f| f.name.to_lowercase())
+                .collect();
+            entity_fields_by_table.insert(
+                (ctx_name.clone(), model.name.to_lowercase()),
+                fields.clone(),
+            );
+            entity_fields_by_table.insert(
+                (ctx_name, to_snake_case(&model.name).to_lowercase()),
+                fields,
+            );
         }
 
         let mut field_names = HashSet::new();
@@ -134,6 +80,47 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
             validate_type_spec_for_driver(&field.ty, &resolved_driver)
                 .map_err(|err| anyhow!("Entity '{}', field '{}': {err}", model.name, field.name))?;
+        }
+    }
+
+    // Foreign key references — verify target entity + column exist after all
+    // entities have been registered.
+    for model in &program.models {
+        if model.kind != ModelKind::Entity {
+            continue;
+        }
+        for field in &model.fields {
+            let Some(reference) = &field.references else {
+                continue;
+            };
+            let target_key = reference.entity.to_lowercase();
+            let target = program
+                .models
+                .iter()
+                .find(|m| m.kind == ModelKind::Entity && m.name.to_lowercase() == target_key)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Entity '{}' field '{}' references unknown entity '{}'",
+                        model.name,
+                        field.name,
+                        reference.entity
+                    )
+                })?;
+
+            let column_key = reference.column.to_lowercase();
+            if !target
+                .fields
+                .iter()
+                .any(|f| f.name.to_lowercase() == column_key)
+            {
+                bail!(
+                    "Entity '{}' field '{}' references unknown column '{}.{}'",
+                    model.name,
+                    field.name,
+                    reference.entity,
+                    reference.column
+                );
+            }
         }
     }
 
@@ -180,13 +167,54 @@ pub fn validate_program(program: &Program) -> Result<()> {
         }
 
         if route.handler.is_none() {
-            validate_stmts(&route.body, &ctx_names, &entity_contexts, &db_tables)?;
+            validate_stmts(
+                &route.body,
+                &ctx_names,
+                &entity_contexts,
+                &db_tables,
+                &entity_fields_by_table,
+            )?;
         }
     }
 
     for function in &program.functions {
-        validate_stmts(&function.body, &ctx_names, &entity_contexts, &db_tables)
-            .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
+        validate_stmts(
+            &function.body,
+            &ctx_names,
+            &entity_contexts,
+            &db_tables,
+            &entity_fields_by_table,
+        )
+        .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
+    }
+
+    let mut mw_names = HashSet::new();
+    for mw in &program.middlewares {
+        let key = mw.name.to_lowercase();
+        if !mw_names.insert(key) {
+            bail!("Duplicate middleware name: {}", mw.name);
+        }
+        validate_stmts(
+            &mw.body,
+            &ctx_names,
+            &entity_contexts,
+            &db_tables,
+            &entity_fields_by_table,
+        )
+        .map_err(|err| anyhow!("Middleware '{}': {err}", mw.name))?;
+    }
+
+    for route in &program.routes {
+        for mw_ref in &route.middlewares {
+            if !mw_names.contains(&mw_ref.to_lowercase()) {
+                bail!(
+                    "Route {} {} references unknown middleware '{}'",
+                    route.method,
+                    route.path,
+                    mw_ref
+                );
+            }
+        }
     }
 
     Ok(())
@@ -197,9 +225,16 @@ fn validate_stmts(
     ctx_names: &HashSet<String>,
     entity_contexts: &HashMap<String, Option<String>>,
     db_tables: &HashSet<(String, String)>,
+    entity_fields_by_table: &HashMap<(String, String), Vec<String>>,
 ) -> Result<()> {
     for stmt in stmts {
-        validate_stmt(stmt, ctx_names, entity_contexts, db_tables)?;
+        validate_stmt(
+            stmt,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        )?;
     }
     Ok(())
 }
@@ -209,34 +244,125 @@ fn validate_stmt(
     ctx_names: &HashSet<String>,
     entity_contexts: &HashMap<String, Option<String>>,
     db_tables: &HashSet<(String, String)>,
+    entity_fields_by_table: &HashMap<(String, String), Vec<String>>,
 ) -> Result<()> {
     match stmt {
-        Stmt::Let { value, .. } => validate_expr(value, ctx_names, entity_contexts, db_tables),
-        Stmt::Assign { value, .. } => validate_expr(value, ctx_names, entity_contexts, db_tables),
-        Stmt::FieldAssign { value, .. } => {
-            validate_expr(value, ctx_names, entity_contexts, db_tables)
-        }
-        Stmt::Print(value) => validate_expr(value, ctx_names, entity_contexts, db_tables),
+        Stmt::Let { value, .. } => validate_expr(
+            value,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
+        Stmt::Assign { value, .. } => validate_expr(
+            value,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
+        Stmt::FieldAssign { value, .. } => validate_expr(
+            value,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
+        Stmt::Print(value) => validate_expr(
+            value,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
         Stmt::If {
             cond,
             then_body,
             else_body,
         } => {
-            validate_expr(cond, ctx_names, entity_contexts, db_tables)?;
-            validate_stmts(then_body, ctx_names, entity_contexts, db_tables)?;
+            validate_expr(
+                cond,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
+            validate_stmts(
+                then_body,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
             if let Some(else_body) = else_body {
-                validate_stmts(else_body, ctx_names, entity_contexts, db_tables)?;
+                validate_stmts(
+                    else_body,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
             }
             Ok(())
         }
         Stmt::While { cond, body } => {
-            validate_expr(cond, ctx_names, entity_contexts, db_tables)?;
-            validate_stmts(body, ctx_names, entity_contexts, db_tables)
+            validate_expr(
+                cond,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
+            validate_stmts(
+                body,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
         }
         Stmt::Break | Stmt::Continue => Ok(()),
-        Stmt::Expr(expr) => validate_expr(expr, ctx_names, entity_contexts, db_tables),
+        Stmt::Expr(expr) => validate_expr(
+            expr,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
         Stmt::Return(None) => Ok(()),
-        Stmt::Return(Some(expr)) => validate_expr(expr, ctx_names, entity_contexts, db_tables),
+        Stmt::Return(Some(expr)) => validate_expr(
+            expr,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
+        Stmt::ValidateBody { fields } => {
+            if fields.is_empty() {
+                bail!("validate body block has no fields");
+            }
+            Ok(())
+        }
+        Stmt::Try {
+            body,
+            catch_body,
+            ..
+        } => {
+            validate_stmts(
+                body,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
+            validate_stmts(
+                catch_body,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
+        }
         Stmt::DbInsert {
             context_var, table, ..
         }
@@ -257,12 +383,13 @@ fn validate_expr(
     ctx_names: &HashSet<String>,
     entity_contexts: &HashMap<String, Option<String>>,
     db_tables: &HashSet<(String, String)>,
+    entity_fields_by_table: &HashMap<(String, String), Vec<String>>,
 ) -> Result<()> {
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) => Ok(()),
         Expr::Call { args, .. } => {
             for arg in args {
-                validate_expr(arg, ctx_names, entity_contexts, db_tables)?;
+                validate_expr(arg, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
             }
             Ok(())
         }
@@ -272,7 +399,10 @@ fn validate_expr(
             context_var,
             table,
             where_clause,
-            ..
+            order_by,
+            limit,
+            offset,
+            first: _,
         } => {
             let ctx_key = validate_context_exists(context_var, ctx_names)?;
 
@@ -305,12 +435,70 @@ fn validate_expr(
 
             validate_table_in_context(&ctx_key, table, db_tables)?;
 
+            // Compile-time column existence check for WHERE / ORDER BY.
+            let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
+            if let Some(fields) = fields {
+                if let Some(wc) = where_clause {
+                    let col = strip_entity_prefix(&wc.field);
+                    if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
+                        bail!(
+                            "Unknown column '{}' in WHERE of {}.{}",
+                            col,
+                            context_var,
+                            table
+                        );
+                    }
+                }
+                if let Some(ob) = order_by {
+                    let col = strip_entity_prefix(&ob.field);
+                    if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
+                        bail!(
+                            "Unknown column '{}' in ORDER BY of {}.{}",
+                            col,
+                            context_var,
+                            table
+                        );
+                    }
+                }
+            }
+
             if let Some(where_clause) = where_clause {
-                validate_expr(&where_clause.rhs, ctx_names, entity_contexts, db_tables)?;
+                validate_expr(
+                    &where_clause.rhs,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
+            }
+            if let Some(limit_expr) = limit {
+                validate_expr(
+                    limit_expr,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
+            }
+            if let Some(offset_expr) = offset {
+                validate_expr(
+                    offset_expr,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
             }
 
             Ok(())
         }
+        Expr::Await(inner) => validate_expr(
+            inner,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
         Expr::Add(l, r)
         | Expr::Sub(l, r)
         | Expr::Mul(l, r)
@@ -324,10 +512,37 @@ fn validate_expr(
         | Expr::Gte(l, r)
         | Expr::And(l, r)
         | Expr::Or(l, r) => {
-            validate_expr(l, ctx_names, entity_contexts, db_tables)?;
-            validate_expr(r, ctx_names, entity_contexts, db_tables)
+            validate_expr(l, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+            validate_expr(r, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
         }
-        Expr::Neg(inner) => validate_expr(inner, ctx_names, entity_contexts, db_tables),
+        Expr::Neg(inner) => validate_expr(
+            inner,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
+    }
+}
+
+fn lookup_table_fields<'a>(
+    ctx_key: &str,
+    table: &str,
+    entity_fields_by_table: &'a HashMap<(String, String), Vec<String>>,
+) -> Option<&'a Vec<String>> {
+    let direct = (ctx_key.to_string(), table.to_lowercase());
+    if let Some(v) = entity_fields_by_table.get(&direct) {
+        return Some(v);
+    }
+    let snake = (ctx_key.to_string(), to_snake_case(table).to_lowercase());
+    entity_fields_by_table.get(&snake)
+}
+
+fn strip_entity_prefix(path: &str) -> String {
+    if let Some(pos) = path.rfind('.') {
+        path[pos + 1..].to_string()
+    } else {
+        path.to_string()
     }
 }
 
@@ -448,7 +663,10 @@ fn validate_type_spec_for_driver(ty: &TypeSpec, driver: &str) -> Result<()> {
         return validate_type_spec_postgres(ty);
     }
 
-    bail!("Unsupported db driver '{driver}' for compile-time type validation")
+    bail!(
+        "Postgres is currently the only supported dbcontext driver (got '{driver}'). \
+         Multi-driver support is planned for Phase 2."
+    )
 }
 
 fn validate_type_spec_postgres(ty: &TypeSpec) -> Result<()> {
@@ -518,7 +736,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Keyword(Keyword::Namespace) => {
                     self.parse_namespace_stmt()?;
                 }
-                TokenKind::Keyword(Keyword::Context) | TokenKind::Keyword(Keyword::DbContext) => {
+                TokenKind::Keyword(Keyword::DbContext) => {
                     program.dbcontexts.push(self.parse_dbcontext_decl()?);
                 }
                 TokenKind::Keyword(Keyword::Entity) => {
@@ -533,12 +751,24 @@ impl<'a> Parser<'a> {
                 TokenKind::Keyword(Keyword::Function) => {
                     program.functions.push(self.parse_function_decl(None)?);
                 }
+                TokenKind::Keyword(Keyword::Async) => {
+                    self.bump()?;
+                    if !matches!(self.current.kind, TokenKind::Keyword(Keyword::Function)) {
+                        return Err(self.error_here("expected 'function' after 'async'"));
+                    }
+                    let mut fn_decl = self.parse_function_decl(None)?;
+                    fn_decl.is_async = true;
+                    program.functions.push(fn_decl);
+                }
                 TokenKind::Keyword(Keyword::Dome) => {
                     self.parse_dome_decl(&mut program)?;
                 }
+                TokenKind::Keyword(Keyword::Middleware) => {
+                    program.middlewares.push(self.parse_middleware_decl()?);
+                }
                 _ => {
                     return Err(self.error_here(
-                        "expected import, namespace, dbcontext, entity/class, route, function, or dome",
+                        "expected import, namespace, dbcontext, entity/class, route, function, middleware, or dome",
                     ));
                 }
             }
@@ -636,6 +866,7 @@ impl<'a> Parser<'a> {
             let ty = self.parse_type_spec()?;
             let mut is_nullable = false;
             let mut is_primary_key = false;
+            let mut references: Option<FieldReference> = None;
 
             loop {
                 match self.current.kind.clone() {
@@ -647,6 +878,10 @@ impl<'a> Parser<'a> {
                         is_primary_key = true;
                         self.bump()?;
                     }
+                    TokenKind::Ident(v) if v.eq_ignore_ascii_case("references") => {
+                        self.bump()?;
+                        references = Some(self.parse_field_reference()?);
+                    }
                     _ => break,
                 }
             }
@@ -657,6 +892,7 @@ impl<'a> Parser<'a> {
                 ty,
                 is_nullable,
                 is_primary_key,
+                references,
             });
         }
 
@@ -694,6 +930,19 @@ impl<'a> Parser<'a> {
         let method = self.expect_ident("expected HTTP method (GET/POST/PUT/DELETE/PATCH)")?;
         let path = self.expect_string("expected route path string")?;
 
+        // Optional `use M1[, M2, ...]` middleware list
+        let middlewares = if self.current.kind == TokenKind::Keyword(Keyword::Use) {
+            self.bump()?;
+            let mut names = vec![self.expect_ident("expected middleware name after 'use'")?];
+            while self.check_symbol(',') {
+                self.expect_symbol(',')?;
+                names.push(self.expect_ident("expected middleware name after ','")?);
+            }
+            names
+        } else {
+            Vec::new()
+        };
+
         if self.check_symbol('-') {
             self.expect_symbol('-')?;
             self.expect_symbol('>')?;
@@ -704,6 +953,7 @@ impl<'a> Parser<'a> {
                 path,
                 handler: Some(handler),
                 body: Vec::new(),
+                middlewares,
             });
         }
 
@@ -713,7 +963,54 @@ impl<'a> Parser<'a> {
             path,
             handler: None,
             body,
+            middlewares,
         })
+    }
+
+    fn parse_field_reference(&mut self) -> Result<FieldReference> {
+        let entity = self.expect_ident("expected target entity name after 'references'")?;
+        self.expect_symbol('.')?;
+        let column = self.expect_ident("expected target column name after '.'")?;
+
+        let on_delete = if self.check_ident_eq("on") {
+            self.bump()?;
+            let delete_kw = self.expect_ident("expected 'delete' after 'on'")?;
+            if !delete_kw.eq_ignore_ascii_case("delete") {
+                return Err(self.error_here("only 'on delete' is supported"));
+            }
+            let action_kw = self.expect_ident("expected action after 'on delete'")?;
+            match action_kw.to_ascii_lowercase().as_str() {
+                "cascade" => OnDeleteAction::Cascade,
+                "restrict" => OnDeleteAction::Restrict,
+                "set" => {
+                    let null_kw = self.expect_ident("expected 'null' after 'set'")?;
+                    if !null_kw.eq_ignore_ascii_case("null") {
+                        return Err(self.error_here("only 'set null' is supported"));
+                    }
+                    OnDeleteAction::SetNull
+                }
+                other => {
+                    return Err(self.error_here(&format!(
+                        "unknown ON DELETE action '{other}' (cascade/restrict/set null)"
+                    )))
+                }
+            }
+        } else {
+            OnDeleteAction::NoAction
+        };
+
+        Ok(FieldReference {
+            entity,
+            column,
+            on_delete,
+        })
+    }
+
+    fn parse_middleware_decl(&mut self) -> Result<MiddlewareDecl> {
+        self.expect_keyword(Keyword::Middleware)?;
+        let name = self.expect_ident("expected middleware name")?;
+        let body = self.parse_block()?;
+        Ok(MiddlewareDecl { name, body })
     }
 
     fn parse_type_spec(&mut self) -> Result<TypeSpec> {
@@ -769,7 +1066,7 @@ impl<'a> Parser<'a> {
         // Optional return-type annotation: `: TypeName`
         let return_type = if self.check_symbol(':') {
             self.expect_symbol(':')?;
-            Some(self.expect_ident("expected return type name")?)
+            Some(self.parse_type_ref()?)
         } else {
             None
         };
@@ -782,23 +1079,53 @@ impl<'a> Parser<'a> {
         }
 
         self.expect_symbol('}')?;
-        Ok(FunctionDecl { name, params, return_type, body })
+        Ok(FunctionDecl {
+            name,
+            params,
+            return_type,
+            body,
+            is_async: false,
+        })
     }
 
-    /// Parse a single parameter: `name` or `name: TypeName`
+    /// Parse a single parameter: `name` or `name: TypeRef`
     fn parse_typed_param(&mut self) -> Result<TypedParam> {
         let name = self.expect_ident("expected parameter name")?;
         let ty = if self.check_symbol(':') {
             self.expect_symbol(':')?;
-            Some(self.expect_ident("expected type name")?)
+            Some(self.parse_type_ref()?)
         } else {
             None
         };
         Ok(TypedParam { name, ty })
     }
 
+    /// Parse a type reference. Supports plain names (`int`), generics
+    /// (`List<User>`, `Optional<int>`), and the trailing `?` nullable marker.
+    /// Result is the source-equivalent string (e.g. `"List<User>"`, `"int?"`).
+    fn parse_type_ref(&mut self) -> Result<String> {
+        let base = self.expect_ident("expected type name")?;
+        let mut s = base;
+
+        if self.check_symbol('<') {
+            self.expect_symbol('<')?;
+            let inner = self.parse_type_ref()?;
+            self.expect_symbol('>')?;
+            s = format!("{s}<{inner}>");
+        }
+
+        if self.check_symbol('?') {
+            self.expect_symbol('?')?;
+            s.push('?');
+        }
+
+        Ok(s)
+    }
+
     fn parse_stmt(&mut self) -> Result<Stmt> {
         match &self.current.kind {
+            TokenKind::Keyword(Keyword::Validate) => self.parse_validate_body_stmt(),
+            TokenKind::Keyword(Keyword::Try) => self.parse_try_stmt(),
             TokenKind::Keyword(Keyword::Let) => {
                 self.bump()?;
                 let name = self.expect_ident("expected variable name")?;
@@ -946,6 +1273,117 @@ impl<'a> Parser<'a> {
         Ok(Stmt::While { cond, body })
     }
 
+    fn parse_try_stmt(&mut self) -> Result<Stmt> {
+        self.expect_keyword(Keyword::Try)?;
+        let body = self.parse_block()?;
+
+        self.expect_keyword(Keyword::Catch)?;
+        self.expect_symbol('(')?;
+        let catch_var = self.expect_ident("expected catch variable name")?;
+        let catch_type = if self.check_symbol(':') {
+            self.expect_symbol(':')?;
+            Some(self.expect_ident("expected error type after ':'")?)
+        } else {
+            None
+        };
+        self.expect_symbol(')')?;
+        let catch_body = self.parse_block()?;
+
+        Ok(Stmt::Try {
+            body,
+            catch_var,
+            catch_type,
+            catch_body,
+        })
+    }
+
+    fn parse_validate_body_stmt(&mut self) -> Result<Stmt> {
+        self.expect_keyword(Keyword::Validate)?;
+
+        let body_kw = self.expect_ident("expected 'body' after 'validate'")?;
+        if !body_kw.eq_ignore_ascii_case("body") {
+            return Err(self.error_here("only 'validate body' is supported"));
+        }
+
+        self.expect_symbol('{')?;
+
+        let mut fields: Vec<ValidateField> = Vec::new();
+        while !self.check_symbol('}') {
+            let field_name = self.expect_ident("expected field name in validate body block")?;
+            self.expect_symbol(':')?;
+
+            let mut rules = Vec::new();
+            rules.push(self.parse_validate_rule()?);
+            while self.check_symbol(',') {
+                self.expect_symbol(',')?;
+                rules.push(self.parse_validate_rule()?);
+            }
+            self.expect_symbol(';')?;
+
+            fields.push(ValidateField {
+                name: field_name,
+                rules,
+            });
+        }
+
+        self.expect_symbol('}')?;
+        Ok(Stmt::ValidateBody { fields })
+    }
+
+    fn parse_validate_rule(&mut self) -> Result<ValidateRule> {
+        let name = self.expect_ident("expected validation rule name")?;
+        let lower = name.to_ascii_lowercase();
+
+        match lower.as_str() {
+            "required" => Ok(ValidateRule::Required),
+            "minlength" => {
+                let n = self.parse_int_arg("minLength")?;
+                Ok(ValidateRule::MinLength(n))
+            }
+            "maxlength" => {
+                let n = self.parse_int_arg("maxLength")?;
+                Ok(ValidateRule::MaxLength(n))
+            }
+            "min" => {
+                let n = self.parse_number_arg("min")?;
+                Ok(ValidateRule::Min(n))
+            }
+            "max" => {
+                let n = self.parse_number_arg("max")?;
+                Ok(ValidateRule::Max(n))
+            }
+            other => Err(self.error_here(&format!("unknown validation rule '{other}'"))),
+        }
+    }
+
+    fn parse_int_arg(&mut self, rule_name: &str) -> Result<i64> {
+        self.expect_symbol('(')?;
+        let n = self.parse_signed_number(&format!("expected integer argument for {rule_name}"))?;
+        self.expect_symbol(')')?;
+        Ok(n)
+    }
+
+    fn parse_number_arg(&mut self, rule_name: &str) -> Result<String> {
+        self.expect_symbol('(')?;
+        let sign = if self.check_symbol('-') {
+            self.expect_symbol('-')?;
+            "-"
+        } else {
+            ""
+        };
+        let token = match self.current.kind.clone() {
+            TokenKind::Number(v) => v,
+            _ => {
+                return Err(
+                    self.error_here(&format!("expected numeric argument for {rule_name}"))
+                )
+            }
+        };
+        self.bump()?;
+        self.expect_symbol(')')?;
+        Ok(format!("{sign}{token}"))
+    }
+
     fn parse_block(&mut self) -> Result<Vec<Stmt>> {
         self.expect_symbol('{')?;
         let mut body = Vec::new();
@@ -1084,6 +1522,11 @@ impl<'a> Parser<'a> {
             let expr = self.parse_unary_expr()?;
             return Ok(Expr::Neg(Box::new(expr)));
         }
+        if matches!(self.current.kind, TokenKind::Keyword(Keyword::Await)) {
+            self.bump()?;
+            let expr = self.parse_unary_expr()?;
+            return Ok(Expr::Await(Box::new(expr)));
+        }
         self.parse_primary_expr()
     }
 
@@ -1206,7 +1649,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse `select [Entity|*] from CTX.TABLE [where FIELD OP EXPR] [first]`
+    /// Parse `select [Entity|*] from CTX.TABLE
+    ///        [where FIELD OP EXPR]
+    ///        [orderby FIELD [asc|desc]]
+    ///        [limit N] [offset N] [first]`
     fn parse_select_expr(&mut self) -> Result<Expr> {
         // entity name or `*`
         let entity = if self.check_symbol('*') {
@@ -1245,19 +1691,73 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // optional `first`
-        let first = if let TokenKind::Ident(ref kw) = self.current.kind.clone() {
-            if kw.eq_ignore_ascii_case("first") {
+        // optional `orderby FIELD [asc|desc]`
+        let order_by = if self.check_ident_eq("orderby") {
+            self.bump()?;
+            let field = self.parse_field_path()?;
+            let dir = if self.check_ident_eq("desc") {
                 self.bump()?;
-                true
+                SortDir::Desc
+            } else if self.check_ident_eq("asc") {
+                self.bump()?;
+                SortDir::Asc
             } else {
-                false
-            }
+                SortDir::Asc
+            };
+            Some(DbOrderBy { field, dir })
+        } else {
+            None
+        };
+
+        // optional `limit N`
+        let limit = if self.check_ident_eq("limit") {
+            self.bump()?;
+            Some(Box::new(self.parse_db_int_arg("limit")?))
+        } else {
+            None
+        };
+
+        // optional `offset N`
+        let offset = if self.check_ident_eq("offset") {
+            self.bump()?;
+            Some(Box::new(self.parse_db_int_arg("offset")?))
+        } else {
+            None
+        };
+
+        // optional `first`
+        let first = if self.check_ident_eq("first") {
+            self.bump()?;
+            true
         } else {
             false
         };
 
-        Ok(Expr::DbSelect { entity, context_var: ctx, table, where_clause, first })
+        Ok(Expr::DbSelect {
+            entity,
+            context_var: ctx,
+            table,
+            where_clause,
+            order_by,
+            limit,
+            offset,
+            first,
+        })
+    }
+
+    /// Accepts `@param`, integer literal, or any expression — runtime ensures
+    /// the value is an integer when binding to LIMIT/OFFSET.
+    fn parse_db_int_arg(&mut self, clause: &str) -> Result<Expr> {
+        if self.check_symbol('@') {
+            self.bump()?;
+            let name = self.expect_ident(&format!("expected parameter name after '@' in {clause}"))?;
+            return Ok(Expr::Var(name));
+        }
+        self.parse_expr()
+    }
+
+    fn check_ident_eq(&self, expected: &str) -> bool {
+        matches!(&self.current.kind, TokenKind::Ident(v) if v.eq_ignore_ascii_case(expected))
     }
 
     /// Parse a comparison operator token sequence: `=`, `==`, `!=`, `<`, `<=`, `>`, `>=`
@@ -1364,8 +1864,7 @@ impl<'a> Parser<'a> {
 
 /// Parse a single expression from a template string hole source, e.g. `env("PG_USER")`.
 fn parse_template_hole(src: &str) -> Result<Expr> {
-    let norm = normalize_webapi_compat(src.trim());
-    let mut p = Parser::new(&norm)?;
+    let mut p = Parser::new(src.trim())?;
     let expr = p.parse_expr()?;
     Ok(expr)
 }
@@ -1557,6 +2056,119 @@ mod tests {
                     let wc = where_clause.as_ref().unwrap();
                     assert_eq!(wc.field, "CarEntity.id");
                     assert_eq!(wc.op, "==");
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn select_where_unknown_column_fails_validation() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(60);
+            }
+
+            function pickOne(name) {
+                let u = select User from AppDb.User where User.nm == @name first;
+                return u;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Unknown column 'nm'"));
+    }
+
+    #[test]
+    fn select_orderby_unknown_column_fails_validation() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(60);
+            }
+
+            function listAll() {
+                let xs = select User from AppDb.User orderby User.created_at desc;
+                return xs;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Unknown column 'created_at'"));
+    }
+
+    #[test]
+    fn select_where_known_column_passes() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(60);
+            }
+
+            function pickByName(name) {
+                let u = select User from AppDb.User where User.name == @name first;
+                return u;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+    }
+
+    #[test]
+    fn parses_db_select_orderby_limit_offset() {
+        let src = r#"
+            function listCars(country) {
+                let cars = select CarEntity from db.Cars
+                    where CarEntity.country == @country
+                    orderby CarEntity.created_at desc
+                    limit 20 offset 10;
+                return cars;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect {
+                    where_clause,
+                    order_by,
+                    limit,
+                    offset,
+                    first,
+                    ..
+                } => {
+                    assert!(!first);
+                    assert!(where_clause.is_some());
+                    let ob = order_by.as_ref().expect("expected orderby");
+                    assert_eq!(ob.field, "CarEntity.created_at");
+                    assert_eq!(ob.dir, crate::ast::SortDir::Desc);
+                    assert!(matches!(limit.as_deref(), Some(crate::ast::Expr::Int(20))));
+                    assert!(matches!(offset.as_deref(), Some(crate::ast::Expr::Int(10))));
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn parses_db_select_orderby_default_asc() {
+        let src = r#"
+            function listAll() {
+                let cars = select CarEntity from db.Cars orderby CarEntity.name;
+                return cars;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect { order_by, .. } => {
+                    let ob = order_by.as_ref().unwrap();
+                    assert_eq!(ob.dir, crate::ast::SortDir::Asc);
                 }
                 _ => panic!("expected DbSelect"),
             },

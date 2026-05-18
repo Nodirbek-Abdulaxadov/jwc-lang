@@ -5,7 +5,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
 
-use crate::ast::{Expr, FunctionDecl, ModelDecl, ModelKind, Program, RouteDecl, Stmt, TypedParam};
+use crate::ast::{
+    DbOrderBy, Expr, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, Program, RouteDecl,
+    SortDir, Stmt, TypedParam, ValidateField, ValidateRule,
+};
 use crate::engine;
 
 #[derive(Debug)]
@@ -25,14 +28,29 @@ pub fn run_main(program: &Program) -> Result<RunMainResult> {
 }
 
 /// Dispatch a single HTTP request to the matching route and return (status_code, body).
+/// Convenience wrapper around `run_request_with_headers` without headers. Kept
+/// public so test code can keep its concise call shape.
+#[allow(dead_code)]
 pub fn run_request(
     program: &Program,
     method: &str,
     path: &str,
     body: Option<String>,
 ) -> Result<(u16, String)> {
+    run_request_with_headers(program, method, path, body, HashMap::new())
+}
+
+/// Same as `run_request` but with request headers accessible via `header(name)`.
+pub fn run_request_with_headers(
+    program: &Program,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    headers: HashMap<String, String>,
+) -> Result<(u16, String)> {
     let mut vm = Vm::new(program);
     vm.request_body = body;
+    vm.current_headers = Some(headers);
     vm.dispatch_route(method, path)
 }
 
@@ -41,7 +59,14 @@ struct Vm<'a> {
     /// Model schema map (entity + class) for runtime JSON validation on typed params/returns.
     models: HashMap<String, &'a ModelDecl>,
     routes: Vec<&'a RouteDecl>,
+    middlewares: HashMap<String, &'a MiddlewareDecl>,
     current_path_params: Option<HashMap<String, String>>,
+    /// Query-string params parsed from the request URL (`?a=1&b=hello`).
+    current_query_params: Option<HashMap<String, String>>,
+    /// Request headers (lower-cased keys) for `header(name)` look-ups.
+    current_headers: Option<HashMap<String, String>>,
+    /// Per-request key-value bag written by `setContext` and read by `context`.
+    request_context: HashMap<String, Value>,
     output: String,
     depth: usize,
     /// Body of the current HTTP request (set by run_request)
@@ -66,11 +91,20 @@ impl<'a> Vm<'a> {
 
         let routes = program.routes.iter().collect();
 
+        let mut middlewares = HashMap::new();
+        for mw in &program.middlewares {
+            middlewares.insert(mw.name.to_lowercase(), mw);
+        }
+
         Self {
             functions,
             models,
             routes,
+            middlewares,
             current_path_params: None,
+            current_query_params: None,
+            current_headers: None,
+            request_context: HashMap::new(),
             output: String::new(),
             depth: 0,
             request_body: None,
@@ -88,7 +122,13 @@ impl<'a> Vm<'a> {
             .functions
             .get(&name.to_lowercase())
             .copied()
-            .ok_or_else(|| anyhow!("Unknown function: {name}"))?;
+            .ok_or_else(|| {
+                let suggestion = closest_match(name, self.functions.keys());
+                match suggestion {
+                    Some(s) => anyhow!("Unknown function: {name}. Did you mean '{s}'?"),
+                    None => anyhow!("Unknown function: {name}"),
+                }
+            })?;
 
         if function.params.len() != args.len() {
             bail!(
@@ -113,13 +153,15 @@ impl<'a> Vm<'a> {
         match flow {
             Flow::Continue => Ok(None),
             Flow::Return(v) => {
+                let had_explicit_value = v.is_some();
                 if let Some(return_ty) = &function.return_type {
                     let checked = self.check_typed_value(
                         &format!("return of function '{}'", function.name),
                         return_ty,
                         v.unwrap_or(Value::Null),
                     )?;
-                    if checked == Value::Null {
+                    if !had_explicit_value && checked == Value::Null {
+                        // `return;` with a typed function → caller gets Void.
                         Ok(None)
                     } else {
                         Ok(Some(checked))
@@ -142,14 +184,43 @@ impl<'a> Vm<'a> {
     }
 
     fn check_typed_value(&self, subject: &str, ty: &str, value: Value) -> Result<Value> {
-        match ty {
+        // Strip trailing `?` nullable marker
+        let (base, nullable_marker) = match ty.strip_suffix('?') {
+            Some(stripped) => (stripped, true),
+            None => (ty, false),
+        };
+
+        // Desugar `Optional<T>` → same nullable semantics as `T?`
+        let (base, nullable) = if let Some(inner) = strip_generic_wrapper(base, "Optional") {
+            (inner.to_string(), true)
+        } else {
+            (base.to_string(), nullable_marker)
+        };
+
+        if nullable {
+            if matches!(value, Value::Null) {
+                return Ok(Value::Null);
+            }
+            if let Value::Str(s) = &value {
+                if s == "null" {
+                    return Ok(Value::Null);
+                }
+            }
+        }
+
+        // List<T> — JSON array where each element matches T
+        if let Some(elem_ty) = strip_generic_wrapper(&base, "List") {
+            return self.check_list_value(subject, elem_ty, value);
+        }
+
+        match base.as_str() {
             "string" | "str" => match &value {
                 Value::Str(_) => Ok(value),
                 Value::Int(n) => Ok(Value::Str(n.to_string())),
                 Value::Float(n) => Ok(Value::Str(format_float(*n))),
                 _ => bail!("Type error: {subject} expects string, got {}", value.type_name()),
             },
-            "int" | "integer" | "number" => match &value {
+            "int" | "integer" | "number" | "bigint" => match &value {
                 Value::Int(_) => Ok(value),
                 Value::Float(n) if n.fract() == 0.0 => Ok(Value::Int(*n as i64)),
                 Value::Str(s) => s
@@ -170,6 +241,35 @@ impl<'a> Vm<'a> {
             "bool" | "boolean" => match &value {
                 Value::Bool(_) => Ok(value),
                 _ => bail!("Type error: {subject} expects bool, got {}", value.type_name()),
+            },
+            "uuid" => match &value {
+                Value::Str(s) if looks_like_uuid(s) => Ok(value),
+                Value::Str(s) => bail!("Type error: {subject} expects uuid, got string \"{s}\""),
+                _ => bail!("Type error: {subject} expects uuid, got {}", value.type_name()),
+            },
+            "datetime" | "timestamp" => match &value {
+                Value::Str(s) if looks_like_datetime(s) => Ok(value),
+                Value::Str(s) => {
+                    bail!("Type error: {subject} expects datetime (ISO 8601), got string \"{s}\"")
+                }
+                _ => bail!("Type error: {subject} expects datetime, got {}", value.type_name()),
+            },
+            "decimal" => match &value {
+                Value::Float(_) | Value::Int(_) => Ok(value),
+                Value::Str(s) if s.parse::<f64>().is_ok() => Ok(Value::Str(s.clone())),
+                Value::Str(s) => bail!("Type error: {subject} expects decimal, got string \"{s}\""),
+                _ => bail!("Type error: {subject} expects decimal, got {}", value.type_name()),
+            },
+            "json" => match &value {
+                Value::Str(s) => {
+                    if serde_json::from_str::<JsonValue>(s).is_ok() {
+                        Ok(value)
+                    } else {
+                        bail!("Type error: {subject} expects json, got non-json string")
+                    }
+                }
+                Value::Null => Ok(value),
+                _ => bail!("Type error: {subject} expects json, got {}", value.type_name()),
             },
             model_ty => {
                 let model = self.models.get(&model_ty.to_lowercase());
@@ -195,6 +295,34 @@ impl<'a> Vm<'a> {
                 }
             }
         }
+    }
+
+    fn check_list_value(&self, subject: &str, elem_ty: &str, value: Value) -> Result<Value> {
+        let raw = match value {
+            Value::Str(s) => s,
+            Value::Null => bail!("Type error: {subject} expects List<{elem_ty}>, got null"),
+            other => bail!(
+                "Type error: {subject} expects List<{elem_ty}>, got {}",
+                other.type_name()
+            ),
+        };
+
+        let parsed: JsonValue = serde_json::from_str(&raw)
+            .map_err(|_| anyhow!("Type error: {subject} expects List<{elem_ty}>, got non-json"))?;
+
+        let arr = parsed
+            .as_array()
+            .ok_or_else(|| anyhow!("Type error: {subject} expects List<{elem_ty}>, got non-array"))?;
+
+        for (i, item) in arr.iter().enumerate() {
+            if !self.json_value_matches_type(item, elem_ty) {
+                bail!(
+                    "Type error: {subject} expects List<{elem_ty}>, item at index {i} is not {elem_ty}"
+                );
+            }
+        }
+
+        Ok(Value::Str(parsed.to_string()))
     }
 
     fn validate_json_against_model(
@@ -254,11 +382,22 @@ impl<'a> Vm<'a> {
     }
 
     fn json_value_matches_type(&self, value: &JsonValue, type_name: &str) -> bool {
-        match type_name.to_ascii_lowercase().as_str() {
-            "string" | "str" | "text" | "varchar" | "uuid" | "datetime" | "timestamp" => {
-                value.is_string()
+        let (base, nullable) = match type_name.strip_suffix('?') {
+            Some(stripped) => (stripped, true),
+            None => (type_name, false),
+        };
+
+        if nullable && value.is_null() {
+            return true;
+        }
+
+        match base.to_ascii_lowercase().as_str() {
+            "string" | "str" | "text" | "varchar" => value.is_string(),
+            "uuid" => value.as_str().map(looks_like_uuid).unwrap_or(false),
+            "datetime" | "timestamp" => value.as_str().map(looks_like_datetime).unwrap_or(false),
+            "int" | "integer" | "number" | "bigint" => {
+                value.as_i64().is_some() || value.as_u64().is_some()
             }
-            "int" | "integer" | "number" | "bigint" => value.as_i64().is_some() || value.as_u64().is_some(),
             "double" | "float" | "decimal" => value.is_number(),
             "bool" | "boolean" => value.is_boolean(),
             "json" => value.is_object() || value.is_array(),
@@ -373,6 +512,67 @@ impl<'a> Vm<'a> {
                 vars.insert(key, Value::Str(doc.to_string()));
                 Ok(Flow::Continue)
             }
+            Stmt::Try {
+                body,
+                catch_var,
+                catch_type: _,
+                catch_body,
+            } => {
+                let try_result = self.exec_block(body, vars);
+                match try_result {
+                    Ok(flow) => Ok(flow),
+                    Err(e) => {
+                        let mut all_msgs: Vec<String> = e
+                            .chain()
+                            .map(|c| c.to_string())
+                            .collect();
+                        let message = if all_msgs.is_empty() {
+                            "unknown error".to_string()
+                        } else {
+                            all_msgs.remove(0)
+                        };
+                        let err_obj = json!({
+                            "message": message,
+                            "causes": all_msgs,
+                        });
+                        let key = catch_var.to_lowercase();
+                        // Inject the error binding; restore the prior value (if any)
+                        // when leaving the catch block.
+                        let prior = vars.insert(key.clone(), Value::Str(err_obj.to_string()));
+                        let catch_flow = self.exec_block(catch_body, vars);
+                        match prior {
+                            Some(v) => {
+                                vars.insert(key, v);
+                            }
+                            None => {
+                                vars.remove(&key);
+                            }
+                        }
+                        catch_flow
+                    }
+                }
+            }
+            Stmt::ValidateBody { fields } => {
+                let body = self.request_body.clone().unwrap_or_default();
+                let parsed: JsonValue = if body.trim().is_empty() {
+                    JsonValue::Object(serde_json::Map::new())
+                } else {
+                    serde_json::from_str(&body)
+                        .with_context(|| "validate body: request body is not valid JSON")?
+                };
+
+                let errors = run_validation_rules(fields, &parsed);
+                if !errors.is_empty() {
+                    let mut error_doc = serde_json::Map::new();
+                    error_doc.insert("status".into(), json!(400));
+                    error_doc.insert("errors".into(), JsonValue::Object(errors));
+                    return Ok(Flow::Return(Some(Value::Str(
+                        JsonValue::Object(error_doc).to_string(),
+                    ))));
+                }
+
+                Ok(Flow::Continue)
+            }
             Stmt::DbInsert { var, context_var: _, table } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
@@ -427,10 +627,13 @@ impl<'a> Vm<'a> {
             Expr::Str(v) => Ok(Value::Str(v.clone())),
             Expr::Bool(v) => Ok(Value::Bool(*v)),
             Expr::Null => Ok(Value::Null),
-            Expr::Var(name) => vars
-                .get(&name.to_lowercase())
-                .cloned()
-                .ok_or_else(|| anyhow!("Undefined variable: {name}")),
+            Expr::Var(name) => vars.get(&name.to_lowercase()).cloned().ok_or_else(|| {
+                let suggestion = closest_match(name, vars.keys());
+                match suggestion {
+                    Some(s) => anyhow!("Undefined variable: {name}. Did you mean '{s}'?"),
+                    None => anyhow!("Undefined variable: {name}"),
+                }
+            }),
             Expr::NewEntity { entity: _ } => Ok(Value::Str("{}".to_string())),
             Expr::FieldGet { var, field } => {
                 let obj_val = vars
@@ -465,10 +668,27 @@ impl<'a> Vm<'a> {
                     ),
                 }
             }
-            Expr::DbSelect { entity: _, context_var: _, table, where_clause, first } => {
+            Expr::DbSelect {
+                entity: _,
+                context_var: _,
+                table,
+                where_clause,
+                order_by,
+                limit,
+                offset,
+                first,
+            } => {
                 let table_name = crate::sql::to_snake_case(table);
-                let (sql, boxed_params, shape_key, cache_key) =
-                    build_select_sql(table_name, where_clause.as_deref(), *first, vars, self)?;
+                let (sql, boxed_params, shape_key, cache_key) = build_select_sql(
+                    table_name,
+                    where_clause.as_deref(),
+                    order_by.as_ref(),
+                    limit.as_deref(),
+                    offset.as_deref(),
+                    *first,
+                    vars,
+                    self,
+                )?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let compiled_sql = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
                 let result =
@@ -486,6 +706,36 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("path_param") {
                     return self.eval_path_param_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("query_param") {
+                    return self.eval_query_param_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("header") {
+                    return self.eval_header_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("context") {
+                    return self.eval_context_get_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("setContext")
+                    || name.eq_ignore_ascii_case("set_context")
+                {
+                    return self.eval_context_set_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("unauthorized") {
+                    return Ok(Value::Str(
+                        r#"{"status":401,"error":"Unauthorized"}"#.to_string(),
+                    ));
+                }
+
+                if name.eq_ignore_ascii_case("forbidden") {
+                    return Ok(Value::Str(
+                        r#"{"status":403,"error":"Forbidden"}"#.to_string(),
+                    ));
                 }
 
                 if name.eq_ignore_ascii_case("db_query") {
@@ -612,28 +862,13 @@ impl<'a> Vm<'a> {
                 }
                 // ──────────────────────────────────────────────────────────
 
-                if name.eq_ignore_ascii_case("db_insert_todo") {
-                    return self.eval_db_insert_todo_call(args, vars);
-                }
-
-                if name.eq_ignore_ascii_case("db_select_todo") {
-                    return self.eval_db_select_todo_call(args, vars);
-                }
-
-                if name.eq_ignore_ascii_case("db_update_todo") {
-                    return self.eval_db_update_todo_call(args, vars);
-                }
-
-                if name.eq_ignore_ascii_case("db_delete_todo") {
-                    return self.eval_db_delete_todo_call(args, vars);
-                }
-
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval_expr(arg, vars)?);
                 }
                 Ok(self.call_function(name, values)?.unwrap_or(Value::Void))
             }
+            Expr::Await(inner) => self.eval_expr(inner, vars),
             Expr::Add(left, right) => {
                 let left = self.eval_expr(left, vars)?;
                 let right = self.eval_expr(right, vars)?;
@@ -784,6 +1019,10 @@ impl<'a> Vm<'a> {
     /// Dispatch a single HTTP request directly (used by the real HTTP server).
     /// Returns (http_status_code, response_body).
     pub fn dispatch_route(&mut self, method: &str, path: &str) -> Result<(u16, String)> {
+        // Split `?query` off the path for route matching; keep the query for
+        // `query_param(name)` lookups inside the handler.
+        let (clean_path, query_params) = split_path_and_query(path);
+
         // Find matching route index and collect params (avoid holding borrow across mut calls)
         let mut found_idx: Option<usize> = None;
         let mut found_params: HashMap<String, String> = HashMap::new();
@@ -792,7 +1031,7 @@ impl<'a> Vm<'a> {
             if !route.method.eq_ignore_ascii_case(method) {
                 continue;
             }
-            if let Some(params) = match_route_pattern(&route.path, path) {
+            if let Some(params) = match_route_pattern(&route.path, &clean_path) {
                 found_idx = Some(i);
                 found_params = params;
                 break;
@@ -803,7 +1042,7 @@ impl<'a> Vm<'a> {
             return Ok((
                 404,
                 format!(
-                    "{{\"status\":404,\"error\":\"Not Found\",\"method\":\"{method}\",\"path\":\"{path}\"}}"
+                    "{{\"status\":404,\"error\":\"Not Found\",\"method\":\"{method}\",\"path\":\"{clean_path}\"}}"
                 ),
             ));
         };
@@ -811,13 +1050,28 @@ impl<'a> Vm<'a> {
         // Clone what we need so we can mutably borrow self below
         let handler: Option<String> = self.routes[idx].handler.clone();
         let body_stmts: Vec<Stmt> = self.routes[idx].body.clone();
+        let middleware_names: Vec<String> = self.routes[idx].middlewares.clone();
 
         let previous = self.current_path_params.take();
+        let previous_query = self.current_query_params.take();
         self.current_path_params = Some(found_params);
+        self.current_query_params = Some(query_params);
 
-        let response_str = if let Some(ref handler_name) = handler {
-            self.call_function(handler_name, Vec::new())?
-                .map(|v| v.as_string())
+        // Run middlewares first; if any returns a value, short-circuit
+        // the request with that response.
+        let mut middleware_response: Option<String> = None;
+        for mw_name in &middleware_names {
+            if let Some(resp) = self.run_middleware(mw_name)? {
+                middleware_response = Some(resp);
+                break;
+            }
+        }
+
+        let response_str = if let Some(resp) = middleware_response {
+            Some(resp)
+        } else if let Some(ref handler_name) = handler {
+            let args = self.build_handler_args(handler_name);
+            self.call_function(handler_name, args)?.map(|v| v.as_string())
         } else {
             let mut route_vars = HashMap::new();
             let flow = self.exec_block(&body_stmts, &mut route_vars)?;
@@ -837,6 +1091,7 @@ impl<'a> Vm<'a> {
         };
 
         self.current_path_params = previous;
+        self.current_query_params = previous_query;
 
         let body = response_str.unwrap_or_else(|| "null".to_string());
 
@@ -908,7 +1163,9 @@ impl<'a> Vm<'a> {
             self.current_path_params = Some(params);
 
             if let Some(handler) = &route.handler {
-                let result = self.call_function(handler, Vec::new())?;
+                let handler_name = handler.clone();
+                let args = self.build_handler_args(&handler_name);
+                let result = self.call_function(&handler_name, args)?;
                 if let Some(value) = result {
                     self.output.push_str(&value.as_string());
                     self.output.push('\n');
@@ -943,6 +1200,66 @@ impl<'a> Vm<'a> {
         Ok(Value::Bool(false))
     }
 
+    /// Execute a middleware by name. Returns `Some(response_body)` when the
+    /// middleware short-circuits the request (returns a value), otherwise
+    /// `None` to fall through to the route handler.
+    fn run_middleware(&mut self, name: &str) -> Result<Option<String>> {
+        let mw = self
+            .middlewares
+            .get(&name.to_lowercase())
+            .copied()
+            .ok_or_else(|| anyhow!("Unknown middleware: {name}"))?;
+
+        let mw_body: Vec<Stmt> = mw.body.clone();
+        let mut mw_vars = HashMap::new();
+        let flow = self.exec_block(&mw_body, &mut mw_vars)?;
+
+        match flow {
+            Flow::Continue => Ok(None),
+            Flow::Return(Some(v)) => Ok(Some(v.as_string())),
+            Flow::Return(None) => Ok(Some("null".to_string())),
+            Flow::Break | Flow::ContinueLoop => {
+                bail!("'break'/'continue' cannot be used at middleware top level")
+            }
+        }
+    }
+
+    /// Build the argument list for a `route ... -> handler;` style call by
+    /// matching the handler's declared parameter names against the current path
+    /// and query params. Missing values become `Value::Null`; `check_param_type`
+    /// later coerces strings to the declared type.
+    fn build_handler_args(&self, handler_name: &str) -> Vec<Value> {
+        let Some(handler) = self.functions.get(&handler_name.to_lowercase()).copied() else {
+            return Vec::new();
+        };
+
+        handler
+            .params
+            .iter()
+            .map(|param| {
+                let key = param.name.clone();
+                let from_path = self
+                    .current_path_params
+                    .as_ref()
+                    .and_then(|m| m.get(&key).or_else(|| m.get(&key.to_lowercase())))
+                    .cloned();
+                if let Some(s) = from_path {
+                    return Value::Str(s);
+                }
+
+                let from_query = self
+                    .current_query_params
+                    .as_ref()
+                    .and_then(|m| m.get(&key).or_else(|| m.get(&key.to_lowercase())))
+                    .cloned();
+                match from_query {
+                    Some(s) => Value::Str(s),
+                    None => Value::Null,
+                }
+            })
+            .collect()
+    }
+
     fn eval_path_param_call(
         &mut self,
         args: &[Expr],
@@ -967,6 +1284,97 @@ impl<'a> Vm<'a> {
             Some(v) => Ok(Value::Str(v.clone())),
             None => Ok(Value::Null),
         }
+    }
+
+    fn eval_query_param_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 2 {
+            bail!("query_param(name[, default]) expects 1 or 2 args");
+        }
+
+        let name = match self.eval_expr(&args[0], vars)? {
+            Value::Str(v) => v,
+            other => bail!(
+                "query_param(name): name must be string, got {}",
+                other.type_name()
+            ),
+        };
+
+        let value = self
+            .current_query_params
+            .as_ref()
+            .and_then(|q| q.get(&name).cloned());
+
+        match (value, args.get(1)) {
+            (Some(v), _) => Ok(Value::Str(v)),
+            (None, Some(default_expr)) => self.eval_expr(default_expr, vars),
+            (None, None) => Ok(Value::Null),
+        }
+    }
+
+    fn eval_header_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("header(name) expects exactly 1 arg");
+        }
+        let name = match self.eval_expr(&args[0], vars)? {
+            Value::Str(v) => v,
+            other => bail!("header(name): name must be string, got {}", other.type_name()),
+        };
+        let key = name.to_ascii_lowercase();
+        let value = self
+            .current_headers
+            .as_ref()
+            .and_then(|h| h.get(&key).cloned());
+        match value {
+            Some(v) => Ok(Value::Str(v)),
+            None => Ok(Value::Null),
+        }
+    }
+
+    fn eval_context_get_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("context(key) expects exactly 1 arg");
+        }
+        let key = match self.eval_expr(&args[0], vars)? {
+            Value::Str(v) => v,
+            other => bail!("context(key): key must be string, got {}", other.type_name()),
+        };
+        Ok(self
+            .request_context
+            .get(&key)
+            .cloned()
+            .unwrap_or(Value::Null))
+    }
+
+    fn eval_context_set_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("setContext(key, value) expects exactly 2 args");
+        }
+        let key = match self.eval_expr(&args[0], vars)? {
+            Value::Str(v) => v,
+            other => bail!(
+                "setContext(key, value): key must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let value = self.eval_expr(&args[1], vars)?;
+        self.request_context.insert(key, value);
+        Ok(Value::Void)
     }
 
     fn eval_db_query_call(
@@ -1066,130 +1474,6 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(json_value.to_string()))
     }
 
-    fn eval_db_insert_todo_call(
-        &mut self,
-        args: &[Expr],
-        vars: &mut HashMap<String, Value>,
-    ) -> Result<Value> {
-        if args.len() != 1 {
-            bail!("db_insert_todo(todo_json) expects 1 arg");
-        }
-
-        let raw = match self.eval_expr(&args[0], vars)? {
-            Value::Str(v) => v,
-            other => bail!("db_insert_todo: arg must be string json, got {}", other.type_name()),
-        };
-        let doc: JsonValue = serde_json::from_str(&raw).with_context(|| "db_insert_todo: invalid json")?;
-
-        let id = json_get_string(&doc, "id")?;
-        let title = json_get_string(&doc, "title")?;
-        let description = json_get_opt_string(&doc, "description");
-        let completed = doc.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
-        let due_date = json_get_opt_string(&doc, "due_date");
-
-        let sql = "INSERT INTO todo_entity (id, title, description, completed, due_date) VALUES ($1::uuid, $2, $3, $4, $5::timestamptz) ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, completed = EXCLUDED.completed, due_date = EXCLUDED.due_date;";
-        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![
-            Box::new(id),
-            Box::new(title),
-            Box::new(description),
-            Box::new(completed),
-            Box::new(due_date),
-        ];
-        let param_refs = boxed_params_to_refs(&boxed_params);
-
-        let _ = engine::exec(sql, &param_refs)?;
-        engine::invalidate_result_cache()?;
-        Ok(Value::Null)
-    }
-
-    fn eval_db_select_todo_call(
-        &mut self,
-        args: &[Expr],
-        vars: &mut HashMap<String, Value>,
-    ) -> Result<Value> {
-        if args.len() != 1 {
-            bail!("db_select_todo(id) expects 1 arg");
-        }
-
-        let id = match self.eval_expr(&args[0], vars)? {
-            Value::Str(v) => v,
-            other => bail!("db_select_todo: id must be string, got {}", other.type_name()),
-        };
-
-        let sql = "SELECT COALESCE((SELECT json_build_object('id', id::text, 'title', title, 'description', description, 'completed', completed, 'due_date', due_date)::text FROM todo_entity WHERE id::text = $1 LIMIT 1), 'null');";
-        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![Box::new(id)];
-        let param_refs = boxed_params_to_refs(&boxed_params);
-        let out = engine::query_text_with_optional_cache(
-            "todo.select.by_id",
-            sql,
-            &param_refs,
-        )?;
-        if out == "null" || out.is_empty() {
-            Ok(Value::Null)
-        } else {
-            Ok(Value::Str(out))
-        }
-    }
-
-    fn eval_db_update_todo_call(
-        &mut self,
-        args: &[Expr],
-        vars: &mut HashMap<String, Value>,
-    ) -> Result<Value> {
-        if args.len() != 2 {
-            bail!("db_update_todo(id, todo_json) expects 2 args");
-        }
-
-        let id = match self.eval_expr(&args[0], vars)? {
-            Value::Str(v) => v,
-            other => bail!("db_update_todo: id must be string, got {}", other.type_name()),
-        };
-        let raw = match self.eval_expr(&args[1], vars)? {
-            Value::Str(v) => v,
-            other => bail!("db_update_todo: todo must be string json, got {}", other.type_name()),
-        };
-        let doc: JsonValue = serde_json::from_str(&raw).with_context(|| "db_update_todo: invalid json")?;
-
-        let title = json_get_string(&doc, "title")?;
-        let description = json_get_opt_string(&doc, "description");
-        let completed = doc.get("completed").and_then(|v| v.as_bool()).unwrap_or(false);
-        let due_date = json_get_opt_string(&doc, "due_date");
-
-        let sql = "UPDATE todo_entity SET title = $1, description = $2, completed = $3, due_date = $4::timestamptz WHERE id::text = $5;";
-        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![
-            Box::new(title),
-            Box::new(description),
-            Box::new(completed),
-            Box::new(due_date),
-            Box::new(id),
-        ];
-        let param_refs = boxed_params_to_refs(&boxed_params);
-        let _ = engine::exec(sql, &param_refs)?;
-        engine::invalidate_result_cache()?;
-        Ok(Value::Null)
-    }
-
-    fn eval_db_delete_todo_call(
-        &mut self,
-        args: &[Expr],
-        vars: &mut HashMap<String, Value>,
-    ) -> Result<Value> {
-        if args.len() != 1 {
-            bail!("db_delete_todo(id) expects 1 arg");
-        }
-
-        let id = match self.eval_expr(&args[0], vars)? {
-            Value::Str(v) => v,
-            other => bail!("db_delete_todo: id must be string, got {}", other.type_name()),
-        };
-
-        let sql = "DELETE FROM todo_entity WHERE id::text = $1;";
-        let boxed_params: Vec<Box<dyn ToSql + Sync>> = vec![Box::new(id)];
-        let param_refs = boxed_params_to_refs(&boxed_params);
-        let _ = engine::exec(sql, &param_refs)?;
-        engine::invalidate_result_cache()?;
-        Ok(Value::Null)
-    }
 }
 
 /// Extract the column name from a field path like `"Entity.field"` → `"field"`
@@ -1350,13 +1634,16 @@ fn value_to_cache_fragment(val: &Value) -> String {
 fn build_select_sql(
     table_name: String,
     where_clause: Option<&crate::ast::DbWhere>,
+    order_by: Option<&DbOrderBy>,
+    limit: Option<&Expr>,
+    offset: Option<&Expr>,
     first: bool,
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm,
 ) -> Result<(String, Vec<Box<dyn ToSql + Sync>>, String, String)> {
     let mut sql_where = String::new();
-    let mut shape_bits = String::new();
-    let mut cache_bits = String::new();
+    let mut shape_bits: Vec<String> = Vec::new();
+    let mut cache_bits: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
 
     if let Some(wc) = where_clause {
@@ -1368,53 +1655,104 @@ fn build_select_sql(
             Value::Null | Value::Void => {
                 if op == "!=" {
                     sql_where = format!(" WHERE \"{}\" IS NOT NULL", col);
-                    shape_bits = format!("where:{col}:is_not_null");
-                    cache_bits = shape_bits.clone();
+                    shape_bits.push(format!("where:{col}:is_not_null"));
+                    cache_bits.push(format!("where:{col}:is_not_null"));
                 } else {
                     sql_where = format!(" WHERE \"{}\" IS NULL", col);
-                    shape_bits = format!("where:{col}:is_null");
-                    cache_bits = shape_bits.clone();
+                    shape_bits.push(format!("where:{col}:is_null"));
+                    cache_bits.push(format!("where:{col}:is_null"));
                 }
             }
             other => {
-                sql_where = format!(" WHERE \"{}\" {} $1", col, op);
-                shape_bits = format!("where:{col}:{op}:param");
-                cache_bits = format!("{shape_bits}:{}", value_to_cache_fragment(&other));
                 params.push(value_to_sql_param(&other));
+                sql_where = format!(" WHERE \"{}\" {} ${}", col, op, params.len());
+                shape_bits.push(format!("where:{col}:{op}:param"));
+                cache_bits.push(format!("where:{col}:{op}:{}", value_to_cache_fragment(&other)));
             }
         }
     }
 
+    let mut sql_order = String::new();
+    if let Some(ob) = order_by {
+        let col = field_path_to_col(&ob.field);
+        let dir = match ob.dir {
+            SortDir::Asc => "ASC",
+            SortDir::Desc => "DESC",
+        };
+        sql_order = format!(" ORDER BY \"{}\" {}", col, dir);
+        shape_bits.push(format!("orderby:{col}:{dir}"));
+        cache_bits.push(format!("orderby:{col}:{dir}"));
+    }
+
+    let mut sql_limit_offset = String::new();
+
+    if let Some(limit_expr) = limit {
+        let v = vm.eval_expr(limit_expr, vars)?;
+        let n = value_to_positive_int(&v, "limit")?;
+        sql_limit_offset.push_str(&format!(" LIMIT {n}"));
+        shape_bits.push("limit:literal".to_string());
+        cache_bits.push(format!("limit:{n}"));
+    } else if first {
+        sql_limit_offset.push_str(" LIMIT 1");
+    }
+
+    if let Some(offset_expr) = offset {
+        let v = vm.eval_expr(offset_expr, vars)?;
+        let n = value_to_positive_int(&v, "offset")?;
+        sql_limit_offset.push_str(&format!(" OFFSET {n}"));
+        shape_bits.push("offset:literal".to_string());
+        cache_bits.push(format!("offset:{n}"));
+    }
+
+    let inner_sql = format!(
+        "SELECT * FROM \"{}\"{}{}{}",
+        table_name, sql_where, sql_order, sql_limit_offset
+    );
+
     let sql = if first {
         format!(
-            "SELECT row_to_json(t)::text FROM (SELECT * FROM \"{}\"{} LIMIT 1) t;",
-            table_name, sql_where
+            "SELECT row_to_json(t)::text FROM ({}) t;",
+            inner_sql.trim_end()
         )
     } else {
         format!(
-            "SELECT COALESCE(json_agg(row_to_json(t)), '[]')::text FROM (SELECT * FROM \"{}\"{}) t;",
-            table_name, sql_where
+            "SELECT COALESCE(json_agg(row_to_json(t)), '[]')::text FROM ({}) t;",
+            inner_sql.trim_end()
         )
     };
 
-    let shape_key = format!(
-        "select|table:{table_name}|first:{first}|{}",
-        if shape_bits.is_empty() {
-            "no_where".to_string()
-        } else {
-            shape_bits
-        }
-    );
-    let cache_key = format!(
-        "result|table:{table_name}|first:{first}|{}",
-        if cache_bits.is_empty() {
-            "no_where".to_string()
-        } else {
-            cache_bits
-        }
-    );
+    let shape_suffix = if shape_bits.is_empty() {
+        "no_clauses".to_string()
+    } else {
+        shape_bits.join("|")
+    };
+    let cache_suffix = if cache_bits.is_empty() {
+        "no_clauses".to_string()
+    } else {
+        cache_bits.join("|")
+    };
+    let shape_key = format!("select|table:{table_name}|first:{first}|{shape_suffix}");
+    let cache_key = format!("result|table:{table_name}|first:{first}|{cache_suffix}");
 
     Ok((sql, params, shape_key, cache_key))
+}
+
+fn value_to_positive_int(value: &Value, clause: &str) -> Result<i64> {
+    match value {
+        Value::Int(n) if *n >= 0 => Ok(*n),
+        Value::Int(n) => bail!("{clause} must be non-negative, got {n}"),
+        Value::Str(s) => s
+            .parse::<i64>()
+            .map_err(|_| anyhow!("{clause} must be integer, got string '{s}'"))
+            .and_then(|n| {
+                if n >= 0 {
+                    Ok(n)
+                } else {
+                    Err(anyhow!("{clause} must be non-negative, got {n}"))
+                }
+            }),
+        other => bail!("{clause} must be integer, got {}", other.type_name()),
+    }
 }
 
 fn value_to_json(value: &Value) -> JsonValue {
@@ -1427,15 +1765,217 @@ fn value_to_json(value: &Value) -> JsonValue {
     }
 }
 
-fn json_get_string(doc: &JsonValue, field: &str) -> Result<String> {
-    doc.get(field)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("Missing or invalid string field: {field}"))
+/// Returns the candidate from `candidates` closest to `target` by Levenshtein
+/// distance, but only when the match is "close enough" (distance ≤ max(2, len/3))
+/// — this keeps the suggestion useful and avoids unrelated noise.
+fn closest_match<'a, I>(target: &str, candidates: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let target_lc = target.to_ascii_lowercase();
+    let threshold = std::cmp::max(2, target_lc.len() / 3);
+
+    let mut best: Option<(usize, &str)> = None;
+    for candidate in candidates {
+        if candidate.eq_ignore_ascii_case(target) {
+            continue;
+        }
+        let dist = levenshtein(&target_lc, &candidate.to_ascii_lowercase());
+        if dist > threshold {
+            continue;
+        }
+        match best {
+            Some((d, _)) if d <= dist => {}
+            _ => best = Some((dist, candidate.as_str())),
+        }
+    }
+
+    best.map(|(_, s)| s.to_string())
 }
 
-fn json_get_opt_string(doc: &JsonValue, field: &str) -> Option<String> {
-    doc.get(field).and_then(|v| v.as_str()).map(|s| s.to_string())
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+
+    let mut prev = (0..=b.len()).collect::<Vec<_>>();
+    let mut curr = vec![0usize; b.len() + 1];
+
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (curr[j] + 1)
+                .min(prev[j + 1] + 1)
+                .min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[b.len()]
+}
+
+/// If `s` looks like `Wrapper<Inner>` returns `Some("Inner")`. Returns `None`
+/// when the wrapper name doesn't match (case-insensitive) or no `< >` present.
+fn strip_generic_wrapper<'a>(s: &'a str, wrapper: &str) -> Option<&'a str> {
+    let lower = s.to_ascii_lowercase();
+    let want = format!("{}<", wrapper.to_ascii_lowercase());
+    if lower.starts_with(&want) && s.ends_with('>') {
+        let start = want.len();
+        let end = s.len() - 1;
+        if end > start {
+            return Some(&s[start..end]);
+        }
+    }
+    None
+}
+
+/// `8-4-4-4-12` hex pattern. Hyphen positions are checked; characters can be
+/// uppercase or lowercase hex. Matches RFC 4122 textual form.
+fn looks_like_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        let is_dash = matches!(i, 8 | 13 | 18 | 23);
+        if is_dash {
+            if *b != b'-' {
+                return false;
+            }
+        } else if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Minimal ISO-8601-ish heuristic: starts with `YYYY-MM-DD` and has at least
+/// 10 characters. Avoids pulling in chrono just for type checking.
+fn looks_like_datetime(s: &str) -> bool {
+    if s.len() < 10 {
+        return false;
+    }
+    let b = s.as_bytes();
+    b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[4] == b'-'
+        && b[5].is_ascii_digit()
+        && b[6].is_ascii_digit()
+        && b[7] == b'-'
+        && b[8].is_ascii_digit()
+        && b[9].is_ascii_digit()
+}
+
+/// Run the rules from a `validate body { ... }` block against a parsed JSON body.
+/// Returns a map `{ field: "first failing rule" }`. Empty map means all rules passed.
+fn run_validation_rules(
+    fields: &[ValidateField],
+    body: &JsonValue,
+) -> serde_json::Map<String, JsonValue> {
+    let mut errors = serde_json::Map::new();
+
+    for field in fields {
+        let value = body.get(&field.name);
+
+        for rule in &field.rules {
+            if let Some(msg) = check_rule(rule, value) {
+                errors.insert(field.name.clone(), JsonValue::String(msg));
+                break;
+            }
+        }
+    }
+
+    errors
+}
+
+fn check_rule(rule: &ValidateRule, value: Option<&JsonValue>) -> Option<String> {
+    match rule {
+        ValidateRule::Required => match value {
+            None | Some(JsonValue::Null) => Some("required".to_string()),
+            _ => None,
+        },
+        ValidateRule::MinLength(n) => match value {
+            Some(JsonValue::String(s)) => {
+                if (s.chars().count() as i64) < *n {
+                    Some(format!("minLength({n})"))
+                } else {
+                    None
+                }
+            }
+            None | Some(JsonValue::Null) => None,
+            _ => Some(format!("minLength({n}): not a string")),
+        },
+        ValidateRule::MaxLength(n) => match value {
+            Some(JsonValue::String(s)) => {
+                if (s.chars().count() as i64) > *n {
+                    Some(format!("maxLength({n})"))
+                } else {
+                    None
+                }
+            }
+            None | Some(JsonValue::Null) => None,
+            _ => Some(format!("maxLength({n}): not a string")),
+        },
+        ValidateRule::Min(bound) => check_numeric_bound(value, bound, true),
+        ValidateRule::Max(bound) => check_numeric_bound(value, bound, false),
+    }
+}
+
+fn check_numeric_bound(value: Option<&JsonValue>, bound: &str, is_min: bool) -> Option<String> {
+    let bound_num: f64 = match bound.parse() {
+        Ok(v) => v,
+        Err(_) => return Some(format!("invalid numeric bound '{bound}'")),
+    };
+    let label = if is_min { "min" } else { "max" };
+
+    match value {
+        Some(JsonValue::Number(n)) => {
+            let v = n.as_f64().unwrap_or(0.0);
+            let ok = if is_min { v >= bound_num } else { v <= bound_num };
+            if ok {
+                None
+            } else {
+                Some(format!("{label}({bound})"))
+            }
+        }
+        None | Some(JsonValue::Null) => None,
+        _ => Some(format!("{label}({bound}): not a number")),
+    }
+}
+
+/// Split `"/items?limit=10&q=hi"` into `("/items", { "limit": "10", "q": "hi" })`.
+/// Percent-decoding is intentionally not done here — keep it lazy for now.
+fn split_path_and_query(raw: &str) -> (String, HashMap<String, String>) {
+    let mut iter = raw.splitn(2, '?');
+    let path = iter.next().unwrap_or("").to_string();
+    let mut params = HashMap::new();
+
+    if let Some(query) = iter.next() {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            match pair.split_once('=') {
+                Some((k, v)) if !k.is_empty() => {
+                    params.insert(k.to_string(), v.to_string());
+                }
+                None if !pair.is_empty() => {
+                    params.insert(pair.to_string(), String::new());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (path, params)
 }
 
 fn match_route_pattern(pattern: &str, path: &str) -> Option<HashMap<String, String>> {
@@ -1794,5 +2334,445 @@ mod tests {
         .to_string();
 
         assert!(err.contains("expects field 'name'"));
+    }
+
+    #[test]
+    fn query_param_reads_value_from_url() {
+        let src = r#"
+            route GET "/items" {
+                let limit = query_param("limit");
+                let q = query_param("q");
+                return json("limit=" + limit + ",q=" + q);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/items?limit=10&q=hello", None).unwrap();
+        assert_eq!(status, 200);
+        assert!(body.contains("limit=10"));
+        assert!(body.contains("q=hello"));
+    }
+
+    #[test]
+    fn query_param_default_used_when_missing() {
+        let src = r#"
+            route GET "/items" {
+                let limit = query_param("limit", "20");
+                return json("limit=" + limit);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/items", None).unwrap();
+        assert_eq!(status, 200);
+        assert!(body.contains("limit=20"));
+    }
+
+    #[test]
+    fn uuid_type_accepts_valid_string_and_rejects_invalid() {
+        let src = r#"
+            function take(id: uuid): uuid {
+                return id;
+            }
+
+            function main() {
+                let good = take("550e8400-e29b-41d4-a716-446655440000");
+                print(good);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert!(out.contains("550e8400-e29b-41d4-a716-446655440000"));
+
+        let bad_src = r#"
+            function take(id: uuid): uuid { return id; }
+            function main() { take("not-a-uuid"); }
+        "#;
+        let bad_program = parse_program(bad_src).unwrap();
+        validate_program(&bad_program).unwrap();
+        let err = run_main(&bad_program).unwrap_err().to_string();
+        assert!(err.contains("uuid"));
+    }
+
+    #[test]
+    fn datetime_type_accepts_iso_string() {
+        let src = r#"
+            function take(at: datetime): datetime {
+                return at;
+            }
+
+            function main() {
+                let v = take("2026-05-19T10:00:00Z");
+                print(v);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert!(out.contains("2026-05-19"));
+    }
+
+    #[test]
+    fn nullable_type_marker_allows_null_value() {
+        let src = r#"
+            function take(name: string?): string? {
+                return name;
+            }
+
+            function main() {
+                let v = take(null);
+                print(v);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert_eq!(out.trim(), "null");
+    }
+
+    #[test]
+    fn optional_wrapper_is_equivalent_to_nullable_marker() {
+        let src = r#"
+            function take(x: Optional<int>): Optional<int> {
+                return x;
+            }
+
+            function main() {
+                let v = take(null);
+                print(v);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert_eq!(out.trim(), "null");
+    }
+
+    #[test]
+    fn list_of_int_validates_each_element() {
+        let src = r#"
+            function take(xs: List<int>): List<int> {
+                return xs;
+            }
+
+            function main() {
+                let v = take("[1, 2, 3]");
+                print(v);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert!(out.contains("[1,2,3]") || out.contains("[1, 2, 3]"));
+
+        let bad_src = r#"
+            function take(xs: List<int>): List<int> { return xs; }
+            function main() { take("[1, \"two\", 3]"); }
+        "#;
+        let bad = parse_program(bad_src).unwrap();
+        validate_program(&bad).unwrap();
+        let err = run_main(&bad).unwrap_err().to_string();
+        assert!(err.contains("List<int>"));
+    }
+
+    #[test]
+    fn try_catch_swallows_runtime_error() {
+        let src = r#"
+            function risky() {
+                let x = undefined_var;
+            }
+
+            function main() {
+                try {
+                    risky();
+                    print("unreachable");
+                } catch (e) {
+                    print("caught: " + e);
+                }
+                print("after");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert!(out.contains("caught:"));
+        assert!(out.contains("Undefined variable"));
+        assert!(out.contains("after"));
+        assert!(!out.contains("unreachable"));
+    }
+
+    #[test]
+    fn try_catch_returns_from_catch_block() {
+        let src = r#"
+            function broken(): int {
+                let x = 0;
+                return x / 0;
+            }
+
+            function main() {
+                try {
+                    let y = broken();
+                    print(y);
+                } catch (e) {
+                    print("recovered");
+                }
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert_eq!(out.trim(), "recovered");
+    }
+
+    #[test]
+    fn try_catch_lets_success_pass_through() {
+        let src = r#"
+            function safe(): int {
+                return 7;
+            }
+
+            function main() {
+                try {
+                    let n = safe();
+                    print(n);
+                } catch (e) {
+                    print("never");
+                }
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert_eq!(out.trim(), "7");
+    }
+
+    #[test]
+    fn unknown_function_suggests_closest_match() {
+        let src = r#"
+            function getAllUsers() { return 1; }
+            function main() {
+                let v = getAllUser();
+                print(v);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let err = run_main(&program).unwrap_err().to_string();
+        assert!(err.contains("Did you mean 'getallusers'"));
+    }
+
+    #[test]
+    fn undefined_variable_suggests_closest_match() {
+        let src = r#"
+            function main() {
+                let userName = "x";
+                print(usrName);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let err = run_main(&program).unwrap_err().to_string();
+        assert!(err.contains("Did you mean 'username'"));
+    }
+
+    #[test]
+    fn async_function_and_await_keyword_parse_and_run() {
+        let src = r#"
+            async function fetch(): int {
+                return 42;
+            }
+
+            function main() {
+                let v = await fetch();
+                print(v);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        assert!(program
+            .functions
+            .iter()
+            .find(|f| f.name == "fetch")
+            .map(|f| f.is_async)
+            .unwrap_or(false));
+        let out = run_main(&program).unwrap().output;
+        assert_eq!(out.trim(), "42");
+    }
+
+    #[test]
+    fn middleware_short_circuits_route_when_returning() {
+        let src = r#"
+            middleware AuthMw {
+                let token = header("authorization");
+                if (token == null) {
+                    return unauthorized();
+                }
+            }
+
+            route GET "/secret" use AuthMw {
+                return json("payload");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        let (status, _body) = run_request(&program, "GET", "/secret", None).unwrap();
+        assert_eq!(status, 401);
+
+        let mut headers = HashMap::new();
+        headers.insert("authorization".into(), "Bearer xyz".into());
+        let (status_ok, body_ok) =
+            run_request_with_headers(&program, "GET", "/secret", None, headers).unwrap();
+        assert_eq!(status_ok, 200);
+        assert_eq!(body_ok, "payload");
+    }
+
+    #[test]
+    fn middleware_can_share_context_with_route_handler() {
+        let src = r#"
+            middleware UserMw {
+                setContext("userId", "u-1");
+            }
+
+            route GET "/me" use UserMw {
+                return json("user=" + context("userId"));
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/me", None).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "user=u-1");
+    }
+
+    #[test]
+    fn unknown_middleware_fails_at_validation() {
+        let src = r#"
+            route GET "/x" use MissingMw {
+                return json("hi");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("unknown middleware"));
+    }
+
+    #[test]
+    fn typed_route_handler_receives_path_param() {
+        let src = r#"
+            function getUser(id: int) {
+                return "user=" + id;
+            }
+
+            route GET "/users/{id}" -> getUser;
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/users/42", None).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "user=42");
+    }
+
+    #[test]
+    fn typed_route_handler_receives_query_param_fallback() {
+        let src = r#"
+            function search(q: string) {
+                return "q=" + q;
+            }
+
+            route GET "/search" -> search;
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/search?q=jwc", None).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "q=jwc");
+    }
+
+    #[test]
+    fn validate_body_returns_400_on_missing_required_field() {
+        let src = r#"
+            route POST "/users" {
+                validate body {
+                    name: required, minLength(2);
+                    age: min(0), max(150);
+                }
+                return json("ok");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(
+            &program,
+            "POST",
+            "/users",
+            Some("{\"age\":10}".to_string()),
+        )
+        .unwrap();
+        assert_eq!(status, 400);
+        assert!(body.contains("\"errors\""));
+        assert!(body.contains("\"name\""));
+    }
+
+    #[test]
+    fn validate_body_passes_when_all_rules_satisfied() {
+        let src = r#"
+            route POST "/users" {
+                validate body {
+                    name: required, minLength(2), maxLength(10);
+                    age: min(0), max(150);
+                }
+                return json("ok");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(
+            &program,
+            "POST",
+            "/users",
+            Some("{\"name\":\"Najim\",\"age\":25}".to_string()),
+        )
+        .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "ok");
+    }
+
+    #[test]
+    fn validate_body_min_max_bound_violation() {
+        let src = r#"
+            route POST "/score" {
+                validate body {
+                    value: min(0), max(100);
+                }
+                return json("ok");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(
+            &program,
+            "POST",
+            "/score",
+            Some("{\"value\":250}".to_string()),
+        )
+        .unwrap();
+        assert_eq!(status, 400);
+        assert!(body.contains("max(100)"));
+    }
+
+    #[test]
+    fn query_string_does_not_break_route_matching() {
+        let src = r#"
+            route GET "/ping" {
+                return "{\"ok\":true}";
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/ping?ignored=1", None).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"ok\":true}");
     }
 }
