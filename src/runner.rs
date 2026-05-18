@@ -875,6 +875,7 @@ impl<'a> Vm<'a> {
                 offset,
                 first,
                 with_relations,
+                projection,
             } => {
                 let table_name = crate::sql::to_snake_case(table);
                 let nav_subqueries = build_navigation_subqueries(
@@ -892,6 +893,7 @@ impl<'a> Vm<'a> {
                     offset.as_deref(),
                     *first,
                     &nav_subqueries,
+                    projection,
                     vars,
                     self,
                 )?;
@@ -954,6 +956,26 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("verify_password") {
                     return self.eval_verify_password_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("cache_get") {
+                    return self.eval_cache_get_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("cache_set") {
+                    return self.eval_cache_set_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("cache_del") {
+                    return self.eval_cache_del_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("cache_clear") {
+                    return self.eval_cache_clear_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("send_email") {
+                    return self.eval_send_email_call(args, vars);
                 }
 
                 if name.eq_ignore_ascii_case("unauthorized") {
@@ -1754,6 +1776,127 @@ impl<'a> Vm<'a> {
         Ok(Value::Bool(crate::password::verify_password(&pwd, &stored)?))
     }
 
+    fn eval_cache_get_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("cache_get(key) expects exactly 1 arg");
+        }
+        let key = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "cache_get(key): key must be string, got {}",
+                other.type_name()
+            ),
+        };
+        match crate::cache::get(&key) {
+            Some(v) => Ok(Value::Str(v)),
+            None => Ok(Value::Null),
+        }
+    }
+
+    fn eval_cache_set_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 3 {
+            bail!("cache_set(key, value, ttl_secs) expects exactly 3 args");
+        }
+        let key = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "cache_set(key, value, ttl_secs): key must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let value = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "cache_set(key, value, ttl_secs): value must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let ttl = match self.eval_expr(&args[2], vars)? {
+            Value::Int(n) if n >= 0 => n as u64,
+            Value::Int(n) => bail!(
+                "cache_set(key, value, ttl_secs): ttl_secs must be >= 0, got {n}"
+            ),
+            other => bail!(
+                "cache_set(key, value, ttl_secs): ttl_secs must be int, got {}",
+                other.type_name()
+            ),
+        };
+        crate::cache::set(&key, &value, ttl);
+        Ok(Value::Void)
+    }
+
+    fn eval_cache_del_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("cache_del(key) expects exactly 1 arg");
+        }
+        let key = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "cache_del(key): key must be string, got {}",
+                other.type_name()
+            ),
+        };
+        crate::cache::del(&key);
+        Ok(Value::Void)
+    }
+
+    fn eval_cache_clear_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("cache_clear() expects no args");
+        }
+        crate::cache::clear();
+        Ok(Value::Void)
+    }
+
+    fn eval_send_email_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 3 {
+            bail!("send_email(to, subject, body_html) expects exactly 3 args");
+        }
+        let to = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "send_email(to, subject, body_html): to must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let subject = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "send_email(to, subject, body_html): subject must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let body_html = match self.eval_expr(&args[2], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "send_email(to, subject, body_html): body_html must be string, got {}",
+                other.type_name()
+            ),
+        };
+        crate::email::send_email(&to, &subject, &body_html)?;
+        Ok(Value::Void)
+    }
+
     fn eval_header_call(
         &mut self,
         args: &[Expr],
@@ -2209,6 +2352,7 @@ fn build_select_sql(
     offset: Option<&Expr>,
     first: bool,
     nav_subqueries: &[NavigationSubquery],
+    projection: &[String],
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm,
 ) -> Result<(String, Vec<Box<dyn ToSql + Sync>>, String, String)> {
@@ -2261,13 +2405,32 @@ fn build_select_sql(
         cache_bits.push(format!("offset:{n}"));
     }
 
-    // Build the inner SELECT projection. When `with rel` is requested we
-    // emit `t.*` plus correlated json subqueries that materialise each
-    // related collection inline.
-    let projection = if nav_subqueries.is_empty() {
+    // Build the inner SELECT column list.
+    //
+    // - No `{ ... }` projection and no `with` clause → SELECT * (cheapest).
+    // - Explicit `{ col1, col2 }` → only those columns from the source table.
+    // - `with rel` → always include the named columns (or `t.*`) plus a
+    //   correlated json subquery per relation.
+    let base_cols: Vec<String> = if projection.is_empty() {
+        Vec::new()
+    } else {
+        projection
+            .iter()
+            .map(|c| format!("t.\"{}\"", c))
+            .collect()
+    };
+    let inner_projection = if nav_subqueries.is_empty() && base_cols.is_empty() {
         "*".to_string()
     } else {
-        let mut bits: Vec<String> = vec!["t.*".to_string()];
+        let mut bits: Vec<String> = if base_cols.is_empty() {
+            vec!["t.*".to_string()]
+        } else {
+            base_cols.clone()
+        };
+        if !projection.is_empty() {
+            shape_bits.push(format!("project:{}", projection.join(",")));
+            cache_bits.push(format!("project:{}", projection.join(",")));
+        }
         for nav in nav_subqueries {
             bits.push(format!(
                 "{} AS \"{}\"",
@@ -2282,7 +2445,7 @@ fn build_select_sql(
 
     let inner_sql = format!(
         "SELECT {} FROM \"{}\" t{}{}{}",
-        projection, table_name, sql_where, sql_order, sql_limit_offset
+        inner_projection, table_name, sql_where, sql_order, sql_limit_offset
     );
 
     let sql = if first {

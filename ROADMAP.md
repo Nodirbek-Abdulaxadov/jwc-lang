@@ -96,7 +96,8 @@
 - Compound `where` — `and`/`or` + qavslar, `and` `or`dan yuqori precedence.
 - Operatorlar: `like @p`, `ilike @p`, `in (@a, @b, ...)`, `between @a and @b`, `is null`, `is not null`.
 - Aggregatsiyalar: `select count(*)`, `select sum|avg|min|max(Entity.col) from ...`.
-- **Qoldi:** `group by` + `having` (projection sintaksis bilan), `join` (navigatsiya bilan qoplandi).
+- Projection: `select User { name, email } from ...` — entity field subset, kompayl-vaqt column existence check, `with rel` bilan birga ishlaydi.
+- **Qoldi:** `group by` + `having` (projection bilan multi-col aggregate uchun), `join` (navigatsiya bilan qoplandi).
 
 ### 2.2b DB business-logic primitivlari ✅
 - PK: `update var in ...` va `delete var from ...` entity'da belgilangan `pk` field(lar)ni hisobga oladi (composite PK qo'llab-quvvatlanadi). Ad-hoc table uchun `id` fallback.

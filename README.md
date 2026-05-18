@@ -247,6 +247,58 @@ let claims = jwt_verify(token, "secret");      // returns payload JSON
   signature mismatch / expired secret / malformed token — pair it with
   `try { ... } catch (e) { return unauthorized(); }`.
 
+## Cache (in-memory, TTL)
+
+A dependency-free process-wide string cache. Useful for JWT validation
+results, per-user query results, short-lived rate-limit counters, etc.
+
+```jwc
+cache_set("user:42", userJson, 60);   // expires in 60 seconds
+let hit = cache_get("user:42");        // → string, or null when missing/expired
+cache_del("user:42");                  // remove a single key
+cache_clear();                         // drop everything
+```
+
+- `cache_set(key, value, ttl_secs)` — `ttl_secs == 0` means "no expiration".
+- `cache_get(key)` returns the cached string, or `null` if the key is
+  missing or its TTL has already elapsed (expired entries are evicted
+  lazily on read).
+- `cache_del(key)` / `cache_clear()` return `void`.
+- The store lives for the lifetime of the process — it does not persist
+  across restarts. Use a real cache (Redis, etc.) if you need durability.
+
+No environment variables are required.
+
+## Email (SMTP)
+
+```jwc
+send_email(
+    "alice@example.com",
+    "Welcome to Acme",
+    "<h1>Hello</h1><p>Confirm your address:</p><a href=\"...\">link</a>"
+);
+```
+
+`send_email(to, subject, body_html)` performs a real SMTP send through a
+cached `SmtpTransport`. The body is sent as `Content-Type: text/html;
+charset=utf-8`.
+
+Required environment variables:
+
+| Env var              | Default     | Purpose                                              |
+|----------------------|-------------|------------------------------------------------------|
+| `JWC_SMTP_HOST`      | (required)  | SMTP server hostname, e.g. `smtp.gmail.com`          |
+| `JWC_SMTP_PORT`      | `587`       | Server port                                          |
+| `JWC_SMTP_USER`      | (required)  | SMTP login username                                  |
+| `JWC_SMTP_PASSWORD`  | (required)  | SMTP login password / app token                      |
+| `JWC_SMTP_FROM`      | (required)  | `Display Name <addr@host>` formatted From            |
+| `JWC_SMTP_TLS`       | `starttls`  | `starttls` (default) \| `tls` (implicit/465) \| `none` |
+
+The transport is built on the first call and reused thereafter. Missing
+`JWC_SMTP_HOST` produces a clean `send_email: JWC_SMTP_HOST is required`
+error so the caller can `try/catch` it. TLS uses `rustls` (no OpenSSL
+dependency).
+
 ## SQL Clauses
 
 `select` supports `where` (with `and`/`or`/parens), `orderby`, `limit`, `offset`, and `first`:
@@ -284,6 +336,10 @@ function totalIn(country) {
 - `limit N` / `offset N` accept integer literals or `@param` references.
 - `first` forces `LIMIT 1` and returns a single row instead of an array.
 - Aggregations: `select count(*)`, `select sum|avg|min|max(Entity.col) from ...`.
+- Projection: `select User { name, email } from ...` — emits only the named
+  columns. Every name is checked against the entity's declared fields at
+  compile time. Combines with `with rel` (relations are added on top of the
+  picked columns).
 
 ## Entity relations (navigation + auto-JOIN)
 

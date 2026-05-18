@@ -273,7 +273,7 @@ pub enum Expr {
         table: String,
         where_clause: Option<Box<WhereExpr>>,
     },
-    /// `select [Entity|*] [with rel, ...] from CTX.TABLE
+    /// `select [Entity|*] [ { col1, col2, ... } ] [with rel, ...] from CTX.TABLE
     ///        [where COND [and|or COND ...]]
     ///        [orderby FIELD [asc|desc]]
     ///        [limit N] [offset N] [first]`
@@ -288,6 +288,9 @@ pub enum Expr {
         first: bool,
         /// Navigation property names to eagerly join (`with posts, comments`).
         with_relations: Vec<String>,
+        /// Column-name subset to project (`select User { name, email } ...`).
+        /// Empty vec means `SELECT *` — every column from the source table.
+        projection: Vec<String>,
     },
     /// `await expr` — placeholder for the future async runtime; today this
     /// is a transparent pass-through that evaluates the inner expression.

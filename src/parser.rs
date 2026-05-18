@@ -666,6 +666,7 @@ fn validate_expr(
             // `with_relations` is validated in `check_with_relations_in_expr`,
             // a separate walk that has access to `entity_navigations`.
             with_relations: _,
+            projection,
         } => {
             let ctx_key = validate_context_exists(context_var, ctx_names)?;
 
@@ -698,7 +699,7 @@ fn validate_expr(
 
             validate_table_in_context(&ctx_key, table, db_tables)?;
 
-            // Compile-time column existence check for WHERE / ORDER BY.
+            // Compile-time column existence check for WHERE / ORDER BY / projection.
             let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
             if let Some(fields) = fields {
                 if let Some(wc) = where_clause {
@@ -709,6 +710,16 @@ fn validate_expr(
                     if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                         bail!(
                             "Unknown column '{}' in ORDER BY of {}.{}",
+                            col,
+                            context_var,
+                            table
+                        );
+                    }
+                }
+                for col in projection {
+                    if !fields.iter().any(|f| f.eq_ignore_ascii_case(col)) {
+                        bail!(
+                            "Unknown column '{}' in projection of {}.{}",
                             col,
                             context_var,
                             table
@@ -2130,6 +2141,31 @@ impl<'a> Parser<'a> {
             self.expect_ident("expected entity name or '*' after 'select'")?
         };
 
+        // optional `{ col1, col2, ... }` projection
+        let projection = if self.check_symbol('{') {
+            self.expect_symbol('{')?;
+            if entity == "*" {
+                return Err(self.error_here(
+                    "projection `{ ... }` requires a named entity, not '*'",
+                ));
+            }
+            let mut cols = Vec::new();
+            if !self.check_symbol('}') {
+                cols.push(self.expect_ident("expected column name in projection")?);
+                while self.check_symbol(',') {
+                    self.expect_symbol(',')?;
+                    cols.push(self.expect_ident("expected column name after ','")?);
+                }
+            }
+            self.expect_symbol('}')?;
+            if cols.is_empty() {
+                return Err(self.error_here("projection `{ ... }` must list at least one column"));
+            }
+            cols
+        } else {
+            Vec::new()
+        };
+
         // optional `with rel1, rel2, ...`
         let with_relations = if self.check_ident_eq("with") {
             self.bump()?;
@@ -2211,6 +2247,7 @@ impl<'a> Parser<'a> {
             offset,
             first,
             with_relations,
+            projection,
         })
     }
 
@@ -2737,6 +2774,67 @@ mod tests {
             },
             _ => panic!("expected Let stmt"),
         }
+    }
+
+    #[test]
+    fn parses_entity_projection_subset() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(60);
+                email varchar(120);
+                password varchar(200);
+            }
+
+            function pickPublic() {
+                let xs = select User { name, email } from AppDb.User;
+                return xs;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect { projection, .. } => {
+                    assert_eq!(projection, &vec!["name".to_string(), "email".to_string()]);
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
+    }
+
+    #[test]
+    fn projection_with_unknown_column_fails_validation() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(60);
+            }
+            function bad() {
+                let xs = select User { name, gender } from AppDb.User;
+                return xs;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Unknown column 'gender'"));
+    }
+
+    #[test]
+    fn star_projection_rejects_brace_list() {
+        let src = r#"
+            function bad() {
+                let xs = select * { name } from AppDb.User;
+                return xs;
+            }
+        "#;
+        let err = parse_program(src).unwrap_err().to_string();
+        assert!(err.contains("projection") && err.contains("'*'"));
     }
 
     #[test]

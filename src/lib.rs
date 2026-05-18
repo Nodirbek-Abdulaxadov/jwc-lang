@@ -5,7 +5,9 @@
 //! `main.rs` is the thin CLI wrapper that imports from here.
 
 pub mod ast;
+pub mod cache;
 pub mod diag;
+pub mod email;
 pub mod engine;
 pub mod error_report;
 pub mod jwt;
