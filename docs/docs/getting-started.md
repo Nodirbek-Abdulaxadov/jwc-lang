@@ -66,11 +66,11 @@ PG_DATABASE=myapp
 The CLI loads `.env` automatically and assembles `DATABASE_URL` from the
 `PG_*` vars if not already set.
 
-Create the database (one time):
-
-```bash
-createdb myapp
-```
+> The database itself is created on demand. The first time you run
+> `jwc migrate up`, JWC connects to the admin database (usually
+> `postgres`) and issues `CREATE DATABASE` if `PG_DATABASE` doesn't
+> exist yet — no `createdb` needed. Set `JWC_ADMIN_DB` if your admin
+> role lives somewhere other than `postgres`.
 
 ## Add an entity and a route
 

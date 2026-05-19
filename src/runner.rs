@@ -2905,9 +2905,45 @@ fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql + Sync> {
                 Box::new(n.to_string())
             }
         }
-        serde_json::Value::String(s) => Box::new(s.clone()),
+        serde_json::Value::String(s) => string_to_sql_param(s),
         other => Box::new(other.to_string()),
     }
+}
+
+/// Postgres rejects plain `String` against `uuid` / `timestamptz` columns —
+/// no auto-cast. Try to recognise these shapes from the literal value and
+/// box them as the proper Rust type so postgres-types accepts the bind.
+/// Falls back to `String` for anything that doesn't match.
+fn string_to_sql_param(s: &str) -> Box<dyn ToSql + Sync> {
+    if looks_like_uuid(s) {
+        if let Ok(u) = uuid::Uuid::parse_str(s) {
+            return Box::new(u);
+        }
+    }
+    if looks_like_datetime(s) {
+        if let Some(ts) = parse_rfc3339(s) {
+            return Box::new(ts);
+        }
+    }
+    Box::new(s.to_string())
+}
+
+/// Accept the most common ISO 8601 / RFC 3339 shapes. Strict chrono parsing
+/// is intentionally permissive: trailing `Z`, sub-second precision, and an
+/// optional timezone offset all parse cleanly.
+fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    // Date-only forms like "2026-05-19" — promote to midnight UTC.
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let dt = d.and_hms_opt(0, 0, 0)?;
+        return Some(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+            dt,
+            chrono::Utc,
+        ));
+    }
+    None
 }
 
 fn boxed_params_to_refs(params: &[Box<dyn ToSql + Sync>]) -> Vec<&(dyn ToSql + Sync)> {
@@ -2923,7 +2959,7 @@ fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync> {
                 Box::new(*n)
             }
         }
-        Value::Str(s) => Box::new(s.clone()),
+        Value::Str(s) => string_to_sql_param(s),
         Value::Float(n) => Box::new(*n),
         Value::Bool(b) => Box::new(*b),
         Value::Null | Value::Void => Box::new(Option::<String>::None),

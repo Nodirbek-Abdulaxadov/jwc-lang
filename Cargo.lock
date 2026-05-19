@@ -1392,6 +1392,7 @@ dependencies = [
  "argon2",
  "axum",
  "base64",
+ "chrono",
  "clap",
  "futures-util",
  "hmac",
@@ -1414,6 +1415,7 @@ dependencies = [
  "tower-lsp",
  "ureq",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1932,8 +1934,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54b858f82211e84682fecd373f68e1ceae642d8d751a1ebd13f33de6257b3e20"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

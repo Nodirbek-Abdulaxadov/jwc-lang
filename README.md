@@ -23,20 +23,15 @@ PG_PASSWORD=secret
 PG_DATABASE=myapp
 ```
 
-3. Create database (once):
+3. Create and run migrations. JWC issues `CREATE DATABASE` itself on the
+   first `migrate up`, so there's no need for `createdb`:
 
 ```bash
-createdb myapp
-```
-
-4. Create and run migrations:
-
-```bash
-jwc migrate add init-db
+jwc migrate new init-db
 jwc migrate up
 ```
 
-5. Run app:
+4. Run app:
 
 ```bash
 jwc run
