@@ -1,24 +1,40 @@
-use anyhow::Result;
-use tiny_http::{Header, Response, Server};
+//! HTTP + WebSocket server built on top of axum.
+//!
+//! The JWC interpreter is fully synchronous (recursive `Vm::eval_expr`,
+//! blocking SQL calls, etc.), so this layer keeps a sync API for the rest
+//! of the codebase and bridges into the async world by running every route
+//! handler on a `spawn_blocking` worker. WS routes get their own bridge:
+//! two `tokio::sync::mpsc::unbounded_channel`s carry text frames between
+//! the async socket and the blocking JWC handler thread.
 
-use crate::ast::Program;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use axum::{
+    body::Bytes,
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
+    http::{HeaderMap, Method, StatusCode, Uri},
+    response::Response,
+    routing::get,
+    Router,
+};
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
+
+use crate::ast::{Program, RouteProtocol};
 use crate::engine;
 use crate::error_report;
 use crate::queue;
 use crate::runner;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
 
 struct ServerMetrics {
-    queue_depth: AtomicUsize,
+    total: AtomicU64,
+    completed: AtomicU64,
+    failed: AtomicU64,
     in_flight: AtomicUsize,
-    busy_workers: AtomicUsize,
-    total_requests: AtomicU64,
-    completed_requests: AtomicU64,
-    rejected_requests: AtomicU64,
     total_latency_us: AtomicU64,
     max_latency_us: AtomicU64,
 }
@@ -26,12 +42,10 @@ struct ServerMetrics {
 impl ServerMetrics {
     fn new() -> Self {
         Self {
-            queue_depth: AtomicUsize::new(0),
+            total: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
             in_flight: AtomicUsize::new(0),
-            busy_workers: AtomicUsize::new(0),
-            total_requests: AtomicU64::new(0),
-            completed_requests: AtomicU64::new(0),
-            rejected_requests: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
             max_latency_us: AtomicU64::new(0),
         }
@@ -39,7 +53,6 @@ impl ServerMetrics {
 
     fn record_latency_us(&self, latency_us: u64) {
         self.total_latency_us.fetch_add(latency_us, Ordering::Relaxed);
-
         let mut observed = self.max_latency_us.load(Ordering::Relaxed);
         while latency_us > observed {
             match self.max_latency_us.compare_exchange_weak(
@@ -67,19 +80,11 @@ fn parse_worker_count() -> usize {
         })
 }
 
-fn parse_queue_capacity(worker_count: usize) -> usize {
-    std::env::var("JWC_SERVER_QUEUE_CAPACITY")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(worker_count.saturating_mul(64).max(64))
-}
-
 fn parse_metrics_enabled() -> bool {
     std::env::var("JWC_SERVER_METRICS")
         .ok()
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-    .unwrap_or(false)
+        .unwrap_or(false)
 }
 
 fn parse_metrics_interval_secs() -> u64 {
@@ -90,15 +95,65 @@ fn parse_metrics_interval_secs() -> u64 {
         .unwrap_or(10)
 }
 
+#[derive(Clone)]
+struct AppState {
+    program: Arc<Program>,
+    request_logging: bool,
+    metrics: Arc<ServerMetrics>,
+}
+
 pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> {
     if std::env::var("DATABASE_URL").is_ok() || std::env::var("JWC_DATABASE_URL").is_ok() {
         engine::init_engine_from_env()?;
     }
 
-    let addr = format!("0.0.0.0:{port}");
-    let server = Server::http(&addr)
-        .map_err(|e| anyhow::anyhow!("Failed to bind to {addr}: {e}"))?;
+    let shared_program = Arc::new(program.clone());
+    queue::init_queue(Arc::clone(&shared_program));
 
+    let metrics = Arc::new(ServerMetrics::new());
+    let worker_count = parse_worker_count();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_count)
+        .enable_all()
+        .thread_name("jwc-server")
+        .build()
+        .map_err(|e| anyhow!("Failed to build tokio runtime: {e}"))?;
+
+    let state = AppState {
+        program: Arc::clone(&shared_program),
+        request_logging,
+        metrics: Arc::clone(&metrics),
+    };
+
+    if parse_metrics_enabled() {
+        let metrics = Arc::clone(&metrics);
+        let interval = Duration::from_secs(parse_metrics_interval_secs());
+        rt.spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let total = metrics.total.load(Ordering::Relaxed);
+                let completed = metrics.completed.load(Ordering::Relaxed);
+                let failed = metrics.failed.load(Ordering::Relaxed);
+                let in_flight = metrics.in_flight.load(Ordering::Relaxed);
+                let total_latency_us = metrics.total_latency_us.load(Ordering::Relaxed);
+                let max_latency_us = metrics.max_latency_us.load(Ordering::Relaxed);
+                let avg_us = if completed == 0 {
+                    0.0
+                } else {
+                    total_latency_us as f64 / completed as f64
+                };
+                eprintln!(
+                    "[JWC-METRICS] in_flight={in_flight} total={total} completed={completed} failed={failed} avg_latency_ms={:.3} max_latency_ms={:.3}",
+                    avg_us / 1000.0,
+                    max_latency_us as f64 / 1000.0
+                );
+            }
+        });
+    }
+
+    let app = build_router(state);
+    let addr = format!("0.0.0.0:{port}");
     println!("╔══════════════════════════════════════╗");
     println!("║         JWC Server started           ║");
     println!("╠══════════════════════════════════════╣");
@@ -107,150 +162,184 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
     println!("╚══════════════════════════════════════╝");
     println!();
 
-    let content_type: Header = "Content-Type: application/json"
-        .parse()
-        .expect("valid header");
-    let shared_program = Arc::new(program.clone());
-    // Bring up the in-process background job queue. Workers stay alive for
-    // the lifetime of the process; jobs are picked up via `enqueue(...)`
-    // from JWC code (typically inside a route handler).
-    queue::init_queue(Arc::clone(&shared_program));
-    let metrics = Arc::new(ServerMetrics::new());
-    let worker_count = parse_worker_count();
-    let queue_capacity = parse_queue_capacity(worker_count);
-    let metrics_enabled = parse_metrics_enabled();
-    let metrics_interval = Duration::from_secs(parse_metrics_interval_secs());
-    let (tx, rx) = mpsc::sync_channel::<tiny_http::Request>(queue_capacity);
-    let shared_rx = Arc::new(Mutex::new(rx));
-
-    if metrics_enabled {
-        let metrics = Arc::clone(&metrics);
-        thread::spawn(move || loop {
-            thread::sleep(metrics_interval);
-
-            let queue_depth = metrics.queue_depth.load(Ordering::Relaxed);
-            let in_flight = metrics.in_flight.load(Ordering::Relaxed);
-            let busy_workers = metrics.busy_workers.load(Ordering::Relaxed);
-            let total = metrics.total_requests.load(Ordering::Relaxed);
-            let completed = metrics.completed_requests.load(Ordering::Relaxed);
-            let rejected = metrics.rejected_requests.load(Ordering::Relaxed);
-            let total_latency_us = metrics.total_latency_us.load(Ordering::Relaxed);
-            let max_latency_us = metrics.max_latency_us.load(Ordering::Relaxed);
-            let avg_latency_us = if completed == 0 {
-                0.0
-            } else {
-                total_latency_us as f64 / completed as f64
-            };
-            let avg_latency_ms = avg_latency_us / 1000.0;
-            let max_latency_ms = max_latency_us as f64 / 1000.0;
-
-            eprintln!(
-                "[JWC-METRICS] queue_depth={} in_flight={} busy_workers={} total={} completed={} rejected={} avg_latency_ms={:.3} max_latency_ms={:.3}",
-                queue_depth,
-                in_flight,
-                busy_workers,
-                total,
-                completed,
-                rejected,
-                avg_latency_ms,
-                max_latency_ms
-            );
-        });
-    }
-
-    for _ in 0..worker_count {
-        let content_type = content_type.clone();
-        let program = Arc::clone(&shared_program);
-        let rx = Arc::clone(&shared_rx);
-        let metrics = Arc::clone(&metrics);
-
-        thread::spawn(move || loop {
-            let next_request = {
-                let guard = rx.lock();
-                match guard {
-                    Ok(rx) => rx.recv(),
-                    Err(_) => return,
-                }
-            };
-
-            let mut request = match next_request {
-                Ok(req) => req,
-                Err(_) => return,
-            };
-
-            metrics.queue_depth.fetch_sub(1, Ordering::Relaxed);
-            metrics.in_flight.fetch_add(1, Ordering::Relaxed);
-            metrics.busy_workers.fetch_add(1, Ordering::Relaxed);
-            let started_at = Instant::now();
-
-            let method = request.method().to_string();
-            // Full URL including query string. The runner parses `?...` itself
-            // so route matching uses the path portion and `query_param(name)`
-            // can read individual query values.
-            let path = request.url().to_string();
-
-            // Snapshot request headers (lower-cased keys) for the runner.
-            let mut header_map: HashMap<String, String> = HashMap::new();
-            for header in request.headers() {
-                header_map.insert(
-                    header.field.as_str().as_str().to_ascii_lowercase(),
-                    header.value.as_str().to_string(),
-                );
-            }
-
-            // Read request body
-            let mut body_bytes = Vec::new();
-            let _ = std::io::Read::read_to_end(request.as_reader(), &mut body_bytes);
-            let body_str = String::from_utf8_lossy(&body_bytes).to_string();
-            let body = if body_str.trim().is_empty() {
-                None
-            } else {
-                Some(body_str)
-            };
-
-            // Dispatch to JWC route
-            let (status, response_body) =
-                runner::run_request_with_headers(&program, &method, &path, body, header_map)
-                    .unwrap_or_else(|e| {
-                        error_report::log_runtime_error(
-                            &format!("HTTP {} {} failed", method, path),
-                            &e,
-                        );
-                        let msg = error_report::to_single_line(&e).replace('"', "'");
-                        (500, format!("{{\"error\":\"{msg}\"}}"))
-                    });
-
-            if request_logging {
-                eprintln!("[JWC] {} {} -> {}", method, path, status);
-            }
-
-            let response = Response::from_string(response_body)
-                .with_status_code(status)
-                .with_header(content_type.clone());
-
-            let _ = request.respond(response);
-
-            let latency_us = started_at.elapsed().as_micros() as u64;
-            metrics.record_latency_us(latency_us);
-            metrics.completed_requests.fetch_add(1, Ordering::Relaxed);
-            metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
-            metrics.busy_workers.fetch_sub(1, Ordering::Relaxed);
-        });
-    }
-
-    for request in server.incoming_requests() {
-        metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-        if let Err(err) = tx.send(request) {
-            let request = err.0;
-            metrics.rejected_requests.fetch_add(1, Ordering::Relaxed);
-            let response = Response::from_string("{\"error\":\"Server queue unavailable\"}")
-                .with_status_code(503)
-                .with_header(content_type.clone());
-            let _ = request.respond(response);
-            break;
-        }
-        metrics.queue_depth.fetch_add(1, Ordering::Relaxed);
-    }
+    rt.block_on(async move {
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| anyhow!("Failed to bind to {addr}: {e}"))?;
+        axum::serve(listener, app)
+            .await
+            .map_err(|e| anyhow!("axum serve error: {e}"))?;
+        Ok::<_, anyhow::Error>(())
+    })?;
 
     Ok(())
 }
+
+fn build_router(state: AppState) -> Router {
+    let mut router: Router<AppState> = Router::new();
+
+    // Each WS route gets its own axum entry. JWC path placeholders
+    // (`/items/{id}`) line up with axum's `{name}` form one-to-one.
+    for route in state.program.routes.iter() {
+        if route.protocol != RouteProtocol::Ws {
+            continue;
+        }
+        let axum_path = ensure_leading_slash(&route.path);
+        let captured_route_path = route.path.clone();
+        router = router.route(
+            &axum_path,
+            get(move |ws: WebSocketUpgrade, State(s): State<AppState>| {
+                let route_path = captured_route_path.clone();
+                async move {
+                    ws.on_upgrade(move |socket| handle_ws(socket, s, route_path))
+                }
+            }),
+        );
+    }
+
+    router
+        .fallback(handle_http_fallback)
+        .with_state(state)
+}
+
+fn ensure_leading_slash(p: &str) -> String {
+    if p.starts_with('/') {
+        p.to_string()
+    } else {
+        format!("/{}", p)
+    }
+}
+
+async fn handle_http_fallback(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    state.metrics.total.fetch_add(1, Ordering::Relaxed);
+    state.metrics.in_flight.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
+
+    let header_map: HashMap<String, String> = headers
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_ascii_lowercase(),
+                v.to_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+
+    // Preserve the query string so `query_param(name)` keeps working.
+    let path = uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string());
+    let method_str = method.as_str().to_string();
+    let body_string = String::from_utf8_lossy(&body).to_string();
+    let body_opt = if body_string.trim().is_empty() {
+        None
+    } else {
+        Some(body_string)
+    };
+
+    let program = Arc::clone(&state.program);
+    let result = tokio::task::spawn_blocking(move || {
+        runner::run_request_with_headers(&program, &method_str, &path, body_opt, header_map)
+    })
+    .await;
+
+    let elapsed = started.elapsed().as_micros() as u64;
+    state.metrics.record_latency_us(elapsed);
+    state.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+
+    let response: Response = match result {
+        Ok(Ok((status, body))) => {
+            state.metrics.completed.fetch_add(1, Ordering::Relaxed);
+            if state.request_logging {
+                eprintln!("[JWC] {} {} -> {}", method, uri.path(), status);
+            }
+            let mut resp = Response::new(body.into());
+            *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            resp.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            resp
+        }
+        Ok(Err(e)) => {
+            state.metrics.failed.fetch_add(1, Ordering::Relaxed);
+            error_report::log_runtime_error(
+                &format!("HTTP {} {} failed", method, uri.path()),
+                &e,
+            );
+            let msg = error_report::to_single_line(&e).replace('"', "'");
+            let body = format!("{{\"error\":\"{msg}\"}}");
+            let mut resp = Response::new(body.into());
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            resp.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            resp
+        }
+        Err(_join_err) => {
+            state.metrics.failed.fetch_add(1, Ordering::Relaxed);
+            let mut resp = Response::new("{\"error\":\"task join\"}".into());
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            resp
+        }
+    };
+
+    response
+}
+
+async fn handle_ws(socket: WebSocket, state: AppState, route_path: String) {
+    let (tx_to_vm, rx_to_vm) = mpsc::unbounded_channel::<String>();
+    let (tx_from_vm, mut rx_from_vm) = mpsc::unbounded_channel::<String>();
+
+    // Reader loop: WS frames → vm-input queue.
+    let (mut ws_sink, mut ws_stream) = futures_util::StreamExt::split(socket);
+    let reader = tokio::spawn(async move {
+        while let Some(frame) = ws_stream.next().await {
+            match frame {
+                Ok(Message::Text(t)) => {
+                    if tx_to_vm.send(t.to_string()).is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Close(_)) => break,
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Writer loop: vm-output queue → WS frames.
+    let writer = tokio::spawn(async move {
+        while let Some(msg) = rx_from_vm.recv().await {
+            if ws_sink.send(Message::Text(msg.into())).await.is_err() {
+                break;
+            }
+        }
+        let _ = ws_sink.close().await;
+    });
+
+    let program = Arc::clone(&state.program);
+    let path_str = route_path.clone();
+    let join = tokio::task::spawn_blocking(move || {
+        runner::run_ws_request(&program, &path_str, rx_to_vm, tx_from_vm)
+    })
+    .await;
+
+    if let Err(e) = join {
+        eprintln!("[JWC-WS] handler task join error: {e}");
+    } else if let Ok(Err(e)) = join {
+        error_report::log_runtime_error(&format!("WS {} failed", route_path), &e);
+    }
+
+    // Best effort: close out the helper tasks.
+    let _ = reader.await;
+    let _ = writer.await;
+}
+
+// Silence unused warning when downstream callers don't need `socket` rebound.
+#[allow(dead_code)]
+fn _socket_marker(_s: WebSocket) {}

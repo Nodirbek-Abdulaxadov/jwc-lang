@@ -28,14 +28,24 @@ pub enum ModelKind {
     Class,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteProtocol {
+    Http,
+    Ws,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteDecl {
+    /// HTTP method for HTTP routes (`"GET"`, `"POST"`, ...). For WS routes,
+    /// this is the literal `"WS"` so existing routing/diagnostic code keeps a
+    /// uniform shape.
     pub method: String,
     pub path: String,
     pub handler: Option<String>,
     pub body: Vec<Stmt>,
     /// Names of middlewares applied to this route (in declaration order).
     pub middlewares: Vec<String>,
+    pub protocol: RouteProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -7,9 +7,25 @@ use serde_json::{json, Value as JsonValue};
 
 use crate::ast::{
     AggregateKind, DbOrderBy, ErrorHandlerDecl, Expr, FunctionDecl, MiddlewareDecl, ModelDecl,
-    ModelKind, NavigationKind, Program, RouteDecl, SortDir, Stmt, TypedParam, ValidateField,
-    ValidateRule, WhereExpr,
+    ModelKind, NavigationKind, Program, RouteDecl, RouteProtocol, SortDir, Stmt, TypedParam,
+    ValidateField, ValidateRule, WhereExpr,
 };
+
+thread_local! {
+    /// Active WebSocket channels for the current handler thread. `ws_send`
+    /// pushes onto the sender; `ws_recv` blocks on the receiver. The handle
+    /// is set by `run_ws_request` before invoking user code and cleared
+    /// afterwards so subsequent requests on the same blocking worker thread
+    /// don't reuse a stale connection.
+    static WS_HANDLE: std::cell::RefCell<Option<WsHandle>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+struct WsHandle {
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+}
 use crate::engine;
 
 #[derive(Debug)]
@@ -39,6 +55,49 @@ pub fn run_request(
     body: Option<String>,
 ) -> Result<(u16, String)> {
     run_request_with_headers(program, method, path, body, HashMap::new())
+}
+
+/// Run a WebSocket route handler. The caller provides two channels that
+/// bridge the async axum socket: `rx` carries inbound text frames toward
+/// JWC, `tx` carries outbound messages from JWC back to the wire. The
+/// channels live in a thread-local so `ws_send` / `ws_recv` / `ws_close`
+/// built-ins inside the route body can reach them without plumbing.
+pub fn run_ws_request(
+    program: &Program,
+    route_path: &str,
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<()> {
+    let route = program
+        .routes
+        .iter()
+        .find(|r| r.protocol == RouteProtocol::Ws && r.path == route_path)
+        .ok_or_else(|| anyhow!("Unknown WS route: {route_path}"))?;
+
+    let handler = route.handler.clone();
+    let body_stmts = route.body.clone();
+
+    let mut vm = Vm::new(program);
+    WS_HANDLE.with(|h| {
+        *h.borrow_mut() = Some(WsHandle { rx, tx });
+    });
+
+    let result: Result<()> = (|| {
+        if let Some(handler_name) = &handler {
+            let args = vm.build_handler_args(handler_name);
+            let _ = vm.call_function(handler_name, args)?;
+        } else {
+            let mut route_vars = HashMap::new();
+            let _ = vm.exec_block(&body_stmts, &mut route_vars)?;
+        }
+        Ok(())
+    })();
+
+    WS_HANDLE.with(|h| {
+        h.borrow_mut().take();
+    });
+
+    result
 }
 
 /// Same as `run_request` but with request headers accessible via `header(name)`.
@@ -1009,6 +1068,16 @@ impl<'a> Vm<'a> {
                     return self.eval_hash_password_call(args, vars);
                 }
 
+                if name.eq_ignore_ascii_case("ws_send") {
+                    return self.eval_ws_send_call(args, vars);
+                }
+                if name.eq_ignore_ascii_case("ws_recv") {
+                    return self.eval_ws_recv_call(args, vars);
+                }
+                if name.eq_ignore_ascii_case("ws_close") {
+                    return self.eval_ws_close_call(args, vars);
+                }
+
                 if name.eq_ignore_ascii_case("verify_password") {
                     return self.eval_verify_password_call(args, vars);
                 }
@@ -1921,6 +1990,66 @@ impl<'a> Vm<'a> {
             ),
         };
         Ok(Value::Str(crate::jwt::verify_hs256(&token, &secret)?))
+    }
+
+    fn eval_ws_send_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("ws_send(msg) expects exactly 1 arg");
+        }
+        let msg = self.eval_expr(&args[0], vars)?.as_string();
+        let sent = WS_HANDLE.with(|h| {
+            h.borrow().as_ref().map(|w| w.tx.send(msg).is_ok())
+        });
+        match sent {
+            Some(true) => Ok(Value::Void),
+            Some(false) => bail!("ws_send: client disconnected"),
+            None => bail!("ws_send(): only valid inside a WS route handler"),
+        }
+    }
+
+    fn eval_ws_recv_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("ws_recv() expects no args");
+        }
+        // Pull the next text frame from the inbound queue. We deliberately
+        // hold the RefCell borrow across the blocking call — this is safe
+        // because each blocking worker thread owns its own thread-local
+        // RefCell with no nested borrows possible.
+        let msg = WS_HANDLE.with(|h| match h.borrow_mut().as_mut() {
+            Some(w) => Some(w.rx.blocking_recv()),
+            None => None,
+        });
+        match msg {
+            None => bail!("ws_recv(): only valid inside a WS route handler"),
+            Some(None) => Ok(Value::Null),     // client closed
+            Some(Some(text)) => Ok(Value::Str(text)),
+        }
+    }
+
+    fn eval_ws_close_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("ws_close() expects no args");
+        }
+        // Dropping the handle drops `tx`, which signals the writer task to
+        // close its sink. The reader task will also see EOF on the next
+        // poll. Subsequent `ws_send`/`ws_recv` calls in this handler error
+        // out cleanly.
+        WS_HANDLE.with(|h| {
+            h.borrow_mut().take();
+        });
+        Ok(Value::Void)
     }
 
     fn eval_hash_password_call(
@@ -4051,6 +4180,38 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).unwrap().output;
         assert_eq!(out.trim(), "7");
+    }
+
+    #[test]
+    fn ws_route_parses_with_protocol_marker() {
+        let src = r#"
+            route WS "/chat/{room}" {
+                let msg = ws_recv();
+                ws_send(msg);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        assert_eq!(program.routes.len(), 1);
+        assert_eq!(program.routes[0].method, "WS");
+        assert_eq!(program.routes[0].path, "/chat/{room}");
+        assert_eq!(
+            program.routes[0].protocol,
+            crate::ast::RouteProtocol::Ws
+        );
+    }
+
+    #[test]
+    fn ws_builtins_error_outside_a_ws_handler() {
+        let src = r#"
+            function main() {
+                ws_send("hi");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let err = run_main(&program).unwrap_err().to_string();
+        assert!(err.contains("only valid inside a WS route"));
     }
 
     #[test]

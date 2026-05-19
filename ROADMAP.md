@@ -134,11 +134,12 @@
 - `select User with posts, profile from AppDb.User ...` — correlated `json_agg` subquery, kompayl-vaqt nav nomini tekshirish.
 - Validator: target entity + FK column + nav nomi mavjudligi tekshiriladi.
 
-### 2.6 async/await ⏳ syntax-only
-- Lexer: `async`, `await` keywordlar.
-- AST: `FunctionDecl.is_async` flag va `Expr::Await(Box<Expr>)`.
-- Hozircha interpreter sync ishlaydi — `await expr` shunchaki ichki ifodani qaytaradi.
-- **Qoldi:** Tokio runtime + `tokio-postgres` + `hyper`/`axum` server. Bu eng katta keyingi ish.
+### 2.6 async/await ⏳ partial — hybrid stage
+- ✅ Lexer: `async`, `await` keywordlar.
+- ✅ AST: `FunctionDecl.is_async` flag va `Expr::Await(Box<Expr>)`.
+- ✅ HTTP server endi axum + tokio asoslangan. Har request `spawn_blocking` orqali sync Vm'ga uzatiladi → modern HTTP/2, hyper performance, real WebSocket support.
+- ✅ WebSocket: `route WS "..."` syntaxsi + `ws_send`/`ws_recv`/`ws_close` built-inlar. Async axum socket va sync Vm o'rtasida unbounded mpsc kanal ko'prik (lifetime: per-connection).
+- **Qoldi:** Vm o'zini async qilish (recursive async fn, BoxFuture); `tokio-postgres` orqali async DB; await'lar haqiqiy yield qiladigan ishlash. Bu Phase 9 yoki keyingisi.
 
 ---
 
@@ -209,13 +210,8 @@
   - ✅ Http client: `http_get(url[, headers])`, `http_post(url[, body[, headers]])` — `ureq` orqali, JSON envelope qaytaradi.
   - ✅ Auth: `jwt_sign(payload_json, secret)` / `jwt_verify(token, secret)` — HS256 (hmac + sha2 + base64).
   - ✅ Password hashing: `hash_password(pwd)` / `verify_password(pwd, hash)` — Argon2id (argon2 crate).
-  - ⬜ Qoldi: Cache (Redis durable backend), Storage (S3), Websocket.
-
-> **WebSocket:** `tiny_http` connection hijacking'ni qo'llab-quvvatlamaydi.
-> Real WS support uchun server'ni `hyper`/`axum`'ga ko'chirish kerak — bu
-> Phase 2.6 tokio async rewrite'i bilan birga ketadi. Hozircha JWC'da
-> long-poll yoki SSE (server-sent events) ko'rinishida vaqtinchalik yechim
-> ham yo'q.
+  - ✅ WebSocket: axum migratsiyasidan keyin `route WS "..."` to'liq ishlaydi.
+  - ⬜ Qoldi: Cache (Redis durable backend), Storage (S3), SSE.
 - **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
 - **JWC Hub:** `hub.jwc.dev` — paket registry.
 - **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.

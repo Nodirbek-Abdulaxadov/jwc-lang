@@ -5,8 +5,8 @@ use anyhow::{anyhow, bail, Result};
 use crate::ast::{
     AggregateKind, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
     FieldReference, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, NavigationField,
-    NavigationKind, OnDeleteAction, Program, RouteDecl, SortDir, Stmt, TypeSpec, TypedParam,
-    ValidateField, ValidateRule, WhereExpr,
+    NavigationKind, OnDeleteAction, Program, RouteDecl, RouteProtocol, SortDir, Stmt, TypeSpec,
+    TypedParam, ValidateField, ValidateRule, WhereExpr,
 };
 use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
@@ -198,7 +198,10 @@ pub fn validate_program(program: &Program) -> Result<()> {
     let mut route_keys = HashSet::new();
     for route in &program.routes {
         let method = route.method.to_ascii_uppercase();
-        if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "DELETE" | "PATCH") {
+        if !matches!(
+            method.as_str(),
+            "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS"
+        ) {
             bail!("Unsupported route method: {}", route.method);
         }
 
@@ -1591,7 +1594,7 @@ impl<'a> Parser<'a> {
 
     fn parse_route_decl(&mut self) -> Result<RouteDecl> {
         self.expect_keyword(Keyword::Route)?;
-        let method = self.expect_ident("expected HTTP method (GET/POST/PUT/DELETE/PATCH)")?;
+        let method = self.expect_ident("expected HTTP method (GET/POST/PUT/DELETE/PATCH/WS)")?;
         let path = self.expect_string("expected route path string")?;
 
         // Optional `use M1[, M2, ...]` middleware list
@@ -1607,6 +1610,17 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
 
+        let protocol = if method.eq_ignore_ascii_case("ws") {
+            RouteProtocol::Ws
+        } else {
+            RouteProtocol::Http
+        };
+        let method = if protocol == RouteProtocol::Ws {
+            "WS".to_string()
+        } else {
+            method
+        };
+
         if self.check_symbol('-') {
             self.expect_symbol('-')?;
             self.expect_symbol('>')?;
@@ -1618,6 +1632,7 @@ impl<'a> Parser<'a> {
                 handler: Some(handler),
                 body: Vec::new(),
                 middlewares,
+                protocol,
             });
         }
 
@@ -1628,6 +1643,7 @@ impl<'a> Parser<'a> {
             handler: None,
             body,
             middlewares,
+            protocol,
         })
     }
 

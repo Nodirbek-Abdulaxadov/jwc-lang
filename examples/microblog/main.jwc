@@ -220,6 +220,21 @@ route GET "stats" {
     return json({ users: users, posts: posts, comments: comments });
 }
 
+// -------------------- WebSocket chat --------------------
+
+route WS "/chat" {
+    // Echo room: read a frame, broadcast it back. Clients keep the
+    // connection open and exchange JSON-encoded messages.
+    while (true) {
+        let msg = ws_recv();
+        if (msg == null) {
+            break;
+        }
+        let frame = { from: "server", echo: msg, at: now() };
+        ws_send(json_stringify(frame));
+    }
+}
+
 // -------------------- helpers --------------------
 
 // `now()` is a built-in starting from Phase 6 — this user-land helper is

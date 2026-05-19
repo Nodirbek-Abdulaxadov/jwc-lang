@@ -205,6 +205,29 @@ On failure, JWC short-circuits and returns:
 
 with HTTP status **400**.
 
+## WebSocket routes
+
+```jwc
+route WS "/chat/{room}" {
+    while (true) {
+        let msg = ws_recv();
+        if (msg == null) { break; }
+        ws_send(json_stringify({ room: path_param("room"), echo: msg }));
+    }
+}
+```
+
+- `route WS "..."` upgrades the HTTP connection to a WebSocket.
+- `ws_recv()` blocks until the next text frame, returning `null` when the
+  client closes.
+- `ws_send(msg)` queues a text frame back to the client.
+- `ws_close()` tears the socket down from the handler side.
+- Path params and middleware work the same as HTTP routes.
+
+> Built on axum + tokio. The interpreter itself is still synchronous, but
+> the HTTP layer is async — each request runs on `spawn_blocking`, so DB
+> calls inside JWC code still use the existing r2d2 pool unchanged.
+
 ## Background jobs
 
 Run work off the request path with a tiny in-process queue:
