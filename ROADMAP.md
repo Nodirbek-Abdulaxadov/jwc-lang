@@ -16,7 +16,7 @@
 | Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean + serve --watch done; LSP/fmt/pkg deferred) |
 | Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
 | Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email stdlib done; queue/wasm/hub deferred) |
-| Phase 6 — DX Polish (real-app feedback) | ⏳ Tier A done (literals/now/@var.field/!); typed body + error handler deferred |
+| Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 
 ---
 
@@ -233,16 +233,18 @@
 - Hozir: `if (ok == false)` yozish kerak.
 - Maqsad: `if (!ok)` ham ishlasin. Lexer'da `!` simvol allaqachon bor (`!=` uchun); `parse_unary_expr`da boshqaruv qo'shiladi.
 
-### 6.5 Raw string literal `r"..."` ⬜ deferred
+### 6.5 Raw string literal `r"..."` ✅
 - Regex pattern'larida `\\.` ikki marta escape kerak. `r"^[^@]+@[^@]+\.[^@]+$"` toza.
 
-### 6.6 Typed body field check (compile-time) ⬜ deferred
-- Hozir: `body()` Value::Str qaytaradi, `req.field` runtime JSON parse. Typed handler param model'ga validatsiya qiladi, lekin kompayl-vaqt field check yo'q.
-- Maqsad: agar `let req = body();` keyin `function takes(req: ReqClass)` ishlatilsa, `req.field` kompayl-vaqt `ReqClass` schema'ga tekshirilsin.
+### 6.6 Typed param field check (compile-time) ✅
+- `function takes(req: ReqClass)` ichida `req.field` kompayl-vaqt `ReqClass` schema'ga tekshiriladi (`Type error: field 'X' is not declared on ReqClass`).
+- `T?` va `Optional<T>` ham tekshiriladi; `List<T>` — skip (var'ning o'zi list, field access mantiqsiz).
+- Local variables (Let/Assign bilan binding) hozircha untyped — kelajakda `let x = body()` typed handler argumenti orqali inferansiya qilinishi mumkin.
 
-### 6.7 Global error handler ⬜ deferred
-- Hozir: har route ichida `try/catch` yozish kerak.
-- Maqsad: top-level `errorHandler { catch (e) { return internalError(e); } }` deklaratsiyasi — uncaught route error'lar shu handler'ga tushadi.
+### 6.7 Global error handler ✅
+- Top-level `errorHandler (e) { ... }` deklaratsiyasi. Bitta handler programma per. Faqat uncaught route errorlari ushlanadi (response oqim yoki middleware short-circuit emas).
+- `e` JSON sifatida bound: `{ "message": "...", "causes": [...] }`.
+- Handler `return` qiymati response body bo'ladi; status JSON ichidagi `"status"`'dan olinadi (default 200, lekin `internalError(...)` 500 beradi).
 
 ## Priority Timeline
 

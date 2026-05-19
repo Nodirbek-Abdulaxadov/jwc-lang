@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 
 use crate::ast::{
-    AggregateKind, DbContextDecl, DbOrderBy, DbWhere, Expr, FieldDecl, FieldReference,
-    FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, NavigationField, NavigationKind,
-    OnDeleteAction, Program, RouteDecl, SortDir, Stmt, TypeSpec, TypedParam, ValidateField,
-    ValidateRule, WhereExpr,
+    AggregateKind, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
+    FieldReference, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, NavigationField,
+    NavigationKind, OnDeleteAction, Program, RouteDecl, SortDir, Stmt, TypeSpec, TypedParam,
+    ValidateField, ValidateRule, WhereExpr,
 };
 use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
@@ -259,6 +259,17 @@ pub fn validate_program(program: &Program) -> Result<()> {
         .map_err(|err| anyhow!("Middleware '{}': {err}", mw.name))?;
     }
 
+    if let Some(handler) = &program.error_handler {
+        validate_stmts(
+            &handler.body,
+            &ctx_names,
+            &entity_contexts,
+            &db_tables,
+            &entity_fields_by_table,
+        )
+        .map_err(|err| anyhow!("errorHandler: {err}"))?;
+    }
+
     for route in &program.routes {
         for mw_ref in &route.middlewares {
             if !mw_names.contains(&mw_ref.to_lowercase()) {
@@ -284,7 +295,239 @@ pub fn validate_program(program: &Program) -> Result<()> {
         check_with_relations_in_stmts(&mw.body, &entity_navigations)?;
     }
 
+    // Compile-time field-access check for typed function parameters.
+    let model_fields_for_typecheck: HashMap<String, HashSet<String>> = program
+        .models
+        .iter()
+        .map(|m| {
+            (
+                m.name.to_lowercase(),
+                m.fields.iter().map(|f| f.name.to_lowercase()).collect(),
+            )
+        })
+        .collect();
+
+    for function in &program.functions {
+        let mut locals: HashMap<String, String> = HashMap::new();
+        for param in &function.params {
+            if let Some(ty) = &param.ty {
+                if let Some(base) = strip_type_to_model_name(ty) {
+                    if model_fields_for_typecheck.contains_key(&base.to_lowercase()) {
+                        locals.insert(param.name.to_lowercase(), base);
+                    }
+                }
+            }
+        }
+        check_typed_field_access_in_stmts(
+            &function.body,
+            &mut locals,
+            &model_fields_for_typecheck,
+        )
+        .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
+    }
+
     Ok(())
+}
+
+/// Strip nullable / `Optional<T>` wrappers down to a plain model name. Returns
+/// `None` for `List<T>` (field access on a list of items doesn't apply to the
+/// list variable itself).
+fn strip_type_to_model_name(ty: &str) -> Option<String> {
+    let mut t = ty.trim();
+    if let Some(stripped) = t.strip_suffix('?') {
+        t = stripped.trim();
+    }
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("list<") {
+        return None;
+    }
+    if lower.starts_with("optional<") && t.ends_with('>') {
+        let inner = &t[9..t.len() - 1];
+        return Some(inner.trim().to_string());
+    }
+    Some(t.to_string())
+}
+
+fn check_typed_field_access_in_stmts(
+    stmts: &[Stmt],
+    locals: &mut HashMap<String, String>,
+    model_fields: &HashMap<String, HashSet<String>>,
+) -> Result<()> {
+    for stmt in stmts {
+        check_typed_field_access_in_stmt(stmt, locals, model_fields)?;
+    }
+    Ok(())
+}
+
+fn check_typed_field_access_in_stmt(
+    stmt: &Stmt,
+    locals: &mut HashMap<String, String>,
+    model_fields: &HashMap<String, HashSet<String>>,
+) -> Result<()> {
+    match stmt {
+        Stmt::Let { name, value } => {
+            check_typed_field_access_in_expr(value, locals, model_fields)?;
+            // The new binding is untyped — clear any older type entry so we
+            // don't accidentally inherit it from a shadowed name.
+            locals.remove(&name.to_lowercase());
+            Ok(())
+        }
+        Stmt::Assign { name, value } => {
+            check_typed_field_access_in_expr(value, locals, model_fields)?;
+            locals.remove(&name.to_lowercase());
+            Ok(())
+        }
+        Stmt::FieldAssign { var, field, value } => {
+            check_typed_field_access_in_expr(value, locals, model_fields)?;
+            if let Some(model_name) = locals.get(&var.to_lowercase()).cloned() {
+                if let Some(fields) = model_fields.get(&model_name.to_lowercase()) {
+                    if !fields.contains(&field.to_lowercase()) {
+                        bail!(
+                            "Type error: field '{}' is not declared on {}",
+                            field,
+                            model_name
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        Stmt::Print(e) | Stmt::Expr(e) => {
+            check_typed_field_access_in_expr(e, locals, model_fields)
+        }
+        Stmt::Return(Some(e)) => check_typed_field_access_in_expr(e, locals, model_fields),
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::ValidateBody { .. } => Ok(()),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            check_typed_field_access_in_expr(cond, locals, model_fields)?;
+            check_typed_field_access_in_stmts(then_body, locals, model_fields)?;
+            if let Some(eb) = else_body {
+                check_typed_field_access_in_stmts(eb, locals, model_fields)?;
+            }
+            Ok(())
+        }
+        Stmt::While { cond, body } => {
+            check_typed_field_access_in_expr(cond, locals, model_fields)?;
+            check_typed_field_access_in_stmts(body, locals, model_fields)
+        }
+        Stmt::Try {
+            body, catch_body, ..
+        } => {
+            check_typed_field_access_in_stmts(body, locals, model_fields)?;
+            check_typed_field_access_in_stmts(catch_body, locals, model_fields)
+        }
+        Stmt::Transaction { body } => {
+            check_typed_field_access_in_stmts(body, locals, model_fields)
+        }
+        Stmt::DbInsert { .. } | Stmt::DbUpdate { .. } | Stmt::DbDelete { .. } | Stmt::DbDeleteWhere { .. } => {
+            Ok(())
+        }
+    }
+}
+
+fn check_typed_field_access_in_expr(
+    expr: &Expr,
+    locals: &HashMap<String, String>,
+    model_fields: &HashMap<String, HashSet<String>>,
+) -> Result<()> {
+    match expr {
+        Expr::FieldGet { var, field } => {
+            if let Some(model_name) = locals.get(&var.to_lowercase()) {
+                if let Some(fields) = model_fields.get(&model_name.to_lowercase()) {
+                    if !fields.contains(&field.to_lowercase()) {
+                        bail!(
+                            "Type error: field '{}' is not declared on {}",
+                            field,
+                            model_name
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                check_typed_field_access_in_expr(a, locals, model_fields)?;
+            }
+            Ok(())
+        }
+        Expr::Await(inner) | Expr::Neg(inner) | Expr::Not(inner) => {
+            check_typed_field_access_in_expr(inner, locals, model_fields)
+        }
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Eq(a, b)
+        | Expr::Neq(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Lte(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Gte(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b) => {
+            check_typed_field_access_in_expr(a, locals, model_fields)?;
+            check_typed_field_access_in_expr(b, locals, model_fields)
+        }
+        Expr::ObjectLit(fields) => {
+            for (_, v) in fields {
+                check_typed_field_access_in_expr(v, locals, model_fields)?;
+            }
+            Ok(())
+        }
+        Expr::DbSelect {
+            where_clause,
+            limit,
+            offset,
+            ..
+        } => {
+            if let Some(wc) = where_clause {
+                check_typed_where(wc, locals, model_fields)?;
+            }
+            if let Some(l) = limit {
+                check_typed_field_access_in_expr(l, locals, model_fields)?;
+            }
+            if let Some(o) = offset {
+                check_typed_field_access_in_expr(o, locals, model_fields)?;
+            }
+            Ok(())
+        }
+        Expr::DbCount { where_clause, .. } | Expr::DbAggregate { where_clause, .. } => {
+            if let Some(wc) = where_clause {
+                check_typed_where(wc, locals, model_fields)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_typed_where(
+    expr: &WhereExpr,
+    locals: &HashMap<String, String>,
+    model_fields: &HashMap<String, HashSet<String>>,
+) -> Result<()> {
+    match expr {
+        WhereExpr::Atom(wc) => check_typed_field_access_in_expr(&wc.rhs, locals, model_fields),
+        WhereExpr::InList { values, .. } => {
+            for v in values {
+                check_typed_field_access_in_expr(v, locals, model_fields)?;
+            }
+            Ok(())
+        }
+        WhereExpr::Between { low, high, .. } => {
+            check_typed_field_access_in_expr(low, locals, model_fields)?;
+            check_typed_field_access_in_expr(high, locals, model_fields)
+        }
+        WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
+            check_typed_where(l, locals, model_fields)?;
+            check_typed_where(r, locals, model_fields)
+        }
+    }
 }
 
 fn check_with_relations_in_stmts(
@@ -1108,9 +1351,21 @@ impl<'a> Parser<'a> {
                 TokenKind::Keyword(Keyword::Middleware) => {
                     program.middlewares.push(self.parse_middleware_decl()?);
                 }
+                TokenKind::Keyword(Keyword::ErrorHandler) => {
+                    if program.error_handler.is_some() {
+                        return Err(self.error_here("only one errorHandler is allowed per project"));
+                    }
+                    self.bump()?;
+                    self.expect_symbol('(')?;
+                    let catch_var =
+                        self.expect_ident("expected error variable name after 'errorHandler('")?;
+                    self.expect_symbol(')')?;
+                    let body = self.parse_block()?;
+                    program.error_handler = Some(ErrorHandlerDecl { catch_var, body });
+                }
                 _ => {
                     return Err(self.error_here(
-                        "expected import, namespace, dbcontext, entity/class, route, function, middleware, or dome",
+                        "expected import, namespace, dbcontext, entity/class, route, function, middleware, errorHandler, or dome",
                     ));
                 }
             }
@@ -3191,6 +3446,70 @@ mod tests {
         }
         // car.model = "Tesla"
         assert!(matches!(body[1], crate::ast::Stmt::FieldAssign { .. }));
+    }
+
+    #[test]
+    fn typed_param_field_access_is_checked_at_compile_time() {
+        let src = r#"
+            class RegisterReq {
+                username string;
+                email string;
+                password string;
+            }
+            function register(req: RegisterReq) {
+                print(req.username);
+                print(req.ghost);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(
+            err.contains("field 'ghost' is not declared on RegisterReq"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn typed_param_field_access_passes_for_known_fields() {
+        let src = r#"
+            class RegisterReq {
+                username string;
+                email string;
+            }
+            function register(req: RegisterReq) {
+                print(req.username);
+                print(req.email);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+    }
+
+    #[test]
+    fn nullable_typed_param_still_checks_fields() {
+        let src = r#"
+            class RegisterReq { name string; }
+            function register(req: RegisterReq?) {
+                print(req.surname);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("'surname' is not declared on RegisterReq"));
+    }
+
+    #[test]
+    fn list_typed_param_skips_field_check() {
+        let src = r#"
+            class Tag { name string; }
+            function uses(xs: List<Tag>) {
+                // `xs.something` doesn't make sense on a list, so we don't
+                // try to type-check it — runtime would report the misuse.
+                print(xs.anything);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
     }
 
     #[test]

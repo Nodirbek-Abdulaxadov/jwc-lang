@@ -6,9 +6,9 @@ use postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
 
 use crate::ast::{
-    AggregateKind, DbOrderBy, Expr, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind,
-    NavigationKind, Program, RouteDecl, SortDir, Stmt, TypedParam, ValidateField, ValidateRule,
-    WhereExpr,
+    AggregateKind, DbOrderBy, ErrorHandlerDecl, Expr, FunctionDecl, MiddlewareDecl, ModelDecl,
+    ModelKind, NavigationKind, Program, RouteDecl, SortDir, Stmt, TypedParam, ValidateField,
+    ValidateRule, WhereExpr,
 };
 use crate::engine;
 
@@ -61,6 +61,7 @@ struct Vm<'a> {
     models: HashMap<String, &'a ModelDecl>,
     routes: Vec<&'a RouteDecl>,
     middlewares: HashMap<String, &'a MiddlewareDecl>,
+    error_handler: Option<&'a ErrorHandlerDecl>,
     /// Primary-key columns per table (keyed by both `Entity` name and its snake_case form).
     /// Empty Vec means no `pk` declared on that entity — falls back to a single `"id"` column.
     pk_by_table: HashMap<String, Vec<String>>,
@@ -124,6 +125,7 @@ impl<'a> Vm<'a> {
             models,
             routes,
             middlewares,
+            error_handler: program.error_handler.as_ref(),
             pk_by_table,
             dirty_fields: HashMap::new(),
             current_path_params: None,
@@ -1357,29 +1359,47 @@ impl<'a> Vm<'a> {
             }
         }
 
-        let response_str = if let Some(resp) = middleware_response {
-            Some(resp)
+        // Build the body response. If anything within the route fails AND a
+        // top-level `errorHandler` is declared, give that handler a chance to
+        // produce the response instead of bubbling up as 500.
+        let body_result: Result<Option<String>> = if let Some(resp) = middleware_response {
+            Ok(Some(resp))
         } else if let Some(ref handler_name) = handler {
             let args = self.build_handler_args(handler_name);
-            self.call_function(handler_name, args)?.map(|v| v.as_string())
+            self.call_function(handler_name, args)
+                .map(|v| v.map(|v| v.as_string()))
         } else {
             let mut route_vars = HashMap::new();
-            let flow = self.exec_block(&body_stmts, &mut route_vars)?;
-            match flow {
-                Flow::Return(Some(v)) => Some(v.as_string()),
-                Flow::Return(None) => Some("null".to_string()),
-                _ => {
-                    if !self.output.is_empty() {
-                        let out = self.output.trim_end_matches('\n').to_string();
-                        self.output.clear();
-                        Some(out)
-                    } else {
-                        None
+            self.exec_block(&body_stmts, &mut route_vars)
+                .map(|flow| match flow {
+                    Flow::Return(Some(v)) => Some(v.as_string()),
+                    Flow::Return(None) => Some("null".to_string()),
+                    _ => {
+                        if !self.output.is_empty() {
+                            let out = self.output.trim_end_matches('\n').to_string();
+                            self.output.clear();
+                            Some(out)
+                        } else {
+                            None
+                        }
                     }
+                })
+        };
+
+        let response_str = match body_result {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(handler) = self.error_handler {
+                    let handler = handler.clone();
+                    Some(self.run_error_handler(&handler, &e)?)
+                } else {
+                    self.current_path_params = previous;
+                    self.current_query_params = previous_query;
+                    self.dirty_fields = previous_dirty;
+                    return Err(e);
                 }
             }
         };
-
         self.current_path_params = previous;
         self.current_query_params = previous_query;
         self.dirty_fields = previous_dirty;
@@ -1489,6 +1509,38 @@ impl<'a> Vm<'a> {
             method, path
         ));
         Ok(Value::Bool(false))
+    }
+
+    /// Run the project's top-level `errorHandler (e) { ... }` block with
+    /// `e` bound to the error envelope. Returns the handler's response body
+    /// string (post-`as_string()`), or `null` if the handler didn't return.
+    fn run_error_handler(
+        &mut self,
+        handler: &ErrorHandlerDecl,
+        err: &anyhow::Error,
+    ) -> Result<String> {
+        let mut all: Vec<String> = err.chain().map(|c| c.to_string()).collect();
+        let message = if all.is_empty() {
+            "unknown error".to_string()
+        } else {
+            all.remove(0)
+        };
+        let payload = json!({
+            "message": message,
+            "causes": all,
+        });
+        let mut handler_vars: HashMap<String, Value> = HashMap::new();
+        handler_vars.insert(
+            handler.catch_var.to_lowercase(),
+            Value::Str(payload.to_string()),
+        );
+
+        let flow = self.exec_block(&handler.body, &mut handler_vars)?;
+        Ok(match flow {
+            Flow::Return(Some(v)) => v.as_string(),
+            Flow::Return(None) => "null".to_string(),
+            _ => "null".to_string(),
+        })
     }
 
     /// Look up the primary-key column names for `table` (matching the entity
@@ -3595,6 +3647,45 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).unwrap().output;
         assert_eq!(out.trim(), "7");
+    }
+
+    #[test]
+    fn error_handler_catches_uncaught_route_error() {
+        let src = r#"
+            errorHandler (e) {
+                return internalError(e.message);
+            }
+
+            route GET "boom" {
+                let x = undefined_var;
+                return json("nope");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        let (status, body) = run_request(&program, "GET", "/boom", None).unwrap();
+        assert_eq!(status, 500);
+        assert!(body.contains("Undefined variable"), "body: {body}");
+    }
+
+    #[test]
+    fn error_handler_does_not_intercept_normal_responses() {
+        let src = r#"
+            errorHandler (e) {
+                return internalError(e.message);
+            }
+
+            route GET "ok" {
+                return json("hello");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        let (status, body) = run_request(&program, "GET", "/ok", None).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "hello");
     }
 
     #[test]

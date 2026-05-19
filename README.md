@@ -205,6 +205,33 @@ On failure, JWC short-circuits and returns:
 
 with HTTP status **400**.
 
+## Global error handler
+
+Declare one top-level `errorHandler` to convert any uncaught route error
+into a structured response:
+
+```jwc
+errorHandler (e) {
+    return internalError(e.message);
+}
+```
+
+- The handler runs after a route body or `-> fn` handler returns `Err`.
+- `e` is bound to `{ "message": "...", "causes": [...] }` JSON.
+- Without a handler, runtime errors still surface as HTTP 500.
+
+## Raw string literals
+
+Backslashes inside regular `"..."` strings are escape sequences (`\n`, `\t`,
+`\"`). For regex patterns and Windows paths, the raw form is friendlier —
+backslashes are kept verbatim:
+
+```jwc
+validate body {
+    email: pattern(r"^[^@]+@[^@]+\.[^@]+$");
+}
+```
+
 ## Object & boolean ergonomics
 
 ```jwc

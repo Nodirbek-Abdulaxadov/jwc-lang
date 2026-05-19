@@ -1,7 +1,11 @@
 // microblog — exercises: dbcontext, entities + FK + navigation, classes,
 // middleware (JWT auth), transactions, validate body, password hashing,
 // JWT sign/verify, cache, projection, compound where + like + count,
-// pagination, body validation. Real backend touch test.
+// pagination, body validation, errorHandler. Real backend touch test.
+
+errorHandler (e) {
+    return internalError(e.message);
+}
 
 dbcontext AppDb : Postgres;
 
@@ -79,7 +83,7 @@ middleware AuthMw {
 route POST "register" {
     validate body {
         username: required, minLength(3), maxLength(40);
-        email: required, pattern("^[^@]+@[^@]+\\.[^@]+$");
+        email: required, pattern(r"^[^@]+@[^@]+\.[^@]+$");
         password: required, minLength(8), maxLength(200);
     }
 

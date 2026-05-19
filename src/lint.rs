@@ -29,6 +29,9 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
     for mw in &program.middlewares {
         collect_calls(&mw.body, &mut called);
     }
+    if let Some(handler) = &program.error_handler {
+        collect_calls(&handler.body, &mut called);
+    }
 
     // Entry points implicitly used.
     called.insert("main".to_string());

@@ -39,6 +39,7 @@ pub enum Keyword {
     Async,
     Await,
     Transaction,
+    ErrorHandler,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +81,18 @@ impl<'a> Lexer<'a> {
             });
         };
 
+        // Raw string literal: `r"..."`. No escape processing; the closing
+        // `"` ends the token. Useful for regex patterns where `\` should
+        // reach the regex engine unaltered (`pattern(r"\d+")`).
+        if ch == 'r' && self.src[self.i..].starts_with("r\"") {
+            self.i += 1; // consume 'r'
+            let value = self.consume_raw_string()?;
+            return Ok(Token {
+                kind: TokenKind::String(value),
+                offset,
+            });
+        }
+
         if is_ident_start(ch) {
             let ident = self.consume_while(is_ident_continue);
             let kind = match ident.as_str() {
@@ -112,6 +125,7 @@ impl<'a> Lexer<'a> {
                 "async" => TokenKind::Keyword(Keyword::Async),
                 "await" => TokenKind::Keyword(Keyword::Await),
                 "transaction" => TokenKind::Keyword(Keyword::Transaction),
+                "errorHandler" => TokenKind::Keyword(Keyword::ErrorHandler),
                 _ => TokenKind::Ident(ident),
             };
             return Ok(Token { kind, offset });
@@ -298,6 +312,21 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// `r"..."` — no escape processing; closing `"` terminates the literal.
+    fn consume_raw_string(&mut self) -> Result<String> {
+        self.i += 1; // opening "
+        let start = self.i;
+        while let Some(ch) = self.peek_char() {
+            if ch == '"' {
+                let out = self.src[start..self.i].to_string();
+                self.i += 1;
+                return Ok(out);
+            }
+            self.i += ch.len_utf8();
+        }
+        Err(anyhow!("Unterminated raw string literal"))
+    }
+
     fn consume_string(&mut self) -> Result<String> {
         self.i += 1;
         let mut out = String::new();
@@ -354,6 +383,24 @@ mod tests {
             TokenKind::Keyword(Keyword::DbContext)
         ));
         assert!(matches!(lexer.next_token().unwrap().kind, TokenKind::Ident(_)));
+    }
+
+    #[test]
+    fn lexes_raw_string_literal_without_escape_processing() {
+        let mut lexer = Lexer::new(r#"r"\d+\.\d+""#);
+        let tok = lexer.next_token().unwrap();
+        match tok.kind {
+            TokenKind::String(s) => assert_eq!(s, "\\d+\\.\\d+"),
+            other => panic!("expected raw string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn r_prefix_only_lexes_as_raw_when_followed_by_quote() {
+        // Plain identifier starting with 'r' must stay an identifier.
+        let mut lexer = Lexer::new("ret value");
+        let tok = lexer.next_token().unwrap();
+        assert!(matches!(tok.kind, TokenKind::Ident(ref v) if v == "ret"));
     }
 
     #[test]

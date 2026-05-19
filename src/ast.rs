@@ -5,6 +5,15 @@ pub struct Program {
     pub routes: Vec<RouteDecl>,
     pub functions: Vec<FunctionDecl>,
     pub middlewares: Vec<MiddlewareDecl>,
+    /// Optional top-level fallback that catches uncaught errors from any
+    /// route handler. Body sees `<catch_var>` bound to the error JSON.
+    pub error_handler: Option<ErrorHandlerDecl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorHandlerDecl {
+    pub catch_var: String,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
