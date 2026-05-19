@@ -3,7 +3,7 @@
   "displayName": "JWC Language",
   "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and LSP-powered diagnostics",
   "version": "0.1.0",
-  "publisher": "jwc",
+  "publisher": "jwc-extension",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
