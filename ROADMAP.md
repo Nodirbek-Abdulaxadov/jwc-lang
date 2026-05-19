@@ -19,6 +19,7 @@
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
 | Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp; ws deferred) |
+| Phase 9 — Async runtime + perf ceiling | ⬜ Deferred (async Vm + tokio-postgres) |
 
 ---
 
@@ -269,6 +270,44 @@
 - `cargo build --bin jwc-lsp` — stdio orqali tower-lsp ishlaydi.
 - Diagnostics + hover ishlaydi (yuqorida 3.1'ga qarang).
 - **Qoldi:** go-to-definition, autocomplete, route/middleware hover, semantic tokens.
+
+## Phase 9 — Async runtime + perf ceiling ⬜ deferred
+
+**Maqsad:** Hozirgi ~20k RPS shiftini Rust async stack darajasida (~50–100k RPS) ko'tarish.
+
+### Joriy baseline (v0.1.2, localhost + Postgres, bombardier)
+
+| Test | Conn | RPS | p50 | p95 | p99 |
+|---|---|---|---|---|---|
+| GET /notes | 100 | **21,512** | 3.0ms | 7.4ms | 14.1ms |
+| GET /notes | 200 | 20,146 | 7.0ms | 17.6ms | 39.2ms |
+| POST /notes | 100 | 16,930 | 4.7ms | 8.6ms | 25.2ms |
+
+Bottleneck — sync tree-walking `Vm` + `r2d2_postgres` (blocking driver).
+Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
+→ async I/O bekor bo'ladi, har handler bitta thread band qiladi.
+
+### 9.1 Async Vm ⬜
+- `Stmt`/`Expr` evaluyatorlarini `async fn` ga aylantirish (`BoxFuture`'siz
+  iloji yo'q — recursive async fn).
+- `Flow::{Continue, Return, Break, ContinueLoop}` o'zgarmaydi.
+- Tree-walking saqlanadi (IR/LLVM Phase 4 da), shunchaki har step await-able.
+
+### 9.2 `tokio-postgres` ⬜
+- `engine.rs`'ni `r2d2_postgres` (sync) → `deadpool-postgres` / `bb8-postgres` (async)'ga ko'chirish.
+- `engine::checkout()` → `async fn`. `TxGuard` ham async-aware.
+- TLS pathlar `tokio-postgres-rustls` bilan parallel.
+
+### 9.3 `spawn_blocking` ni olib tashlash ⬜
+- `server.rs`'da `tokio::spawn` qilish, `spawn_blocking` butunlay yo'qoladi.
+- WebSocket bridge'ga ehtiyoj qolmaydi — Vm o'zi axum context'da yashaydi.
+
+### 9.4 Maqsadli raqamlar
+- GET (oddiy SELECT) c=100: **40–60k RPS**, p99 < 10ms.
+- POST: **30–50k RPS**.
+- c=500+ Linux'da real ravishda yelka tortishi mumkin (Windows loopback alohida holat).
+
+---
 
 ## Phase 7 — Standard helpers ✅
 
