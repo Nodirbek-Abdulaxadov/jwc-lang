@@ -1,0 +1,13 @@
+**/.git
+**/.github
+**/node_modules
+**/.docusaurus
+**/build
+**/.cache-loader
+**/.env
+**/.env.*
+**/.idea
+**/.vscode
+**/*.log
+**/Dockerfile
+**/.dockerignore
