@@ -1,41 +1,67 @@
-# Website
+# JWC Docs
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+Docusaurus 3.6 site for **https://jwc.1kb.uz**. Source for the public
+documentation that ships with the JWC language.
 
-### Installation
+## Local development
 
-```
-$ yarn
-```
-
-### Local Development
-
-```
-$ yarn start
+```bash
+cd docs
+npm install
+npm run start         # http://localhost:3000
+npm run build         # production static site → docs/build/
 ```
 
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
+## Container image
 
-### Build
+The `Dockerfile` builds a multi-stage image (node-20 build → nginx-1.27
+runtime). Build context is the **repo root** (so the `COPY docs/...`
+paths resolve correctly):
 
-```
-$ yarn build
-```
-
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-### Deployment
-
-Using SSH:
-
-```
-$ USE_SSH=true yarn deploy
+```bash
+docker build -f docs/Dockerfile -t ghcr.io/nodirbek-abdulaxadov/jwc-docs:latest .
 ```
 
-Not using SSH:
+## CI / CD
 
-```
-$ GIT_USER=<Your GitHub username> yarn deploy
+`.github/workflows/docs.yml` runs on every push to `main` touching `docs/`:
+
+1. Builds the image and pushes to `ghcr.io/nodirbek-abdulaxadov/jwc-docs`
+   with two tags: `main-<short-sha>` and `latest`.
+2. Checks out **musanna-soft/k8s-gitops** and rewrites
+   `apps/jwc-docs/deployment.yaml` to pin the new SHA tag.
+3. Commits the bump back to `k8s-gitops` so ArgoCD picks it up.
+
+### Required secrets
+
+| Secret | Where to set | Why |
+|---|---|---|
+| `GITHUB_TOKEN` | provided automatically | push image to GHCR |
+| `GITOPS_PAT` | repo → Settings → Secrets → Actions | cross-repo write access to `musanna-soft/k8s-gitops`. PAT needs `contents: write` on that repo. Reuse the same PAT as the mongodbcore-docs workflow if you already have one. |
+
+### Required cluster secret
+
+The Deployment expects `imagePullSecrets: [ghcr-secret]` inside the `jwc`
+namespace. Create it once after the ArgoCD app first syncs (it creates
+the namespace):
+
+```bash
+kubectl create secret docker-registry ghcr-secret \
+  --namespace=jwc \
+  --docker-server=ghcr.io \
+  --docker-username=nodirbek-abdulaxadov \
+  --docker-password=<PAT-with-read:packages> \
+  --docker-email=you@example.com
 ```
 
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+(Reuse the same PAT as the other `ghcr-secret`s on the cluster — same
+auth, separate namespace.)
+
+## Site structure
+
+- `docs/intro.md` — landing
+- `docs/getting-started.md` — install + CLI cheat sheet
+- `docs/language-tour.md` — 10-minute walkthrough
+- `docs/language/` — routes, entities, control flow
+- `docs/db.md` — query / migration / pool reference
+- `docs/stdlib.md` — every built-in shipped today
