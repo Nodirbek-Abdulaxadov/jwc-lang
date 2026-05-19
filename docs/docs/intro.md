@@ -62,7 +62,17 @@ The above is a working CRUD endpoint, complete with:
 
 ## Where to next
 
-- **Getting started** — install the CLI and create your first project.
-- **Language tour** — entities, routes, middleware, transactions.
-- **Standard library** — what's available out of the box.
-- **Database guide** — query syntax, navigation, migrations.
+- **[Getting started](./getting-started.md)** — install the CLI and create your first project.
+- **[Language tour](./language-tour.md)** — entities, routes, middleware, transactions, in ~10 minutes.
+- **[Standard library](./stdlib.md)** — what's available out of the box.
+- **[Database guide](./db.md)** — query syntax, navigation, migrations, transactions.
+
+## Status
+
+The language is in active development. Phases 0–8 (core MVP, business
+logic, axum + WebSocket, LSP, in-process queue, DX polish) are shipped
+and exercised by the
+[microblog example](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/microblog).
+The remaining vision items — async Vm, LLVM AOT, package registry,
+multi-driver dbcontext — are tracked in
+[ROADMAP.md](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md).
