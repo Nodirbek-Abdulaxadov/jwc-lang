@@ -1,15 +1,17 @@
 {
   "name": "jwc-lang",
   "displayName": "JWC Language",
-  "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and language features",
+  "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and LSP-powered diagnostics",
   "version": "0.1.0",
   "publisher": "jwc",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Programming Languages",
-    "Snippets"
+    "Snippets",
+    "Linters"
   ],
   "icon": "icon.png",
   "keywords": [
@@ -17,12 +19,21 @@
     "just web code",
     "backend",
     "web",
-    "database"
+    "database",
+    "postgres"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/jwc-lang/jwc"
+    "url": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang"
   },
+  "bugs": {
+    "url": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang/issues"
+  },
+  "homepage": "https://jwc.1kb.uz",
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:jwc"
+  ],
   "contributes": {
     "languages": [
       {
@@ -64,7 +75,54 @@
         "path": "./snippets/jwc.code-snippets"
       }
     ],
-    "themes": [],
-    "commands": []
+    "commands": [
+      {
+        "command": "jwc.restartServer",
+        "title": "JWC: Restart Language Server"
+      },
+      {
+        "command": "jwc.showOutput",
+        "title": "JWC: Show Language Server Output"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "JWC",
+      "properties": {
+        "jwc.lspPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the jwc-lsp executable. Leave empty to look up `jwc-lsp` on PATH."
+        },
+        "jwc.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the LSP traffic between VS Code and the JWC language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle",
+    "compile": "tsc -p ./",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node18 --external:vscode --format=cjs --outfile=out/extension.js --minify",
+    "watch": "tsc -w -p ./",
+    "package": "vsce package --no-dependencies",
+    "publish": "vsce publish --no-dependencies"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.4.0"
   }
 }

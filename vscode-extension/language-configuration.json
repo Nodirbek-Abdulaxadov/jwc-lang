@@ -21,7 +21,7 @@
   ],
   "onEnterRules": [
     {
-      "beforeText": "^\\s*(?:function|route|entity|dbcontext|context|if|while|else|try|catch|middleware)\\b.*\\{[^}]*$",
+      "beforeText": "^\\s*(?:function|route|entity|dbcontext|context|if|while|for|else|try|catch|middleware|dome|transaction|errorHandler)\\b.*\\{[^}]*$",
       "action": {
         "indent": "indent"
       }

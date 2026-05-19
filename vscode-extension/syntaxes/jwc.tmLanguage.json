@@ -53,8 +53,8 @@
     },
 
     "route-declaration": {
-      "comment": "route GET \"path\" { ... }",
-      "begin": "\\b(route)\\s+(GET|POST|PUT|DELETE|PATCH)\\s+(\"[^\"]*\")",
+      "comment": "route GET|WS \"path\" { ... }",
+      "begin": "\\b(route)\\s+(GET|POST|PUT|DELETE|PATCH|WS)\\s+(\"[^\"]*\")",
       "end": "(?<=})",
       "beginCaptures": {
         "1": { "name": "keyword.control.route.jwc" },
@@ -80,8 +80,8 @@
     },
 
     "model-declaration": {
-      "comment": "entity/class Name { ... }",
-      "begin": "\\b(entity|class)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*\\{",
+      "comment": "entity Name of Ctx { ... } | class Name { ... }",
+      "begin": "\\b(entity|class)\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+of\\s+[A-Za-z_][A-Za-z0-9_]*)?\\s*\\{",
       "end": "\\}",
       "beginCaptures": {
         "1": { "name": "keyword.declaration.entity.jwc" },
@@ -204,20 +204,20 @@
       "patterns": [
         {
           "name": "keyword.control.jwc",
-          "match": "\\b(if|else|while|break|continue|return|let)\\b"
+          "match": "\\b(if|else|while|for|in|break|continue|return|let|transaction)\\b"
         },
         {
           "name": "keyword.control.import.jwc",
-          "match": "\\b(import|namespace|dome|class)\\b"
+          "match": "\\b(import|namespace|dome|class|errorHandler)\\b"
         }
       ]
     },
 
     "http-response-builtins": {
-      "comment": "json(), notFound(), noContent(), created(), body(), params, internalError(), unauthorized(), badRequest()",
+      "comment": "json(), notFound(), noContent(), created(), body(), params, internalError(), unauthorized(), badRequest(), ws_*, jwt_*, etc.",
       "patterns": [
         {
-          "match": "\\b(json|notFound|noContent|created|internalError|unauthorized|badRequest|ok|accepted)\\s*\\(",
+          "match": "\\b(json|notFound|noContent|created|internalError|unauthorized|badRequest|forbidden|conflict|ok|accepted)\\s*\\(",
           "captures": {
             "1": { "name": "support.function.http-response.jwc" }
           }
@@ -227,13 +227,7 @@
           "name": "support.variable.http.jwc"
         },
         {
-          "match": "\\b(dispatch|path_param|request_body|uuid)\\s*\\(",
-          "captures": {
-            "1": { "name": "support.function.builtin.jwc" }
-          }
-        },
-        {
-          "match": "\\b(print)\\s*\\(",
+          "match": "\\b(dispatch|path_param|request_body|uuid|now|unix_timestamp|print|setConnectionString|hash_password|verify_password|jwt_sign|jwt_verify|send_email|http_get|http_post|ws_send|ws_recv|ws_close|pattern|env|len|push|pop|keys|values)\\s*\\(",
           "captures": {
             "1": { "name": "support.function.builtin.jwc" }
           }
@@ -243,12 +237,12 @@
 
     "type-names": {
       "name": "storage.type",
-      "match": "\\b(int|bigint|bool|uuid|datetime|timestamp|json|text|varchar|decimal|string|float|List|Optional)\\b"
+      "match": "\\b(int|bigint|bool|uuid|datetime|timestamp|json|text|varchar|decimal|double|string|float|List|Optional)\\b"
     },
 
     "field-modifiers": {
       "name": "storage.modifier.jwc",
-      "match": "\\b(pk|nullable|not null|auto_increment|unique|not)\\b"
+      "match": "\\b(pk|nullable|autoincrement|auto_increment|serial|unique|references|of|via)\\b"
     },
 
     "boolean-null": {

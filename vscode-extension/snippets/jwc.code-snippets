@@ -95,23 +95,81 @@
   "Entity": {
     "prefix": "entity",
     "body": [
-      "entity ${1:EntityName} {",
-      "\tid int pk auto_increment;",
-      "\t${2:field}: ${3:varchar(255)} not null;",
+      "entity ${1:EntityName} of ${2:AppDb} {",
+      "\tid int pk autoincrement;",
+      "\t${3:field} ${4:varchar(255)};",
       "}"
     ],
-    "description": "JWC entity declaration"
+    "description": "JWC entity with autoincrement int PK"
   },
 
   "Entity with UUID PK": {
     "prefix": "entity-uuid",
     "body": [
-      "entity ${1:EntityName} {",
+      "entity ${1:EntityName} of ${2:AppDb} {",
       "\tid uuid pk;",
-      "\t${2:name}: varchar(255) not null;",
+      "\t${3:name} varchar(255);",
       "}"
     ],
     "description": "JWC entity with UUID primary key"
+  },
+
+  "Route WS": {
+    "prefix": "route-ws",
+    "body": [
+      "route WS \"${1:/ws/path}\" {",
+      "\twhile (true) {",
+      "\t\tlet msg = ws_recv();",
+      "\t\tif (msg == null) { break; }",
+      "\t\tws_send(msg);",
+      "\t}",
+      "}"
+    ],
+    "description": "WebSocket route"
+  },
+
+  "Dome": {
+    "prefix": "dome",
+    "body": [
+      "dome ${1:Service} {",
+      "\tfunction ${2:method}(${3:params}) {",
+      "\t\t${4:// body}",
+      "\t}",
+      "}"
+    ],
+    "description": "Dome (static-class) declaration"
+  },
+
+  "Transaction": {
+    "prefix": "transaction",
+    "body": [
+      "transaction ${1:AppDb} {",
+      "\t${2:// db statements run atomically}",
+      "}"
+    ],
+    "description": "Transaction block"
+  },
+
+  "Middleware": {
+    "prefix": "middleware",
+    "body": [
+      "middleware ${1:Name} {",
+      "\t${2:// runs before the route handler}",
+      "}"
+    ],
+    "description": "Middleware declaration"
+  },
+
+  "Setup main": {
+    "prefix": "main-setup",
+    "body": [
+      "dbcontext ${1:AppDb} : Postgres;",
+      "",
+      "function main() {",
+      "\tsetConnectionString();",
+      "}"
+    ],
+    "description": "main() with dbcontext + env-based connection string"
   },
 
   "DbContext": {
