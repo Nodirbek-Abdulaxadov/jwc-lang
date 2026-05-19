@@ -4,6 +4,7 @@ use tiny_http::{Header, Response, Server};
 use crate::ast::Program;
 use crate::engine;
 use crate::error_report;
+use crate::queue;
 use crate::runner;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -110,6 +111,10 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
         .parse()
         .expect("valid header");
     let shared_program = Arc::new(program.clone());
+    // Bring up the in-process background job queue. Workers stay alive for
+    // the lifetime of the process; jobs are picked up via `enqueue(...)`
+    // from JWC code (typically inside a route handler).
+    queue::init_queue(Arc::clone(&shared_program));
     let metrics = Arc::new(ServerMetrics::new());
     let worker_count = parse_worker_count();
     let queue_capacity = parse_queue_capacity(worker_count);

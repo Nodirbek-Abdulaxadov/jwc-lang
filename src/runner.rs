@@ -55,6 +55,16 @@ pub fn run_request_with_headers(
     vm.dispatch_route(method, path)
 }
 
+/// Invoke a JWC function by name with a single string payload. Used by the
+/// background job queue: workers receive `Job { name, payload }`, look up
+/// the registered handler function name, then call this. Any return value
+/// is discarded — handlers communicate via side effects (db, cache, email).
+pub fn run_handler(program: &Program, function_name: &str, payload: String) -> Result<()> {
+    let mut vm = Vm::new(program);
+    vm.call_function(function_name, vec![Value::Str(payload)])?;
+    Ok(())
+}
+
 struct Vm<'a> {
     functions: HashMap<String, &'a FunctionDecl>,
     /// Model schema map (entity + class) for runtime JSON validation on typed params/returns.
@@ -1021,6 +1031,18 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("send_email") {
                     return self.eval_send_email_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("register_job_handler") {
+                    return self.eval_register_job_handler_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("enqueue") {
+                    return self.eval_enqueue_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("job_count") {
+                    return self.eval_job_count_call(args, vars);
                 }
 
                 if name.eq_ignore_ascii_case("unauthorized") {
@@ -2063,6 +2085,75 @@ impl<'a> Vm<'a> {
         };
         crate::email::send_email(&to, &subject, &body_html)?;
         Ok(Value::Void)
+    }
+
+    fn eval_register_job_handler_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("register_job_handler(name, handler_fn_name) expects exactly 2 args");
+        }
+        let name = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "register_job_handler(name, handler_fn_name): name must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let handler = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "register_job_handler(name, handler_fn_name): handler_fn_name must be string, got {}",
+                other.type_name()
+            ),
+        };
+        if !self.functions.contains_key(&handler.to_lowercase()) {
+            bail!(
+                "register_job_handler: handler function '{}' is not defined in this program",
+                handler
+            );
+        }
+        crate::queue::register_handler(&name, &handler);
+        Ok(Value::Void)
+    }
+
+    fn eval_enqueue_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("enqueue(name, payload_json) expects exactly 2 args");
+        }
+        let name = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "enqueue(name, payload_json): name must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let payload = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!(
+                "enqueue(name, payload_json): payload_json must be string, got {}",
+                other.type_name()
+            ),
+        };
+        crate::queue::enqueue(&name, &payload);
+        Ok(Value::Void)
+    }
+
+    fn eval_job_count_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("job_count() expects no args");
+        }
+        Ok(Value::Int(crate::queue::pending_count() as i64))
     }
 
     fn eval_header_call(

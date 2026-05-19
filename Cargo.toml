@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "jwc"
 path = "src/main.rs"
 
+[[bin]]
+name = "jwc-lsp"
+path = "src/bin/jwc_lsp.rs"
+
 [dependencies]
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }
@@ -30,6 +34,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tiny_http = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+tower-lsp = "0.20"
 ureq = { version = "2", features = ["json"] }
 url = "2"
 

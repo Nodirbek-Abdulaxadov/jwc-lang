@@ -205,6 +205,49 @@ On failure, JWC short-circuits and returns:
 
 with HTTP status **400**.
 
+## Background jobs
+
+Run work off the request path with a tiny in-process queue:
+
+```jwc
+function sendWelcome(payload_json) {
+    let user = json_parse(payload_json);
+    send_email(user.email, "Welcome!", "<p>Hi " + user.name + "</p>");
+}
+
+route POST "register" {
+    let req = body();
+    let u = new User();
+    u.id = uuid();
+    u.email = req.email;
+    u.name = req.name;
+    insert u into AppDb.User;
+
+    register_job_handler("welcome", "sendWelcome");
+    enqueue("welcome", json_stringify({ name: req.name, email: req.email }));
+
+    return created({ ok: true });
+}
+```
+
+- `register_job_handler(name, fn_name)` wires a queue name to a JWC function;
+  the compiler verifies the function exists.
+- `enqueue(name, payload_json)` returns immediately and pops the job onto
+  one of the queue's worker threads (default 2, `JWC_QUEUE_WORKERS` to tune).
+- `job_count()` reports pending size for health checks.
+- The queue lives for the lifetime of `serve(...)`; no persistence yet —
+  jobs in flight are lost on process restart.
+
+## Editor support
+
+`cargo build --bin jwc-lsp` produces a Language Server. Point your editor at it
+to get:
+
+- Live diagnostics from `parse_program` / `validate_program` / `lint_program`.
+- Hover info on entities, classes, and functions.
+
+It speaks stdio LSP; standard tower-lsp setup applies.
+
 ## Global error handler
 
 Declare one top-level `errorHandler` to convert any uncaught route error

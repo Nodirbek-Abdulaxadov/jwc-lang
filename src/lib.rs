@@ -17,6 +17,7 @@ pub mod migrate;
 pub mod parser;
 pub mod password;
 pub mod project;
+pub mod queue;
 pub mod runner;
 pub mod schema_diff;
 pub mod server;

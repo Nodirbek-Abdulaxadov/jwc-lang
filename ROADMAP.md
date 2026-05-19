@@ -18,6 +18,7 @@
 | Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email stdlib done; queue/wasm/hub deferred) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
+| Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp; ws deferred) |
 
 ---
 
@@ -145,10 +146,12 @@
 
 **Maqsad:** JWC bilan yozish — Node yoki Go bilan yozishdek tezroq bo‘lsin.
 
-### 3.1 Real LSP ⬜ deferred
-- `vscode-extension/` papka mavjud, faqat `language-configuration.json` + snippet.
-- Maqsad: alohida `jwc-lsp` binary (LSP protocol) — entity field autocomplete, route hover, go-to-definition, diagnostics push.
-- Hozircha bo‘shliq sezilarli ish bo‘lgani uchun keyingi katta ish.
+### 3.1 Real LSP ✅ basic
+- `src/bin/jwc_lsp.rs` — stdio orqali ishlaydigan tower-lsp asoslangan server.
+- Diagnostics: parse xato (regex bilan `at line N, col M` ushlanadi), validate xato (file boshi), lint warning (W001/W002).
+- Hover: cursor pozitsiyadagi identifier'ga qarab `entity / class / function` haqida ma'lumot — fields soni, context, params, return type, `async` prefiksi.
+- Document sync: `TextDocumentSyncKind::FULL` (har edit'da to'liq matn).
+- **Qoldi:** go-to-definition, autocomplete, route hover, semantic tokens.
 
 ### 3.2 Compiler diagnostics ✅ qisman
 - ✅ "Did you mean?" suggestion — `runner.rs::closest_match` Levenshtein based, unknown function / undefined variable xabariga qo‘shiladi.
@@ -206,7 +209,13 @@
   - ✅ Http client: `http_get(url[, headers])`, `http_post(url[, body[, headers]])` — `ureq` orqali, JSON envelope qaytaradi.
   - ✅ Auth: `jwt_sign(payload_json, secret)` / `jwt_verify(token, secret)` — HS256 (hmac + sha2 + base64).
   - ✅ Password hashing: `hash_password(pwd)` / `verify_password(pwd, hash)` — Argon2id (argon2 crate).
-  - ⬜ Qoldi: Cache (Redis), Queue (BullMQ-like), Email, Storage, Websocket.
+  - ⬜ Qoldi: Cache (Redis durable backend), Storage (S3), Websocket.
+
+> **WebSocket:** `tiny_http` connection hijacking'ni qo'llab-quvvatlamaydi.
+> Real WS support uchun server'ni `hyper`/`axum`'ga ko'chirish kerak — bu
+> Phase 2.6 tokio async rewrite'i bilan birga ketadi. Hozircha JWC'da
+> long-poll yoki SSE (server-sent events) ko'rinishida vaqtinchalik yechim
+> ham yo'q.
 - **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
 - **JWC Hub:** `hub.jwc.dev` — paket registry.
 - **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.
@@ -246,6 +255,24 @@
 - Top-level `errorHandler (e) { ... }` deklaratsiyasi. Bitta handler programma per. Faqat uncaught route errorlari ushlanadi (response oqim yoki middleware short-circuit emas).
 - `e` JSON sifatida bound: `{ "message": "...", "causes": [...] }`.
 - Handler `return` qiymati response body bo'ladi; status JSON ichidagi `"status"`'dan olinadi (default 200, lekin `internalError(...)` 500 beradi).
+
+## Phase 8 — Background jobs + LSP ✅
+
+### 8.1 In-process job queue
+- Yangi modul `src/queue.rs` + 3 built-in: `register_job_handler(name, fn_name)`,
+  `enqueue(name, payload_json)`, `job_count()`.
+- `Mutex<VecDeque<Job>>` + `Condvar` orqali worker thread'lar polls qiladi.
+  Default 2 worker, `JWC_QUEUE_WORKERS` env bilan sozlanadi.
+- Server `serve(port)` chaqiruvi paytida `queue::init_queue(Arc::clone(&program))`
+  yoqiladi; worker'lar process lifetime davomida tirik.
+- Validator: `register_job_handler` ikkinchi argi haqiqiy function nomi ekanligini
+  kompayl-vaqt tekshiradi.
+- **Qoldi:** retry policy, persistent backing (Redis/PG), priority queues.
+
+### 8.2 LSP server (basic)
+- `cargo build --bin jwc-lsp` — stdio orqali tower-lsp ishlaydi.
+- Diagnostics + hover ishlaydi (yuqorida 3.1'ga qarang).
+- **Qoldi:** go-to-definition, autocomplete, route/middleware hover, semantic tokens.
 
 ## Phase 7 — Standard helpers ✅
 
