@@ -95,33 +95,3 @@ jobs:
           files: ${{ env.ASSET }}
           fail_on_unmatched_files: true
           generate_release_notes: true
-
-      # Optional mirror to a self-hosted S3/MinIO bucket. Skipped silently
-      # when the secrets aren't configured, so forks don't fail here.
-      - name: Mirror to MinIO (optional)
-        if: >-
-          github.event_name == 'push' &&
-          startsWith(github.ref, 'refs/tags/') &&
-          env.MINIO_ENDPOINT != ''
-        env:
-          MINIO_ENDPOINT:   ${{ secrets.MINIO_ENDPOINT }}
-          MINIO_BUCKET:     ${{ secrets.MINIO_BUCKET }}
-          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
-          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
-          MINIO_REGION:     ${{ secrets.MINIO_REGION || 'us-east-1' }}
-          AWS_ACCESS_KEY_ID:     ${{ secrets.MINIO_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
-          AWS_DEFAULT_REGION:    ${{ secrets.MINIO_REGION || 'us-east-1' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${MINIO_ENDPOINT:-}" || -z "${MINIO_BUCKET:-}" ]]; then
-            echo "MinIO secrets not set, skipping mirror."
-            exit 0
-          fi
-          # Use the official aws CLI (preinstalled on GH runners) against MinIO.
-          aws --endpoint-url "$MINIO_ENDPOINT" s3 cp "$ASSET" "s3://$MINIO_BUCKET/$ASSET"
-          # Also publish a stable "latest" pointer so install scripts can
-          # resolve the most recent build without API calls.
-          stable="jwc-latest-${{ matrix.short }}.${{ matrix.ext }}"
-          aws --endpoint-url "$MINIO_ENDPOINT" s3 cp "$ASSET" "s3://$MINIO_BUCKET/$stable"

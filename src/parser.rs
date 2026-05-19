@@ -82,6 +82,18 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
             validate_type_spec_for_driver(&field.ty, &resolved_driver)
                 .map_err(|err| anyhow!("Entity '{}', field '{}': {err}", model.name, field.name))?;
+
+            if field.is_auto_increment {
+                let ty_lc = field.ty.name.to_ascii_lowercase();
+                if ty_lc != "int" && ty_lc != "integer" && ty_lc != "bigint" {
+                    bail!(
+                        "Entity '{}', field '{}': autoincrement is only valid on int / bigint types (got '{}')",
+                        model.name,
+                        field.name,
+                        field.ty.name
+                    );
+                }
+            }
         }
 
         if !model.navigations.is_empty() {
@@ -1496,6 +1508,7 @@ impl<'a> Parser<'a> {
             let ty = self.parse_type_spec()?;
             let mut is_nullable = false;
             let mut is_primary_key = false;
+            let mut is_auto_increment = false;
             let mut references: Option<FieldReference> = None;
 
             loop {
@@ -1506,6 +1519,14 @@ impl<'a> Parser<'a> {
                     }
                     TokenKind::Ident(v) if v.eq_ignore_ascii_case("pk") => {
                         is_primary_key = true;
+                        self.bump()?;
+                    }
+                    TokenKind::Ident(v)
+                        if v.eq_ignore_ascii_case("autoincrement")
+                            || v.eq_ignore_ascii_case("auto_increment")
+                            || v.eq_ignore_ascii_case("serial") =>
+                    {
+                        is_auto_increment = true;
                         self.bump()?;
                     }
                     TokenKind::Ident(v) if v.eq_ignore_ascii_case("references") => {
@@ -1522,6 +1543,7 @@ impl<'a> Parser<'a> {
                 ty,
                 is_nullable,
                 is_primary_key,
+                is_auto_increment,
                 references,
             });
         }
