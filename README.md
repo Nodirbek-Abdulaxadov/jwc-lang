@@ -205,6 +205,28 @@ On failure, JWC short-circuits and returns:
 
 with HTTP status **400**.
 
+## Object & boolean ergonomics
+
+```jwc
+// JSON object literal — strings, numbers, bools, nested arrays/objects
+// are all embedded raw (no double-encoding).
+return json({ items: posts, total: count, healthy: true });
+
+// Unary `!` for boolean negation
+if (!verify_password(req.password, user.password_hash)) {
+    return unauthorized();
+}
+
+// `now()` returns current UTC time as an RFC 3339 string.
+// `unix_timestamp()` returns the same instant as an int.
+let created_at = now();
+let secs = unix_timestamp();
+
+// `where ... == @req.username` reaches into the request payload directly,
+// no temporary `let` needed:
+let u = select User from db.Users where User.username == @req.username first;
+```
+
 ## HTTP Client
 
 ```jwc

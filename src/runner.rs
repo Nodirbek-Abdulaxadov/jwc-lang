@@ -1006,6 +1006,24 @@ impl<'a> Vm<'a> {
                     return self.eval_uuid_call(args, vars);
                 }
 
+                if name.eq_ignore_ascii_case("now") {
+                    if !args.is_empty() {
+                        bail!("now() expects no args");
+                    }
+                    return Ok(Value::Str(current_utc_iso8601()?));
+                }
+
+                if name.eq_ignore_ascii_case("unix_timestamp") {
+                    if !args.is_empty() {
+                        bail!("unix_timestamp() expects no args");
+                    }
+                    let secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|_| anyhow!("System clock error"))?
+                        .as_secs() as i64;
+                    return Ok(Value::Int(secs));
+                }
+
                 if name.eq_ignore_ascii_case("set_json_field") {
                     return self.eval_set_json_field_call(args, vars);
                 }
@@ -1125,6 +1143,21 @@ impl<'a> Vm<'a> {
                 Ok(self.call_function(name, values)?.unwrap_or(Value::Void))
             }
             Expr::Await(inner) => self.eval_expr(inner, vars),
+            Expr::Not(inner) => match self.eval_expr(inner, vars)? {
+                Value::Bool(b) => Ok(Value::Bool(!b)),
+                other => bail!(
+                    "Unsupported unary '!' for {} (only bool is allowed)",
+                    other.type_name()
+                ),
+            },
+            Expr::ObjectLit(fields) => {
+                let mut obj = serde_json::Map::with_capacity(fields.len());
+                for (key, expr) in fields {
+                    let value = self.eval_expr(expr, vars)?;
+                    obj.insert(key.clone(), value_to_json_smart(&value));
+                }
+                Ok(Value::Str(serde_json::Value::Object(obj).to_string()))
+            }
             Expr::Add(left, right) => {
                 let left = self.eval_expr(left, vars)?;
                 let right = self.eval_expr(right, vars)?;
@@ -2656,6 +2689,24 @@ fn value_to_positive_int(value: &Value, clause: &str) -> Result<i64> {
     }
 }
 
+/// JSON-encode a runtime Value, embedding nested JSON shapes raw.
+///
+/// `Value::Str` is the language's universal carrier for both plain strings
+/// AND nested objects/arrays returned by `select` / `body()` / `cache_get`.
+/// When the string parses as a JSON object/array, embed it as-is so an
+/// object literal like `{ items: posts }` produces `{"items": [...]}`
+/// rather than the double-encoded `{"items": "[...]"}`.
+fn value_to_json_smart(value: &Value) -> JsonValue {
+    if let Value::Str(s) = value {
+        if let Ok(parsed) = serde_json::from_str::<JsonValue>(s) {
+            if parsed.is_object() || parsed.is_array() {
+                return parsed;
+            }
+        }
+    }
+    value_to_json(value)
+}
+
 fn value_to_json(value: &Value) -> JsonValue {
     match value {
         Value::Int(v) => json!(v),
@@ -2664,6 +2715,52 @@ fn value_to_json(value: &Value) -> JsonValue {
         Value::Bool(v) => json!(v),
         Value::Null | Value::Void => JsonValue::Null,
     }
+}
+
+/// Format the current UTC time as an RFC 3339 / ISO 8601 string with millis,
+/// using Howard Hinnant's civil-from-days algorithm so we avoid pulling in
+/// chrono just for one call.
+fn current_utc_iso8601() -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| anyhow!("System clock is before UNIX_EPOCH"))?;
+    let seconds = now.as_secs() as i64;
+    let nanos = now.subsec_nanos();
+    Ok(format_iso8601_utc(seconds, nanos))
+}
+
+fn format_iso8601_utc(seconds: i64, nanos: u32) -> String {
+    let mut days = seconds.div_euclid(86_400);
+    let secs_today = seconds.rem_euclid(86_400);
+    let hh = secs_today / 3600;
+    let mm = (secs_today % 3600) / 60;
+    let ss = secs_today % 60;
+
+    // Civil-from-days: days since 1970-01-01 → (year, month, day).
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    let _ = &mut days;
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y,
+        m,
+        d,
+        hh,
+        mm,
+        ss,
+        nanos / 1_000_000
+    )
 }
 
 /// Apply a JSON object of `{"Header-Name": "value"}` pairs onto a ureq request.
@@ -3498,6 +3595,109 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).unwrap().output;
         assert_eq!(out.trim(), "7");
+    }
+
+    #[test]
+    fn object_literal_serializes_to_json_with_nested_embedding() {
+        let src = r#"
+            function main() {
+                let inner = "[1,2,3]";
+                let payload = { name: "Najim", count: 5, items: inner, ok: true };
+                print(payload);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        let trimmed = out.trim_end();
+        // Order isn't guaranteed by serde_json::Map (insertion order preserved
+        // since 1.0.79 with preserve_order disabled defaults to BTreeMap-like),
+        // so check field presence instead of exact text.
+        assert!(trimmed.contains("\"name\":\"Najim\""), "got: {trimmed}");
+        assert!(trimmed.contains("\"count\":5"), "got: {trimmed}");
+        assert!(
+            trimmed.contains("\"items\":[1,2,3]"),
+            "nested JSON should embed raw, got: {trimmed}"
+        );
+        assert!(trimmed.contains("\"ok\":true"), "got: {trimmed}");
+    }
+
+    #[test]
+    fn unary_not_inverts_bool() {
+        let src = r#"
+            function main() {
+                let ok = false;
+                if (!ok) { print("flipped"); }
+                let n = true;
+                if (!!n) { print("doubled"); }
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert!(out.contains("flipped"));
+        assert!(out.contains("doubled"));
+    }
+
+    #[test]
+    fn now_built_in_returns_iso_8601() {
+        let src = r#"
+            function main() {
+                let ts = now();
+                print(ts);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        let trimmed = out.trim_end();
+        // 2026-05-19T12:00:00.000Z shape — 4 digits, dashes, T, ms, Z.
+        let bytes = trimmed.as_bytes();
+        assert!(bytes.len() >= 20, "too short: {trimmed}");
+        assert_eq!(bytes[4], b'-');
+        assert_eq!(bytes[7], b'-');
+        assert_eq!(bytes[10], b'T');
+        assert_eq!(bytes[trimmed.len() - 1], b'Z');
+    }
+
+    #[test]
+    fn at_var_field_shortcut_in_where_clause() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                username varchar(40);
+            }
+
+            function lookup(req) {
+                let u = select User from AppDb.User
+                    where User.username == @req.username first;
+                return u;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        match &program.functions[0].body[0] {
+            crate::ast::Stmt::Let { value, .. } => match value {
+                crate::ast::Expr::DbSelect { where_clause, .. } => {
+                    let wc = where_clause.as_ref().unwrap();
+                    let atom = match wc.as_ref() {
+                        crate::ast::WhereExpr::Atom(a) => a,
+                        _ => panic!("expected atom"),
+                    };
+                    match &atom.rhs {
+                        crate::ast::Expr::FieldGet { var, field } => {
+                            assert_eq!(var, "req");
+                            assert_eq!(field, "username");
+                        }
+                        other => panic!("expected FieldGet, got {:?}", other),
+                    }
+                }
+                _ => panic!("expected DbSelect"),
+            },
+            _ => panic!("expected Let stmt"),
+        }
     }
 
     #[test]

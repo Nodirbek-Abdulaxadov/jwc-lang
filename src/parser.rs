@@ -758,13 +758,19 @@ fn validate_expr(
 
             Ok(())
         }
-        Expr::Await(inner) => validate_expr(
+        Expr::Await(inner) | Expr::Not(inner) => validate_expr(
             inner,
             ctx_names,
             entity_contexts,
             db_tables,
             entity_fields_by_table,
         ),
+        Expr::ObjectLit(fields) => {
+            for (_, value) in fields {
+                validate_expr(value, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+            }
+            Ok(())
+        }
         Expr::Add(l, r)
         | Expr::Sub(l, r)
         | Expr::Mul(l, r)
@@ -1939,6 +1945,14 @@ impl<'a> Parser<'a> {
             let expr = self.parse_unary_expr()?;
             return Ok(Expr::Neg(Box::new(expr)));
         }
+        // Unary `!`. Disambiguated from `!=` because that operator is only
+        // parsed at the equality precedence level (after a primary operand),
+        // never as a leading token.
+        if self.check_symbol('!') {
+            self.expect_symbol('!')?;
+            let expr = self.parse_unary_expr()?;
+            return Ok(Expr::Not(Box::new(expr)));
+        }
         if matches!(self.current.kind, TokenKind::Keyword(Keyword::Await)) {
             self.bump()?;
             let expr = self.parse_unary_expr()?;
@@ -2028,8 +2042,35 @@ impl<'a> Parser<'a> {
                 self.expect_symbol(')')?;
                 Ok(expr)
             }
+            TokenKind::Symbol('{') => self.parse_object_literal(),
             _ => Err(self.error_here("expected expression")),
         }
+    }
+
+    /// Parse an expression-position object literal: `{ key: expr [, key: expr]* }`.
+    /// Statement-position `{ ... }` blocks never reach this path because their
+    /// callers (function body, if/while, validate body, select projection)
+    /// consume the brace directly.
+    fn parse_object_literal(&mut self) -> Result<Expr> {
+        self.expect_symbol('{')?;
+        let mut fields: Vec<(String, Expr)> = Vec::new();
+        if !self.check_symbol('}') {
+            loop {
+                let key = self.expect_ident("expected key in object literal")?;
+                self.expect_symbol(':')?;
+                let value = self.parse_expr()?;
+                fields.push((key, value));
+                if !self.check_symbol(',') {
+                    break;
+                }
+                self.expect_symbol(',')?;
+                if self.check_symbol('}') {
+                    break;
+                }
+            }
+        }
+        self.expect_symbol('}')?;
+        Ok(Expr::ObjectLit(fields))
     }
 
     fn parse_call_after_name(&mut self, name: String) -> Result<Expr> {
@@ -2343,23 +2384,31 @@ impl<'a> Parser<'a> {
             self.parse_cmp_op()?
         };
 
-        let rhs = if self.check_symbol('@') {
-            self.bump()?;
-            let param = self.expect_ident("expected parameter name after '@'")?;
-            Expr::Var(param)
-        } else {
-            self.parse_expr()?
-        };
+        let rhs = self.parse_at_or_expr()?;
         Ok(WhereExpr::Atom(DbWhere { field, op, rhs }))
     }
 
     fn parse_in_value(&mut self) -> Result<Expr> {
-        if self.check_symbol('@') {
-            self.bump()?;
-            let name = self.expect_ident("expected parameter name after '@' in 'in (...)'")?;
-            return Ok(Expr::Var(name));
+        self.parse_at_or_expr()
+    }
+
+    /// Parse the RHS of a where comparison / `in` value. `@name` is shorthand
+    /// for an `Expr::Var`; `@name.field` extends it to `Expr::FieldGet` so
+    /// callers can write `where User.id == @req.userId first;` instead of
+    /// staging an extra `let` binding.
+    fn parse_at_or_expr(&mut self) -> Result<Expr> {
+        if !self.check_symbol('@') {
+            return self.parse_expr();
         }
-        self.parse_expr()
+        self.bump()?;
+        let name = self.expect_ident("expected parameter name after '@'")?;
+        if self.check_symbol('.') {
+            self.bump()?;
+            let field = self.expect_ident("expected field name after '@var.'")?;
+            Ok(Expr::FieldGet { var: name, field })
+        } else {
+            Ok(Expr::Var(name))
+        }
     }
 
     /// Accepts `@param`, integer literal, or any expression — runtime ensures

@@ -15,7 +15,8 @@
 | Phase 2 — Language Completeness | ✅ Done (real async deferred) |
 | Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean + serve --watch done; LSP/fmt/pkg deferred) |
 | Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
-| Phase 5 — Ecosystem | ⏳ Partial (Http + JWT stdlib done; cache/queue/wasm/hub deferred) |
+| Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email stdlib done; queue/wasm/hub deferred) |
+| Phase 6 — DX Polish (real-app feedback) | ⏳ Tier A done (literals/now/@var.field/!); typed body + error handler deferred |
 
 ---
 
@@ -210,6 +211,38 @@
 - **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.
 
 ---
+
+## Phase 6 — DX Polish `now` (microblog feedback'idan)
+
+**Maqsad:** Real backend yozish jarayonida til "DSL'dan" "kundalik tilga" aylanishi uchun aniqlangan to'siqlarni tozalash.
+
+### 6.1 JSON object literal ✅
+- Hozir: `return "{\"items\":" + items + ",\"total\":" + total + "}";` — manual concat + escape.
+- Maqsad: `return { items: items, total: total };` — birinchi-sinf object literali.
+- AST: `Expr::ObjectLit(Vec<(String, Expr)>)`. Runtime JSON string'ga serializatsiya.
+
+### 6.2 `now()` built-in ✅
+- Hozir: hardcoded `"2026-05-19T..."` string. Schema-side default'lar yo'q.
+- Maqsad: `now()` → ISO 8601 UTC string (chrono dep). Keyingi iteratsiyada `entity` ichida `created_at datetime default now;`.
+
+### 6.3 `@var.field` shortcut ✅
+- Hozir: `where ... == @req.username` → parse xato. Workaround: `let v = req.username; ... == @v;`.
+- Maqsad: `@ident.field` doim FieldGet sifatida parse qilinsin.
+
+### 6.4 `!expr` unary negation ✅
+- Hozir: `if (ok == false)` yozish kerak.
+- Maqsad: `if (!ok)` ham ishlasin. Lexer'da `!` simvol allaqachon bor (`!=` uchun); `parse_unary_expr`da boshqaruv qo'shiladi.
+
+### 6.5 Raw string literal `r"..."` ⬜ deferred
+- Regex pattern'larida `\\.` ikki marta escape kerak. `r"^[^@]+@[^@]+\.[^@]+$"` toza.
+
+### 6.6 Typed body field check (compile-time) ⬜ deferred
+- Hozir: `body()` Value::Str qaytaradi, `req.field` runtime JSON parse. Typed handler param model'ga validatsiya qiladi, lekin kompayl-vaqt field check yo'q.
+- Maqsad: agar `let req = body();` keyin `function takes(req: ReqClass)` ishlatilsa, `req.field` kompayl-vaqt `ReqClass` schema'ga tekshirilsin.
+
+### 6.7 Global error handler ⬜ deferred
+- Hozir: har route ichida `try/catch` yozish kerak.
+- Maqsad: top-level `errorHandler { catch (e) { return internalError(e); } }` deklaratsiyasi — uncaught route error'lar shu handler'ga tushadi.
 
 ## Priority Timeline
 

@@ -102,18 +102,16 @@ route POST "login" {
         password: required;
     }
     let req = body();
-    let uname = req.username;
-    let u = select User from AppDb.User where User.username == @uname first;
+    let u = select User from AppDb.User where User.username == @req.username first;
     if (u == null) {
         return unauthorized();
     }
     let ok = verify_password(req.password, u.password_hash);
-    if (ok == false) {
+    if (!ok) {
         return unauthorized();
     }
-    let payload = "{\"sub\":\"" + u.id + "\"}";
-    let token = jwt_sign(payload, env("JWT_SECRET"));
-    return json("{\"token\":\"" + token + "\"}");
+    let token = jwt_sign({ sub: u.id }, env("JWT_SECRET"));
+    return json({ token: token });
 }
 
 route GET "me" use AuthMw {
@@ -155,7 +153,7 @@ route GET "posts" {
 
     let total = select count(*) from AppDb.Post where Post.title like @q;
 
-    return json("{\"items\":" + items + ",\"total\":" + total + "}");
+    return json({ items: items, total: total });
 }
 
 route GET "posts/{id}" {
@@ -215,21 +213,14 @@ route GET "stats" {
     let users = select count(*) from AppDb.User;
     let posts = select count(*) from AppDb.Post;
     let comments = select count(*) from AppDb.Comment;
-    return json(
-        "{\"users\":" + users +
-        ",\"posts\":" + posts +
-        ",\"comments\":" + comments + "}"
-    );
+    return json({ users: users, posts: posts, comments: comments });
 }
 
 // -------------------- helpers --------------------
 
-function now(): datetime {
-    // Postgres-side now() would be cleaner; this is a stand-in placeholder
-    // until JWC ships a real `datetime` helper or a way to bind SQL-side
-    // defaults to entity fields.
-    return "2026-05-19T12:00:00Z";
-}
+// `now()` is a built-in starting from Phase 6 — this user-land helper is
+// no longer needed. Kept as a tiny shim so the rest of the file reads the
+// same and to demonstrate that built-ins win over user functions.
 
 function main() {
     setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);

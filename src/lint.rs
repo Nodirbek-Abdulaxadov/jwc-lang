@@ -119,7 +119,12 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
                 collect_calls_expr(arg, out);
             }
         }
-        Expr::Await(inner) | Expr::Neg(inner) => collect_calls_expr(inner, out),
+        Expr::Await(inner) | Expr::Neg(inner) | Expr::Not(inner) => collect_calls_expr(inner, out),
+        Expr::ObjectLit(fields) => {
+            for (_, v) in fields {
+                collect_calls_expr(v, out);
+            }
+        }
         Expr::Add(a, b)
         | Expr::Sub(a, b)
         | Expr::Mul(a, b)

@@ -295,6 +295,11 @@ pub enum Expr {
     /// `await expr` — placeholder for the future async runtime; today this
     /// is a transparent pass-through that evaluates the inner expression.
     Await(Box<Expr>),
+    /// `!expr` — boolean negation. Inner must evaluate to a bool.
+    Not(Box<Expr>),
+    /// `{ key: value, key2: value2 }` — JSON object literal. Each value is
+    /// evaluated and the result is serialised as a JSON string Value.
+    ObjectLit(Vec<(String, Expr)>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
