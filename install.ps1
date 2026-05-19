@@ -1,97 +1,93 @@
-param(
-    [switch] $Release = $true,
-    [switch] $Debug,
-    [string] $ExePath
-)
+#requires -version 5.1
+<#
+    jwc — one-liner installer (Windows PowerShell).
+
+    iwr -useb https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.ps1 | iex
+
+    Override targets via env:
+      $env:JWC_VERSION          install a specific release tag (e.g. v0.2.0)
+      $env:JWC_INSTALL_DIR      destination folder (default: %LOCALAPPDATA%\jwc\bin)
+      $env:JWC_DOWNLOAD_BASE    download from a mirror (e.g. the project's MinIO)
+                                instead of GitHub Releases. Asset name expected
+                                there is "jwc-$VERSION-x86_64-windows.zip".
+#>
 
 $ErrorActionPreference = 'Stop'
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-Push-Location $root
+$Repo = 'Nodirbek-Abdulaxadov/jwc-lang'
+$InstallDir = if ($env:JWC_INSTALL_DIR) {
+    $env:JWC_INSTALL_DIR
+} else {
+    Join-Path $env:LOCALAPPDATA 'jwc\bin'
+}
+$DownloadBase = $env:JWC_DOWNLOAD_BASE
 
+# Sanity check architecture — prebuilt JWC binaries ship x86_64 only today.
+$arch = (Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture
+if ($arch -ne 9) {
+    Write-Error "Only x86_64 Windows is supported (CIM architecture=$arch)."
+}
+$short = 'x86_64-windows'
+$ext   = 'zip'
+
+if ($env:JWC_VERSION) {
+    $Version = $env:JWC_VERSION
+} else {
+    Write-Host "Resolving latest release tag for $Repo..."
+    $Version = (Invoke-RestMethod -UseBasicParsing `
+        -Uri "https://api.github.com/repos/$Repo/releases/latest").tag_name
+    if (-not $Version) {
+        Write-Error "Failed to resolve latest version. Set `$env:JWC_VERSION to pin one."
+    }
+}
+
+$asset = "jwc-$Version-$short.$ext"
+$url = if ($DownloadBase) {
+    "$($DownloadBase.TrimEnd('/'))/$asset"
+} else {
+    "https://github.com/$Repo/releases/download/$Version/$asset"
+}
+
+Write-Host "Downloading $url"
+$tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "jwc-install-$([guid]::NewGuid().ToString('N'))") -Force
 try {
-    $profile = 'release'
-    if ($Debug) { $profile = 'debug' }
+    $archive = Join-Path $tmp $asset
+    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
+    Expand-Archive -Path $archive -DestinationPath $tmp -Force
 
-    $exeSrc = $null
-    if ($ExePath) {
-        $exeSrc = $ExePath
-    }
-    elseif (Test-Path (Join-Path $root ("target\{0}\jwc.exe" -f $profile))) {
-        $exeSrc = (Join-Path $root ("target\{0}\jwc.exe" -f $profile))
-    }
-    elseif (Test-Path (Join-Path $root 'jwc.exe')) {
-        $exeSrc = (Join-Path $root 'jwc.exe')
-    }
-    elseif (Test-Path (Join-Path $root 'bin\jwc.exe')) {
-        $exeSrc = (Join-Path $root 'bin\jwc.exe')
-    }
-    else {
-        $hasCargo = $false
-        try { Get-Command cargo -ErrorAction Stop | Out-Null; $hasCargo = $true } catch { $hasCargo = $false }
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    Copy-Item -Force (Join-Path $tmp 'jwc.exe')     (Join-Path $InstallDir 'jwc.exe')
+    Copy-Item -Force (Join-Path $tmp 'jwc-lsp.exe') (Join-Path $InstallDir 'jwc-lsp.exe')
 
-        if (-not $hasCargo) {
-            throw "Rust/cargo not found and no prebuilt jwc.exe found. Provide -ExePath <path-to-jwc.exe> or place a prebuilt binary at .\jwc.exe or .\bin\jwc.exe."
-        }
+    Write-Host "Installed: $InstallDir\jwc.exe"
+    Write-Host "Installed: $InstallDir\jwc-lsp.exe"
 
-        Write-Host "Building jwc ($profile)..."
-        if ($profile -eq 'release') {
-            cargo build --release
-        } else {
-            cargo build
-        }
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-        $exeSrc = Join-Path $root ("target\{0}\jwc.exe" -f $profile)
-        if (-not (Test-Path $exeSrc)) {
-            throw "Build succeeded but jwc.exe not found at $exeSrc"
-        }
-    }
-
-    if (-not (Test-Path $exeSrc)) {
-        throw "jwc.exe not found at $exeSrc"
-    }
-
-    Write-Host "Using binary source: $exeSrc"
-
-    $installDir = Join-Path $env:LOCALAPPDATA 'jwc\bin'
-    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-
-    $exeDst = Join-Path $installDir 'jwc.exe'
-    Copy-Item -Force $exeSrc $exeDst
-
-    # Add installDir to USER PATH if missing
+    # User-scope PATH update — survives shell restarts. Does not require admin.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ([string]::IsNullOrWhiteSpace($userPath)) { $userPath = '' }
-
-    $pathParts = $userPath -split ';' | Where-Object { $_ -and $_.Trim() -ne '' }
-    $already = $false
-    foreach ($p in $pathParts) {
-        if ($p.TrimEnd('\\') -ieq $installDir.TrimEnd('\\')) { $already = $true; break }
-    }
+    $already = ($userPath -split ';' | Where-Object {
+        $_ -and $_.TrimEnd('\\') -ieq $InstallDir.TrimEnd('\\')
+    }).Count -gt 0
 
     if (-not $already) {
-        $newPath = if ($userPath.Trim().Length -eq 0) { $installDir } else { "$userPath;$installDir" }
+        $newPath = if ($userPath.Trim().Length -eq 0) { $InstallDir } else { "$userPath;$InstallDir" }
         [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-        Write-Host "Added to user PATH: $installDir"
-        Write-Host 'Restart your terminal (or sign out/in) to apply everywhere.'
+        Write-Host "Added to user PATH: $InstallDir"
+        Write-Host 'Open a fresh terminal (or sign out/in) for the new PATH to take effect.'
     } else {
-        Write-Host "Already on user PATH: $installDir"
+        Write-Host "Already on user PATH: $InstallDir"
     }
 
-    # Also add to current session PATH so `jwc` can be used immediately.
-    $procParts = ($env:Path -split ';') | Where-Object { $_ -and $_.Trim() -ne '' }
-    $procHas = $false
-    foreach ($p in $procParts) {
-        if ($p.TrimEnd('\\') -ieq $installDir.TrimEnd('\\')) { $procHas = $true; break }
-    }
-    if (-not $procHas) {
-        $env:Path = "$env:Path;$installDir"
+    # Make the binary usable in the current session too.
+    if (-not (($env:Path -split ';') | Where-Object {
+        $_ -and $_.TrimEnd('\\') -ieq $InstallDir.TrimEnd('\\')
+    })) {
+        $env:Path = "$env:Path;$InstallDir"
     }
 
-    Write-Host "Installed: $exeDst"
-    Write-Host 'Try: jwc --help'
+    Write-Host ''
+    Write-Host 'Try:  jwc --help'
 }
 finally {
-    Pop-Location
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

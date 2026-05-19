@@ -58,7 +58,7 @@ route GET "api/brands" {
 }
 
 function main() {
-    setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);
+    setConnectionString();   // env: DATABASE_URL or PG_HOST/PORT/USER/PASSWORD/DATABASE
     serve(8080);
 }
 ```
@@ -743,18 +743,49 @@ Server tuning:
 - `JWC_SERVER_METRICS` (`false` by default; set to `true` to enable)
 - `JWC_SERVER_METRICS_INTERVAL_SECS` (default `10`)
 
-## Install / Reinstall
+## Install
 
-Windows:
-
-```powershell
-./install.ps1 -Release
-```
-
-Linux/macOS:
+### Linux
 
 ```bash
-./install.sh --release
+curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.ps1 | iex
+```
+
+Both scripts pull the latest tagged release from GitHub Releases, drop the
+binaries into:
+
+| OS | Path |
+|----|------|
+| Linux / macOS | `~/.jwc/bin/` |
+| Windows | `%LOCALAPPDATA%\jwc\bin\` |
+
+and add that directory to your user `PATH`. Open a new terminal afterwards
+if `jwc` isn't immediately on the path.
+
+### Overrides
+
+| Env var | What it does |
+|---|---|
+| `JWC_VERSION=v0.2.0` | install a specific release tag instead of latest |
+| `JWC_INSTALL_DIR=/opt/jwc/bin` | install to a custom directory |
+| `JWC_DOWNLOAD_BASE=https://...` | fetch from a mirror (e.g. the project's MinIO) instead of GitHub Releases |
+
+### Build from source
+
+When you want the bleeding-edge `main` rather than a tagged release, or
+to hack on the compiler itself:
+
+```bash
+git clone https://github.com/Nodirbek-Abdulaxadov/jwc-lang
+cd jwc-lang
+./install-from-source.sh         # Linux / macOS
+./install-from-source.ps1        # Windows PowerShell
 ```
 
 After install, open a new terminal if `jwc` is not found immediately.

@@ -1,98 +1,74 @@
 #!/usr/bin/env bash
+# jwc — one-liner installer (Linux / macOS).
+#
+#   curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+#
+# Override targets via env:
+#   JWC_VERSION=v0.2.0            install a specific release tag
+#   JWC_INSTALL_DIR=/opt/jwc/bin  put the binaries somewhere other than ~/.jwc/bin
+#   JWC_DOWNLOAD_BASE=https://...  pull from a mirror (e.g. the project's MinIO)
+#                                  instead of GitHub Releases. The script
+#                                  expects an asset name of
+#                                  "jwc-${VERSION}-${ARCH_SHORT}.tar.gz" there.
+
 set -euo pipefail
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT_DIR"
+REPO="Nodirbek-Abdulaxadov/jwc-lang"
+INSTALL_DIR="${JWC_INSTALL_DIR:-${HOME}/.jwc/bin}"
+DOWNLOAD_BASE="${JWC_DOWNLOAD_BASE:-}"
 
-profile="release"
-exe_path=""
+os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+arch="$(uname -m)"
+case "${os}-${arch}" in
+    linux-x86_64)  short="x86_64-linux";  ext="tar.gz" ;;
+    *)
+        echo "Unsupported platform: ${os}-${arch}." >&2
+        echo "Prebuilt JWC binaries currently ship for x86_64 Linux + Windows." >&2
+        echo "Build from source: ./install-from-source.sh" >&2
+        exit 1
+        ;;
+esac
 
-usage() {
-    cat <<'EOF'
-Usage: ./install.sh [--release|--debug] [--exe-path <path>]
-
-Options:
-  --release            Build/install release binary (default)
-  --debug              Build/install debug binary
-  --exe-path <path>    Use an existing jwc binary instead of building
-EOF
-}
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --release)
-            profile="release"
-            shift
-            ;;
-        --debug)
-            profile="debug"
-            shift
-            ;;
-        --exe-path)
-            if [[ $# -lt 2 ]]; then
-                echo "Error: --exe-path requires a value" >&2
-                usage
-                exit 1
-            fi
-            exe_path="$2"
-            shift 2
-            ;;
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        *)
-            echo "Error: unknown argument '$1'" >&2
-            usage
-            exit 1
-            ;;
-    esac
-done
-
-exe_src=""
-
-if [[ -n "$exe_path" ]]; then
-    exe_src="$exe_path"
-elif [[ -f "$ROOT_DIR/target/$profile/jwc" ]]; then
-    exe_src="$ROOT_DIR/target/$profile/jwc"
-elif [[ -f "$ROOT_DIR/jwc" ]]; then
-    exe_src="$ROOT_DIR/jwc"
-elif [[ -f "$ROOT_DIR/bin/jwc" ]]; then
-    exe_src="$ROOT_DIR/bin/jwc"
-else
-    if ! command -v cargo >/dev/null 2>&1; then
-        echo "Error: cargo not found and no prebuilt jwc binary available." >&2
-        echo "Provide --exe-path <path-to-jwc> or place a prebuilt binary at ./jwc or ./bin/jwc" >&2
+version="${JWC_VERSION:-}"
+if [[ -z "${version}" ]]; then
+    echo "Resolving latest release tag for ${REPO}..."
+    # Cheap, dep-free version lookup. No `jq` required.
+    version=$(
+        curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep -oE '"tag_name":\s*"[^"]+"' | head -1 | cut -d'"' -f4
+    )
+    if [[ -z "${version}" ]]; then
+        echo "Failed to resolve latest version. Set JWC_VERSION to pin one." >&2
         exit 1
     fi
-
-    echo "Building jwc ($profile)..."
-    if [[ "$profile" == "release" ]]; then
-        cargo build --release
-    else
-        cargo build
-    fi
-    exe_src="$ROOT_DIR/target/$profile/jwc"
 fi
 
-if [[ ! -f "$exe_src" ]]; then
-    echo "Error: jwc binary not found at '$exe_src'" >&2
-    exit 1
+asset="jwc-${version}-${short}.${ext}"
+if [[ -n "${DOWNLOAD_BASE}" ]]; then
+    url="${DOWNLOAD_BASE%/}/${asset}"
+else
+    url="https://github.com/${REPO}/releases/download/${version}/${asset}"
 fi
 
-install_dir="${HOME}/.local/bin"
-mkdir -p "$install_dir"
+echo "Downloading ${url}"
+tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp}"' EXIT
 
-exe_dst="$install_dir/jwc"
-cp -f "$exe_src" "$exe_dst"
-chmod +x "$exe_dst"
+curl -fL "${url}" -o "${tmp}/${asset}"
+tar -xzf "${tmp}/${asset}" -C "${tmp}"
 
-echo "Installed: $exe_dst"
+mkdir -p "${INSTALL_DIR}"
+install -m 0755 "${tmp}/jwc"     "${INSTALL_DIR}/jwc"
+install -m 0755 "${tmp}/jwc-lsp" "${INSTALL_DIR}/jwc-lsp"
 
-if [[ ":${PATH}:" != *":${install_dir}:"* ]]; then
-    echo "Note: ${install_dir} is not in your PATH."
-    echo "Add this line to your shell profile (e.g. ~/.bashrc or ~/.zshrc):"
-    echo "  export PATH=\"$HOME/.local/bin:$PATH\""
+echo "Installed: ${INSTALL_DIR}/jwc"
+echo "Installed: ${INSTALL_DIR}/jwc-lsp"
+
+if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
+    echo
+    echo "Add to PATH (drop into your shell rc file):"
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
 fi
 
-echo "Try: jwc --help"
+echo
+echo "Try:  jwc --help"

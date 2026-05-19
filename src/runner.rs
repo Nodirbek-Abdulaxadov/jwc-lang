@@ -65,6 +65,8 @@ pub fn run_request(
 pub fn run_ws_request(
     program: &Program,
     route_path: &str,
+    path_params: HashMap<String, String>,
+    headers: HashMap<String, String>,
     rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     tx: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<()> {
@@ -76,13 +78,24 @@ pub fn run_ws_request(
 
     let handler = route.handler.clone();
     let body_stmts = route.body.clone();
+    let middleware_names: Vec<String> = route.middlewares.clone();
 
     let mut vm = Vm::new(program);
+    vm.current_path_params = Some(path_params);
+    vm.current_headers = Some(headers);
     WS_HANDLE.with(|h| {
         *h.borrow_mut() = Some(WsHandle { rx, tx });
     });
 
     let result: Result<()> = (|| {
+        // Same short-circuit semantics as HTTP routes: if a middleware
+        // returns a value, abort the WS handshake by closing the channel
+        // before the user's handler runs.
+        for mw_name in &middleware_names {
+            if vm.run_middleware(mw_name)?.is_some() {
+                return Ok(());
+            }
+        }
         if let Some(handler_name) = &handler {
             let args = vm.build_handler_args(handler_name);
             let _ = vm.call_function(handler_name, args)?;
@@ -1240,24 +1253,20 @@ impl<'a> Vm<'a> {
                     return Ok(Value::Str(val));
                 }
 
-                // ── `setConnectionString(url)` — set DATABASE_URL for this process ──
+                // ── `setConnectionString(...)` — pin DATABASE_URL for this process.
+                //
+                // Three legal forms:
+                //   setConnectionString();                           // pull from env (.env auto-loaded)
+                //   setConnectionString("postgres://user:p@h:port/db");
+                //   setConnectionString({
+                //       host: "localhost", port: 5432,
+                //       user: "postgres",  password: "x",
+                //       database: "myapp"
+                //   });
                 if name.eq_ignore_ascii_case("setConnectionString")
                     || name.eq_ignore_ascii_case("set_connection_string")
                 {
-                    if args.len() != 1 {
-                        bail!("setConnectionString(url) expects exactly 1 arg");
-                    }
-                    let url = self.eval_expr(&args[0], vars)?;
-                    let url = match url {
-                        Value::Str(s) => s,
-                        other => bail!(
-                            "setConnectionString(url): url must be string, got {}",
-                            other.type_name()
-                        ),
-                    };
-                    // SAFETY: only called from single-threaded main startup
-                    std::env::set_var("DATABASE_URL", &url);
-                    return Ok(Value::Void);
+                    return self.eval_set_connection_string_call(args, vars);
                 }
 
                 // ── HTTP response helpers ──────────────────────────────────
@@ -2398,6 +2407,47 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn eval_set_connection_string_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() > 1 {
+            bail!(
+                "setConnectionString() expects 0 or 1 args (use a URL string, an \
+                 object literal, or no args to pull from the env)"
+            );
+        }
+
+        // Form 1: no args → read from env. `.env` was already loaded by the
+        // CLI before `main()` ran, so PG_* / DATABASE_URL should be present.
+        if args.is_empty() {
+            if let Ok(url) = std::env::var("DATABASE_URL") {
+                // SAFETY: setter is only called from single-threaded main startup.
+                std::env::set_var("DATABASE_URL", url);
+                return Ok(Value::Void);
+            }
+            if let Some(url) = assemble_url_from_pg_env() {
+                std::env::set_var("DATABASE_URL", url);
+                return Ok(Value::Void);
+            }
+            bail!(
+                "setConnectionString(): no DATABASE_URL and no PG_HOST/PORT/USER/PASSWORD/DATABASE in env"
+            );
+        }
+
+        let value = self.eval_expr(&args[0], vars)?;
+        let url_string = match value {
+            Value::Str(s) => connection_string_from_arg(&s)?,
+            other => bail!(
+                "setConnectionString(arg): arg must be a URL string or an object literal, got {}",
+                other.type_name()
+            ),
+        };
+        std::env::set_var("DATABASE_URL", url_string);
+        Ok(Value::Void)
+    }
+
     fn eval_db_query_call(
         &mut self,
         args: &[Expr],
@@ -2657,21 +2707,9 @@ impl<'a> Vm<'a> {
         if !args.is_empty() {
             bail!("uuid() expects no args");
         }
-
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| anyhow!("System clock error"))?
-            .as_nanos();
-        let hex = format!("{:032x}", nanos);
-        let uuid = format!(
-            "{}-{}-{}-{}-{}",
-            &hex[0..8],
-            &hex[8..12],
-            &hex[12..16],
-            &hex[16..20],
-            &hex[20..32]
-        );
-        Ok(Value::Str(uuid))
+        // RFC 4122 v4 — random, includes proper version/variant bits, no
+        // sub-nanosecond collisions like the old `SystemTime::now()` hack.
+        Ok(Value::Str(uuid::Uuid::new_v4().to_string()))
     }
 
     fn eval_set_json_field_call(
@@ -3287,6 +3325,75 @@ fn value_to_positive_int(value: &Value, clause: &str) -> Result<i64> {
             }),
         other => bail!("{clause} must be integer, got {}", other.type_name()),
     }
+}
+
+/// Resolve the argument to `setConnectionString(...)` into a Postgres URL.
+///
+/// Accepts either:
+/// - A literal connection URL (`postgres://user:pw@host:port/db`), passed
+///   through unchanged.
+/// - A JSON object literal `{ host, port, user, password, database }` —
+///   the format JWC's object-literal syntax produces. Every field except
+///   `port` is required; missing keys surface as a clear error.
+fn connection_string_from_arg(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("postgres://") || trimmed.starts_with("postgresql://") {
+        return Ok(trimmed.to_string());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|_| {
+        anyhow!(
+            "setConnectionString(arg): expected a postgres:// URL or a JSON object literal, got '{trimmed}'"
+        )
+    })?;
+    let obj = parsed
+        .as_object()
+        .ok_or_else(|| anyhow!("setConnectionString(arg): expected a JSON object, got non-object"))?;
+
+    let host = pick_string_field(obj, "host")?;
+    let port = obj
+        .get("port")
+        .map(|v| match v {
+            serde_json::Value::Number(n) => Ok(n.to_string()),
+            serde_json::Value::String(s) => Ok(s.clone()),
+            other => Err(anyhow!(
+                "setConnectionString: 'port' must be a number or string, got {other:?}"
+            )),
+        })
+        .transpose()?
+        .unwrap_or_else(|| "5432".to_string());
+    let user = pick_string_field(obj, "user")?;
+    let password = pick_string_field(obj, "password")?;
+    let database = pick_string_field(obj, "database")?;
+
+    Ok(format!(
+        "postgresql://{}:{}@{}:{}/{}",
+        user, password, host, port, database
+    ))
+}
+
+fn pick_string_field(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<String> {
+    obj.get(key)
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .ok_or_else(|| {
+            anyhow!(
+                "setConnectionString({{ ... }}): missing or non-string field '{key}'"
+            )
+        })
+}
+
+fn assemble_url_from_pg_env() -> Option<String> {
+    let user = std::env::var("PG_USER").ok()?;
+    let password = std::env::var("PG_PASSWORD").ok()?;
+    let host = std::env::var("PG_HOST").ok()?;
+    let port = std::env::var("PG_PORT").ok()?;
+    let database = std::env::var("PG_DATABASE").ok()?;
+    Some(format!(
+        "postgresql://{}:{}@{}:{}/{}",
+        user, password, host, port, database
+    ))
 }
 
 /// Convert a parsed JSON value back into the runtime's untagged Value enum.
@@ -4216,6 +4323,174 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).unwrap().output;
         assert_eq!(out.trim(), "7");
+    }
+
+    /// Tests that mutate process env need to be serialised — cargo runs
+    /// tests in parallel by default and `setConnectionString(...)` writes
+    /// to `DATABASE_URL`. One shared mutex keeps the three env-touching
+    /// tests below from racing each other.
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn set_connection_string_accepts_url_form() {
+        let _g = env_test_lock();
+        let key = "DATABASE_URL";
+        let backup = std::env::var(key).ok();
+        std::env::remove_var(key);
+
+        let src = r#"
+            function main() {
+                setConnectionString("postgresql://postgres:secret@127.0.0.1:5432/myapp");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        run_main(&program).unwrap();
+        assert_eq!(
+            std::env::var(key).unwrap(),
+            "postgresql://postgres:secret@127.0.0.1:5432/myapp"
+        );
+
+        if let Some(v) = backup {
+            std::env::set_var(key, v);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn set_connection_string_accepts_object_literal_form() {
+        let _g = env_test_lock();
+        let key = "DATABASE_URL";
+        let backup = std::env::var(key).ok();
+        std::env::remove_var(key);
+
+        let src = r#"
+            function main() {
+                setConnectionString({
+                    host:     "db.example.com",
+                    port:     5433,
+                    user:     "app",
+                    password: "topsecret",
+                    database: "prod"
+                });
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        run_main(&program).unwrap();
+        assert_eq!(
+            std::env::var(key).unwrap(),
+            "postgresql://app:topsecret@db.example.com:5433/prod"
+        );
+
+        if let Some(v) = backup {
+            std::env::set_var(key, v);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn set_connection_string_no_args_reads_from_env() {
+        let _g = env_test_lock();
+        let backup = std::env::var("DATABASE_URL").ok();
+        std::env::set_var(
+            "DATABASE_URL",
+            "postgresql://envuser:envpw@envhost:5400/envdb",
+        );
+
+        let src = r#"
+            function main() {
+                setConnectionString();
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        run_main(&program).unwrap();
+        assert_eq!(
+            std::env::var("DATABASE_URL").unwrap(),
+            "postgresql://envuser:envpw@envhost:5400/envdb"
+        );
+
+        if let Some(v) = backup {
+            std::env::set_var("DATABASE_URL", v);
+        } else {
+            std::env::remove_var("DATABASE_URL");
+        }
+    }
+
+    #[test]
+    fn uuid_builtin_is_v4_and_never_collides_on_a_tight_loop() {
+        let src = r#"
+            function main() {
+                let a = uuid();
+                let b = uuid();
+                let c = uuid();
+                print(a);
+                print(b);
+                print(c);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // All three must be distinct — v4 should never collide here.
+        assert!(lines[0] != lines[1]);
+        assert!(lines[1] != lines[2]);
+        assert!(lines[0] != lines[2]);
+        // And every one is a proper RFC 4122 v4: version nibble is '4' at
+        // the 14th hex digit (index 14, position [14..15] in the dashed form).
+        for line in &lines {
+            assert_eq!(
+                line.as_bytes()[14], b'4',
+                "expected v4 version nibble in {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn ws_path_params_reach_the_handler() {
+        // Smoke check that the runtime path-params plumbing accepts a
+        // pre-populated map exactly the way `server.rs::handle_ws` will
+        // hand it over. We exercise it by calling `run_ws_request`
+        // directly and watching the value land in `path_param(...)`.
+        let src = r#"
+            route WS "/chat/{room}" {
+                let r = path_param("room");
+                ws_send(r);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+
+        let (tx_to_vm, rx_to_vm) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx_from_vm, mut rx_from_vm) = tokio::sync::mpsc::unbounded_channel::<String>();
+        // No inbound messages, so the handler runs ws_send then exits.
+        drop(tx_to_vm);
+
+        let mut params = HashMap::new();
+        params.insert("room".to_string(), "general".to_string());
+
+        run_ws_request(
+            &program,
+            "/chat/{room}",
+            params,
+            HashMap::new(),
+            rx_to_vm,
+            tx_from_vm,
+        )
+        .unwrap();
+
+        let received = rx_from_vm.try_recv().expect("ws_send fired");
+        assert_eq!(received, "general");
     }
 
     #[test]

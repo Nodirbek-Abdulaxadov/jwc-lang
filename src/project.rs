@@ -66,6 +66,8 @@ pub fn create_new_project(target_dir: &Path) -> Result<()> {
     let proj_filename = format!("{}.jwcproj", manifest.name);
     let manifest_path = target_dir.join(&proj_filename);
     let main_path = target_dir.join("main.jwc");
+    let gitignore_path = target_dir.join(".gitignore");
+    let env_example_path = target_dir.join(".env.example");
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     std::fs::write(&manifest_path, manifest_json)
@@ -74,6 +76,47 @@ pub fn create_new_project(target_dir: &Path) -> Result<()> {
     let main_content = "function main() {\n    print(\"Hello from JWC\");\n}\n";
     std::fs::write(&main_path, main_content)
         .with_context(|| format!("Failed to write {}", main_path.display()))?;
+
+    // Sensible defaults: keep secrets, bundled binaries, IDE/OS cruft out
+    // of the repo. Migrations stay tracked — they're the schema history.
+    let gitignore = "\
+# Local secrets / env
+.env
+.env.local
+
+# jwc bundle output
+bin/
+
+# Rust toolchain output (only relevant if you check the compiler in)
+target/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db
+";
+    std::fs::write(&gitignore_path, gitignore)
+        .with_context(|| format!("Failed to write {}", gitignore_path.display()))?;
+
+    let env_example = "\
+# Postgres connection details. JWC auto-assembles DATABASE_URL from these
+# the first time the runtime loads .env, so a `setConnectionString(...)`
+# call in main() is NOT required.
+PG_HOST=localhost
+PG_PORT=5432
+PG_USER=postgres
+PG_PASSWORD=secret
+PG_DATABASE=\
+";
+    let env_example = format!("{}{}\n", env_example, manifest.name);
+    std::fs::write(&env_example_path, env_example)
+        .with_context(|| format!("Failed to write {}", env_example_path.display()))?;
+
     Ok(())
 }
 
@@ -264,5 +307,50 @@ pub fn load_dotenv(dir: &Path) {
             let url = format!("postgresql://{}:{}@{}:{}/{}", user, password, host, port, db);
             std::env::set_var("DATABASE_URL", url);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("jwc-newproj-{}-{}-{}", label, std::process::id(), nanos))
+    }
+
+    #[test]
+    fn create_new_project_lays_down_starter_files() {
+        let dir = unique_tmp_dir("starter");
+        create_new_project(&dir).expect("create project");
+
+        // The manifest file is named after the directory's basename.
+        let project_name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("temp dir name")
+            .to_string();
+        assert!(
+            dir.join(format!("{}.jwcproj", project_name)).is_file(),
+            ".jwcproj not created"
+        );
+        assert!(dir.join("main.jwc").is_file());
+        assert!(dir.join(".gitignore").is_file(), ".gitignore not created");
+        assert!(dir.join(".env.example").is_file(), ".env.example not created");
+
+        let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert!(gi.contains(".env"));
+        assert!(gi.contains("bin/"));
+        assert!(gi.contains("target/"));
+
+        let env_ex = std::fs::read_to_string(dir.join(".env.example")).unwrap();
+        assert!(env_ex.contains("PG_HOST"));
+        assert!(env_ex.contains("PG_DATABASE="));
+
+        // Be tidy.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

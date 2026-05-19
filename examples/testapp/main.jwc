@@ -1,4 +1,19 @@
 function main() {
-    setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);
+    // No-arg form: pulls DATABASE_URL (or PG_HOST/PORT/USER/PASSWORD/DATABASE)
+    // from the env. `.env` is auto-loaded before main() runs.
+    setConnectionString();
+
+    // Structured form (use when you want fields explicit in source):
+    //   setConnectionString({
+    //       host:     "localhost",
+    //       port:     5432,
+    //       user:     "postgres",
+    //       password: env("PG_PASSWORD"),
+    //       database: "myapp"
+    //   });
+    //
+    // Raw URL form:
+    //   setConnectionString("postgresql://postgres:secret@localhost:5432/myapp");
+
     serve(8080);
 }

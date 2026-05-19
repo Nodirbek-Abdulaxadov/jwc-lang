@@ -242,6 +242,6 @@ route WS "/chat" {
 // same and to demonstrate that built-ins win over user functions.
 
 function main() {
-    setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);
+    setConnectionString();   // PG_* / DATABASE_URL from .env
     serve(8080);
 }

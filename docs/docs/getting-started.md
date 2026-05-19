@@ -7,19 +7,46 @@ title: Getting started
 
 ## Install
 
-Clone the language repo and build the CLI:
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.ps1 | iex
+```
+
+Both scripts pull the most recent tagged release from GitHub Releases
+and place `jwc` + `jwc-lsp` into your user-local install directory
+(`~/.jwc/bin` on Linux/macOS, `%LOCALAPPDATA%\jwc\bin` on Windows),
+plus add it to your `PATH`.
+
+Confirm:
+
+```bash
+jwc --help
+```
+
+### Pin a version or mirror
+
+| Env var | What it does |
+|---|---|
+| `JWC_VERSION=v0.2.0` | install a specific release tag instead of latest |
+| `JWC_INSTALL_DIR=/opt/jwc/bin` | install to a custom directory |
+| `JWC_DOWNLOAD_BASE=https://mirror/...` | pull artifacts from a self-hosted mirror (e.g. MinIO) instead of GitHub Releases |
+
+### Build from source
+
+When you want bleeding-edge `main`, clone and run the source installer:
 
 ```bash
 git clone https://github.com/Nodirbek-Abdulaxadov/jwc-lang
 cd jwc-lang
-./install.sh   # Linux / macOS
-./install.ps1  # Windows PowerShell
-```
-
-This places a `jwc` binary on your `PATH` (release profile). Confirm:
-
-```bash
-jwc --help
+./install-from-source.sh         # Linux / macOS
+./install-from-source.ps1        # Windows PowerShell
 ```
 
 ## Create a project
@@ -72,6 +99,30 @@ The CLI loads `.env` automatically and assembles `DATABASE_URL` from the
 > exist yet — no `createdb` needed. Set `JWC_ADMIN_DB` if your admin
 > role lives somewhere other than `postgres`.
 
+### `setConnectionString(...)` forms
+
+`setConnectionString` is the language-level "wire me to the database"
+call. Three legal shapes, pick whichever reads best:
+
+```jwc
+// 1. No args — pull from env. `.env` is auto-loaded; reads
+//    DATABASE_URL if present, otherwise assembles one from
+//    PG_HOST / PG_PORT / PG_USER / PG_PASSWORD / PG_DATABASE.
+setConnectionString();
+
+// 2. Structured — explicit, source-readable. Port defaults to 5432.
+setConnectionString({
+    host:     "localhost",
+    port:     5432,
+    user:     "postgres",
+    password: env("PG_PASSWORD"),
+    database: "myapp"
+});
+
+// 3. Raw URL — drop-in for an existing connection string.
+setConnectionString("postgresql://postgres:secret@localhost:5432/myapp");
+```
+
 ## Add an entity and a route
 
 Edit `main.jwc`:
@@ -98,7 +149,7 @@ route GET "notes" {
 }
 
 function main() {
-    setConnectionString(`postgresql://${env("PG_USER")}:${env("PG_PASSWORD")}@${env("PG_HOST")}:${env("PG_PORT")}/${env("PG_DATABASE")}`);
+    setConnectionString();   // reads DATABASE_URL or PG_* from the loaded .env
     serve(8080);
 }
 ```

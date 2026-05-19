@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use axum::{
     body::Bytes,
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::Response,
     routing::get,
@@ -153,11 +153,16 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
     }
 
     let app = build_router(state);
+    // Bind to 0.0.0.0 so the server accepts traffic on every interface,
+    // but print the loopback URL — most browsers/curl reject `0.0.0.0`,
+    // and `localhost` is what users actually paste into a tab.
     let addr = format!("0.0.0.0:{port}");
+    let public_url = format!("http://localhost:{port}");
+    let label = format!("║  {:<34}  ║", public_url);
     println!("╔══════════════════════════════════════╗");
     println!("║         JWC Server started           ║");
     println!("╠══════════════════════════════════════╣");
-    println!("║  http://{}            ║", addr);
+    println!("{}", label);
     println!("║  Press Ctrl+C to stop                ║");
     println!("╚══════════════════════════════════════╝");
     println!();
@@ -188,12 +193,28 @@ fn build_router(state: AppState) -> Router {
         let captured_route_path = route.path.clone();
         router = router.route(
             &axum_path,
-            get(move |ws: WebSocketUpgrade, State(s): State<AppState>| {
-                let route_path = captured_route_path.clone();
-                async move {
-                    ws.on_upgrade(move |socket| handle_ws(socket, s, route_path))
-                }
-            }),
+            get(
+                move |ws: WebSocketUpgrade,
+                      Path(path_params): Path<HashMap<String, String>>,
+                      headers: HeaderMap,
+                      State(s): State<AppState>| {
+                    let route_path = captured_route_path.clone();
+                    let header_map: HashMap<String, String> = headers
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.as_str().to_ascii_lowercase(),
+                                v.to_str().unwrap_or("").to_string(),
+                            )
+                        })
+                        .collect();
+                    async move {
+                        ws.on_upgrade(move |socket| {
+                            handle_ws(socket, s, route_path, path_params, header_map)
+                        })
+                    }
+                },
+            ),
         );
     }
 
@@ -291,7 +312,13 @@ async fn handle_http_fallback(
     response
 }
 
-async fn handle_ws(socket: WebSocket, state: AppState, route_path: String) {
+async fn handle_ws(
+    socket: WebSocket,
+    state: AppState,
+    route_path: String,
+    path_params: HashMap<String, String>,
+    headers: HashMap<String, String>,
+) {
     let (tx_to_vm, rx_to_vm) = mpsc::unbounded_channel::<String>();
     let (tx_from_vm, mut rx_from_vm) = mpsc::unbounded_channel::<String>();
 
@@ -325,7 +352,14 @@ async fn handle_ws(socket: WebSocket, state: AppState, route_path: String) {
     let program = Arc::clone(&state.program);
     let path_str = route_path.clone();
     let join = tokio::task::spawn_blocking(move || {
-        runner::run_ws_request(&program, &path_str, rx_to_vm, tx_from_vm)
+        runner::run_ws_request(
+            &program,
+            &path_str,
+            path_params,
+            headers,
+            rx_to_vm,
+            tx_from_vm,
+        )
     })
     .await;
 

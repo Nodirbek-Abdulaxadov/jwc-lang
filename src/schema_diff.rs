@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 
-use crate::ast::{ModelDecl, ModelKind, Program};
+use crate::ast::{ModelDecl, ModelKind, OnDeleteAction, Program};
 use crate::sql::{map_type_postgres, to_snake_case};
 
 /// One column in a parsed/snapshotted table.
@@ -49,6 +49,20 @@ pub struct ColumnSnapshot {
     pub sql_type: String,
     pub is_nullable: bool,
     pub is_primary_key: bool,
+    /// Foreign-key target for `entity X { col uuid references Y.id ... }`.
+    /// Populated by `entity_to_snapshot`; the DDL parser does NOT extract
+    /// FK constraints from prior migrations (FK diff is intentionally
+    /// out of scope), so any snapshot reconstructed from disk leaves this
+    /// at `None` regardless of what the migration originally contained.
+    pub fk: Option<FkSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FkSnapshot {
+    /// Target table name in snake_case (matches what jwc emits).
+    pub target_table: String,
+    pub target_column: String,
+    pub on_delete: OnDeleteAction,
 }
 
 /// One table — name plus ordered column list.
@@ -108,11 +122,17 @@ pub fn entity_to_snapshot(model: &ModelDecl) -> Result<TableSnapshot> {
 
     for field in &model.fields {
         let (sql_type, _constraints) = map_type_postgres(&field.ty, &field.name)?;
+        let fk = field.references.as_ref().map(|r| FkSnapshot {
+            target_table: to_snake_case(&r.entity),
+            target_column: r.column.clone(),
+            on_delete: r.on_delete,
+        });
         columns.push(ColumnSnapshot {
             name: field.name.clone(),
             sql_type,
             is_nullable: field.is_nullable,
             is_primary_key: field.is_primary_key,
+            fk,
         });
     }
 
@@ -283,6 +303,7 @@ fn parse_column_line(entry: &str) -> Option<ColumnSnapshot> {
         sql_type: normalize_sql_type(&sql_type),
         is_nullable,
         is_primary_key: false, // PRIMARY KEY clause sets this in a later pass
+        fk: None,
     })
 }
 
@@ -385,6 +406,7 @@ fn apply_alter_statements(sql: &str, tables: &mut Vec<TableSnapshot>) {
                 sql_type,
                 is_nullable,
                 is_primary_key: false,
+                fk: None,
             });
         }
     }
@@ -621,12 +643,26 @@ pub fn diff_to_sql(diff: &[DiffOp]) -> String {
 fn render_create_table(snapshot: &TableSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut pk_cols: Vec<&str> = Vec::new();
+    let mut fk_lines: Vec<String> = Vec::new();
 
     for col in &snapshot.columns {
         let nn = if col.is_nullable { "" } else { " NOT NULL" };
         lines.push(format!("    \"{}\" {}{}", col.name, col.sql_type, nn));
         if col.is_primary_key {
             pk_cols.push(&col.name);
+        }
+        if let Some(fk) = &col.fk {
+            let mut clause = format!(
+                "    CONSTRAINT \"fk_{}_{}\" FOREIGN KEY (\"{}\") REFERENCES \"{}\" (\"{}\")",
+                snapshot.name, col.name, col.name, fk.target_table, fk.target_column
+            );
+            match fk.on_delete {
+                OnDeleteAction::NoAction => {}
+                OnDeleteAction::Cascade => clause.push_str(" ON DELETE CASCADE"),
+                OnDeleteAction::Restrict => clause.push_str(" ON DELETE RESTRICT"),
+                OnDeleteAction::SetNull => clause.push_str(" ON DELETE SET NULL"),
+            }
+            fk_lines.push(clause);
         }
     }
 
@@ -638,6 +674,7 @@ fn render_create_table(snapshot: &TableSnapshot) -> String {
             .join(", ");
         lines.push(format!("    PRIMARY KEY ({})", quoted));
     }
+    lines.extend(fk_lines);
 
     let mut out = String::new();
     out.push_str(&format!(
@@ -664,6 +701,7 @@ mod tests {
             sql_type: ty.to_string(),
             is_nullable: nullable,
             is_primary_key: pk,
+            fk: None,
         }
     }
 
@@ -816,6 +854,32 @@ CREATE TABLE IF NOT EXISTS "user" (
         assert_eq!(t.columns[1].sql_type, "varchar(120)");
         assert!(t.columns[2].is_nullable);
         assert_eq!(t.columns[3].sql_type, "numeric(18,2)");
+    }
+
+    #[test]
+    fn create_table_diff_emits_fk_constraints_for_new_entity() {
+        let src = r#"
+            entity User {
+                id uuid pk;
+                name varchar(60);
+            }
+            entity Post {
+                id uuid pk;
+                author_id uuid references User.id on delete cascade;
+                title varchar(200);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let new_snaps = program_to_snapshots(&program).unwrap();
+        let diff = compute_diff(&[], &new_snaps);
+        let sql = diff_to_sql(&diff);
+        assert!(
+            sql.contains(
+                "CONSTRAINT \"fk_post_author_id\" FOREIGN KEY (\"author_id\") REFERENCES \"user\" (\"id\") ON DELETE CASCADE"
+            ),
+            "FK lost in schema diff output:\n{sql}"
+        );
     }
 
     #[test]
