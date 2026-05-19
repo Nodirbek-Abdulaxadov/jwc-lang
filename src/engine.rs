@@ -111,13 +111,14 @@ fn parse_pool_size() -> u32 {
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(16)
+        .unwrap_or(64)
 }
 
 fn parse_pool_min_idle() -> Option<u32> {
     std::env::var("JWC_DB_MIN_IDLE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
+        .or(Some(8))
 }
 
 fn parse_optional_secs(env: &str, default_secs: u64) -> Option<Duration> {
