@@ -30,6 +30,23 @@ Confirm:
 jwc --help
 ```
 
+### VS Code extension
+
+Syntax highlighting, snippets, and LSP-powered diagnostics. Install
+from the Marketplace:
+
+```bash
+code --install-extension jwc-extension.jwc-lang
+```
+
+Or grab the latest `.vsix` from the
+[GitHub Releases](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases)
+page and install via *Extensions → ⋯ → Install from VSIX...*.
+
+The extension auto-discovers `jwc-lsp` on `PATH` or under `~/.jwc/bin`.
+Override with the `jwc.lspPath` setting if you've installed it
+elsewhere.
+
 ### Pin a version or mirror
 
 | Env var | What it does |
