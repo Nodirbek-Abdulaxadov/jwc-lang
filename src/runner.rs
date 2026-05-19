@@ -605,6 +605,49 @@ impl<'a> Vm<'a> {
                     }
                 }
             }
+            Stmt::ForIn { var, iter, body } => {
+                let iter_val = self.eval_expr(iter, vars)?;
+                let raw = match iter_val {
+                    Value::Str(s) => s,
+                    Value::Null => return Ok(Flow::Continue),
+                    other => bail!(
+                        "for-in: iter must be a JSON array string, got {}",
+                        other.type_name()
+                    ),
+                };
+                let parsed: JsonValue = serde_json::from_str(&raw)
+                    .map_err(|_| anyhow!("for-in: iter is not valid JSON"))?;
+                let items = parsed
+                    .as_array()
+                    .ok_or_else(|| anyhow!("for-in: iter is not a JSON array"))?
+                    .clone();
+                let key = var.to_lowercase();
+                let prior = vars.get(&key).cloned();
+                let prior_dirty = self.dirty_fields.remove(&key);
+                let mut early_return: Option<Option<Value>> = None;
+                for item in items.iter() {
+                    vars.insert(key.clone(), json_to_value(item));
+                    match self.exec_block(body, vars)? {
+                        Flow::Continue | Flow::ContinueLoop => continue,
+                        Flow::Break => break,
+                        Flow::Return(v) => {
+                            early_return = Some(v);
+                            break;
+                        }
+                    }
+                }
+                match prior {
+                    Some(p) => { vars.insert(key.clone(), p); }
+                    None => { vars.remove(&key); }
+                }
+                if let Some(d) = prior_dirty {
+                    self.dirty_fields.insert(key, d);
+                }
+                if let Some(v) = early_return {
+                    return Ok(Flow::Return(v));
+                }
+                Ok(Flow::Continue)
+            }
             Stmt::ValidateBody { fields } => {
                 let body = self.request_body.clone().unwrap_or_default();
                 let parsed: JsonValue = if body.trim().is_empty() {
@@ -1006,6 +1049,46 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("uuid") {
                     return self.eval_uuid_call(args, vars);
+                }
+
+                if name.eq_ignore_ascii_case("length") || name.eq_ignore_ascii_case("len") {
+                    return self.eval_length_call(args, vars);
+                }
+                if name.eq_ignore_ascii_case("lower") {
+                    return self.eval_string_call(args, vars, "lower", |s| s.to_lowercase());
+                }
+                if name.eq_ignore_ascii_case("upper") {
+                    return self.eval_string_call(args, vars, "upper", |s| s.to_uppercase());
+                }
+                if name.eq_ignore_ascii_case("trim") {
+                    return self.eval_string_call(args, vars, "trim", |s| s.trim().to_string());
+                }
+                if name.eq_ignore_ascii_case("contains") {
+                    return self.eval_contains_call(args, vars);
+                }
+                if name.eq_ignore_ascii_case("starts_with") {
+                    return self.eval_two_string_bool_call(args, vars, "starts_with", |s, p| s.starts_with(p));
+                }
+                if name.eq_ignore_ascii_case("ends_with") {
+                    return self.eval_two_string_bool_call(args, vars, "ends_with", |s, p| s.ends_with(p));
+                }
+                if name.eq_ignore_ascii_case("replace") {
+                    return self.eval_replace_call(args, vars);
+                }
+                if name.eq_ignore_ascii_case("split") {
+                    return self.eval_split_call(args, vars);
+                }
+                if name.eq_ignore_ascii_case("first") {
+                    return self.eval_first_or_last_call(args, vars, true);
+                }
+                if name.eq_ignore_ascii_case("last") {
+                    return self.eval_first_or_last_call(args, vars, false);
+                }
+                if name.eq_ignore_ascii_case("json_parse") {
+                    return self.eval_json_parse_call(args, vars);
+                }
+                if name.eq_ignore_ascii_case("json_stringify") {
+                    return self.eval_json_stringify_call(args, vars);
                 }
 
                 if name.eq_ignore_ascii_case("now") {
@@ -2141,6 +2224,215 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(body))
     }
 
+    /// `length(x)` — characters for a string, element count for a JSON array
+    /// carried as a string, key count for a JSON object, 0 for null. Falls
+    /// back to a friendly error for other shapes.
+    fn eval_length_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("length(x) expects exactly 1 arg");
+        }
+        match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => {
+                if let Ok(parsed) = serde_json::from_str::<JsonValue>(&s) {
+                    if let Some(arr) = parsed.as_array() {
+                        return Ok(Value::Int(arr.len() as i64));
+                    }
+                    if let Some(obj) = parsed.as_object() {
+                        return Ok(Value::Int(obj.len() as i64));
+                    }
+                }
+                Ok(Value::Int(s.chars().count() as i64))
+            }
+            Value::Null => Ok(Value::Int(0)),
+            other => bail!("length(x): unsupported type {}", other.type_name()),
+        }
+    }
+
+    fn eval_string_call<F: Fn(&str) -> String>(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+        name: &str,
+        op: F,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("{name}(s) expects exactly 1 arg");
+        }
+        let s = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Null),
+            other => bail!("{name}(s): s must be string, got {}", other.type_name()),
+        };
+        Ok(Value::Str(op(&s)))
+    }
+
+    fn eval_two_string_bool_call<F: Fn(&str, &str) -> bool>(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+        name: &str,
+        op: F,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("{name}(s, p) expects exactly 2 args");
+        }
+        let s = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Bool(false)),
+            other => bail!("{name}: first arg must be string, got {}", other.type_name()),
+        };
+        let p = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!("{name}: second arg must be string, got {}", other.type_name()),
+        };
+        Ok(Value::Bool(op(&s, &p)))
+    }
+
+    /// `contains(s, sub)` — substring check for strings, element check for
+    /// JSON arrays carried as strings, key check for JSON objects.
+    fn eval_contains_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("contains(haystack, needle) expects exactly 2 args");
+        }
+        let haystack = self.eval_expr(&args[0], vars)?;
+        let needle = self.eval_expr(&args[1], vars)?;
+
+        match haystack {
+            Value::Null => Ok(Value::Bool(false)),
+            Value::Str(s) => {
+                if let Ok(parsed) = serde_json::from_str::<JsonValue>(&s) {
+                    if let Some(arr) = parsed.as_array() {
+                        let target = value_to_json_smart(&needle);
+                        return Ok(Value::Bool(arr.iter().any(|v| v == &target)));
+                    }
+                    if let Some(obj) = parsed.as_object() {
+                        if let Value::Str(key) = needle {
+                            return Ok(Value::Bool(obj.contains_key(&key)));
+                        }
+                    }
+                }
+                match needle {
+                    Value::Str(sub) => Ok(Value::Bool(s.contains(&sub))),
+                    other => bail!(
+                        "contains: needle must be string for string haystack, got {}",
+                        other.type_name()
+                    ),
+                }
+            }
+            other => bail!("contains: haystack must be string/array, got {}", other.type_name()),
+        }
+    }
+
+    fn eval_replace_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 3 {
+            bail!("replace(s, from, to) expects exactly 3 args");
+        }
+        let s = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Null),
+            other => bail!("replace: s must be string, got {}", other.type_name()),
+        };
+        let from = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!("replace: from must be string, got {}", other.type_name()),
+        };
+        let to = match self.eval_expr(&args[2], vars)? {
+            Value::Str(s) => s,
+            other => bail!("replace: to must be string, got {}", other.type_name()),
+        };
+        Ok(Value::Str(s.replace(&from, &to)))
+    }
+
+    fn eval_split_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("split(s, sep) expects exactly 2 args");
+        }
+        let s = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Str("[]".to_string())),
+            other => bail!("split: s must be string, got {}", other.type_name()),
+        };
+        let sep = match self.eval_expr(&args[1], vars)? {
+            Value::Str(s) => s,
+            other => bail!("split: sep must be string, got {}", other.type_name()),
+        };
+        let pieces: Vec<JsonValue> = s
+            .split(&sep)
+            .map(|p| JsonValue::String(p.to_string()))
+            .collect();
+        Ok(Value::Str(JsonValue::Array(pieces).to_string()))
+    }
+
+    fn eval_first_or_last_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+        first: bool,
+    ) -> Result<Value> {
+        let name = if first { "first" } else { "last" };
+        if args.len() != 1 {
+            bail!("{name}(xs) expects exactly 1 arg");
+        }
+        let raw = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Null),
+            other => bail!("{name}: xs must be array (JSON string), got {}", other.type_name()),
+        };
+        let parsed: JsonValue = serde_json::from_str(&raw)
+            .map_err(|_| anyhow!("{name}: xs is not valid JSON"))?;
+        let arr = parsed
+            .as_array()
+            .ok_or_else(|| anyhow!("{name}: xs is not a JSON array"))?;
+        let elem = if first { arr.first() } else { arr.last() };
+        Ok(elem.map(json_to_value).unwrap_or(Value::Null))
+    }
+
+    fn eval_json_parse_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("json_parse(s) expects exactly 1 arg");
+        }
+        let s = match self.eval_expr(&args[0], vars)? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Null),
+            other => bail!("json_parse: s must be string, got {}", other.type_name()),
+        };
+        let parsed: JsonValue = serde_json::from_str(&s)
+            .map_err(|e| anyhow!("json_parse: invalid JSON: {e}"))?;
+        Ok(json_to_value(&parsed))
+    }
+
+    fn eval_json_stringify_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("json_stringify(v) expects exactly 1 arg");
+        }
+        let v = self.eval_expr(&args[0], vars)?;
+        Ok(Value::Str(value_to_json_smart(&v).to_string()))
+    }
+
     fn eval_uuid_call(&mut self, args: &[Expr], _vars: &mut HashMap<String, Value>) -> Result<Value> {
         if !args.is_empty() {
             bail!("uuid() expects no args");
@@ -2738,6 +3030,27 @@ fn value_to_positive_int(value: &Value, clause: &str) -> Result<i64> {
                 }
             }),
         other => bail!("{clause} must be integer, got {}", other.type_name()),
+    }
+}
+
+/// Convert a parsed JSON value back into the runtime's untagged Value enum.
+/// Objects and arrays round-trip through their serialised form because the
+/// runtime carries nested shapes as JSON strings.
+fn json_to_value(value: &JsonValue) -> Value {
+    match value {
+        JsonValue::Null => Value::Null,
+        JsonValue::Bool(b) => Value::Bool(*b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::Str(n.to_string())
+            }
+        }
+        JsonValue::String(s) => Value::Str(s.clone()),
+        JsonValue::Array(_) | JsonValue::Object(_) => Value::Str(value.to_string()),
     }
 }
 
@@ -3647,6 +3960,112 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).unwrap().output;
         assert_eq!(out.trim(), "7");
+    }
+
+    #[test]
+    fn string_helpers_basic_shapes() {
+        let src = r#"
+            function main() {
+                print(lower("HELLO"));
+                print(upper("Najim"));
+                print(trim("   ok   "));
+                print(replace("a-b-c", "-", "/"));
+                print(contains("hello world", "world"));
+                print(starts_with("hello", "he"));
+                print(ends_with("hello", "lo"));
+                print(length("hello"));
+                let parts = split("a,b,c", ",");
+                print(parts);
+                print(length(parts));
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert!(out.contains("hello"));
+        assert!(out.contains("NAJIM"));
+        assert!(out.contains("\nok\n"));
+        assert!(out.contains("a/b/c"));
+        assert!(out.contains("true\ntrue\ntrue\n5\n"));
+        assert!(out.contains("[\"a\",\"b\",\"c\"]"));
+        // length(parts) — array of 3 strings → 3.
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.last().map(|l| l.trim() == "3").unwrap_or(false), "{out}");
+    }
+
+    #[test]
+    fn for_in_iterates_json_array() {
+        let src = r#"
+            function main() {
+                let xs = "[1, 2, 3, 4]";
+                let sum = 0;
+                for x in xs {
+                    sum = sum + x;
+                    if (x == 3) { break; }
+                }
+                print(sum);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert_eq!(out.trim(), "6");
+    }
+
+    #[test]
+    fn for_in_continue_skips_iteration() {
+        let src = r#"
+            function main() {
+                let xs = "[1, 2, 3, 4, 5]";
+                let kept = 0;
+                for x in xs {
+                    if (x == 3) { continue; }
+                    kept = kept + 1;
+                }
+                print(kept);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert_eq!(out.trim(), "4");
+    }
+
+    #[test]
+    fn first_last_return_array_endpoints() {
+        let src = r#"
+            function main() {
+                let xs = "[10, 20, 30]";
+                print(first(xs));
+                print(last(xs));
+                let empty = "[]";
+                print(first(empty));
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "10");
+        assert_eq!(lines[1], "30");
+        assert_eq!(lines[2], "null");
+    }
+
+    #[test]
+    fn json_parse_then_stringify_roundtrip() {
+        let src = r#"
+            function main() {
+                let parsed = json_parse("{\"a\":1,\"b\":\"x\"}");
+                print(parsed);
+                let back = json_stringify({ a: 1, b: "x" });
+                print(back);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).unwrap().output;
+        assert!(out.contains("\"a\":1"));
+        assert!(out.contains("\"b\":\"x\""));
     }
 
     #[test]

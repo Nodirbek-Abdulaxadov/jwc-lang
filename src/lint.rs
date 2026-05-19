@@ -100,6 +100,10 @@ fn collect_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
                 collect_calls(catch_body, out);
             }
             Stmt::Transaction { body } => collect_calls(body, out),
+            Stmt::ForIn { iter, body, .. } => {
+                collect_calls_expr(iter, out);
+                collect_calls(body, out);
+            }
             Stmt::DbDeleteWhere { where_clause, .. } => {
                 collect_calls_where(where_clause, out);
             }

@@ -254,6 +254,40 @@ let secs = unix_timestamp();
 let u = select User from db.Users where User.username == @req.username first;
 ```
 
+## Strings, arrays, iteration
+
+```jwc
+lower("HELLO")           // "hello"
+upper("najim")           // "NAJIM"
+trim("  hi  ")           // "hi"
+replace("a-b-c", "-", "/")  // "a/b/c"
+contains("hello world", "world")  // true
+starts_with("hello", "he")        // true
+ends_with("hello", "lo")          // true
+length("hello")          // 5
+split("a,b,c", ",")      // "[\"a\",\"b\",\"c\"]"
+first("[1,2,3]")         // 1
+last("[1,2,3]")          // 3
+length("[1,2,3]")        // 3
+length({ a: 1, b: 2 })   // 2 — key count on an object literal
+
+let xs = select Post from db.Posts where Post.draft == false;
+for p in xs {
+    print(p.title);
+    if (p.id == "x") { break; }
+}
+
+let parsed = json_parse("{\"a\":1}");
+let back   = json_stringify({ a: 1 });
+```
+
+- `for VAR in EXPR { ... }` iterates a JSON array. `EXPR` can be a `select`
+  result, a `body()` payload, a literal `"[ ... ]"` — anything that parses
+  into a JSON array. `break` / `continue` / `return` all work inside.
+- `contains` works on substrings, JSON-array elements, and JSON-object keys.
+- `json_parse` lifts a JSON string into the runtime's untagged Value;
+  `json_stringify` does the reverse.
+
 ## HTTP Client
 
 ```jwc

@@ -237,6 +237,9 @@ pub enum Stmt {
     /// pooled connection wrapped in a SQL transaction; an uncaught error
     /// rolls back, otherwise commits at the end of the block.
     Transaction { body: Vec<Stmt> },
+    /// `for VAR in EXPR { ... }` — iterate over a JSON array (returned by
+    /// `select`, `body()` parsed array, etc). `VAR` is rebound per iteration.
+    ForIn { var: String, iter: Expr, body: Vec<Stmt> },
     /// `insert VAR into CTX.TABLE;`
     DbInsert { var: String, context_var: String, table: String },
     /// `update VAR in CTX.TABLE;`

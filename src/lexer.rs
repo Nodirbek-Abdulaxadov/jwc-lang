@@ -40,6 +40,8 @@ pub enum Keyword {
     Await,
     Transaction,
     ErrorHandler,
+    For,
+    In,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +128,8 @@ impl<'a> Lexer<'a> {
                 "await" => TokenKind::Keyword(Keyword::Await),
                 "transaction" => TokenKind::Keyword(Keyword::Transaction),
                 "errorHandler" => TokenKind::Keyword(Keyword::ErrorHandler),
+                "for" => TokenKind::Keyword(Keyword::For),
+                "in" => TokenKind::Keyword(Keyword::In),
                 _ => TokenKind::Ident(ident),
             };
             return Ok(Token { kind, offset });

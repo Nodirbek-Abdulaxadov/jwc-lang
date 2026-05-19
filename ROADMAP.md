@@ -17,6 +17,7 @@
 | Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
 | Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email stdlib done; queue/wasm/hub deferred) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
+| Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
 
 ---
 
@@ -245,6 +246,20 @@
 - Top-level `errorHandler (e) { ... }` deklaratsiyasi. Bitta handler programma per. Faqat uncaught route errorlari ushlanadi (response oqim yoki middleware short-circuit emas).
 - `e` JSON sifatida bound: `{ "message": "...", "causes": [...] }`.
 - Handler `return` qiymati response body bo'ladi; status JSON ichidagi `"status"`'dan olinadi (default 200, lekin `internalError(...)` 500 beradi).
+
+## Phase 7 — Standard helpers ✅
+
+- `length(x)` — char count for strings, element count for JSON arrays,
+  key count for JSON objects, 0 for null.
+- String ops: `lower`, `upper`, `trim`, `replace`, `contains`, `starts_with`,
+  `ends_with`, `split` (returns JSON array string).
+- Array ops: `first(xs)`, `last(xs)`, plus `contains` and `length`.
+- `for VAR in EXPR { ... }` — iterate a JSON array. `break` / `continue` /
+  `return` all work. `EXPR` is evaluated once, items round-trip through
+  `json_to_value`.
+- `json_parse(s)` / `json_stringify(v)` — explicit conversion between
+  JSON-string carriers and structured Value shapes.
+- `in` is now a real keyword (reserved by `where ... in (...)` and `for ... in ...`).
 
 ## Priority Timeline
 

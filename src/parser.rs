@@ -422,6 +422,18 @@ fn check_typed_field_access_in_stmt(
         Stmt::Transaction { body } => {
             check_typed_field_access_in_stmts(body, locals, model_fields)
         }
+        Stmt::ForIn { var, iter, body } => {
+            check_typed_field_access_in_expr(iter, locals, model_fields)?;
+            // Loop variable is currently untyped — it's an array element from
+            // a JSON shape we don't track at compile time.
+            let key = var.to_lowercase();
+            let prior = locals.remove(&key);
+            let res = check_typed_field_access_in_stmts(body, locals, model_fields);
+            if let Some(p) = prior {
+                locals.insert(key, p);
+            }
+            res
+        }
         Stmt::DbInsert { .. } | Stmt::DbUpdate { .. } | Stmt::DbDelete { .. } | Stmt::DbDeleteWhere { .. } => {
             Ok(())
         }
@@ -576,6 +588,10 @@ fn check_with_relations_in_stmt(
             check_with_relations_in_stmts(catch_body, entity_navigations)
         }
         Stmt::Transaction { body } => check_with_relations_in_stmts(body, entity_navigations),
+        Stmt::ForIn { iter, body, .. } => {
+            check_with_relations_in_expr(iter, entity_navigations)?;
+            check_with_relations_in_stmts(body, entity_navigations)
+        }
         _ => Ok(()),
     }
 }
@@ -790,6 +806,10 @@ fn validate_stmt(
             db_tables,
             entity_fields_by_table,
         ),
+        Stmt::ForIn { iter, body, .. } => {
+            validate_expr(iter, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+            validate_stmts(body, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
+        }
         Stmt::DbInsert {
             context_var, table, ..
         }
@@ -1804,6 +1824,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Keyword(Keyword::If) => self.parse_if_stmt(),
             TokenKind::Keyword(Keyword::While) => self.parse_while_stmt(),
+            TokenKind::Keyword(Keyword::For) => self.parse_for_stmt(),
             TokenKind::Keyword(Keyword::Break) => {
                 self.bump()?;
                 self.expect_symbol(';')?;
@@ -1828,10 +1849,10 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(s) if s.eq_ignore_ascii_case("update") => {
                 self.bump()?;
                 let var = self.expect_ident("expected variable name after 'update'")?;
-                let kw = self.expect_ident("expected 'in'")?;
-                if !kw.eq_ignore_ascii_case("in") {
+                if self.current.kind != TokenKind::Keyword(Keyword::In) {
                     return Err(self.error_here("expected 'in' in update statement"));
                 }
+                self.bump()?;
                 let (ctx, table) = self.parse_db_ref()?;
                 self.expect_symbol(';')?;
                 Ok(Stmt::DbUpdate { var, context_var: ctx, table })
@@ -1964,6 +1985,18 @@ impl<'a> Parser<'a> {
             catch_type,
             catch_body,
         })
+    }
+
+    fn parse_for_stmt(&mut self) -> Result<Stmt> {
+        self.expect_keyword(Keyword::For)?;
+        let var = self.expect_ident("expected variable name after 'for'")?;
+        if self.current.kind != TokenKind::Keyword(Keyword::In) {
+            return Err(self.error_here("expected 'in' after 'for <var>'"));
+        }
+        self.bump()?;
+        let iter = self.parse_expr()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::ForIn { var, iter, body })
     }
 
     fn parse_validate_body_stmt(&mut self) -> Result<Stmt> {
@@ -2588,7 +2621,7 @@ impl<'a> Parser<'a> {
             return Ok(WhereExpr::Between { field, low, high });
         }
 
-        if self.check_ident_eq("in") {
+        if self.current.kind == TokenKind::Keyword(Keyword::In) {
             self.bump()?;
             self.expect_symbol('(')?;
             let mut values = Vec::new();
