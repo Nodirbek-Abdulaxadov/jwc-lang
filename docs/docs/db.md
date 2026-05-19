@@ -134,11 +134,14 @@ jwc migrate down --steps 1
 
 | env | default | notes |
 |---|---|---|
-| `JWC_DB_POOL_SIZE` | 16 | maximum connections |
-| `JWC_DB_MIN_IDLE` | unset | minimum warm connections |
-| `JWC_DB_MAX_LIFETIME_SECS` | 1800 | recycle after this many seconds |
-| `JWC_DB_IDLE_TIMEOUT_SECS` | 600 | close idle conns after this |
+| `JWC_DB_POOL_SIZE` | 64 | maximum connections |
+| `JWC_DB_MIN_IDLE` | 8 | minimum warm connections kept open |
+| `JWC_DB_MAX_LIFETIME_SECS` | 1800 | recycle after this many seconds (`0` disables) |
+| `JWC_DB_IDLE_TIMEOUT_SECS` | 600 | close idle conns after this (`0` disables) |
 | `JWC_DB_CONNECTION_TIMEOUT_SECS` | 5 | abort waiting after this |
-| `JWC_QUERY_CACHE_TTL_SECS` | unset | enable result-cache TTL |
-| `JWC_DB_TLS` | unset | set to `1` for TLS (native-tls) |
+| `JWC_QUERY_CACHE_TTL_SECS` | unset | enable result-cache TTL when `> 0` |
+| `JWC_DB_TLS` | unset | set to `1` / `true` for TLS (`native-tls`) |
 | `JWC_DB_TLS_INSECURE_SKIP_VERIFY` | unset | dev only — accept self-signed |
+
+Both the runtime pool and the `jwc migrate up` / `down` CLI honour these
+flags, so a single env setting covers app traffic and schema migrations.

@@ -199,12 +199,80 @@ curl http://localhost:8080/notes
 |---|---|
 | `jwc new <name>` | Create a new project |
 | `jwc run [path]` | Run `main()` from a project / file |
+| `jwc run [path] --request-logging` | Run with per-request console logs |
 | `jwc serve [--watch]` | Start the HTTP server; `--watch` restarts on `.jwc` change |
+| `jwc serve [path] --request-logging` | Serve with per-request console logs |
 | `jwc check <file>` | Parse + validate a single file |
 | `jwc test` | Validate the whole project |
 | `jwc lint` | Validate + emit warnings (unused fn, unused middleware) |
 | `jwc gen-sql <file>` | Emit Postgres DDL from entities |
-| `jwc migrate new <name>` | Create a new migration |
+| `jwc migrate new <name>` (alias: `add`) | Create a new migration |
 | `jwc migrate up` | Apply pending migrations |
 | `jwc migrate down --steps N` | Roll back the most recent N migrations |
 | `jwc build [--release]` | Bundle runtime + launcher into `bin/{debug,release}` |
+
+Request logging is off by default.
+
+## Build & bundle
+
+`jwc build` (alias: `jwc bundle`) packages your project together with the JWC
+runtime into `bin/{debug,release}`. This is **not** native AOT compilation
+yet — the launcher invokes the embedded runtime to execute your `.jwc`
+sources. A real native compiler is on Phase 4 of `ROADMAP.md`.
+
+The build uses your current machine OS / architecture automatically.
+
+```bash
+# Linux / macOS
+./build.sh --debug
+./build.sh --release
+```
+
+```powershell
+# Windows (PowerShell)
+./build.ps1 -Debug
+./build.ps1 -Release
+```
+
+```bat
+:: Windows (cmd)
+build.cmd --debug
+build.cmd --release
+```
+
+Output binaries:
+
+| Platform | Debug | Release |
+|---|---|---|
+| Windows | `target/debug/jwc.exe` | `target/release/jwc.exe` |
+| Linux / macOS | `target/debug/jwc` | `target/release/jwc` |
+
+Project-level native artifacts:
+
+- `jwc build` generates a native project launcher inside `bin/debug`.
+- `jwc build --release` generates it inside `bin/release`.
+- On Windows the launcher is a real `.exe` (e.g. `bin/debug/myapp.exe`).
+- `jwc run` on a project also refreshes the debug launcher automatically.
+
+This keeps the interpreter-style dev flow (`jwc run`) and still gives
+compiled native artifacts for distribution.
+
+## Server tuning
+
+The HTTP server is built on axum + tokio. Tune the workload via env vars:
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `JWC_SERVER_WORKERS` | CPU parallelism, min 2 | tokio worker threads |
+| `JWC_SERVER_QUEUE_CAPACITY` | `workers × 64`, min 64 | inbound request queue cap |
+| `JWC_SERVER_METRICS` | `false` | enable lightweight metrics dump |
+| `JWC_SERVER_METRICS_INTERVAL_SECS` | `10` | metrics emission interval |
+
+## Notes
+
+- `.env` is loaded automatically from the project root.
+- `jwc run -- test` is not the same as `jwc test`; use `jwc test` for
+  project validation.
+- If `jwc run` fails with `os error 10048`, port `8080` is already in use.
+  Stop the offending process or pick another port:
+  `jwc serve --port 8081`.

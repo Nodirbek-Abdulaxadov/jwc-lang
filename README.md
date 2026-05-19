@@ -716,8 +716,8 @@ Database:
 
 DB engine tuning:
 
-- `JWC_DB_POOL_SIZE` (default `16`)
-- `JWC_DB_MIN_IDLE` (optional — keeps at least N idle connections warm)
+- `JWC_DB_POOL_SIZE` (default `64`)
+- `JWC_DB_MIN_IDLE` (default `8` — minimum warm connections kept open)
 - `JWC_DB_MAX_LIFETIME_SECS` (default `1800` / 30 min, `0` disables)
 - `JWC_DB_IDLE_TIMEOUT_SECS` (default `600` / 10 min, `0` disables)
 - `JWC_DB_CONNECTION_TIMEOUT_SECS` (default `5`)
