@@ -170,17 +170,20 @@ pub async fn run_ws_request(
     let handler = route.handler.clone();
     let body_stmts = route.body.clone();
     let middleware_names: Vec<String> = route.middlewares.clone();
+    let route_namespace = route.namespace.clone();
     vm.current_path_params = Some(path_params);
     vm.current_headers = Some(headers);
 
     let cell = Arc::new(tokio::sync::Mutex::new(Some(WsHandle { rx, tx })));
     WS_HANDLE
         .scope(cell, async move {
+            vm.current_namespace_stack.push(route_namespace);
             // Same short-circuit semantics as HTTP routes: if a middleware
             // returns a value, abort the WS handshake by closing the channel
             // before the user's handler runs.
             for mw_name in &middleware_names {
                 if vm.run_middleware(mw_name).await?.is_some() {
+                    vm.current_namespace_stack.pop();
                     return Ok(());
                 }
             }
@@ -191,6 +194,7 @@ pub async fn run_ws_request(
                 let mut route_vars = HashMap::new();
                 let _ = vm.exec_block(&body_stmts, &mut route_vars).await?;
             }
+            vm.current_namespace_stack.pop();
             Ok(())
         })
         .await
@@ -1778,12 +1782,17 @@ impl<'a> Vm<'a> {
         let handler: Option<String> = self.routes[idx].handler.clone();
         let body_stmts: Vec<Stmt> = self.routes[idx].body.clone();
         let middleware_names: Vec<String> = self.routes[idx].middlewares.clone();
+        // Route's own namespace — pushed onto the stack so bare-name calls
+        // inside the inline body resolve against the route's namespace and
+        // its file-level imports (same as a function call would).
+        let route_namespace: Vec<String> = self.routes[idx].namespace.clone();
 
         let previous = self.current_path_params.take();
         let previous_query = self.current_query_params.take();
         let previous_dirty = std::mem::take(&mut self.dirty_fields);
         self.current_path_params = Some(found_params);
         self.current_query_params = Some(query_params);
+        self.current_namespace_stack.push(route_namespace);
 
         // Run middlewares first; if any returns a value, short-circuit
         // the request with that response.
@@ -1832,6 +1841,7 @@ impl<'a> Vm<'a> {
                     self.current_path_params = previous;
                     self.current_query_params = previous_query;
                     self.dirty_fields = previous_dirty;
+                    self.current_namespace_stack.pop();
                     return Err(e);
                 }
             }
@@ -1839,6 +1849,7 @@ impl<'a> Vm<'a> {
         self.current_path_params = previous;
         self.current_query_params = previous_query;
         self.dirty_fields = previous_dirty;
+        self.current_namespace_stack.pop();
 
         let body = response_str.unwrap_or_else(|| "null".to_string());
 
@@ -1915,9 +1926,11 @@ impl<'a> Vm<'a> {
         if let Some((idx, params)) = matched {
             let handler: Option<String> = self.routes[idx].handler.clone();
             let body_stmts: Vec<Stmt> = self.routes[idx].body.clone();
+            let route_namespace: Vec<String> = self.routes[idx].namespace.clone();
 
             let previous = self.current_path_params.take();
             self.current_path_params = Some(params);
+            self.current_namespace_stack.push(route_namespace);
 
             if let Some(handler_name) = handler {
                 let args = self.build_handler_args(&handler_name);
@@ -1932,6 +1945,7 @@ impl<'a> Vm<'a> {
                 match flow {
                     Flow::Break | Flow::ContinueLoop => {
                         self.current_path_params = previous;
+                        self.current_namespace_stack.pop();
                         bail!("break/continue cannot be used at route top-level");
                     }
                     Flow::Return(Some(value)) => {
@@ -1946,6 +1960,7 @@ impl<'a> Vm<'a> {
             }
 
             self.current_path_params = previous;
+            self.current_namespace_stack.pop();
             return Ok(Value::Bool(true));
         }
 
@@ -2021,10 +2036,16 @@ impl<'a> Vm<'a> {
         let mut mw_vars = HashMap::new();
         let flow = self.exec_block(&mw_body, &mut mw_vars).await?;
 
+        // Middleware contract:
+        //   no return / bare `return;` / `return null;`  → continue to next
+        //   middleware (or handler)
+        //   `return <value>;` with a non-null Value     → short-circuit and
+        //   send that value as the HTTP response body
         match flow {
             Flow::Continue => Ok(None),
+            Flow::Return(None) => Ok(None),
+            Flow::Return(Some(Value::Null)) => Ok(None),
             Flow::Return(Some(v)) => Ok(Some(v.as_string())),
-            Flow::Return(None) => Ok(Some("null".to_string())),
             Flow::Break | Flow::ContinueLoop => {
                 bail!("'break'/'continue' cannot be used at middleware top level")
             }
