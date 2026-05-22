@@ -198,6 +198,22 @@ pub(crate) fn reset_for_tests() {
 /// Block-wait for the next job, then dispatch it. Loops forever; on `Vm`
 /// errors the job is dropped and logged to stderr.
 fn worker_loop(worker_id: usize) {
+    // The runner is async (tokio_postgres under the hood). Each worker thread
+    // owns a small current-thread tokio runtime and drives the handler future
+    // to completion via `block_on`. We do NOT reuse the HTTP server's runtime
+    // because workers must survive even when there is no `serve` call.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!(
+                "[jwc-queue worker {worker_id}] failed to build tokio runtime: {e}; worker exiting"
+            );
+            return;
+        }
+    };
     let st = state();
     loop {
         let job = {
@@ -249,9 +265,11 @@ fn worker_loop(worker_id: usize) {
         // lifetime. Holding `Arc<Program>` keeps the program alive for the
         // duration of the call; `as_ref()` hands the runner a borrow whose
         // lifetime is bounded by this local `program`.
-        if let Err(e) =
-            crate::runner::run_handler(program.as_ref(), &handler_name, job.payload.clone())
-        {
+        if let Err(e) = rt.block_on(crate::runner::run_handler(
+            program.as_ref(),
+            &handler_name,
+            job.payload.clone(),
+        )) {
             eprintln!(
                 "[jwc-queue worker {worker_id}] job '{}' handler '{}' failed: {:#}",
                 job.name, handler_name, e

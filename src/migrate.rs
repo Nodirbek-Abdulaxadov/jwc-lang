@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use postgres::Client;
+use tokio_postgres::Client;
 use url::Url;
 
 use crate::engine;
@@ -81,7 +81,10 @@ pub fn create_migration(root: &Path, name: &str) -> Result<CreatedMigration> {
     Ok(CreatedMigration { up_path, down_path })
 }
 
-pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Result<ApplyReport> {
+pub async fn apply_pending_migrations(
+    root: &Path,
+    database_url: Option<String>,
+) -> Result<ApplyReport> {
     let url = database_url
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .or_else(|| std::env::var("JWC_DATABASE_URL").ok())
@@ -97,13 +100,13 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
         );
     }
 
-    ensure_database_exists(&url)?;
+    ensure_database_exists(&url).await?;
 
-    let mut client = engine::connect_for_migrations(&url)?;
+    let client = engine::connect_for_migrations(&url).await?;
 
-    let _lock = MigrationLock::acquire(&mut client)?;
+    let _lock = MigrationLock::acquire(&client).await?;
 
-    ensure_migration_table(&mut client)?;
+    ensure_migration_table(&client).await?;
 
     let mut migration_files: Vec<PathBuf> = std::fs::read_dir(&migrations_dir)
         .with_context(|| format!("Failed to read {}", migrations_dir.display()))?
@@ -118,7 +121,7 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
 
     migration_files.sort();
 
-    let applied = read_applied_migrations(&mut client)?;
+    let applied = read_applied_migrations(&client).await?;
     let mut applied_now = 0usize;
     let mut skipped = 0usize;
 
@@ -134,7 +137,7 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
             continue;
         }
 
-        run_migration_file(&mut client, file, &name)?;
+        run_migration_file(&client, file, &name).await?;
         applied_now += 1;
     }
 
@@ -145,7 +148,7 @@ pub fn apply_pending_migrations(root: &Path, database_url: Option<String>) -> Re
     })
 }
 
-pub fn rollback_migrations(
+pub async fn rollback_migrations(
     root: &Path,
     database_url: Option<String>,
     steps: usize,
@@ -172,15 +175,15 @@ pub fn rollback_migrations(
         );
     }
 
-    ensure_database_exists(&url)?;
+    ensure_database_exists(&url).await?;
 
-    let mut client = engine::connect_for_migrations(&url)?;
+    let client = engine::connect_for_migrations(&url).await?;
 
-    let _lock = MigrationLock::acquire(&mut client)?;
+    let _lock = MigrationLock::acquire(&client).await?;
 
-    ensure_migration_table(&mut client)?;
+    ensure_migration_table(&client).await?;
 
-    let applied_names = read_applied_migrations_ordered_desc(&mut client)?;
+    let applied_names = read_applied_migrations_ordered_desc(&client).await?;
     let total_applied = applied_names.len();
 
     if total_applied == 0 {
@@ -215,21 +218,37 @@ pub fn rollback_migrations(
             bail!("no rollback SQL for migration {}", name);
         }
 
-        let mut tx = client
-            .transaction()
+        client
+            .batch_execute("BEGIN;")
+            .await
             .with_context(|| "Failed to start rollback transaction")?;
 
-        tx.batch_execute(&sql)
-            .with_context(|| format!("Rollback failed for {}", down_path.display()))?;
+        let inner = async {
+            client
+                .batch_execute(&sql)
+                .await
+                .with_context(|| format!("Rollback failed for {}", down_path.display()))?;
 
-        tx.execute(
-            "DELETE FROM _jwc_migrations WHERE name = $1;",
-            &[name],
-        )
-        .with_context(|| "Failed to remove rolled-back migration record")?;
+            client
+                .execute("DELETE FROM _jwc_migrations WHERE name = $1;", &[name])
+                .await
+                .with_context(|| "Failed to remove rolled-back migration record")?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
 
-        tx.commit()
-            .with_context(|| "Failed to commit rollback transaction")?;
+        match inner {
+            Ok(()) => {
+                client
+                    .batch_execute("COMMIT;")
+                    .await
+                    .with_context(|| "Failed to commit rollback transaction")?;
+            }
+            Err(e) => {
+                let _ = client.batch_execute("ROLLBACK;").await;
+                return Err(e);
+            }
+        }
 
         rolled_back += 1;
     }
@@ -240,9 +259,10 @@ pub fn rollback_migrations(
     })
 }
 
-fn read_applied_migrations_ordered_desc(client: &mut Client) -> Result<Vec<String>> {
+async fn read_applied_migrations_ordered_desc(client: &Client) -> Result<Vec<String>> {
     let rows = client
         .query("SELECT name FROM _jwc_migrations ORDER BY name DESC;", &[])
+        .await
         .with_context(|| "Failed to read applied migrations")?;
 
     Ok(rows
@@ -261,12 +281,13 @@ fn read_applied_migrations_ordered_desc(client: &mut Client) -> Result<Vec<Strin
 struct MigrationLock;
 
 impl MigrationLock {
-    fn acquire(client: &mut Client) -> Result<MigrationLock> {
+    async fn acquire(client: &Client) -> Result<MigrationLock> {
         let row = client
             .query_one(
                 "SELECT pg_try_advisory_lock($1);",
                 &[&MIGRATION_LOCK_KEY],
             )
+            .await
             .with_context(|| "Failed to request migration advisory lock")?;
         let got: bool = row.try_get(0)?;
         if !got {
@@ -278,11 +299,6 @@ impl MigrationLock {
         Ok(MigrationLock)
     }
 }
-
-// The connection that obtained the lock is closed at the end of the function
-// scope; Postgres releases session advisory locks automatically on disconnect,
-// so an explicit unlock isn't required. We still try to release proactively
-// when the guard drops while the client is still alive elsewhere.
 
 fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -309,7 +325,7 @@ fn slugify(name: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn ensure_database_exists(url: &str) -> Result<()> {
+async fn ensure_database_exists(url: &str) -> Result<()> {
     let parsed = Url::parse(url).with_context(|| "Invalid DATABASE_URL")?;
     let dbname = parsed
         .path()
@@ -331,11 +347,13 @@ fn ensure_database_exists(url: &str) -> Result<()> {
     let mut admin_url = parsed;
     admin_url.set_path(&format!("/{}", admin_db));
 
-    let mut admin_client = engine::connect_for_migrations(admin_url.as_str())
+    let admin_client = engine::connect_for_migrations(admin_url.as_str())
+        .await
         .with_context(|| "Failed to connect to admin database to ensure target database exists")?;
 
     let exists = admin_client
         .query_opt("SELECT 1 FROM pg_database WHERE datname = $1;", &[&dbname])
+        .await
         .with_context(|| "Failed to query pg_database")?
         .is_some();
 
@@ -343,6 +361,7 @@ fn ensure_database_exists(url: &str) -> Result<()> {
         let create_sql = format!("CREATE DATABASE {}", quote_identifier(&dbname));
         admin_client
             .batch_execute(&create_sql)
+            .await
             .with_context(|| format!("Failed to create database '{}'", dbname))?;
     }
 
@@ -354,7 +373,7 @@ fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
-fn ensure_migration_table(client: &mut Client) -> Result<()> {
+async fn ensure_migration_table(client: &Client) -> Result<()> {
     let sql = r#"
 CREATE TABLE IF NOT EXISTS _jwc_migrations (
     name text PRIMARY KEY,
@@ -363,12 +382,14 @@ CREATE TABLE IF NOT EXISTS _jwc_migrations (
 "#;
     client
         .batch_execute(sql)
+        .await
         .with_context(|| "Failed to ensure _jwc_migrations table")
 }
 
-fn read_applied_migrations(client: &mut Client) -> Result<HashSet<String>> {
+async fn read_applied_migrations(client: &Client) -> Result<HashSet<String>> {
     let rows = client
         .query("SELECT name FROM _jwc_migrations ORDER BY name;", &[])
+        .await
         .with_context(|| "Failed to read applied migrations")?;
 
     let set = rows
@@ -379,25 +400,44 @@ fn read_applied_migrations(client: &mut Client) -> Result<HashSet<String>> {
     Ok(set)
 }
 
-fn run_migration_file(client: &mut Client, file: &Path, name: &str) -> Result<()> {
+async fn run_migration_file(client: &Client, file: &Path, name: &str) -> Result<()> {
     let sql = std::fs::read_to_string(file)
         .with_context(|| format!("Failed to read migration file {}", file.display()))?;
 
-    let mut tx = client
-        .transaction()
+    // `transaction()` requires &mut Client. Use SAVEPOINT-style explicit BEGIN/COMMIT instead.
+    client
+        .batch_execute("BEGIN;")
+        .await
         .with_context(|| "Failed to start migration transaction")?;
 
-    tx.batch_execute(&sql)
-        .with_context(|| format!("Migration failed for {}", file.display()))?;
+    let res = async {
+        client
+            .batch_execute(&sql)
+            .await
+            .with_context(|| format!("Migration failed for {}", file.display()))?;
 
-    tx.execute(
-        "INSERT INTO _jwc_migrations(name) VALUES ($1) ON CONFLICT (name) DO NOTHING;",
-        &[&name],
-    )
-    .with_context(|| "Failed to record applied migration")?;
+        client
+            .execute(
+                "INSERT INTO _jwc_migrations(name) VALUES ($1) ON CONFLICT (name) DO NOTHING;",
+                &[&name],
+            )
+            .await
+            .with_context(|| "Failed to record applied migration")?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
 
-    tx.commit()
-        .with_context(|| "Failed to commit migration transaction")?;
-
-    Ok(())
+    match res {
+        Ok(()) => {
+            client
+                .batch_execute("COMMIT;")
+                .await
+                .with_context(|| "Failed to commit migration transaction")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = client.batch_execute("ROLLBACK;").await;
+            Err(e)
+        }
+    }
 }

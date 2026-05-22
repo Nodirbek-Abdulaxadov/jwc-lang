@@ -14,6 +14,7 @@ pub mod jwt;
 pub mod lexer;
 pub mod lint;
 pub mod migrate;
+pub mod native_build;
 pub mod parser;
 pub mod password;
 pub mod project;

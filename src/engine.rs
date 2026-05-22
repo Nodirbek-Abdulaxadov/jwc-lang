@@ -1,66 +1,25 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::future::Future;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use deadpool_postgres::{Config as DpConfig, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use native_tls::TlsConnector;
-use postgres::types::ToSql;
-use postgres::{Client, Config, NoTls, Row, Statement};
 use postgres_native_tls::MakeTlsConnector;
-use r2d2::{Pool, PooledConnection};
-use r2d2_postgres::PostgresConnectionManager;
+use tokio::sync::Mutex;
+use tokio_postgres::types::ToSql;
+use tokio_postgres::{Client as TokioClient, Config as PgConfig, NoTls};
 
-/// Pooled Postgres connection that abstracts over the `NoTls` and
-/// `MakeTlsConnector` variants of the underlying r2d2 manager.
-///
-/// The two pool types are not interchangeable at the type level, but the
-/// `postgres::Client` API they hand out is identical — so we wrap them in
-/// an enum and forward every operation we actually use to the inner client.
-pub enum PgConn {
-    NoTls(PooledConnection<PostgresConnectionManager<NoTls>>),
-    Tls(PooledConnection<PostgresConnectionManager<MakeTlsConnector>>),
-}
+/// Pooled Postgres connection — async version backed by deadpool-postgres.
+pub type PgConn = deadpool_postgres::Object;
 
-impl PgConn {
-    fn client_mut(&mut self) -> &mut Client {
-        match self {
-            PgConn::NoTls(c) => &mut **c,
-            PgConn::Tls(c) => &mut **c,
-        }
-    }
-
-    pub fn prepare(&mut self, sql: &str) -> Result<Statement, postgres::Error> {
-        self.client_mut().prepare(sql)
-    }
-
-    pub fn query(
-        &mut self,
-        stmt: &Statement,
-        params: &[&(dyn ToSql + Sync)],
-    ) -> Result<Vec<Row>, postgres::Error> {
-        self.client_mut().query(stmt, params)
-    }
-
-    pub fn execute(
-        &mut self,
-        stmt: &Statement,
-        params: &[&(dyn ToSql + Sync)],
-    ) -> Result<u64, postgres::Error> {
-        self.client_mut().execute(stmt, params)
-    }
-
-    pub fn batch_execute(&mut self, sql: &str) -> Result<(), postgres::Error> {
-        self.client_mut().batch_execute(sql)
-    }
-}
-
-thread_local! {
-    /// Holds a pooled connection while the current thread is inside a
+tokio::task_local! {
+    /// Holds a pooled connection while the current task is inside a
     /// `transaction { ... }` block. All `query_text` / `exec` calls
     /// transparently route through this connection so they are part of the
     /// same SQL transaction (started with a `BEGIN` statement).
-    static TX_CONN: RefCell<Option<PgConn>> = const { RefCell::new(None) };
+    pub static TX_CONN: Arc<Mutex<Option<PgConn>>>;
 }
 
 struct CachedResult {
@@ -68,31 +27,8 @@ struct CachedResult {
     expires_at: Instant,
 }
 
-/// Inner pool — homogeneous variant chosen once at `init_engine` time based
-/// on whether TLS is enabled via env. Each branch carries its own concrete
-/// `PostgresConnectionManager<...>` type so r2d2's generics are satisfied.
-enum JwcPool {
-    NoTls(Pool<PostgresConnectionManager<NoTls>>),
-    Tls(Pool<PostgresConnectionManager<MakeTlsConnector>>),
-}
-
-impl JwcPool {
-    fn get(&self) -> Result<PgConn> {
-        match self {
-            JwcPool::NoTls(p) => p
-                .get()
-                .map(PgConn::NoTls)
-                .with_context(|| "Failed to checkout DB connection from pool"),
-            JwcPool::Tls(p) => p
-                .get()
-                .map(PgConn::Tls)
-                .with_context(|| "Failed to checkout DB connection from pool"),
-        }
-    }
-}
-
 pub struct JwcEngine {
-    pool: JwcPool,
+    pool: Pool,
     query_cache: RwLock<HashMap<String, String>>,
     result_cache: RwLock<HashMap<String, CachedResult>>,
     result_ttl: Option<Duration>,
@@ -106,51 +42,12 @@ fn read_database_url() -> Result<String> {
         .map_err(|_| anyhow!("DATABASE_URL (or JWC_DATABASE_URL) is required for db access"))
 }
 
-fn parse_pool_size() -> u32 {
+fn parse_pool_size() -> usize {
     std::env::var("JWC_DB_POOL_SIZE")
         .ok()
-        .and_then(|v| v.parse::<u32>().ok())
+        .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(64)
-}
-
-fn parse_pool_min_idle() -> Option<u32> {
-    std::env::var("JWC_DB_MIN_IDLE")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .or(Some(8))
-}
-
-fn parse_optional_secs(env: &str, default_secs: u64) -> Option<Duration> {
-    match std::env::var(env) {
-        Ok(v) => {
-            let parsed = v.parse::<i64>().ok();
-            match parsed {
-                Some(n) if n < 0 => None, // negative → disable
-                Some(0) => None,          // 0 → disable
-                Some(n) => Some(Duration::from_secs(n as u64)),
-                None => Some(Duration::from_secs(default_secs)),
-            }
-        }
-        Err(_) => Some(Duration::from_secs(default_secs)),
-    }
-}
-
-fn parse_connection_timeout() -> Duration {
-    std::env::var("JWC_DB_CONNECTION_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|v| *v > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(5))
-}
-
-fn parse_result_ttl() -> Option<Duration> {
-    std::env::var("JWC_QUERY_CACHE_TTL_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .map(Duration::from_secs)
 }
 
 fn parse_bool_flag(raw: &str) -> bool {
@@ -190,53 +87,70 @@ fn build_tls_connector() -> Result<MakeTlsConnector> {
     Ok(MakeTlsConnector::new(connector))
 }
 
+fn parse_result_ttl() -> Option<Duration> {
+    std::env::var("JWC_QUERY_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs)
+}
+
+fn build_pool(database_url: &str) -> Result<Pool> {
+    let pg_cfg: PgConfig = database_url
+        .parse()
+        .with_context(|| "Invalid DATABASE_URL")?;
+
+    let mut cfg = DpConfig::new();
+    if let Some(user) = pg_cfg.get_user() {
+        cfg.user = Some(user.to_string());
+    }
+    if let Some(pw) = pg_cfg.get_password() {
+        if let Ok(s) = std::str::from_utf8(pw) {
+            cfg.password = Some(s.to_string());
+        }
+    }
+    if let Some(dbname) = pg_cfg.get_dbname() {
+        cfg.dbname = Some(dbname.to_string());
+    }
+    // hosts: use first host
+    if let Some(host) = pg_cfg.get_hosts().first() {
+        match host {
+            tokio_postgres::config::Host::Tcp(s) => {
+                cfg.host = Some(s.clone());
+            }
+            #[cfg(unix)]
+            tokio_postgres::config::Host::Unix(_) => {}
+        }
+    }
+    if let Some(port) = pg_cfg.get_ports().first() {
+        cfg.port = Some(*port);
+    }
+
+    cfg.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+
+    let max_size = parse_pool_size();
+    cfg.pool = Some(deadpool_postgres::PoolConfig::new(max_size));
+
+    let pool = if should_use_tls() {
+        let connector = build_tls_connector()?;
+        cfg.create_pool(Some(Runtime::Tokio1), connector)
+            .with_context(|| "Failed to create Postgres TLS pool")?
+    } else {
+        cfg.create_pool(Some(Runtime::Tokio1), NoTls)
+            .with_context(|| "Failed to create Postgres pool")?
+    };
+
+    Ok(pool)
+}
+
 pub fn init_engine(database_url: &str) -> Result<()> {
     if ENGINE.get().is_some() {
         return Ok(());
     }
 
-    let cfg: Config = database_url
-        .parse()
-        .with_context(|| "Invalid DATABASE_URL")?;
-
-    // Default `max_lifetime` = 30 min, `idle_timeout` = 10 min — these mitigate
-    // stale connections after Postgres restarts or LB-level idle kills. Either
-    // can be disabled by setting the matching env var to 0 (or negative).
-    let max_lifetime = parse_optional_secs("JWC_DB_MAX_LIFETIME_SECS", 30 * 60);
-    let idle_timeout = parse_optional_secs("JWC_DB_IDLE_TIMEOUT_SECS", 10 * 60);
-    let connection_timeout = parse_connection_timeout();
-    let max_size = parse_pool_size();
-    let min_idle = parse_pool_min_idle();
-
-    let pool = if should_use_tls() {
-        let manager = PostgresConnectionManager::new(cfg, build_tls_connector()?);
-        let mut builder = Pool::builder()
-            .max_size(max_size)
-            .max_lifetime(max_lifetime)
-            .idle_timeout(idle_timeout)
-            .connection_timeout(connection_timeout);
-        if let Some(min) = min_idle {
-            builder = builder.min_idle(Some(min));
-        }
-        let pool = builder
-            .build(manager)
-            .with_context(|| "Failed to initialize Postgres TLS connection pool")?;
-        JwcPool::Tls(pool)
-    } else {
-        let manager = PostgresConnectionManager::new(cfg, NoTls);
-        let mut builder = Pool::builder()
-            .max_size(max_size)
-            .max_lifetime(max_lifetime)
-            .idle_timeout(idle_timeout)
-            .connection_timeout(connection_timeout);
-        if let Some(min) = min_idle {
-            builder = builder.min_idle(Some(min));
-        }
-        let pool = builder
-            .build(manager)
-            .with_context(|| "Failed to initialize Postgres connection pool")?;
-        JwcPool::NoTls(pool)
-    };
+    let pool = build_pool(database_url)?;
 
     let engine = JwcEngine {
         pool,
@@ -269,84 +183,91 @@ fn engine() -> Result<&'static JwcEngine> {
         .ok_or_else(|| anyhow!("DB engine initialization failed"))
 }
 
-pub fn get_connection() -> Result<PgConn> {
-    engine()?.pool.get()
+pub async fn get_connection() -> Result<PgConn> {
+    let pool = &engine()?.pool;
+    pool.get()
+        .await
+        .with_context(|| "Failed to checkout DB connection from pool")
 }
 
-/// Build a single (non-pooled) `postgres::Client` for migration runs.
+/// Build a single (non-pooled) `tokio_postgres::Client` for migration runs.
 ///
 /// Migrations only need one connection for a short period, so this skips the
-/// r2d2 pool entirely. TLS settings are re-read from the env each call so the
-/// migrate CLI behaves consistently with the runtime engine.
-pub fn connect_for_migrations(url: &str) -> Result<Client> {
+/// connection pool entirely. TLS settings are re-read from the env each call so
+/// the migrate CLI behaves consistently with the runtime engine.
+pub async fn connect_for_migrations(url: &str) -> Result<TokioClient> {
     if should_use_tls() {
         let connector = build_tls_connector()?;
-        Client::connect(url, connector)
-            .with_context(|| "Failed to connect to database (TLS) for migrations")
-    } else {
-        Client::connect(url, NoTls)
-            .with_context(|| "Failed to connect to database for migrations")
-    }
-}
-
-/// RAII guard that owns the in-progress thread-local transaction.
-///
-/// Construct with `begin_tx()`. Call `commit()` to commit and release the
-/// connection back to the pool. If the guard is dropped without `commit()`
-/// (early `return`, `?` error propagation, panic), `Drop` issues a
-/// best-effort `ROLLBACK` and clears the thread-local — preventing leaked
-/// open transactions across worker-thread reuse.
-#[must_use = "TxGuard must be committed or dropped to release the transaction"]
-pub struct TxGuard {
-    committed: bool,
-}
-
-impl TxGuard {
-    pub fn commit(mut self) -> Result<()> {
-        let res = TX_CONN.with(|cell| {
-            let mut held = cell.borrow_mut();
-            let Some(mut conn) = held.take() else {
-                return Ok(());
-            };
-            drop(held);
-            conn.batch_execute("COMMIT;")
-                .with_context(|| "Failed to COMMIT transaction")
-        });
-        self.committed = true;
-        res
-    }
-}
-
-impl Drop for TxGuard {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        TX_CONN.with(|cell| {
-            let mut held = cell.borrow_mut();
-            if let Some(mut conn) = held.take() {
-                drop(held);
-                let _ = conn.batch_execute("ROLLBACK;");
+        let (client, connection) = tokio_postgres::connect(url, connector)
+            .await
+            .with_context(|| "Failed to connect to database (TLS) for migrations")?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("postgres connection error: {}", e);
             }
         });
+        Ok(client)
+    } else {
+        let (client, connection) = tokio_postgres::connect(url, NoTls)
+            .await
+            .with_context(|| "Failed to connect to database for migrations")?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("postgres connection error: {}", e);
+            }
+        });
+        Ok(client)
     }
 }
 
-/// Begin a SQL transaction on the current thread. All subsequent
-/// `query_text` / `exec` calls on this thread run on the held connection
-/// until the returned guard is committed or dropped.
-pub fn begin_tx() -> Result<TxGuard> {
-    let already_open = TX_CONN.with(|cell| cell.borrow().is_some());
+/// Async transaction helper. Begins a transaction, runs `body` inside a
+/// scope that exposes `TX_CONN` to nested queries, then commits on success
+/// or rolls back on error.
+pub async fn with_tx<F, Fut, T>(body: F) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    // Try to peek at an in-progress tx (nested) — but since TX_CONN may not be
+    // set in the current task, only check via try_with.
+    let already_open = TX_CONN
+        .try_with(|cell| {
+            let guard = cell.try_lock();
+            match guard {
+                Ok(g) => g.is_some(),
+                Err(_) => true,
+            }
+        })
+        .unwrap_or(false);
     if already_open {
-        bail!("transaction already in progress on this thread (nested transactions are not supported)");
+        bail!("transaction already in progress on this task (nested transactions are not supported)");
     }
-    let mut conn = get_connection()?;
+
+    let mut conn = get_connection().await?;
     conn.batch_execute("BEGIN;")
+        .await
         .with_context(|| "Failed to BEGIN transaction")?;
-    TX_CONN.with(|cell| {
-        *cell.borrow_mut() = Some(conn);
-    });
-    Ok(TxGuard { committed: false })
+    let cell = Arc::new(Mutex::new(Some(conn)));
+
+    let cell_for_scope = cell.clone();
+    let result = TX_CONN.scope(cell_for_scope, body()).await;
+
+    // Take the (possibly already taken) conn out
+    let mut held = cell.lock().await;
+    if let Some(mut conn) = held.take() {
+        drop(held);
+        match &result {
+            Ok(_) => {
+                conn.batch_execute("COMMIT;")
+                    .await
+                    .with_context(|| "Failed to COMMIT transaction")?;
+            }
+            Err(_) => {
+                let _ = conn.batch_execute("ROLLBACK;").await;
+            }
+        }
+    }
+    result
 }
 
 pub fn get_or_compile_sql<F>(cache_key: &str, compiler: F) -> Result<String>
@@ -378,36 +299,37 @@ where
     Ok(entry.clone())
 }
 
-pub fn query_text(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<String> {
-    // Inside `transaction { ... }` route through the held connection so the
-    // query participates in the open SQL transaction; otherwise fall back to
-    // the connection pool.
-    let routed = TX_CONN.with(|cell| {
-        let mut held = cell.borrow_mut();
-        if let Some(conn) = held.as_mut() {
-            Some(query_text_on_conn(conn, sql, params))
-        } else {
-            None
-        }
-    });
-    if let Some(result) = routed {
-        return result;
-    }
-
-    let mut conn = get_connection()?;
-    query_text_on_conn(&mut conn, sql, params)
+/// Try to grab the current tx connection if a transaction is active in the
+/// current task. Returns the inner `PgConn` if present — caller must put it
+/// back when done.
+async fn take_tx_conn() -> Option<Arc<Mutex<Option<PgConn>>>> {
+    TX_CONN.try_with(|cell| cell.clone()).ok()
 }
 
-fn query_text_on_conn(
-    conn: &mut PgConn,
+pub async fn query_text(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<String> {
+    if let Some(cell) = take_tx_conn().await {
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.as_mut() {
+            return query_text_on_conn(conn, sql, params).await;
+        }
+    }
+
+    let conn = get_connection().await?;
+    query_text_on_conn(&conn, sql, params).await
+}
+
+async fn query_text_on_conn(
+    conn: &PgConn,
     sql: &str,
     params: &[&(dyn ToSql + Sync)],
 ) -> Result<String> {
     let stmt = conn
-        .prepare(sql)
+        .prepare_cached(sql)
+        .await
         .with_context(|| "Failed to prepare SQL statement")?;
     let rows = conn
         .query(&stmt, params)
+        .await
         .with_context(|| "Failed to execute SQL query")?;
 
     let mut parts = Vec::new();
@@ -423,7 +345,7 @@ fn query_text_on_conn(
     Ok(parts.join("\n").trim().to_string())
 }
 
-pub fn query_text_with_optional_cache(
+pub async fn query_text_with_optional_cache(
     result_cache_key: &str,
     sql: &str,
     params: &[&(dyn ToSql + Sync)],
@@ -444,7 +366,7 @@ pub fn query_text_with_optional_cache(
             return Ok(found);
         }
 
-        let result = query_text(sql, params)?;
+        let result = query_text(sql, params).await?;
 
         engine
             .result_cache
@@ -461,36 +383,33 @@ pub fn query_text_with_optional_cache(
         return Ok(result);
     }
 
-    query_text(sql, params)
+    query_text(sql, params).await
 }
 
-pub fn exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
-    let routed = TX_CONN.with(|cell| {
-        let mut held = cell.borrow_mut();
+pub async fn exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
+    if let Some(cell) = take_tx_conn().await {
+        let mut held = cell.lock().await;
         if let Some(conn) = held.as_mut() {
-            Some(exec_on_conn(conn, sql, params))
-        } else {
-            None
+            return exec_on_conn(conn, sql, params).await;
         }
-    });
-    if let Some(result) = routed {
-        return result;
     }
 
-    let mut conn = get_connection()?;
-    exec_on_conn(&mut conn, sql, params)
+    let conn = get_connection().await?;
+    exec_on_conn(&conn, sql, params).await
 }
 
-fn exec_on_conn(
-    conn: &mut PgConn,
+async fn exec_on_conn(
+    conn: &PgConn,
     sql: &str,
     params: &[&(dyn ToSql + Sync)],
 ) -> Result<u64> {
     let stmt = conn
-        .prepare(sql)
+        .prepare_cached(sql)
+        .await
         .with_context(|| "Failed to prepare SQL statement")?;
     let affected = conn
         .execute(&stmt, params)
+        .await
         .with_context(|| "Failed to execute SQL statement")?;
     Ok(affected)
 }
@@ -508,11 +427,11 @@ pub fn invalidate_result_cache() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::Mutex as StdMutex;
 
     // `std::env::set_var` is process-global; serialise tests that mutate it so
     // they don't fight each other when run in parallel.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
         let _guard = ENV_LOCK.lock().unwrap();

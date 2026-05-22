@@ -266,8 +266,8 @@ async fn handle_http_fallback(
     };
 
     let program = Arc::clone(&state.program);
-    let result = tokio::task::spawn_blocking(move || {
-        runner::run_request_with_headers(&program, &method_str, &path, body_opt, header_map)
+    let result = tokio::spawn(async move {
+        runner::run_request_with_headers(&program, &method_str, &path, body_opt, header_map).await
     })
     .await;
 
@@ -351,7 +351,7 @@ async fn handle_ws(
 
     let program = Arc::clone(&state.program);
     let path_str = route_path.clone();
-    let join = tokio::task::spawn_blocking(move || {
+    let join = tokio::spawn(async move {
         runner::run_ws_request(
             &program,
             &path_str,
@@ -360,13 +360,14 @@ async fn handle_ws(
             rx_to_vm,
             tx_from_vm,
         )
+        .await
     })
     .await;
 
-    if let Err(e) = join {
+    if let Err(e) = &join {
         eprintln!("[JWC-WS] handler task join error: {e}");
-    } else if let Ok(Err(e)) = join {
-        error_report::log_runtime_error(&format!("WS {} failed", route_path), &e);
+    } else if let Ok(Err(e)) = &join {
+        error_report::log_runtime_error(&format!("WS {} failed", route_path), e);
     }
 
     // Best effort: close out the helper tasks.

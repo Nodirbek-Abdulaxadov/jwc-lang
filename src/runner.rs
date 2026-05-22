@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use postgres::types::ToSql;
+use tokio_postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
 
 use crate::ast::{
@@ -11,22 +11,33 @@ use crate::ast::{
     ValidateField, ValidateRule, WhereExpr,
 };
 
-thread_local! {
-    /// Active WebSocket channels for the current handler thread. `ws_send`
-    /// pushes onto the sender; `ws_recv` blocks on the receiver. The handle
-    /// is set by `run_ws_request` before invoking user code and cleared
-    /// afterwards so subsequent requests on the same blocking worker thread
-    /// don't reuse a stale connection.
-    static WS_HANDLE: std::cell::RefCell<Option<WsHandle>> = const {
-        std::cell::RefCell::new(None)
-    };
+use std::sync::Arc;
+use std::sync::OnceLock as StdOnceLock;
+use async_recursion::async_recursion;
+
+tokio::task_local! {
+    /// Active WebSocket channels for the current handler task. `ws_send`
+    /// pushes onto the sender; `ws_recv` awaits on the receiver. The handle
+    /// is set by `run_ws_request` before invoking user code and is
+    /// task-local so each WS connection has its own.
+    pub static WS_HANDLE: Arc<tokio::sync::Mutex<Option<WsHandle>>>;
 }
 
-struct WsHandle {
-    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
-    tx: tokio::sync::mpsc::UnboundedSender<String>,
+pub struct WsHandle {
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    pub tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 use crate::engine;
+
+static REQWEST_CLIENT: StdOnceLock<reqwest::Client> = StdOnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    REQWEST_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .build()
+            .expect("failed to build reqwest client")
+    })
+}
 
 #[derive(Debug)]
 pub struct RunMainResult {
@@ -35,9 +46,9 @@ pub struct RunMainResult {
     pub serve_port: Option<u16>,
 }
 
-pub fn run_main(program: &Program) -> Result<RunMainResult> {
+pub async fn run_main(program: &Program) -> Result<RunMainResult> {
     let mut vm = Vm::new(program);
-    let _ = vm.call_function("main", Vec::new())?;
+    let _ = vm.call_function("main", Vec::new()).await?;
     Ok(RunMainResult {
         output: vm.output,
         serve_port: vm.serve_requested,
@@ -48,13 +59,13 @@ pub fn run_main(program: &Program) -> Result<RunMainResult> {
 /// Convenience wrapper around `run_request_with_headers` without headers. Kept
 /// public so test code can keep its concise call shape.
 #[allow(dead_code)]
-pub fn run_request(
+pub async fn run_request(
     program: &Program,
     method: &str,
     path: &str,
     body: Option<String>,
 ) -> Result<(u16, String)> {
-    run_request_with_headers(program, method, path, body, HashMap::new())
+    run_request_with_headers(program, method, path, body, HashMap::new()).await
 }
 
 /// Run a WebSocket route handler. The caller provides two channels that
@@ -62,7 +73,7 @@ pub fn run_request(
 /// JWC, `tx` carries outbound messages from JWC back to the wire. The
 /// channels live in a thread-local so `ws_send` / `ws_recv` / `ws_close`
 /// built-ins inside the route body can reach them without plumbing.
-pub fn run_ws_request(
+pub async fn run_ws_request(
     program: &Program,
     route_path: &str,
     path_params: HashMap<String, String>,
@@ -83,38 +94,32 @@ pub fn run_ws_request(
     let mut vm = Vm::new(program);
     vm.current_path_params = Some(path_params);
     vm.current_headers = Some(headers);
-    WS_HANDLE.with(|h| {
-        *h.borrow_mut() = Some(WsHandle { rx, tx });
-    });
 
-    let result: Result<()> = (|| {
-        // Same short-circuit semantics as HTTP routes: if a middleware
-        // returns a value, abort the WS handshake by closing the channel
-        // before the user's handler runs.
-        for mw_name in &middleware_names {
-            if vm.run_middleware(mw_name)?.is_some() {
-                return Ok(());
+    let cell = Arc::new(tokio::sync::Mutex::new(Some(WsHandle { rx, tx })));
+    WS_HANDLE
+        .scope(cell, async move {
+            // Same short-circuit semantics as HTTP routes: if a middleware
+            // returns a value, abort the WS handshake by closing the channel
+            // before the user's handler runs.
+            for mw_name in &middleware_names {
+                if vm.run_middleware(mw_name).await?.is_some() {
+                    return Ok(());
+                }
             }
-        }
-        if let Some(handler_name) = &handler {
-            let args = vm.build_handler_args(handler_name);
-            let _ = vm.call_function(handler_name, args)?;
-        } else {
-            let mut route_vars = HashMap::new();
-            let _ = vm.exec_block(&body_stmts, &mut route_vars)?;
-        }
-        Ok(())
-    })();
-
-    WS_HANDLE.with(|h| {
-        h.borrow_mut().take();
-    });
-
-    result
+            if let Some(handler_name) = &handler {
+                let args = vm.build_handler_args(handler_name);
+                let _ = vm.call_function(handler_name, args).await?;
+            } else {
+                let mut route_vars = HashMap::new();
+                let _ = vm.exec_block(&body_stmts, &mut route_vars).await?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// Same as `run_request` but with request headers accessible via `header(name)`.
-pub fn run_request_with_headers(
+pub async fn run_request_with_headers(
     program: &Program,
     method: &str,
     path: &str,
@@ -124,16 +129,16 @@ pub fn run_request_with_headers(
     let mut vm = Vm::new(program);
     vm.request_body = body;
     vm.current_headers = Some(headers);
-    vm.dispatch_route(method, path)
+    vm.dispatch_route(method, path).await
 }
 
 /// Invoke a JWC function by name with a single string payload. Used by the
 /// background job queue: workers receive `Job { name, payload }`, look up
 /// the registered handler function name, then call this. Any return value
 /// is discarded — handlers communicate via side effects (db, cache, email).
-pub fn run_handler(program: &Program, function_name: &str, payload: String) -> Result<()> {
+pub async fn run_handler(program: &Program, function_name: &str, payload: String) -> Result<()> {
     let mut vm = Vm::new(program);
-    vm.call_function(function_name, vec![Value::Str(payload)])?;
+    vm.call_function(function_name, vec![Value::Str(payload)]).await?;
     Ok(())
 }
 
@@ -221,7 +226,8 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Option<Value>> {
+    #[async_recursion]
+    async fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Option<Value>> {
         const MAX_DEPTH: usize = 256;
         if self.depth >= MAX_DEPTH {
             bail!("Call stack depth exceeded ({MAX_DEPTH})");
@@ -257,7 +263,7 @@ impl<'a> Vm<'a> {
         }
 
         let saved_dirty = std::mem::take(&mut self.dirty_fields);
-        let flow_result = self.exec_block(&function.body, &mut vars);
+        let flow_result = self.exec_block(&function.body, &mut vars).await;
         self.dirty_fields = saved_dirty;
         let flow = flow_result?;
         self.depth -= 1;
@@ -522,9 +528,10 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn exec_block(&mut self, stmts: &[Stmt], vars: &mut HashMap<String, Value>) -> Result<Flow> {
+    #[async_recursion]
+    async fn exec_block(&mut self, stmts: &[Stmt], vars: &mut HashMap<String, Value>) -> Result<Flow> {
         for stmt in stmts {
-            let flow = self.exec_stmt(stmt, vars)?;
+            let flow = self.exec_stmt(stmt, vars).await?;
             if !matches!(flow, Flow::Continue) {
                 return Ok(flow);
             }
@@ -532,14 +539,15 @@ impl<'a> Vm<'a> {
         Ok(Flow::Continue)
     }
 
-    fn exec_stmt(&mut self, stmt: &Stmt, vars: &mut HashMap<String, Value>) -> Result<Flow> {
+    #[async_recursion]
+    async fn exec_stmt(&mut self, stmt: &Stmt, vars: &mut HashMap<String, Value>) -> Result<Flow> {
         match stmt {
             Stmt::Let { name, value } => {
                 let key = name.to_lowercase();
                 if vars.contains_key(&key) {
                     bail!("Duplicate variable declaration: {name}");
                 }
-                let evaluated = self.eval_expr(value, vars)?;
+                let evaluated = self.eval_expr(value, vars).await?;
                 vars.insert(key.clone(), evaluated);
                 // New binding has no modified fields yet.
                 self.dirty_fields.remove(&key);
@@ -550,14 +558,14 @@ impl<'a> Vm<'a> {
                 if !vars.contains_key(&key) {
                     bail!("Assignment to undefined variable: {name}");
                 }
-                let evaluated = self.eval_expr(value, vars)?;
+                let evaluated = self.eval_expr(value, vars).await?;
                 vars.insert(key.clone(), evaluated);
                 // Full rebind resets the modified-field set.
                 self.dirty_fields.remove(&key);
                 Ok(Flow::Continue)
             }
             Stmt::Print(expr) => {
-                let value = self.eval_expr(expr, vars)?;
+                let value = self.eval_expr(expr, vars).await?;
                 self.output.push_str(&value.as_string());
                 self.output.push('\n');
                 Ok(Flow::Continue)
@@ -567,12 +575,12 @@ impl<'a> Vm<'a> {
                 then_body,
                 else_body,
             } => {
-                let cond_value = self.eval_expr(cond, vars)?;
+                let cond_value = self.eval_expr(cond, vars).await?;
                 match cond_value {
-                    Value::Bool(true) => self.exec_block(then_body, vars),
+                    Value::Bool(true) => self.exec_block(then_body, vars).await,
                     Value::Bool(false) => {
                         if let Some(else_body) = else_body {
-                            self.exec_block(else_body, vars)
+                            self.exec_block(else_body, vars).await
                         } else {
                             Ok(Flow::Continue)
                         }
@@ -583,9 +591,9 @@ impl<'a> Vm<'a> {
             Stmt::While { cond, body } => {
                 const MAX_ITERS: usize = 100_000;
                 for _ in 0..MAX_ITERS {
-                    let cond_value = self.eval_expr(cond, vars)?;
+                    let cond_value = self.eval_expr(cond, vars).await?;
                     match cond_value {
-                        Value::Bool(true) => match self.exec_block(body, vars)? {
+                        Value::Bool(true) => match self.exec_block(body, vars).await? {
                             Flow::Continue => {}
                             Flow::Return(v) => return Ok(Flow::Return(v)),
                             Flow::Break => return Ok(Flow::Continue),
@@ -600,12 +608,12 @@ impl<'a> Vm<'a> {
             Stmt::Break => Ok(Flow::Break),
             Stmt::Continue => Ok(Flow::ContinueLoop),
             Stmt::Expr(expr) => {
-                let _ = self.eval_expr(expr, vars)?;
+                let _ = self.eval_expr(expr, vars).await?;
                 Ok(Flow::Continue)
             }
             Stmt::Return(None) => Ok(Flow::Return(None)),
             Stmt::Return(Some(expr)) => {
-                let value = self.eval_expr(expr, vars)?;
+                let value = self.eval_expr(expr, vars).await?;
                 Ok(Flow::Return(Some(value)))
             }
             Stmt::FieldAssign { var, field, value } => {
@@ -614,7 +622,7 @@ impl<'a> Vm<'a> {
                     .get(&key)
                     .cloned()
                     .ok_or_else(|| anyhow!("FieldAssign: variable '{}' not found", var))?;
-                let new_val = self.eval_expr(value, vars)?;
+                let new_val = self.eval_expr(value, vars).await?;
                 let json_str = match current {
                     Value::Str(s) => s,
                     Value::Null => "{}".to_string(),
@@ -638,7 +646,7 @@ impl<'a> Vm<'a> {
                 catch_type: _,
                 catch_body,
             } => {
-                let try_result = self.exec_block(body, vars);
+                let try_result = self.exec_block(body, vars).await;
                 match try_result {
                     Ok(flow) => Ok(flow),
                     Err(e) => {
@@ -659,7 +667,7 @@ impl<'a> Vm<'a> {
                         // Inject the error binding; restore the prior value (if any)
                         // when leaving the catch block.
                         let prior = vars.insert(key.clone(), Value::Str(err_obj.to_string()));
-                        let catch_flow = self.exec_block(catch_body, vars);
+                        let catch_flow = self.exec_block(catch_body, vars).await;
                         match prior {
                             Some(v) => {
                                 vars.insert(key, v);
@@ -673,22 +681,21 @@ impl<'a> Vm<'a> {
                 }
             }
             Stmt::Transaction { body } => {
-                let guard = engine::begin_tx()?;
-                let inner = self.exec_block(body, vars);
-                match inner {
-                    Ok(flow) => {
-                        guard.commit()?;
-                        Ok(flow)
-                    }
-                    Err(e) => {
-                        // Drop runs ROLLBACK automatically; nothing extra needed.
-                        drop(guard);
-                        Err(e)
-                    }
-                }
+                let body_clone = body.clone();
+                // Run the body inside an engine-level transaction scope. The
+                // body is a future capturing `self` and `vars` by mutable
+                // reference, which is fine because `with_tx` polls it
+                // immediately to completion.
+                let outcome: Result<Flow> = engine::with_tx(|| {
+                    Box::pin(async move {
+                        self.exec_block(&body_clone, vars).await
+                    })
+                })
+                .await;
+                outcome
             }
             Stmt::ForIn { var, iter, body } => {
-                let iter_val = self.eval_expr(iter, vars)?;
+                let iter_val = self.eval_expr(iter, vars).await?;
                 let raw = match iter_val {
                     Value::Str(s) => s,
                     Value::Null => return Ok(Flow::Continue),
@@ -709,7 +716,7 @@ impl<'a> Vm<'a> {
                 let mut early_return: Option<Option<Value>> = None;
                 for item in items.iter() {
                     vars.insert(key.clone(), json_to_value(item));
-                    match self.exec_block(body, vars)? {
+                    match self.exec_block(body, vars).await? {
                         Flow::Continue | Flow::ContinueLoop => continue,
                         Flow::Break => break,
                         Flow::Return(v) => {
@@ -756,7 +763,7 @@ impl<'a> Vm<'a> {
                 let table_name = crate::sql::to_snake_case(table);
                 let (sql, boxed_params) = build_insert_sql(&table_name, &json_str)?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
-                let returned = engine::query_text(&sql, &param_refs)?;
+                let returned = engine::query_text(&sql, &param_refs).await?;
                 if !returned.is_empty() && returned != "null" {
                     vars.insert(var.to_lowercase(), Value::Str(returned));
                 }
@@ -776,7 +783,7 @@ impl<'a> Vm<'a> {
                     dirty_snapshot.as_ref(),
                 )?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
-                let returned = engine::query_text(&sql, &param_refs)?;
+                let returned = engine::query_text(&sql, &param_refs).await?;
                 if !returned.is_empty() && returned != "null" {
                     vars.insert(key.clone(), Value::Str(returned));
                 }
@@ -791,7 +798,7 @@ impl<'a> Vm<'a> {
                 let pk_fields = self.resolve_pk_fields(table);
                 let (sql, boxed_params) = build_delete_sql(&table_name, &json_str, &pk_fields)?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
-                let _ = engine::exec(&sql, &param_refs)?;
+                let _ = engine::exec(&sql, &param_refs).await?;
                 engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
@@ -803,7 +810,7 @@ impl<'a> Vm<'a> {
                 let table_name = crate::sql::to_snake_case(table);
                 let mut shape_bits: Vec<String> = Vec::new();
                 let mut cache_bits: Vec<String> = Vec::new();
-                let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+                let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
                 let where_sql = build_where_sql(
                     where_clause,
                     &mut params,
@@ -811,17 +818,18 @@ impl<'a> Vm<'a> {
                     &mut cache_bits,
                     vars,
                     self,
-                )?;
+                ).await?;
                 let sql = format!("DELETE FROM \"{}\" WHERE {};", table_name, where_sql);
                 let param_refs = boxed_params_to_refs(&params);
-                let _ = engine::exec(&sql, &param_refs)?;
+                let _ = engine::exec(&sql, &param_refs).await?;
                 engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
         }
     }
 
-    fn eval_expr(&mut self, expr: &Expr, vars: &mut HashMap<String, Value>) -> Result<Value> {
+    #[async_recursion]
+    async fn eval_expr(&mut self, expr: &Expr, vars: &mut HashMap<String, Value>) -> Result<Value> {
         match expr {
             Expr::Int(v) => Ok(Value::Int(*v)),
             Expr::Float(v) => {
@@ -898,7 +906,7 @@ impl<'a> Vm<'a> {
 
                 let mut shape_bits: Vec<String> = vec![format!("agg:{kind_tag}:{col}")];
                 let mut cache_bits: Vec<String> = vec![format!("agg:{kind_tag}:{col}")];
-                let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+                let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
 
                 let where_sql = if let Some(wc) = where_clause {
                     let s = build_where_sql(
@@ -908,7 +916,7 @@ impl<'a> Vm<'a> {
                         &mut cache_bits,
                         vars,
                         self,
-                    )?;
+                    ).await?;
                     format!(" WHERE {}", s)
                 } else {
                     String::new()
@@ -925,7 +933,7 @@ impl<'a> Vm<'a> {
                 let param_refs = boxed_params_to_refs(&params);
                 let compiled = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
                 let result =
-                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs)?;
+                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs).await?;
                 let trimmed = result.trim();
                 if trimmed.is_empty() || trimmed == "null" {
                     return Ok(Value::Null);
@@ -946,7 +954,7 @@ impl<'a> Vm<'a> {
                 let table_name = crate::sql::to_snake_case(table);
                 let mut shape_bits: Vec<String> = Vec::new();
                 let mut cache_bits: Vec<String> = Vec::new();
-                let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+                let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
 
                 let where_sql = if let Some(wc) = where_clause {
                     let s = build_where_sql(
@@ -956,7 +964,7 @@ impl<'a> Vm<'a> {
                         &mut cache_bits,
                         vars,
                         self,
-                    )?;
+                    ).await?;
                     format!(" WHERE {}", s)
                 } else {
                     String::new()
@@ -986,7 +994,7 @@ impl<'a> Vm<'a> {
                 let param_refs = boxed_params_to_refs(&params);
                 let compiled = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
                 let result =
-                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs)?;
+                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs).await?;
                 let n = result.trim().parse::<i64>().with_context(|| {
                     format!("count(*): expected integer text, got '{}'", result.trim())
                 })?;
@@ -1023,11 +1031,11 @@ impl<'a> Vm<'a> {
                     projection,
                     vars,
                     self,
-                )?;
+                ).await?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let compiled_sql = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
                 let result =
-                    engine::query_text_with_optional_cache(&cache_key, &compiled_sql, &param_refs)?;
+                    engine::query_text_with_optional_cache(&cache_key, &compiled_sql, &param_refs).await?;
                 if result == "null" || result.is_empty() {
                     Ok(Value::Null)
                 } else {
@@ -1036,95 +1044,95 @@ impl<'a> Vm<'a> {
             }
             Expr::Call { name, args } => {
                 if name.eq_ignore_ascii_case("dispatch") {
-                    return self.eval_dispatch_call(args, vars);
+                    return self.eval_dispatch_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("path_param") {
-                    return self.eval_path_param_call(args, vars);
+                    return self.eval_path_param_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("query_param") {
-                    return self.eval_query_param_call(args, vars);
+                    return self.eval_query_param_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("header") {
-                    return self.eval_header_call(args, vars);
+                    return self.eval_header_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("context") {
-                    return self.eval_context_get_call(args, vars);
+                    return self.eval_context_get_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("setContext")
                     || name.eq_ignore_ascii_case("set_context")
                 {
-                    return self.eval_context_set_call(args, vars);
+                    return self.eval_context_set_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("http_get") {
-                    return self.eval_http_get_call(args, vars);
+                    return self.eval_http_get_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("http_post") {
-                    return self.eval_http_post_call(args, vars);
+                    return self.eval_http_post_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("jwt_sign") {
-                    return self.eval_jwt_sign_call(args, vars);
+                    return self.eval_jwt_sign_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("jwt_verify") {
-                    return self.eval_jwt_verify_call(args, vars);
+                    return self.eval_jwt_verify_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("hash_password") {
-                    return self.eval_hash_password_call(args, vars);
+                    return self.eval_hash_password_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("ws_send") {
-                    return self.eval_ws_send_call(args, vars);
+                    return self.eval_ws_send_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("ws_recv") {
-                    return self.eval_ws_recv_call(args, vars);
+                    return self.eval_ws_recv_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("ws_close") {
-                    return self.eval_ws_close_call(args, vars);
+                    return self.eval_ws_close_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("verify_password") {
-                    return self.eval_verify_password_call(args, vars);
+                    return self.eval_verify_password_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("cache_get") {
-                    return self.eval_cache_get_call(args, vars);
+                    return self.eval_cache_get_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("cache_set") {
-                    return self.eval_cache_set_call(args, vars);
+                    return self.eval_cache_set_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("cache_del") {
-                    return self.eval_cache_del_call(args, vars);
+                    return self.eval_cache_del_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("cache_clear") {
-                    return self.eval_cache_clear_call(args, vars);
+                    return self.eval_cache_clear_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("send_email") {
-                    return self.eval_send_email_call(args, vars);
+                    return self.eval_send_email_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("register_job_handler") {
-                    return self.eval_register_job_handler_call(args, vars);
+                    return self.eval_register_job_handler_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("enqueue") {
-                    return self.eval_enqueue_call(args, vars);
+                    return self.eval_enqueue_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("job_count") {
-                    return self.eval_job_count_call(args, vars);
+                    return self.eval_job_count_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("unauthorized") {
@@ -1140,59 +1148,59 @@ impl<'a> Vm<'a> {
                 }
 
                 if name.eq_ignore_ascii_case("db_query") {
-                    return self.eval_db_query_call(args, vars);
+                    return self.eval_db_query_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("raw_sql") {
-                    return self.eval_raw_sql_call(args, vars);
+                    return self.eval_raw_sql_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("request_body") {
-                    return self.eval_request_body_call(args, vars);
+                    return self.eval_request_body_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("uuid") {
-                    return self.eval_uuid_call(args, vars);
+                    return self.eval_uuid_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("length") || name.eq_ignore_ascii_case("len") {
-                    return self.eval_length_call(args, vars);
+                    return self.eval_length_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("lower") {
-                    return self.eval_string_call(args, vars, "lower", |s| s.to_lowercase());
+                    return self.eval_string_call(args, vars, "lower", |s| s.to_lowercase()).await;
                 }
                 if name.eq_ignore_ascii_case("upper") {
-                    return self.eval_string_call(args, vars, "upper", |s| s.to_uppercase());
+                    return self.eval_string_call(args, vars, "upper", |s| s.to_uppercase()).await;
                 }
                 if name.eq_ignore_ascii_case("trim") {
-                    return self.eval_string_call(args, vars, "trim", |s| s.trim().to_string());
+                    return self.eval_string_call(args, vars, "trim", |s| s.trim().to_string()).await;
                 }
                 if name.eq_ignore_ascii_case("contains") {
-                    return self.eval_contains_call(args, vars);
+                    return self.eval_contains_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("starts_with") {
-                    return self.eval_two_string_bool_call(args, vars, "starts_with", |s, p| s.starts_with(p));
+                    return self.eval_two_string_bool_call(args, vars, "starts_with", |s, p| s.starts_with(p)).await;
                 }
                 if name.eq_ignore_ascii_case("ends_with") {
-                    return self.eval_two_string_bool_call(args, vars, "ends_with", |s, p| s.ends_with(p));
+                    return self.eval_two_string_bool_call(args, vars, "ends_with", |s, p| s.ends_with(p)).await;
                 }
                 if name.eq_ignore_ascii_case("replace") {
-                    return self.eval_replace_call(args, vars);
+                    return self.eval_replace_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("split") {
-                    return self.eval_split_call(args, vars);
+                    return self.eval_split_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("first") {
-                    return self.eval_first_or_last_call(args, vars, true);
+                    return self.eval_first_or_last_call(args, vars, true).await;
                 }
                 if name.eq_ignore_ascii_case("last") {
-                    return self.eval_first_or_last_call(args, vars, false);
+                    return self.eval_first_or_last_call(args, vars, false).await;
                 }
                 if name.eq_ignore_ascii_case("json_parse") {
-                    return self.eval_json_parse_call(args, vars);
+                    return self.eval_json_parse_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("json_stringify") {
-                    return self.eval_json_stringify_call(args, vars);
+                    return self.eval_json_stringify_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("now") {
@@ -1214,17 +1222,17 @@ impl<'a> Vm<'a> {
                 }
 
                 if name.eq_ignore_ascii_case("set_json_field") {
-                    return self.eval_set_json_field_call(args, vars);
+                    return self.eval_set_json_field_call(args, vars).await;
                 }
 
                 if name.eq_ignore_ascii_case("body") {
-                    return self.eval_request_body_call(args, vars);
+                    return self.eval_request_body_call(args, vars).await;
                 }
 
                 // ── `serve(port?)` — starts HTTP server from main() ───────
                 if name.eq_ignore_ascii_case("serve") {
                     let port: u16 = if let Some(arg) = args.first() {
-                        match self.eval_expr(arg, vars)? {
+                        match self.eval_expr(arg, vars).await? {
                             Value::Int(n) if n > 0 && n <= 65535 => n as u16,
                             Value::Int(n) => bail!("serve(): invalid port {n}"),
                             other => bail!(
@@ -1244,7 +1252,7 @@ impl<'a> Vm<'a> {
                     if args.len() != 1 {
                         bail!("env(name) expects exactly 1 arg");
                     }
-                    let var_name = self.eval_expr(&args[0], vars)?;
+                    let var_name = self.eval_expr(&args[0], vars).await?;
                     let var_name = match var_name {
                         Value::Str(s) => s,
                         other => bail!("env(name): name must be string, got {}", other.type_name()),
@@ -1266,7 +1274,48 @@ impl<'a> Vm<'a> {
                 if name.eq_ignore_ascii_case("setConnectionString")
                     || name.eq_ignore_ascii_case("set_connection_string")
                 {
-                    return self.eval_set_connection_string_call(args, vars);
+                    return self.eval_set_connection_string_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("sleep_ms") {
+                    if args.len() != 1 {
+                        bail!("sleep_ms(n) expects exactly 1 arg");
+                    }
+                    let n = match self.eval_expr(&args[0], vars).await? {
+                        Value::Int(n) if n >= 0 => n as u64,
+                        Value::Int(n) => bail!("sleep_ms(n): n must be >= 0, got {n}"),
+                        other => bail!(
+                            "sleep_ms(n): n must be int, got {}",
+                            other.type_name()
+                        ),
+                    };
+                    tokio::time::sleep(std::time::Duration::from_millis(n)).await;
+                    return Ok(Value::Null);
+                }
+
+                if name.eq_ignore_ascii_case("fetch_json") {
+                    if args.len() != 1 {
+                        bail!("fetch_json(url) expects exactly 1 arg");
+                    }
+                    let url = match self.eval_expr(&args[0], vars).await? {
+                        Value::Str(s) => s,
+                        other => bail!(
+                            "fetch_json(url): url must be string, got {}",
+                            other.type_name()
+                        ),
+                    };
+                    let resp = http_client()
+                        .get(&url)
+                        .send()
+                        .await
+                        .map_err(|e| anyhow!("fetch_json({url}) failed: {e}"))?;
+                    let body = resp
+                        .text()
+                        .await
+                        .map_err(|e| anyhow!("fetch_json: read body failed: {e}"))?;
+                    let parsed: JsonValue = serde_json::from_str(&body)
+                        .map_err(|e| anyhow!("fetch_json: invalid JSON: {e}"))?;
+                    return Ok(json_to_value(&parsed));
                 }
 
                 // ── HTTP response helpers ──────────────────────────────────
@@ -1274,7 +1323,7 @@ impl<'a> Vm<'a> {
                     if args.len() != 1 {
                         bail!("json(val) expects exactly 1 arg");
                     }
-                    let val = self.eval_expr(&args[0], vars)?;
+                    let val = self.eval_expr(&args[0], vars).await?;
                     return Ok(Value::Str(val.as_string()));
                 }
 
@@ -1282,7 +1331,7 @@ impl<'a> Vm<'a> {
                     if args.len() != 1 {
                         bail!("created(val) expects exactly 1 arg");
                     }
-                    let val = self.eval_expr(&args[0], vars)?;
+                    let val = self.eval_expr(&args[0], vars).await?;
                     let s = val.as_string();
                     let result = if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&s) {
                         match doc.as_object_mut() {
@@ -1310,7 +1359,7 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("internalError") {
                     let msg = if let Some(arg) = args.first() {
-                        self.eval_expr(arg, vars)?.as_string()
+                        self.eval_expr(arg, vars).await?.as_string()
                     } else {
                         "Internal Server Error".to_string()
                     };
@@ -1323,12 +1372,12 @@ impl<'a> Vm<'a> {
 
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
-                    values.push(self.eval_expr(arg, vars)?);
+                    values.push(self.eval_expr(arg, vars).await?);
                 }
-                Ok(self.call_function(name, values)?.unwrap_or(Value::Void))
+                Ok(self.call_function(name, values).await?.unwrap_or(Value::Void))
             }
-            Expr::Await(inner) => self.eval_expr(inner, vars),
-            Expr::Not(inner) => match self.eval_expr(inner, vars)? {
+            Expr::Await(inner) => self.eval_expr(inner, vars).await,
+            Expr::Not(inner) => match self.eval_expr(inner, vars).await? {
                 Value::Bool(b) => Ok(Value::Bool(!b)),
                 other => bail!(
                     "Unsupported unary '!' for {} (only bool is allowed)",
@@ -1338,14 +1387,14 @@ impl<'a> Vm<'a> {
             Expr::ObjectLit(fields) => {
                 let mut obj = serde_json::Map::with_capacity(fields.len());
                 for (key, expr) in fields {
-                    let value = self.eval_expr(expr, vars)?;
+                    let value = self.eval_expr(expr, vars).await?;
                     obj.insert(key.clone(), value_to_json_smart(&value));
                 }
                 Ok(Value::Str(serde_json::Value::Object(obj).to_string()))
             }
             Expr::Add(left, right) => {
-                let left = self.eval_expr(left, vars)?;
-                let right = self.eval_expr(right, vars)?;
+                let left = self.eval_expr(left, vars).await?;
+                let right = self.eval_expr(right, vars).await?;
                 match (left, right) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
@@ -1358,14 +1407,14 @@ impl<'a> Vm<'a> {
                 }
             }
             Expr::Sub(left, right) => {
-                self.eval_numeric_bin(left, right, vars, |a, b| a - b, |a, b| a - b)
+                self.eval_numeric_bin(left, right, vars, |a, b| a - b, |a, b| a - b).await
             }
             Expr::Mul(left, right) => {
-                self.eval_numeric_bin(left, right, vars, |a, b| a * b, |a, b| a * b)
+                self.eval_numeric_bin(left, right, vars, |a, b| a * b, |a, b| a * b).await
             }
             Expr::Div(left, right) => {
-                let l = self.eval_expr(left, vars)?;
-                let r = self.eval_expr(right, vars)?;
+                let l = self.eval_expr(left, vars).await?;
+                let r = self.eval_expr(right, vars).await?;
                 match (l, r) {
                     (Value::Int(_), Value::Int(0)) => bail!("division by zero"),
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
@@ -1379,8 +1428,8 @@ impl<'a> Vm<'a> {
                 }
             }
             Expr::Mod(left, right) => {
-                let l = self.eval_expr(left, vars)?;
-                let r = self.eval_expr(right, vars)?;
+                let l = self.eval_expr(left, vars).await?;
+                let r = self.eval_expr(right, vars).await?;
                 match (l, r) {
                     (Value::Int(_), Value::Int(0)) => bail!("modulo by zero"),
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
@@ -1394,7 +1443,7 @@ impl<'a> Vm<'a> {
                 }
             }
             Expr::Neg(inner) => {
-                let value = self.eval_expr(inner, vars)?;
+                let value = self.eval_expr(inner, vars).await?;
                 match value {
                     Value::Int(v) => Ok(Value::Int(-v)),
                     Value::Float(v) => Ok(Value::Float(-v)),
@@ -1402,25 +1451,25 @@ impl<'a> Vm<'a> {
                 }
             }
             Expr::Eq(left, right) => {
-                let l = self.eval_expr(left, vars)?;
-                let r = self.eval_expr(right, vars)?;
+                let l = self.eval_expr(left, vars).await?;
+                let r = self.eval_expr(right, vars).await?;
                 Ok(Value::Bool(l == r))
             }
             Expr::Neq(left, right) => {
-                let l = self.eval_expr(left, vars)?;
-                let r = self.eval_expr(right, vars)?;
+                let l = self.eval_expr(left, vars).await?;
+                let r = self.eval_expr(right, vars).await?;
                 Ok(Value::Bool(l != r))
             }
-            Expr::Lt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a < b),
-            Expr::Lte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a <= b),
-            Expr::Gt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a > b),
-            Expr::Gte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a >= b),
+            Expr::Lt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a < b).await,
+            Expr::Lte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a <= b).await,
+            Expr::Gt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a > b).await,
+            Expr::Gte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a >= b).await,
             Expr::And(left, right) => {
-                let l = self.eval_expr(left, vars)?;
+                let l = self.eval_expr(left, vars).await?;
                 match l {
                     Value::Bool(false) => Ok(Value::Bool(false)),
                     Value::Bool(true) => {
-                        let r = self.eval_expr(right, vars)?;
+                        let r = self.eval_expr(right, vars).await?;
                         match r {
                             Value::Bool(v) => Ok(Value::Bool(v)),
                             other => bail!("'and' expects bool, got {}", other.type_name()),
@@ -1430,11 +1479,11 @@ impl<'a> Vm<'a> {
                 }
             }
             Expr::Or(left, right) => {
-                let l = self.eval_expr(left, vars)?;
+                let l = self.eval_expr(left, vars).await?;
                 match l {
                     Value::Bool(true) => Ok(Value::Bool(true)),
                     Value::Bool(false) => {
-                        let r = self.eval_expr(right, vars)?;
+                        let r = self.eval_expr(right, vars).await?;
                         match r {
                             Value::Bool(v) => Ok(Value::Bool(v)),
                             other => bail!("'or' expects bool, got {}", other.type_name()),
@@ -1446,7 +1495,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_numeric_bin<FInt, FFloat>(
+    async fn eval_numeric_bin<FInt, FFloat>(
         &mut self,
         left: &Expr,
         right: &Expr,
@@ -1458,8 +1507,8 @@ impl<'a> Vm<'a> {
         FInt: Fn(i64, i64) -> i64,
         FFloat: Fn(f64, f64) -> f64,
     {
-        let l = self.eval_expr(left, vars)?;
-        let r = self.eval_expr(right, vars)?;
+        let l = self.eval_expr(left, vars).await?;
+        let r = self.eval_expr(right, vars).await?;
         match (l, r) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_func(a, b))),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_func(a, b))),
@@ -1469,7 +1518,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_numeric_cmp<F>(
+    async fn eval_numeric_cmp<F>(
         &mut self,
         left: &Expr,
         right: &Expr,
@@ -1479,8 +1528,8 @@ impl<'a> Vm<'a> {
     where
         F: Fn(f64, f64) -> bool,
     {
-        let l = self.eval_expr(left, vars)?;
-        let r = self.eval_expr(right, vars)?;
+        let l = self.eval_expr(left, vars).await?;
+        let r = self.eval_expr(right, vars).await?;
         match (l, r) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(func(a as f64, b as f64))),
             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(func(a, b))),
@@ -1492,7 +1541,7 @@ impl<'a> Vm<'a> {
 
     /// Dispatch a single HTTP request directly (used by the real HTTP server).
     /// Returns (http_status_code, response_body).
-    pub fn dispatch_route(&mut self, method: &str, path: &str) -> Result<(u16, String)> {
+    pub async fn dispatch_route(&mut self, method: &str, path: &str) -> Result<(u16, String)> {
         // Split `?query` off the path for route matching; keep the query for
         // `query_param(name)` lookups inside the handler.
         let (clean_path, query_params) = split_path_and_query(path);
@@ -1536,7 +1585,7 @@ impl<'a> Vm<'a> {
         // the request with that response.
         let mut middleware_response: Option<String> = None;
         for mw_name in &middleware_names {
-            if let Some(resp) = self.run_middleware(mw_name)? {
+            if let Some(resp) = self.run_middleware(mw_name).await? {
                 middleware_response = Some(resp);
                 break;
             }
@@ -1549,11 +1598,11 @@ impl<'a> Vm<'a> {
             Ok(Some(resp))
         } else if let Some(ref handler_name) = handler {
             let args = self.build_handler_args(handler_name);
-            self.call_function(handler_name, args)
+            self.call_function(handler_name, args).await
                 .map(|v| v.map(|v| v.as_string()))
         } else {
             let mut route_vars = HashMap::new();
-            self.exec_block(&body_stmts, &mut route_vars)
+            self.exec_block(&body_stmts, &mut route_vars).await
                 .map(|flow| match flow {
                     Flow::Return(Some(v)) => Some(v.as_string()),
                     Flow::Return(None) => Some("null".to_string()),
@@ -1574,7 +1623,7 @@ impl<'a> Vm<'a> {
             Err(e) => {
                 if let Some(handler) = self.error_handler {
                     let handler = handler.clone();
-                    Some(self.run_error_handler(&handler, &e)?)
+                    Some(self.run_error_handler(&handler, &e).await?)
                 } else {
                     self.current_path_params = previous;
                     self.current_query_params = previous_query;
@@ -1616,7 +1665,8 @@ impl<'a> Vm<'a> {
         Ok((status, clean_body))
     }
 
-    fn eval_dispatch_call(
+    #[async_recursion]
+    async fn eval_dispatch_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -1625,8 +1675,8 @@ impl<'a> Vm<'a> {
             bail!("dispatch(method, path) expects exactly 2 args");
         }
 
-        let method = self.eval_expr(&args[0], vars)?;
-        let path = self.eval_expr(&args[1], vars)?;
+        let method = self.eval_expr(&args[0], vars).await?;
+        let path = self.eval_expr(&args[1], vars).await?;
 
         let method = match method {
             Value::Str(v) => v.to_ascii_uppercase(),
@@ -1659,14 +1709,14 @@ impl<'a> Vm<'a> {
             if let Some(handler) = &route.handler {
                 let handler_name = handler.clone();
                 let args = self.build_handler_args(&handler_name);
-                let result = self.call_function(&handler_name, args)?;
+                let result = self.call_function(&handler_name, args).await?;
                 if let Some(value) = result {
                     self.output.push_str(&value.as_string());
                     self.output.push('\n');
                 }
             } else {
                 let mut route_vars = HashMap::new();
-                let flow = self.exec_block(&route.body, &mut route_vars)?;
+                let flow = self.exec_block(&route.body, &mut route_vars).await?;
                 match flow {
                     Flow::Break | Flow::ContinueLoop => {
                         self.current_path_params = previous;
@@ -1697,7 +1747,7 @@ impl<'a> Vm<'a> {
     /// Run the project's top-level `errorHandler (e) { ... }` block with
     /// `e` bound to the error envelope. Returns the handler's response body
     /// string (post-`as_string()`), or `null` if the handler didn't return.
-    fn run_error_handler(
+    async fn run_error_handler(
         &mut self,
         handler: &ErrorHandlerDecl,
         err: &anyhow::Error,
@@ -1718,7 +1768,7 @@ impl<'a> Vm<'a> {
             Value::Str(payload.to_string()),
         );
 
-        let flow = self.exec_block(&handler.body, &mut handler_vars)?;
+        let flow = self.exec_block(&handler.body, &mut handler_vars).await?;
         Ok(match flow {
             Flow::Return(Some(v)) => v.as_string(),
             Flow::Return(None) => "null".to_string(),
@@ -1748,7 +1798,7 @@ impl<'a> Vm<'a> {
     /// Execute a middleware by name. Returns `Some(response_body)` when the
     /// middleware short-circuits the request (returns a value), otherwise
     /// `None` to fall through to the route handler.
-    fn run_middleware(&mut self, name: &str) -> Result<Option<String>> {
+    async fn run_middleware(&mut self, name: &str) -> Result<Option<String>> {
         let mw = self
             .middlewares
             .get(&name.to_lowercase())
@@ -1757,7 +1807,7 @@ impl<'a> Vm<'a> {
 
         let mw_body: Vec<Stmt> = mw.body.clone();
         let mut mw_vars = HashMap::new();
-        let flow = self.exec_block(&mw_body, &mut mw_vars)?;
+        let flow = self.exec_block(&mw_body, &mut mw_vars).await?;
 
         match flow {
             Flow::Continue => Ok(None),
@@ -1805,7 +1855,7 @@ impl<'a> Vm<'a> {
             .collect()
     }
 
-    fn eval_path_param_call(
+    async fn eval_path_param_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -1814,7 +1864,7 @@ impl<'a> Vm<'a> {
             bail!("path_param(name) expects exactly 1 arg");
         }
 
-        let name = self.eval_expr(&args[0], vars)?;
+        let name = self.eval_expr(&args[0], vars).await?;
         let name = match name {
             Value::Str(v) => v,
             other => bail!("path_param(name): name must be string, got {}", other.type_name()),
@@ -1831,7 +1881,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_query_param_call(
+    async fn eval_query_param_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -1840,7 +1890,7 @@ impl<'a> Vm<'a> {
             bail!("query_param(name[, default]) expects 1 or 2 args");
         }
 
-        let name = match self.eval_expr(&args[0], vars)? {
+        let name = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
             other => bail!(
                 "query_param(name): name must be string, got {}",
@@ -1855,12 +1905,12 @@ impl<'a> Vm<'a> {
 
         match (value, args.get(1)) {
             (Some(v), _) => Ok(Value::Str(v)),
-            (None, Some(default_expr)) => self.eval_expr(default_expr, vars),
+            (None, Some(default_expr)) => self.eval_expr(default_expr, vars).await,
             (None, None) => Ok(Value::Null),
         }
     }
 
-    fn eval_http_get_call(
+    async fn eval_http_get_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -1868,13 +1918,13 @@ impl<'a> Vm<'a> {
         if args.is_empty() || args.len() > 2 {
             bail!("http_get(url[, headers_json]) expects 1 or 2 args");
         }
-        let url = match self.eval_expr(&args[0], vars)? {
+        let url = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!("http_get(url): url must be string, got {}", other.type_name()),
         };
 
         let headers_json = if let Some(arg) = args.get(1) {
-            match self.eval_expr(arg, vars)? {
+            match self.eval_expr(arg, vars).await? {
                 Value::Str(s) => Some(s),
                 Value::Null => None,
                 other => bail!(
@@ -1886,18 +1936,19 @@ impl<'a> Vm<'a> {
             None
         };
 
-        let mut req = ureq::get(&url);
+        let mut req = http_client().get(&url);
         if let Some(json_str) = headers_json {
-            req = apply_headers(req, &json_str)?;
+            req = apply_headers_reqwest(req, &json_str)?;
         }
 
         let response = req
-            .call()
+            .send()
+            .await
             .map_err(|e| anyhow!("http_get({url}) failed: {e}"))?;
-        Ok(Value::Str(http_response_to_json_string(response)?))
+        Ok(Value::Str(http_response_to_json_string(response).await?))
     }
 
-    fn eval_http_post_call(
+    async fn eval_http_post_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -1905,7 +1956,7 @@ impl<'a> Vm<'a> {
         if args.is_empty() || args.len() > 3 {
             bail!("http_post(url[, body[, headers_json]]) expects 1, 2 or 3 args");
         }
-        let url = match self.eval_expr(&args[0], vars)? {
+        let url = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "http_post(url): url must be string, got {}",
@@ -1915,7 +1966,7 @@ impl<'a> Vm<'a> {
 
         let body_str = match args.get(1) {
             None => None,
-            Some(arg) => match self.eval_expr(arg, vars)? {
+            Some(arg) => match self.eval_expr(arg, vars).await? {
                 Value::Str(s) => Some(s),
                 Value::Null => None,
                 other => Some(other.as_string()),
@@ -1923,7 +1974,7 @@ impl<'a> Vm<'a> {
         };
 
         let headers_json = if let Some(arg) = args.get(2) {
-            match self.eval_expr(arg, vars)? {
+            match self.eval_expr(arg, vars).await? {
                 Value::Str(s) => Some(s),
                 Value::Null => None,
                 other => bail!(
@@ -1935,9 +1986,9 @@ impl<'a> Vm<'a> {
             None
         };
 
-        let mut req = ureq::post(&url);
+        let mut req = http_client().post(&url);
         if let Some(json_str) = headers_json {
-            req = apply_headers(req, &json_str)?;
+            req = apply_headers_reqwest(req, &json_str)?;
         }
 
         let body_is_json = body_str
@@ -1945,19 +1996,19 @@ impl<'a> Vm<'a> {
             .map(|s| serde_json::from_str::<JsonValue>(s).is_ok())
             .unwrap_or(false);
         if body_is_json {
-            req = req.set("content-type", "application/json");
+            req = req.header("content-type", "application/json");
         }
 
         let response = match body_str {
-            Some(b) => req.send_string(&b),
-            None => req.call(),
+            Some(b) => req.body(b).send().await,
+            None => req.send().await,
         }
         .map_err(|e| anyhow!("http_post({url}) failed: {e}"))?;
 
-        Ok(Value::Str(http_response_to_json_string(response)?))
+        Ok(Value::Str(http_response_to_json_string(response).await?))
     }
 
-    fn eval_jwt_sign_call(
+    async fn eval_jwt_sign_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -1965,8 +2016,8 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("jwt_sign(payload_json, secret) expects exactly 2 args");
         }
-        let payload = self.eval_expr(&args[0], vars)?.as_string();
-        let secret = match self.eval_expr(&args[1], vars)? {
+        let payload = self.eval_expr(&args[0], vars).await?.as_string();
+        let secret = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "jwt_sign(payload, secret): secret must be string, got {}",
@@ -1976,7 +2027,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(crate::jwt::sign_hs256(&payload, &secret)?))
     }
 
-    fn eval_jwt_verify_call(
+    async fn eval_jwt_verify_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -1984,14 +2035,14 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("jwt_verify(token, secret) expects exactly 2 args");
         }
-        let token = match self.eval_expr(&args[0], vars)? {
+        let token = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "jwt_verify(token, secret): token must be string, got {}",
                 other.type_name()
             ),
         };
-        let secret = match self.eval_expr(&args[1], vars)? {
+        let secret = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "jwt_verify(token, secret): secret must be string, got {}",
@@ -2001,7 +2052,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(crate::jwt::verify_hs256(&token, &secret)?))
     }
 
-    fn eval_ws_send_call(
+    async fn eval_ws_send_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2009,18 +2060,24 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("ws_send(msg) expects exactly 1 arg");
         }
-        let msg = self.eval_expr(&args[0], vars)?.as_string();
-        let sent = WS_HANDLE.with(|h| {
-            h.borrow().as_ref().map(|w| w.tx.send(msg).is_ok())
-        });
-        match sent {
-            Some(true) => Ok(Value::Void),
-            Some(false) => bail!("ws_send: client disconnected"),
+        let msg = self.eval_expr(&args[0], vars).await?.as_string();
+        let cell = match WS_HANDLE.try_with(|c| c.clone()) {
+            Ok(c) => c,
+            Err(_) => bail!("ws_send(): only valid inside a WS route handler"),
+        };
+        let guard = cell.lock().await;
+        let sent = match guard.as_ref() {
+            Some(w) => w.tx.send(msg).is_ok(),
             None => bail!("ws_send(): only valid inside a WS route handler"),
+        };
+        if sent {
+            Ok(Value::Void)
+        } else {
+            bail!("ws_send: client disconnected")
         }
     }
 
-    fn eval_ws_recv_call(
+    async fn eval_ws_recv_call(
         &mut self,
         args: &[Expr],
         _vars: &mut HashMap<String, Value>,
@@ -2028,22 +2085,22 @@ impl<'a> Vm<'a> {
         if !args.is_empty() {
             bail!("ws_recv() expects no args");
         }
-        // Pull the next text frame from the inbound queue. We deliberately
-        // hold the RefCell borrow across the blocking call — this is safe
-        // because each blocking worker thread owns its own thread-local
-        // RefCell with no nested borrows possible.
-        let msg = WS_HANDLE.with(|h| match h.borrow_mut().as_mut() {
-            Some(w) => Some(w.rx.blocking_recv()),
-            None => None,
-        });
-        match msg {
+        let cell = match WS_HANDLE.try_with(|c| c.clone()) {
+            Ok(c) => c,
+            Err(_) => bail!("ws_recv(): only valid inside a WS route handler"),
+        };
+        let mut guard = cell.lock().await;
+        let result = match guard.as_mut() {
+            Some(w) => w.rx.recv().await,
             None => bail!("ws_recv(): only valid inside a WS route handler"),
-            Some(None) => Ok(Value::Null),     // client closed
-            Some(Some(text)) => Ok(Value::Str(text)),
+        };
+        match result {
+            None => Ok(Value::Null), // client closed
+            Some(text) => Ok(Value::Str(text)),
         }
     }
 
-    fn eval_ws_close_call(
+    async fn eval_ws_close_call(
         &mut self,
         args: &[Expr],
         _vars: &mut HashMap<String, Value>,
@@ -2051,17 +2108,15 @@ impl<'a> Vm<'a> {
         if !args.is_empty() {
             bail!("ws_close() expects no args");
         }
-        // Dropping the handle drops `tx`, which signals the writer task to
-        // close its sink. The reader task will also see EOF on the next
-        // poll. Subsequent `ws_send`/`ws_recv` calls in this handler error
-        // out cleanly.
-        WS_HANDLE.with(|h| {
-            h.borrow_mut().take();
-        });
+        let cell = match WS_HANDLE.try_with(|c| c.clone()) {
+            Ok(c) => c,
+            Err(_) => bail!("ws_close(): only valid inside a WS route handler"),
+        };
+        cell.lock().await.take();
         Ok(Value::Void)
     }
 
-    fn eval_hash_password_call(
+    async fn eval_hash_password_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2069,7 +2124,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("hash_password(pwd) expects exactly 1 arg");
         }
-        let pwd = match self.eval_expr(&args[0], vars)? {
+        let pwd = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "hash_password(pwd): pwd must be string, got {}",
@@ -2079,7 +2134,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(crate::password::hash_password(&pwd)?))
     }
 
-    fn eval_verify_password_call(
+    async fn eval_verify_password_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2087,14 +2142,14 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("verify_password(pwd, stored_hash) expects exactly 2 args");
         }
-        let pwd = match self.eval_expr(&args[0], vars)? {
+        let pwd = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "verify_password(pwd, hash): pwd must be string, got {}",
                 other.type_name()
             ),
         };
-        let stored = match self.eval_expr(&args[1], vars)? {
+        let stored = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "verify_password(pwd, hash): hash must be string, got {}",
@@ -2104,7 +2159,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Bool(crate::password::verify_password(&pwd, &stored)?))
     }
 
-    fn eval_cache_get_call(
+    async fn eval_cache_get_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2112,7 +2167,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("cache_get(key) expects exactly 1 arg");
         }
-        let key = match self.eval_expr(&args[0], vars)? {
+        let key = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "cache_get(key): key must be string, got {}",
@@ -2125,7 +2180,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_cache_set_call(
+    async fn eval_cache_set_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2133,21 +2188,21 @@ impl<'a> Vm<'a> {
         if args.len() != 3 {
             bail!("cache_set(key, value, ttl_secs) expects exactly 3 args");
         }
-        let key = match self.eval_expr(&args[0], vars)? {
+        let key = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "cache_set(key, value, ttl_secs): key must be string, got {}",
                 other.type_name()
             ),
         };
-        let value = match self.eval_expr(&args[1], vars)? {
+        let value = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "cache_set(key, value, ttl_secs): value must be string, got {}",
                 other.type_name()
             ),
         };
-        let ttl = match self.eval_expr(&args[2], vars)? {
+        let ttl = match self.eval_expr(&args[2], vars).await? {
             Value::Int(n) if n >= 0 => n as u64,
             Value::Int(n) => bail!(
                 "cache_set(key, value, ttl_secs): ttl_secs must be >= 0, got {n}"
@@ -2161,7 +2216,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
-    fn eval_cache_del_call(
+    async fn eval_cache_del_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2169,7 +2224,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("cache_del(key) expects exactly 1 arg");
         }
-        let key = match self.eval_expr(&args[0], vars)? {
+        let key = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "cache_del(key): key must be string, got {}",
@@ -2180,7 +2235,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
-    fn eval_cache_clear_call(
+    async fn eval_cache_clear_call(
         &mut self,
         args: &[Expr],
         _vars: &mut HashMap<String, Value>,
@@ -2192,7 +2247,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
-    fn eval_send_email_call(
+    async fn eval_send_email_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2200,21 +2255,21 @@ impl<'a> Vm<'a> {
         if args.len() != 3 {
             bail!("send_email(to, subject, body_html) expects exactly 3 args");
         }
-        let to = match self.eval_expr(&args[0], vars)? {
+        let to = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "send_email(to, subject, body_html): to must be string, got {}",
                 other.type_name()
             ),
         };
-        let subject = match self.eval_expr(&args[1], vars)? {
+        let subject = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "send_email(to, subject, body_html): subject must be string, got {}",
                 other.type_name()
             ),
         };
-        let body_html = match self.eval_expr(&args[2], vars)? {
+        let body_html = match self.eval_expr(&args[2], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "send_email(to, subject, body_html): body_html must be string, got {}",
@@ -2225,7 +2280,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
-    fn eval_register_job_handler_call(
+    async fn eval_register_job_handler_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2233,14 +2288,14 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("register_job_handler(name, handler_fn_name) expects exactly 2 args");
         }
-        let name = match self.eval_expr(&args[0], vars)? {
+        let name = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "register_job_handler(name, handler_fn_name): name must be string, got {}",
                 other.type_name()
             ),
         };
-        let handler = match self.eval_expr(&args[1], vars)? {
+        let handler = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "register_job_handler(name, handler_fn_name): handler_fn_name must be string, got {}",
@@ -2257,7 +2312,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
-    fn eval_enqueue_call(
+    async fn eval_enqueue_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2265,14 +2320,14 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("enqueue(name, payload_json) expects exactly 2 args");
         }
-        let name = match self.eval_expr(&args[0], vars)? {
+        let name = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "enqueue(name, payload_json): name must be string, got {}",
                 other.type_name()
             ),
         };
-        let payload = match self.eval_expr(&args[1], vars)? {
+        let payload = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!(
                 "enqueue(name, payload_json): payload_json must be string, got {}",
@@ -2283,7 +2338,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
-    fn eval_job_count_call(
+    async fn eval_job_count_call(
         &mut self,
         args: &[Expr],
         _vars: &mut HashMap<String, Value>,
@@ -2294,7 +2349,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Int(crate::queue::pending_count() as i64))
     }
 
-    fn eval_header_call(
+    async fn eval_header_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2302,7 +2357,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("header(name) expects exactly 1 arg");
         }
-        let name = match self.eval_expr(&args[0], vars)? {
+        let name = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
             other => bail!("header(name): name must be string, got {}", other.type_name()),
         };
@@ -2317,7 +2372,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_context_get_call(
+    async fn eval_context_get_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2325,7 +2380,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("context(key) expects exactly 1 arg");
         }
-        let key = match self.eval_expr(&args[0], vars)? {
+        let key = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
             other => bail!("context(key): key must be string, got {}", other.type_name()),
         };
@@ -2336,7 +2391,7 @@ impl<'a> Vm<'a> {
             .unwrap_or(Value::Null))
     }
 
-    fn eval_context_set_call(
+    async fn eval_context_set_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2344,19 +2399,19 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("setContext(key, value) expects exactly 2 args");
         }
-        let key = match self.eval_expr(&args[0], vars)? {
+        let key = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
             other => bail!(
                 "setContext(key, value): key must be string, got {}",
                 other.type_name()
             ),
         };
-        let value = self.eval_expr(&args[1], vars)?;
+        let value = self.eval_expr(&args[1], vars).await?;
         self.request_context.insert(key, value);
         Ok(Value::Void)
     }
 
-    fn eval_raw_sql_call(
+    async fn eval_raw_sql_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2364,14 +2419,14 @@ impl<'a> Vm<'a> {
         if args.is_empty() || args.len() > 2 {
             bail!("raw_sql(sql[, params_json]) expects 1 or 2 args");
         }
-        let sql = match self.eval_expr(&args[0], vars)? {
+        let sql = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             other => bail!("raw_sql(sql, ...): sql must be string, got {}", other.type_name()),
         };
 
-        let mut boxed_params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+        let mut boxed_params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
         if let Some(arg) = args.get(1) {
-            let raw = match self.eval_expr(arg, vars)? {
+            let raw = match self.eval_expr(arg, vars).await? {
                 Value::Str(s) => s,
                 Value::Null => "[]".to_string(),
                 other => bail!(
@@ -2394,20 +2449,20 @@ impl<'a> Vm<'a> {
         // For SELECT-shaped queries return the first column as text; everything
         // else routes through `exec` to also support write statements.
         if lowered.starts_with("select") || lowered.starts_with("with") {
-            let result = engine::query_text(&sql, &param_refs)?;
+            let result = engine::query_text(&sql, &param_refs).await?;
             if result.is_empty() {
                 Ok(Value::Null)
             } else {
                 Ok(Value::Str(result))
             }
         } else {
-            let affected = engine::exec(&sql, &param_refs)?;
+            let affected = engine::exec(&sql, &param_refs).await?;
             engine::invalidate_result_cache()?;
             Ok(Value::Int(affected as i64))
         }
     }
 
-    fn eval_set_connection_string_call(
+    async fn eval_set_connection_string_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2436,7 +2491,7 @@ impl<'a> Vm<'a> {
             );
         }
 
-        let value = self.eval_expr(&args[0], vars)?;
+        let value = self.eval_expr(&args[0], vars).await?;
         let url_string = match value {
             Value::Str(s) => connection_string_from_arg(&s)?,
             other => bail!(
@@ -2448,7 +2503,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
-    fn eval_db_query_call(
+    async fn eval_db_query_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2457,7 +2512,7 @@ impl<'a> Vm<'a> {
             bail!("db_query(sql) expects exactly 1 arg");
         }
 
-        let sql = self.eval_expr(&args[0], vars)?;
+        let sql = self.eval_expr(&args[0], vars).await?;
         let sql = match sql {
             Value::Str(v) => v,
             other => bail!("db_query(sql): sql must be string, got {}", other.type_name()),
@@ -2468,7 +2523,7 @@ impl<'a> Vm<'a> {
             .map_err(|_| anyhow!("DATABASE_URL (or JWC_DATABASE_URL) is required for db_query"))?;
 
         engine::init_engine(&database_url)?;
-        let value = engine::query_text(&sql, &[])?;
+        let value = engine::query_text(&sql, &[]).await?;
         if value.is_empty() {
             Ok(Value::Null)
         } else {
@@ -2476,7 +2531,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_request_body_call(
+    async fn eval_request_body_call(
         &mut self,
         args: &[Expr],
         _vars: &mut HashMap<String, Value>,
@@ -2485,7 +2540,7 @@ impl<'a> Vm<'a> {
             bail!("request_body() expects no args");
         }
 
-        // Prefer the body injected by run_request(), fall back to env var for legacy use
+        // Prefer the body injected by run_request().await, fall back to env var for legacy use
         let body = self
             .request_body
             .clone()
@@ -2497,7 +2552,7 @@ impl<'a> Vm<'a> {
     /// `length(x)` — characters for a string, element count for a JSON array
     /// carried as a string, key count for a JSON object, 0 for null. Falls
     /// back to a friendly error for other shapes.
-    fn eval_length_call(
+    async fn eval_length_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2505,7 +2560,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("length(x) expects exactly 1 arg");
         }
-        match self.eval_expr(&args[0], vars)? {
+        match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => {
                 if let Ok(parsed) = serde_json::from_str::<JsonValue>(&s) {
                     if let Some(arr) = parsed.as_array() {
@@ -2522,7 +2577,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_string_call<F: Fn(&str) -> String>(
+    async fn eval_string_call<F: Fn(&str) -> String>(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2532,7 +2587,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("{name}(s) expects exactly 1 arg");
         }
-        let s = match self.eval_expr(&args[0], vars)? {
+        let s = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Null),
             other => bail!("{name}(s): s must be string, got {}", other.type_name()),
@@ -2540,7 +2595,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(op(&s)))
     }
 
-    fn eval_two_string_bool_call<F: Fn(&str, &str) -> bool>(
+    async fn eval_two_string_bool_call<F: Fn(&str, &str) -> bool>(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2550,12 +2605,12 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("{name}(s, p) expects exactly 2 args");
         }
-        let s = match self.eval_expr(&args[0], vars)? {
+        let s = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Bool(false)),
             other => bail!("{name}: first arg must be string, got {}", other.type_name()),
         };
-        let p = match self.eval_expr(&args[1], vars)? {
+        let p = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!("{name}: second arg must be string, got {}", other.type_name()),
         };
@@ -2564,7 +2619,7 @@ impl<'a> Vm<'a> {
 
     /// `contains(s, sub)` — substring check for strings, element check for
     /// JSON arrays carried as strings, key check for JSON objects.
-    fn eval_contains_call(
+    async fn eval_contains_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2572,8 +2627,8 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("contains(haystack, needle) expects exactly 2 args");
         }
-        let haystack = self.eval_expr(&args[0], vars)?;
-        let needle = self.eval_expr(&args[1], vars)?;
+        let haystack = self.eval_expr(&args[0], vars).await?;
+        let needle = self.eval_expr(&args[1], vars).await?;
 
         match haystack {
             Value::Null => Ok(Value::Bool(false)),
@@ -2601,7 +2656,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn eval_replace_call(
+    async fn eval_replace_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2609,23 +2664,23 @@ impl<'a> Vm<'a> {
         if args.len() != 3 {
             bail!("replace(s, from, to) expects exactly 3 args");
         }
-        let s = match self.eval_expr(&args[0], vars)? {
+        let s = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Null),
             other => bail!("replace: s must be string, got {}", other.type_name()),
         };
-        let from = match self.eval_expr(&args[1], vars)? {
+        let from = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!("replace: from must be string, got {}", other.type_name()),
         };
-        let to = match self.eval_expr(&args[2], vars)? {
+        let to = match self.eval_expr(&args[2], vars).await? {
             Value::Str(s) => s,
             other => bail!("replace: to must be string, got {}", other.type_name()),
         };
         Ok(Value::Str(s.replace(&from, &to)))
     }
 
-    fn eval_split_call(
+    async fn eval_split_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2633,12 +2688,12 @@ impl<'a> Vm<'a> {
         if args.len() != 2 {
             bail!("split(s, sep) expects exactly 2 args");
         }
-        let s = match self.eval_expr(&args[0], vars)? {
+        let s = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Str("[]".to_string())),
             other => bail!("split: s must be string, got {}", other.type_name()),
         };
-        let sep = match self.eval_expr(&args[1], vars)? {
+        let sep = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
             other => bail!("split: sep must be string, got {}", other.type_name()),
         };
@@ -2649,7 +2704,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(JsonValue::Array(pieces).to_string()))
     }
 
-    fn eval_first_or_last_call(
+    async fn eval_first_or_last_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2659,7 +2714,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("{name}(xs) expects exactly 1 arg");
         }
-        let raw = match self.eval_expr(&args[0], vars)? {
+        let raw = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Null),
             other => bail!("{name}: xs must be array (JSON string), got {}", other.type_name()),
@@ -2673,7 +2728,7 @@ impl<'a> Vm<'a> {
         Ok(elem.map(json_to_value).unwrap_or(Value::Null))
     }
 
-    fn eval_json_parse_call(
+    async fn eval_json_parse_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2681,7 +2736,7 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("json_parse(s) expects exactly 1 arg");
         }
-        let s = match self.eval_expr(&args[0], vars)? {
+        let s = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Null),
             other => bail!("json_parse: s must be string, got {}", other.type_name()),
@@ -2691,7 +2746,7 @@ impl<'a> Vm<'a> {
         Ok(json_to_value(&parsed))
     }
 
-    fn eval_json_stringify_call(
+    async fn eval_json_stringify_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2699,11 +2754,11 @@ impl<'a> Vm<'a> {
         if args.len() != 1 {
             bail!("json_stringify(v) expects exactly 1 arg");
         }
-        let v = self.eval_expr(&args[0], vars)?;
+        let v = self.eval_expr(&args[0], vars).await?;
         Ok(Value::Str(value_to_json_smart(&v).to_string()))
     }
 
-    fn eval_uuid_call(&mut self, args: &[Expr], _vars: &mut HashMap<String, Value>) -> Result<Value> {
+    async fn eval_uuid_call(&mut self, args: &[Expr], _vars: &mut HashMap<String, Value>) -> Result<Value> {
         if !args.is_empty() {
             bail!("uuid() expects no args");
         }
@@ -2712,7 +2767,7 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(uuid::Uuid::new_v4().to_string()))
     }
 
-    fn eval_set_json_field_call(
+    async fn eval_set_json_field_call(
         &mut self,
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
@@ -2721,15 +2776,15 @@ impl<'a> Vm<'a> {
             bail!("set_json_field(obj_json, field, value) expects 3 args");
         }
 
-        let source = match self.eval_expr(&args[0], vars)? {
+        let source = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
             other => bail!("set_json_field: first arg must be string json, got {}", other.type_name()),
         };
-        let field = match self.eval_expr(&args[1], vars)? {
+        let field = match self.eval_expr(&args[1], vars).await? {
             Value::Str(v) => v,
             other => bail!("set_json_field: field must be string, got {}", other.type_name()),
         };
-        let value = self.eval_expr(&args[2], vars)?;
+        let value = self.eval_expr(&args[2], vars).await?;
 
         let mut json_value: JsonValue = serde_json::from_str(&source)
             .with_context(|| "set_json_field: invalid json in first arg")?;
@@ -2779,7 +2834,7 @@ fn get_var_as_json(var: &str, vars: &HashMap<String, Value>) -> Result<String> {
 
 /// Build `INSERT INTO "table" (...) VALUES (...) RETURNING *` from a JSON object string
 /// Uses a CTE so all columns (including SERIAL id) are returned.
-fn build_insert_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
+fn build_insert_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "insert: value is not valid JSON")?;
     let obj = doc
@@ -2795,7 +2850,7 @@ fn build_insert_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn 
 
     let fields: Vec<String> = filtered.iter().map(|(k, _)| format!("\"{}\"", k)).collect();
     let placeholders: Vec<String> = (1..=filtered.len()).map(|i| format!("${}", i)).collect();
-    let params: Vec<Box<dyn ToSql + Sync>> =
+    let params: Vec<Box<dyn ToSql + Sync + Send>> =
         filtered.iter().map(|(_, v)| json_value_to_sql_param(v)).collect();
     Ok((format!(
         "WITH _ins AS (INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING *) SELECT row_to_json(t)::text FROM _ins t;",
@@ -2817,7 +2872,7 @@ fn build_update_sql(
     json_str: &str,
     pk_fields: &[String],
     dirty_fields: Option<&HashSet<String>>,
-) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
+) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "update: value is not valid JSON")?;
     let obj = doc
@@ -2865,7 +2920,7 @@ fn build_update_sql(
         .map(|(idx, (k, _))| format!("\"{}\" = ${}", k, idx + 1))
         .collect();
 
-    let mut params: Vec<Box<dyn ToSql + Sync>> = updates
+    let mut params: Vec<Box<dyn ToSql + Sync + Send>> = updates
         .iter()
         .map(|(_, v)| json_value_to_sql_param(v))
         .collect();
@@ -2893,7 +2948,7 @@ fn build_delete_sql(
     table: &str,
     json_str: &str,
     pk_fields: &[String],
-) -> Result<(String, Vec<Box<dyn ToSql + Sync>>)> {
+) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "delete: value is not valid JSON")?;
     let obj = doc
@@ -2903,7 +2958,7 @@ fn build_delete_sql(
     if pk_fields.is_empty() {
         bail!("delete: table '{}' has no primary key declared", table);
     }
-    let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::with_capacity(pk_fields.len());
+    let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::with_capacity(pk_fields.len());
     let mut where_parts = Vec::with_capacity(pk_fields.len());
     for pk in pk_fields {
         let v = obj.get(pk).ok_or_else(|| {
@@ -2926,7 +2981,7 @@ fn build_delete_sql(
     ))
 }
 
-fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql + Sync> {
+fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql + Sync + Send> {
     match val {
         serde_json::Value::Null => Box::new(Option::<String>::None),
         serde_json::Value::Bool(b) => Box::new(*b),
@@ -2952,7 +3007,7 @@ fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql + Sync> {
 /// no auto-cast. Try to recognise these shapes from the literal value and
 /// box them as the proper Rust type so postgres-types accepts the bind.
 /// Falls back to `String` for anything that doesn't match.
-fn string_to_sql_param(s: &str) -> Box<dyn ToSql + Sync> {
+fn string_to_sql_param(s: &str) -> Box<dyn ToSql + Sync + Send> {
     if looks_like_uuid(s) {
         if let Ok(u) = uuid::Uuid::parse_str(s) {
             return Box::new(u);
@@ -2984,11 +3039,11 @@ fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     None
 }
 
-fn boxed_params_to_refs(params: &[Box<dyn ToSql + Sync>]) -> Vec<&(dyn ToSql + Sync)> {
+fn boxed_params_to_refs(params: &[Box<dyn ToSql + Sync + Send>]) -> Vec<&(dyn ToSql + Sync)> {
     params.iter().map(|p| p.as_ref() as &(dyn ToSql + Sync)).collect()
 }
 
-fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync> {
+fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync + Send> {
     match val {
         Value::Int(n) => {
             if (i32::MIN as i64..=i32::MAX as i64).contains(n) {
@@ -3015,7 +3070,7 @@ fn value_to_cache_fragment(val: &Value) -> String {
     }
 }
 
-fn build_select_sql(
+async fn build_select_sql(
     table_name: String,
     where_clause: Option<&WhereExpr>,
     order_by: Option<&DbOrderBy>,
@@ -3025,12 +3080,12 @@ fn build_select_sql(
     nav_subqueries: &[NavigationSubquery],
     projection: &[String],
     vars: &mut HashMap<String, Value>,
-    vm: &mut Vm,
-) -> Result<(String, Vec<Box<dyn ToSql + Sync>>, String, String)> {
+    vm: &mut Vm<'_>,
+) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>, String, String)> {
     let mut sql_where = String::new();
     let mut shape_bits: Vec<String> = Vec::new();
     let mut cache_bits: Vec<String> = Vec::new();
-    let mut params: Vec<Box<dyn ToSql + Sync>> = Vec::new();
+    let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
 
     if let Some(wc) = where_clause {
         let where_sql = build_where_sql(
@@ -3040,7 +3095,7 @@ fn build_select_sql(
             &mut cache_bits,
             vars,
             vm,
-        )?;
+        ).await?;
         sql_where = format!(" WHERE {}", where_sql);
     }
 
@@ -3059,7 +3114,7 @@ fn build_select_sql(
     let mut sql_limit_offset = String::new();
 
     if let Some(limit_expr) = limit {
-        let v = vm.eval_expr(limit_expr, vars)?;
+        let v = vm.eval_expr(limit_expr, vars).await?;
         let n = value_to_positive_int(&v, "limit")?;
         sql_limit_offset.push_str(&format!(" LIMIT {n}"));
         shape_bits.push("limit:literal".to_string());
@@ -3069,7 +3124,7 @@ fn build_select_sql(
     }
 
     if let Some(offset_expr) = offset {
-        let v = vm.eval_expr(offset_expr, vars)?;
+        let v = vm.eval_expr(offset_expr, vars).await?;
         let n = value_to_positive_int(&v, "offset")?;
         sql_limit_offset.push_str(&format!(" OFFSET {n}"));
         shape_bits.push("offset:literal".to_string());
@@ -3218,19 +3273,20 @@ fn build_navigation_subqueries(
     Ok(out)
 }
 
-fn build_where_sql(
+#[async_recursion]
+async fn build_where_sql(
     expr: &WhereExpr,
-    params: &mut Vec<Box<dyn ToSql + Sync>>,
+    params: &mut Vec<Box<dyn ToSql + Sync + Send>>,
     shape: &mut Vec<String>,
     cache: &mut Vec<String>,
     vars: &mut HashMap<String, Value>,
-    vm: &mut Vm,
+    vm: &mut Vm<'_>,
 ) -> Result<String> {
     match expr {
         WhereExpr::Atom(wc) => {
             let col = field_path_to_col(&wc.field);
             let op = normalize_sql_op(&wc.op);
-            let rhs_val = vm.eval_expr(&wc.rhs, vars)?;
+            let rhs_val = vm.eval_expr(&wc.rhs, vars).await?;
 
             Ok(match rhs_val {
                 Value::Null | Value::Void => {
@@ -3258,8 +3314,8 @@ fn build_where_sql(
         }
         WhereExpr::Between { field, low, high } => {
             let col = field_path_to_col(field);
-            let low_v = vm.eval_expr(low, vars)?;
-            let high_v = vm.eval_expr(high, vars)?;
+            let low_v = vm.eval_expr(low, vars).await?;
+            let high_v = vm.eval_expr(high, vars).await?;
             params.push(value_to_sql_param(&low_v));
             let low_idx = params.len();
             params.push(value_to_sql_param(&high_v));
@@ -3283,7 +3339,7 @@ fn build_where_sql(
             let mut placeholders = Vec::with_capacity(values.len());
             let mut cache_parts = Vec::with_capacity(values.len());
             for value_expr in values {
-                let v = vm.eval_expr(value_expr, vars)?;
+                let v = vm.eval_expr(value_expr, vars).await?;
                 params.push(value_to_sql_param(&v));
                 placeholders.push(format!("${}", params.len()));
                 cache_parts.push(value_to_cache_fragment(&v));
@@ -3293,17 +3349,17 @@ fn build_where_sql(
             Ok(format!("\"{}\" IN ({})", col, placeholders.join(", ")))
         }
         WhereExpr::And(l, r) => {
-            let ls = build_where_sql(l, params, shape, cache, vars, vm)?;
+            let ls = build_where_sql(l, params, shape, cache, vars, vm).await?;
             shape.push("AND".to_string());
             cache.push("AND".to_string());
-            let rs = build_where_sql(r, params, shape, cache, vars, vm)?;
+            let rs = build_where_sql(r, params, shape, cache, vars, vm).await?;
             Ok(format!("({} AND {})", ls, rs))
         }
         WhereExpr::Or(l, r) => {
-            let ls = build_where_sql(l, params, shape, cache, vars, vm)?;
+            let ls = build_where_sql(l, params, shape, cache, vars, vm).await?;
             shape.push("OR".to_string());
             cache.push("OR".to_string());
-            let rs = build_where_sql(r, params, shape, cache, vars, vm)?;
+            let rs = build_where_sql(r, params, shape, cache, vars, vm).await?;
             Ok(format!("({} OR {})", ls, rs))
         }
     }
@@ -3491,8 +3547,11 @@ fn format_iso8601_utc(seconds: i64, nanos: u32) -> String {
     )
 }
 
-/// Apply a JSON object of `{"Header-Name": "value"}` pairs onto a ureq request.
-fn apply_headers(mut req: ureq::Request, headers_json: &str) -> Result<ureq::Request> {
+/// Apply a JSON object of `{"Header-Name": "value"}` pairs onto a reqwest request.
+fn apply_headers_reqwest(
+    mut req: reqwest::RequestBuilder,
+    headers_json: &str,
+) -> Result<reqwest::RequestBuilder> {
     let parsed: JsonValue = serde_json::from_str(headers_json)
         .map_err(|_| anyhow!("headers must be a JSON object literal, got invalid json"))?;
     let obj = parsed
@@ -3503,17 +3562,18 @@ fn apply_headers(mut req: ureq::Request, headers_json: &str) -> Result<ureq::Req
             JsonValue::String(s) => s.clone(),
             other => other.to_string(),
         };
-        req = req.set(k, &val);
+        req = req.header(k.as_str(), val);
     }
     Ok(req)
 }
 
-/// Wrap a ureq response into a JSON envelope `{"status": N, "body": "..."}` —
+/// Wrap a reqwest response into a JSON envelope `{"status": N, "body": "..."}` —
 /// JSON body is preserved as-is when parseable, otherwise stored as a string.
-fn http_response_to_json_string(response: ureq::Response) -> Result<String> {
-    let status = response.status();
+async fn http_response_to_json_string(response: reqwest::Response) -> Result<String> {
+    let status = response.status().as_u16();
     let body = response
-        .into_string()
+        .text()
+        .await
         .map_err(|e| anyhow!("failed to read response body: {e}"))?;
 
     let body_value = match serde_json::from_str::<JsonValue>(&body) {
@@ -3849,8 +3909,8 @@ mod tests {
     use super::*;
     use crate::parser::{parse_program, validate_program};
 
-    #[test]
-    fn runs_main_and_prints_output() {
+    #[tokio::test]
+    async fn runs_main_and_prints_output() {
         let src = r#"
             function main() {
                 let name = "JWC";
@@ -3861,12 +3921,12 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "Hello JWC\n7\n");
     }
 
-    #[test]
-    fn supports_function_call_and_return() {
+    #[tokio::test]
+    async fn supports_function_call_and_return() {
         let src = r#"
             function add(a, b) {
                 return a + b;
@@ -3880,12 +3940,12 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "42\n");
     }
 
-    #[test]
-    fn supports_float_literals_and_arithmetic() {
+    #[tokio::test]
+    async fn supports_float_literals_and_arithmetic() {
         let src = r#"
             function main() {
                 let a = 0.2;
@@ -3897,12 +3957,12 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "0.3\n");
     }
 
-    #[test]
-    fn supports_if_while_break_continue() {
+    #[tokio::test]
+    async fn supports_if_while_break_continue() {
         let src = r#"
             function main() {
                 let i = 0;
@@ -3921,12 +3981,12 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "1\n3\n4\n");
     }
 
-    #[test]
-    fn supports_logical_ops() {
+    #[tokio::test]
+    async fn supports_logical_ops() {
         let src = r#"
             function main() {
                 if (true and (1 < 2) or false) {
@@ -3939,12 +3999,12 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "ok\n");
     }
 
-    #[test]
-    fn supports_declarative_routes_with_dispatch() {
+    #[tokio::test]
+    async fn supports_declarative_routes_with_dispatch() {
         let src = r#"
             route GET "/health" {
                 print("GET /health -> 200 OK");
@@ -3958,15 +4018,15 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(
             out.output,
             "GET /health -> 200 OK\n{\"status\":404,\"error\":\"Not Found\",\"method\":\"GET\",\"path\":\"/unknown\"}\n"
         );
     }
 
-    #[test]
-    fn supports_route_path_params() {
+    #[tokio::test]
+    async fn supports_route_path_params() {
         let src = r#"
             route GET "/todos/{id}" {
                 let id = path_param("id");
@@ -3980,12 +4040,12 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "todo=42\n");
     }
 
-    #[test]
-    fn dispatch_outputs_json_from_route_return() {
+    #[tokio::test]
+    async fn dispatch_outputs_json_from_route_return() {
         let src = r#"
             route GET "/todos" {
                 return "{\"items\":[]}";
@@ -3998,12 +4058,12 @@ mod tests {
 
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "{\"items\":[]}\n");
     }
 
-    #[test]
-    fn supports_new_entity_and_field_ops() {
+    #[tokio::test]
+    async fn supports_new_entity_and_field_ops() {
         let src = r#"
             function main() {
                 let car = new CarEntity();
@@ -4017,12 +4077,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "Tesla\n2024\n");
     }
 
-    #[test]
-    fn run_request_dispatches_route() {
+    #[tokio::test]
+    async fn run_request_dispatches_route() {
         let src = r#"
             route GET "/ping" {
                 return "{\"ok\":true}";
@@ -4030,13 +4090,13 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/ping", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/ping", None).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "{\"ok\":true}");
     }
 
-    #[test]
-    fn run_request_returns_404_for_unknown_route() {
+    #[tokio::test]
+    async fn run_request_returns_404_for_unknown_route() {
         let src = r#"
             route GET "/ping" {
                 return "pong";
@@ -4044,12 +4104,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, _body) = run_request(&program, "GET", "/missing", None).unwrap();
+        let (status, _body) = run_request(&program, "GET", "/missing", None).await.unwrap();
         assert_eq!(status, 404);
     }
 
-    #[test]
-    fn body_is_auto_parsed_for_typed_class_param() {
+    #[tokio::test]
+    async fn body_is_auto_parsed_for_typed_class_param() {
         let src = r#"
             class BrandInput {
                 id int;
@@ -4074,15 +4134,15 @@ mod tests {
             "POST",
             "/brands",
             Some("{\"id\":1,\"name\":\"Acme\"}".to_string()),
-        )
+        ).await
         .unwrap();
 
         assert_eq!(status, 200);
         assert_eq!(body, "{\"id\":1,\"name\":\"Acme\"}");
     }
 
-    #[test]
-    fn body_parse_fails_when_typed_class_missing_required_field() {
+    #[tokio::test]
+    async fn body_parse_fails_when_typed_class_missing_required_field() {
         let src = r#"
             class BrandInput {
                 id int;
@@ -4107,15 +4167,15 @@ mod tests {
             "POST",
             "/brands",
             Some("{\"id\":1}".to_string()),
-        )
+        ).await
         .unwrap_err()
         .to_string();
 
         assert!(err.contains("expects field 'name'"));
     }
 
-    #[test]
-    fn query_param_reads_value_from_url() {
+    #[tokio::test]
+    async fn query_param_reads_value_from_url() {
         let src = r#"
             route GET "/items" {
                 let limit = query_param("limit");
@@ -4125,14 +4185,14 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/items?limit=10&q=hello", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/items?limit=10&q=hello", None).await.unwrap();
         assert_eq!(status, 200);
         assert!(body.contains("limit=10"));
         assert!(body.contains("q=hello"));
     }
 
-    #[test]
-    fn query_param_default_used_when_missing() {
+    #[tokio::test]
+    async fn query_param_default_used_when_missing() {
         let src = r#"
             route GET "/items" {
                 let limit = query_param("limit", "20");
@@ -4141,13 +4201,13 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/items", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/items", None).await.unwrap();
         assert_eq!(status, 200);
         assert!(body.contains("limit=20"));
     }
 
-    #[test]
-    fn uuid_type_accepts_valid_string_and_rejects_invalid() {
+    #[tokio::test]
+    async fn uuid_type_accepts_valid_string_and_rejects_invalid() {
         let src = r#"
             function take(id: uuid): uuid {
                 return id;
@@ -4160,7 +4220,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert!(out.contains("550e8400-e29b-41d4-a716-446655440000"));
 
         let bad_src = r#"
@@ -4169,12 +4229,12 @@ mod tests {
         "#;
         let bad_program = parse_program(bad_src).unwrap();
         validate_program(&bad_program).unwrap();
-        let err = run_main(&bad_program).unwrap_err().to_string();
+        let err = run_main(&bad_program).await.unwrap_err().to_string();
         assert!(err.contains("uuid"));
     }
 
-    #[test]
-    fn datetime_type_accepts_iso_string() {
+    #[tokio::test]
+    async fn datetime_type_accepts_iso_string() {
         let src = r#"
             function take(at: datetime): datetime {
                 return at;
@@ -4187,12 +4247,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert!(out.contains("2026-05-19"));
     }
 
-    #[test]
-    fn nullable_type_marker_allows_null_value() {
+    #[tokio::test]
+    async fn nullable_type_marker_allows_null_value() {
         let src = r#"
             function take(name: string?): string? {
                 return name;
@@ -4205,12 +4265,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "null");
     }
 
-    #[test]
-    fn optional_wrapper_is_equivalent_to_nullable_marker() {
+    #[tokio::test]
+    async fn optional_wrapper_is_equivalent_to_nullable_marker() {
         let src = r#"
             function take(x: Optional<int>): Optional<int> {
                 return x;
@@ -4223,12 +4283,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "null");
     }
 
-    #[test]
-    fn list_of_int_validates_each_element() {
+    #[tokio::test]
+    async fn list_of_int_validates_each_element() {
         let src = r#"
             function take(xs: List<int>): List<int> {
                 return xs;
@@ -4241,7 +4301,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert!(out.contains("[1,2,3]") || out.contains("[1, 2, 3]"));
 
         let bad_src = r#"
@@ -4250,12 +4310,12 @@ mod tests {
         "#;
         let bad = parse_program(bad_src).unwrap();
         validate_program(&bad).unwrap();
-        let err = run_main(&bad).unwrap_err().to_string();
+        let err = run_main(&bad).await.unwrap_err().to_string();
         assert!(err.contains("List<int>"));
     }
 
-    #[test]
-    fn try_catch_swallows_runtime_error() {
+    #[tokio::test]
+    async fn try_catch_swallows_runtime_error() {
         let src = r#"
             function risky() {
                 let x = undefined_var;
@@ -4273,15 +4333,15 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert!(out.contains("caught:"));
         assert!(out.contains("Undefined variable"));
         assert!(out.contains("after"));
         assert!(!out.contains("unreachable"));
     }
 
-    #[test]
-    fn try_catch_returns_from_catch_block() {
+    #[tokio::test]
+    async fn try_catch_returns_from_catch_block() {
         let src = r#"
             function broken(): int {
                 let x = 0;
@@ -4299,12 +4359,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "recovered");
     }
 
-    #[test]
-    fn try_catch_lets_success_pass_through() {
+    #[tokio::test]
+    async fn try_catch_lets_success_pass_through() {
         let src = r#"
             function safe(): int {
                 return 7;
@@ -4321,7 +4381,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "7");
     }
 
@@ -4336,8 +4396,8 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    #[test]
-    fn set_connection_string_accepts_url_form() {
+    #[tokio::test]
+    async fn set_connection_string_accepts_url_form() {
         let _g = env_test_lock();
         let key = "DATABASE_URL";
         let backup = std::env::var(key).ok();
@@ -4350,7 +4410,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        run_main(&program).unwrap();
+        run_main(&program).await.unwrap();
         assert_eq!(
             std::env::var(key).unwrap(),
             "postgresql://postgres:secret@127.0.0.1:5432/myapp"
@@ -4363,8 +4423,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_connection_string_accepts_object_literal_form() {
+    #[tokio::test]
+    async fn set_connection_string_accepts_object_literal_form() {
         let _g = env_test_lock();
         let key = "DATABASE_URL";
         let backup = std::env::var(key).ok();
@@ -4383,7 +4443,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        run_main(&program).unwrap();
+        run_main(&program).await.unwrap();
         assert_eq!(
             std::env::var(key).unwrap(),
             "postgresql://app:topsecret@db.example.com:5433/prod"
@@ -4396,8 +4456,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn set_connection_string_no_args_reads_from_env() {
+    #[tokio::test]
+    async fn set_connection_string_no_args_reads_from_env() {
         let _g = env_test_lock();
         let backup = std::env::var("DATABASE_URL").ok();
         std::env::set_var(
@@ -4412,7 +4472,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        run_main(&program).unwrap();
+        run_main(&program).await.unwrap();
         assert_eq!(
             std::env::var("DATABASE_URL").unwrap(),
             "postgresql://envuser:envpw@envhost:5400/envdb"
@@ -4425,8 +4485,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn uuid_builtin_is_v4_and_never_collides_on_a_tight_loop() {
+    #[tokio::test]
+    async fn uuid_builtin_is_v4_and_never_collides_on_a_tight_loop() {
         let src = r#"
             function main() {
                 let a = uuid();
@@ -4439,7 +4499,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
         // All three must be distinct — v4 should never collide here.
@@ -4456,8 +4516,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ws_path_params_reach_the_handler() {
+    #[tokio::test]
+    async fn ws_path_params_reach_the_handler() {
         // Smoke check that the runtime path-params plumbing accepts a
         // pre-populated map exactly the way `server.rs::handle_ws` will
         // hand it over. We exercise it by calling `run_ws_request`
@@ -4486,15 +4546,15 @@ mod tests {
             HashMap::new(),
             rx_to_vm,
             tx_from_vm,
-        )
+        ).await
         .unwrap();
 
         let received = rx_from_vm.try_recv().expect("ws_send fired");
         assert_eq!(received, "general");
     }
 
-    #[test]
-    fn ws_route_parses_with_protocol_marker() {
+    #[tokio::test]
+    async fn ws_route_parses_with_protocol_marker() {
         let src = r#"
             route WS "/chat/{room}" {
                 let msg = ws_recv();
@@ -4512,8 +4572,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ws_builtins_error_outside_a_ws_handler() {
+    #[tokio::test]
+    async fn ws_builtins_error_outside_a_ws_handler() {
         let src = r#"
             function main() {
                 ws_send("hi");
@@ -4521,12 +4581,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let err = run_main(&program).unwrap_err().to_string();
+        let err = run_main(&program).await.unwrap_err().to_string();
         assert!(err.contains("only valid inside a WS route"));
     }
 
-    #[test]
-    fn string_helpers_basic_shapes() {
+    #[tokio::test]
+    async fn string_helpers_basic_shapes() {
         let src = r#"
             function main() {
                 print(lower("HELLO"));
@@ -4544,7 +4604,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert!(out.contains("hello"));
         assert!(out.contains("NAJIM"));
         assert!(out.contains("\nok\n"));
@@ -4556,8 +4616,8 @@ mod tests {
         assert!(lines.last().map(|l| l.trim() == "3").unwrap_or(false), "{out}");
     }
 
-    #[test]
-    fn for_in_iterates_json_array() {
+    #[tokio::test]
+    async fn for_in_iterates_json_array() {
         let src = r#"
             function main() {
                 let xs = "[1, 2, 3, 4]";
@@ -4571,12 +4631,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "6");
     }
 
-    #[test]
-    fn for_in_continue_skips_iteration() {
+    #[tokio::test]
+    async fn for_in_continue_skips_iteration() {
         let src = r#"
             function main() {
                 let xs = "[1, 2, 3, 4, 5]";
@@ -4590,12 +4650,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "4");
     }
 
-    #[test]
-    fn first_last_return_array_endpoints() {
+    #[tokio::test]
+    async fn first_last_return_array_endpoints() {
         let src = r#"
             function main() {
                 let xs = "[10, 20, 30]";
@@ -4607,15 +4667,15 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "10");
         assert_eq!(lines[1], "30");
         assert_eq!(lines[2], "null");
     }
 
-    #[test]
-    fn json_parse_then_stringify_roundtrip() {
+    #[tokio::test]
+    async fn json_parse_then_stringify_roundtrip() {
         let src = r#"
             function main() {
                 let parsed = json_parse("{\"a\":1,\"b\":\"x\"}");
@@ -4626,13 +4686,13 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert!(out.contains("\"a\":1"));
         assert!(out.contains("\"b\":\"x\""));
     }
 
-    #[test]
-    fn error_handler_catches_uncaught_route_error() {
+    #[tokio::test]
+    async fn error_handler_catches_uncaught_route_error() {
         let src = r#"
             errorHandler (e) {
                 return internalError(e.message);
@@ -4646,13 +4706,13 @@ mod tests {
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
 
-        let (status, body) = run_request(&program, "GET", "/boom", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/boom", None).await.unwrap();
         assert_eq!(status, 500);
         assert!(body.contains("Undefined variable"), "body: {body}");
     }
 
-    #[test]
-    fn error_handler_does_not_intercept_normal_responses() {
+    #[tokio::test]
+    async fn error_handler_does_not_intercept_normal_responses() {
         let src = r#"
             errorHandler (e) {
                 return internalError(e.message);
@@ -4665,13 +4725,13 @@ mod tests {
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
 
-        let (status, body) = run_request(&program, "GET", "/ok", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/ok", None).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "hello");
     }
 
-    #[test]
-    fn object_literal_serializes_to_json_with_nested_embedding() {
+    #[tokio::test]
+    async fn object_literal_serializes_to_json_with_nested_embedding() {
         let src = r#"
             function main() {
                 let inner = "[1,2,3]";
@@ -4681,7 +4741,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         let trimmed = out.trim_end();
         // Order isn't guaranteed by serde_json::Map (insertion order preserved
         // since 1.0.79 with preserve_order disabled defaults to BTreeMap-like),
@@ -4695,8 +4755,8 @@ mod tests {
         assert!(trimmed.contains("\"ok\":true"), "got: {trimmed}");
     }
 
-    #[test]
-    fn unary_not_inverts_bool() {
+    #[tokio::test]
+    async fn unary_not_inverts_bool() {
         let src = r#"
             function main() {
                 let ok = false;
@@ -4707,13 +4767,13 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert!(out.contains("flipped"));
         assert!(out.contains("doubled"));
     }
 
-    #[test]
-    fn now_built_in_returns_iso_8601() {
+    #[tokio::test]
+    async fn now_built_in_returns_iso_8601() {
         let src = r#"
             function main() {
                 let ts = now();
@@ -4722,7 +4782,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         let trimmed = out.trim_end();
         // 2026-05-19T12:00:00.000Z shape — 4 digits, dashes, T, ms, Z.
         let bytes = trimmed.as_bytes();
@@ -4733,8 +4793,8 @@ mod tests {
         assert_eq!(bytes[trimmed.len() - 1], b'Z');
     }
 
-    #[test]
-    fn at_var_field_shortcut_in_where_clause() {
+    #[tokio::test]
+    async fn at_var_field_shortcut_in_where_clause() {
         let src = r#"
             dbcontext AppDb : Postgres;
             entity User of AppDb {
@@ -4773,8 +4833,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_function_suggests_closest_match() {
+    #[tokio::test]
+    async fn unknown_function_suggests_closest_match() {
         let src = r#"
             function getAllUsers() { return 1; }
             function main() {
@@ -4784,12 +4844,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let err = run_main(&program).unwrap_err().to_string();
+        let err = run_main(&program).await.unwrap_err().to_string();
         assert!(err.contains("Did you mean 'getallusers'"));
     }
 
-    #[test]
-    fn undefined_variable_suggests_closest_match() {
+    #[tokio::test]
+    async fn undefined_variable_suggests_closest_match() {
         let src = r#"
             function main() {
                 let userName = "x";
@@ -4798,12 +4858,12 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let err = run_main(&program).unwrap_err().to_string();
+        let err = run_main(&program).await.unwrap_err().to_string();
         assert!(err.contains("Did you mean 'username'"));
     }
 
-    #[test]
-    fn async_function_and_await_keyword_parse_and_run() {
+    #[tokio::test]
+    async fn async_function_and_await_keyword_parse_and_run() {
         let src = r#"
             async function fetch(): int {
                 return 42;
@@ -4822,12 +4882,12 @@ mod tests {
             .find(|f| f.name == "fetch")
             .map(|f| f.is_async)
             .unwrap_or(false));
-        let out = run_main(&program).unwrap().output;
+        let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "42");
     }
 
-    #[test]
-    fn middleware_short_circuits_route_when_returning() {
+    #[tokio::test]
+    async fn middleware_short_circuits_route_when_returning() {
         let src = r#"
             middleware AuthMw {
                 let token = header("authorization");
@@ -4843,19 +4903,19 @@ mod tests {
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
 
-        let (status, _body) = run_request(&program, "GET", "/secret", None).unwrap();
+        let (status, _body) = run_request(&program, "GET", "/secret", None).await.unwrap();
         assert_eq!(status, 401);
 
         let mut headers = HashMap::new();
         headers.insert("authorization".into(), "Bearer xyz".into());
         let (status_ok, body_ok) =
-            run_request_with_headers(&program, "GET", "/secret", None, headers).unwrap();
+            run_request_with_headers(&program, "GET", "/secret", None, headers).await.unwrap();
         assert_eq!(status_ok, 200);
         assert_eq!(body_ok, "payload");
     }
 
-    #[test]
-    fn middleware_can_share_context_with_route_handler() {
+    #[tokio::test]
+    async fn middleware_can_share_context_with_route_handler() {
         let src = r#"
             middleware UserMw {
                 setContext("userId", "u-1");
@@ -4867,13 +4927,13 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/me", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/me", None).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "user=u-1");
     }
 
-    #[test]
-    fn unknown_middleware_fails_at_validation() {
+    #[tokio::test]
+    async fn unknown_middleware_fails_at_validation() {
         let src = r#"
             route GET "/x" use MissingMw {
                 return json("hi");
@@ -4884,8 +4944,8 @@ mod tests {
         assert!(err.contains("unknown middleware"));
     }
 
-    #[test]
-    fn typed_route_handler_receives_path_param() {
+    #[tokio::test]
+    async fn typed_route_handler_receives_path_param() {
         let src = r#"
             function getUser(id: int) {
                 return "user=" + id;
@@ -4895,13 +4955,13 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/users/42", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/users/42", None).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "user=42");
     }
 
-    #[test]
-    fn typed_route_handler_receives_query_param_fallback() {
+    #[tokio::test]
+    async fn typed_route_handler_receives_query_param_fallback() {
         let src = r#"
             function search(q: string) {
                 return "q=" + q;
@@ -4911,13 +4971,13 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/search?q=jwc", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/search?q=jwc", None).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "q=jwc");
     }
 
-    #[test]
-    fn validate_body_returns_400_on_missing_required_field() {
+    #[tokio::test]
+    async fn validate_body_returns_400_on_missing_required_field() {
         let src = r#"
             route POST "/users" {
                 validate body {
@@ -4934,15 +4994,15 @@ mod tests {
             "POST",
             "/users",
             Some("{\"age\":10}".to_string()),
-        )
+        ).await
         .unwrap();
         assert_eq!(status, 400);
         assert!(body.contains("\"errors\""));
         assert!(body.contains("\"name\""));
     }
 
-    #[test]
-    fn validate_body_passes_when_all_rules_satisfied() {
+    #[tokio::test]
+    async fn validate_body_passes_when_all_rules_satisfied() {
         let src = r#"
             route POST "/users" {
                 validate body {
@@ -4959,14 +5019,14 @@ mod tests {
             "POST",
             "/users",
             Some("{\"name\":\"Najim\",\"age\":25}".to_string()),
-        )
+        ).await
         .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "ok");
     }
 
-    #[test]
-    fn validate_body_min_max_bound_violation() {
+    #[tokio::test]
+    async fn validate_body_min_max_bound_violation() {
         let src = r#"
             route POST "/score" {
                 validate body {
@@ -4982,14 +5042,14 @@ mod tests {
             "POST",
             "/score",
             Some("{\"value\":250}".to_string()),
-        )
+        ).await
         .unwrap();
         assert_eq!(status, 400);
         assert!(body.contains("max(100)"));
     }
 
-    #[test]
-    fn query_string_does_not_break_route_matching() {
+    #[tokio::test]
+    async fn query_string_does_not_break_route_matching() {
         let src = r#"
             route GET "/ping" {
                 return "{\"ok\":true}";
@@ -4997,7 +5057,7 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/ping?ignored=1", None).unwrap();
+        let (status, body) = run_request(&program, "GET", "/ping?ignored=1", None).await.unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "{\"ok\":true}");
     }

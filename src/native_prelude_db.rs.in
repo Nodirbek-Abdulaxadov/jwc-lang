@@ -1,0 +1,267 @@
+// --- Postgres runtime (async) -----------------------------------------------
+//
+// Only included when the program declares at least one dbcontext / entity.
+// Pulls `tokio-postgres` + `deadpool-postgres` deps in the generated Cargo.toml.
+//
+// Notes:
+//   * One global `deadpool_postgres::Pool`; per-call `pool.get().await` checks
+//     out a client; `prepare_cached` reuses statements per-client.
+//   * Column readers cover BOOL, INT2/4/8, FLOAT4/8, TEXT/VARCHAR/BPCHAR/NAME.
+//     UUID, TIMESTAMP, JSONB surface as `V::Null` — switch to TEXT or wait for
+//     the uuid/chrono follow-up.
+
+use std::sync::OnceLock;
+
+static DB_POOL: OnceLock<deadpool_postgres::Pool> = OnceLock::new();
+
+fn jwc_db_connection_string() -> String {
+    if let Ok(u) = std::env::var("DATABASE_URL") { return u; }
+    if let Ok(u) = std::env::var("JWC_DATABASE_URL") { return u; }
+    let host = std::env::var("PG_HOST").unwrap_or_else(|_| "localhost".into());
+    let port = std::env::var("PG_PORT").unwrap_or_else(|_| "5432".into());
+    let user = std::env::var("PG_USER").unwrap_or_else(|_| "postgres".into());
+    let pwd = std::env::var("PG_PASSWORD").unwrap_or_default();
+    let db = std::env::var("PG_DATABASE").unwrap_or_else(|_| "postgres".into());
+    format!("host={} port={} user={} password={} dbname={}", host, port, user, pwd, db)
+}
+
+async fn jwc_db_init() {
+    if DB_POOL.get().is_some() { return; }
+    let url = jwc_db_connection_string();
+    let pg_cfg: tokio_postgres::Config = url
+        .parse()
+        .unwrap_or_else(|e| panic!("setConnectionString: invalid Postgres URL: {}", e));
+    let mgr_cfg = deadpool_postgres::ManagerConfig {
+        recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+    };
+    let mgr = deadpool_postgres::Manager::from_config(pg_cfg, tokio_postgres::NoTls, mgr_cfg);
+    let pool = deadpool_postgres::Pool::builder(mgr)
+        .max_size(16)
+        .build()
+        .unwrap_or_else(|e| panic!("setConnectionString: pool build failed: {}", e));
+    let _ = DB_POOL.set(pool);
+}
+
+async fn jwc_b_setConnectionString() -> V {
+    jwc_db_init().await;
+    V::Null
+}
+
+async fn jwc_db_get() -> deadpool_postgres::Object {
+    let pool = DB_POOL
+        .get()
+        .expect("DB used before setConnectionString() — call setConnectionString() in main()");
+    pool.get()
+        .await
+        .unwrap_or_else(|e| panic!("failed to check out a DB connection: {}", e))
+}
+
+type DbParams = Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>;
+
+async fn jwc_db_query(sql: &str, params: DbParams) -> Vec<V> {
+    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        params.iter().map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+    let client = jwc_db_get().await;
+    let stmt = client
+        .prepare_cached(sql)
+        .await
+        .unwrap_or_else(|e| panic!("prepare failed: {}\nSQL: {}", e, sql));
+    let rows = client
+        .query(&stmt, &refs)
+        .await
+        .unwrap_or_else(|e| panic!("query failed: {}\nSQL: {}", e, sql));
+    rows.iter().map(jwc_row_to_v).collect()
+}
+
+async fn jwc_db_exec(sql: &str, params: DbParams) -> u64 {
+    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        params.iter().map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+    let client = jwc_db_get().await;
+    let stmt = client
+        .prepare_cached(sql)
+        .await
+        .unwrap_or_else(|e| panic!("prepare failed: {}\nSQL: {}", e, sql));
+    client
+        .execute(&stmt, &refs)
+        .await
+        .unwrap_or_else(|e| panic!("execute failed: {}\nSQL: {}", e, sql))
+}
+
+fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
+    use tokio_postgres::types::Type;
+    let mut m = BTreeMap::new();
+    for (i, col) in row.columns().iter().enumerate() {
+        let name = col.name().to_string();
+        let ty = col.type_();
+        let v: V = match *ty {
+            Type::BOOL => row
+                .try_get::<_, Option<bool>>(i)
+                .ok()
+                .flatten()
+                .map(V::Bool)
+                .unwrap_or(V::Null),
+            Type::INT2 => row
+                .try_get::<_, Option<i16>>(i)
+                .ok()
+                .flatten()
+                .map(|n| V::Int(n as i64))
+                .unwrap_or(V::Null),
+            Type::INT4 => row
+                .try_get::<_, Option<i32>>(i)
+                .ok()
+                .flatten()
+                .map(|n| V::Int(n as i64))
+                .unwrap_or(V::Null),
+            Type::INT8 => row
+                .try_get::<_, Option<i64>>(i)
+                .ok()
+                .flatten()
+                .map(V::Int)
+                .unwrap_or(V::Null),
+            Type::FLOAT4 => row
+                .try_get::<_, Option<f32>>(i)
+                .ok()
+                .flatten()
+                .map(|n| V::Float(n as f64))
+                .unwrap_or(V::Null),
+            Type::FLOAT8 => row
+                .try_get::<_, Option<f64>>(i)
+                .ok()
+                .flatten()
+                .map(V::Float)
+                .unwrap_or(V::Null),
+            Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => row
+                .try_get::<_, Option<String>>(i)
+                .ok()
+                .flatten()
+                .map(V::Str)
+                .unwrap_or(V::Null),
+            _ => V::Null,
+        };
+        m.insert(name, v);
+    }
+    V::Object(m)
+}
+
+// --- typed-param helpers used by codegen --------------------------------------
+
+fn jwc_param_int(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    match v {
+        V::Null => Box::new(None::<i64>),
+        other => Box::new(jwc_to_int(&other).unwrap_or(0)),
+    }
+}
+
+fn jwc_param_bigint(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    jwc_param_int(v)
+}
+
+fn jwc_param_float(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    match v {
+        V::Null => Box::new(None::<f64>),
+        V::Int(n) => Box::new(n as f64),
+        V::Float(n) => Box::new(n),
+        V::Str(s) => Box::new(s.parse::<f64>().unwrap_or(0.0)),
+        _ => Box::new(0.0_f64),
+    }
+}
+
+fn jwc_param_str(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    match v {
+        V::Null => Box::new(None::<String>),
+        V::Str(s) => Box::new(s),
+        other => Box::new(other.to_string()),
+    }
+}
+
+fn jwc_param_bool(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    match v {
+        V::Null => Box::new(None::<bool>),
+        V::Bool(b) => Box::new(b),
+        other => Box::new(jwc_truthy(&other)),
+    }
+}
+
+// --- eager-load helper for `select ... with rel1, rel2 ...` ------------------
+//
+// One extra `SELECT * FROM <target> WHERE <fk> IN (...)` per relation, groups
+// children by FK client-side. N+1 collapses to N+R.
+
+fn jwc_v_to_key(v: &V) -> String {
+    match v {
+        V::Int(n) => n.to_string(),
+        V::Float(n) => n.to_string(),
+        V::Str(s) => s.clone(),
+        V::Bool(b) => b.to_string(),
+        V::Null => String::new(),
+        V::Array(_) | V::Object(_) => jwc_to_json(v),
+    }
+}
+
+async fn jwc_db_eager_load(
+    parents: &mut Vec<V>,
+    parent_pk: &str,
+    target_table: &str,
+    fk_col: &str,
+    pk_is_int: bool,
+    nav_name: &str,
+    one_to_one: bool,
+) {
+    if parents.is_empty() {
+        return;
+    }
+    let mut keys: Vec<V> = Vec::new();
+    for p in parents.iter() {
+        if let V::Object(m) = p {
+            if let Some(v) = m.get(parent_pk) {
+                if !matches!(v, V::Null) {
+                    keys.push(v.clone());
+                }
+            }
+        }
+    }
+    if keys.is_empty() {
+        for p in parents.iter_mut() {
+            if let V::Object(m) = p {
+                let val = if one_to_one { V::Null } else { V::Array(Vec::new()) };
+                m.insert(nav_name.to_string(), val);
+            }
+        }
+        return;
+    }
+    let placeholders: Vec<String> = (1..=keys.len()).map(|i| format!("${}", i)).collect();
+    let sql = format!(
+        "SELECT * FROM \"{}\" WHERE \"{}\" IN ({})",
+        target_table,
+        fk_col,
+        placeholders.join(", "),
+    );
+    let params: DbParams = if pk_is_int {
+        keys.into_iter().map(jwc_param_int).collect()
+    } else {
+        keys.into_iter().map(jwc_param_str).collect()
+    };
+    let children = jwc_db_query(&sql, params).await;
+    let mut by_fk: BTreeMap<String, Vec<V>> = BTreeMap::new();
+    for c in children {
+        if let V::Object(ref m) = c {
+            if let Some(k) = m.get(fk_col) {
+                let key = jwc_v_to_key(k);
+                by_fk.entry(key).or_default().push(c);
+                continue;
+            }
+        }
+    }
+    for p in parents.iter_mut() {
+        if let V::Object(m) = p {
+            let key = m.get(parent_pk).map(jwc_v_to_key).unwrap_or_default();
+            let attached = by_fk.remove(&key).unwrap_or_default();
+            let val = if one_to_one {
+                attached.into_iter().next().unwrap_or(V::Null)
+            } else {
+                V::Array(attached)
+            };
+            m.insert(nav_name.to_string(), val);
+        }
+    }
+}

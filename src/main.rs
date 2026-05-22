@@ -1,5 +1,5 @@
 use jwc::{
-    error_report, lint, migrate, parser, project, runner, server, sql,
+    error_report, lint, migrate, native_build, parser, project, runner, server, sql,
 };
 
 use std::{fs, path::PathBuf};
@@ -33,12 +33,18 @@ enum Command {
     Test,
     /// Run lint checks (validation + dead-code warnings) on the current project
     Lint,
-    /// Bundle the project: copies JWC runtime + launcher into bin/{debug,release}
-    /// (this is NOT a native AOT compiler yet — see Phase 4 in ROADMAP.md)
+    /// Bundle the project: copies JWC runtime + launcher into bin/{debug,release}.
+    ///
+    /// Pass --native to produce a real AOT-compiled binary via the embedded Rust
+    /// toolchain. Native compilation is being rolled out incrementally; trivial
+    /// programs work today, full coverage tracks Phase 4 in ROADMAP.md.
     #[command(alias = "bundle")]
     Build {
         #[arg(long)]
         release: bool,
+        /// Compile to a real native binary instead of bundling the interpreter.
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        native: bool,
     },
     /// Manage SQL migrations for Postgres
     Migrate {
@@ -107,7 +113,16 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
-    if try_run_embedded_app()? {
+    // The runner and migration engine are async (tokio_postgres under the
+    // hood). The CLI itself stays synchronous so `server::serve` can keep
+    // owning its own multi-threaded runtime; we only need a small
+    // current-thread runtime for the handful of awaited calls below.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build tokio runtime: {e}"))?;
+
+    if try_run_embedded_app(&rt)? {
         return Ok(());
     }
 
@@ -151,7 +166,7 @@ fn real_main() -> Result<()> {
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
                 let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
-                let result = runner::run_main(&loaded.program)?;
+                let result = rt.block_on(runner::run_main(&loaded.program))?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
                     server::serve(&loaded.program, port, request_logging)?;
@@ -169,7 +184,7 @@ fn real_main() -> Result<()> {
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
                 let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
-                let result = runner::run_main(&loaded.program)?;
+                let result = rt.block_on(runner::run_main(&loaded.program))?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
                     server::serve(&loaded.program, port, request_logging)?;
@@ -180,7 +195,7 @@ fn real_main() -> Result<()> {
                     .with_context(|| format!("Failed to parse {}", target.display()))?;
                 parser::validate_program(&program)
                     .with_context(|| format!("Validation failed for {}", target.display()))?;
-                let result = runner::run_main(&program)?;
+                let result = rt.block_on(runner::run_main(&program))?;
                 if !result.output.is_empty() { print!("{}", result.output); }
                 if let Some(port) = result.serve_port {
                     server::serve(&program, port, request_logging)?;
@@ -216,18 +231,27 @@ fn real_main() -> Result<()> {
                 println!("{} warning(s) found.", warnings.len());
             }
         }
-        Command::Build { release } => {
+        Command::Build { release, native } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             let loaded = project::load_project_from_root(&root)?;
             let profile = if release { "release" } else { "debug" };
-            let out_path = build_project_native_artifact(&root, &loaded.manifest.name, release)?;
 
-            println!("Bundled runtime + launcher ({profile})");
-            println!("Project: {}", loaded.manifest.name);
-            println!("Launcher: {}", out_path.display());
-            println!("Note: this bundles the JWC runtime alongside your project.");
-            println!("      Native AOT compilation is on Phase 4 of the roadmap.");
+            if native {
+                let app_name = sanitize_app_name(&loaded.manifest.name);
+                let report = native_build::compile(&loaded.program, &root, &app_name, release)?;
+                println!("Native build complete ({profile})");
+                println!("Project: {}", loaded.manifest.name);
+                println!("Binary:  {}", report.binary_path.display());
+                println!("Workspace: {}", report.workspace.display());
+            } else {
+                let out_path = build_project_native_artifact(&root, &loaded.manifest.name, release)?;
+                println!("Bundled runtime + launcher ({profile})");
+                println!("Project: {}", loaded.manifest.name);
+                println!("Launcher: {}", out_path.display());
+                println!("Note: this bundles the JWC runtime alongside your project.");
+                println!("      For real AOT-compiled binaries, pass --native (Phase 4 — incremental).");
+            }
         }
         Command::Migrate { command } => {
             let cwd = std::env::current_dir()?;
@@ -242,7 +266,7 @@ fn real_main() -> Result<()> {
                     println!("  {}", created.down_path.display());
                 }
                 MigrateCommand::Up { database_url } => {
-                    let report = migrate::apply_pending_migrations(&root, database_url)?;
+                    let report = rt.block_on(migrate::apply_pending_migrations(&root, database_url))?;
                     println!("Migrations applied: {}", report.applied);
                     println!("Already applied: {}", report.skipped);
                     println!("Total found: {}", report.total);
@@ -251,7 +275,7 @@ fn real_main() -> Result<()> {
                     if steps == 0 {
                         println!("No-op (steps=0)");
                     } else {
-                        let report = migrate::rollback_migrations(&root, database_url, steps)?;
+                        let report = rt.block_on(migrate::rollback_migrations(&root, database_url, steps))?;
                         println!("Rolled back: {}", report.rolled_back);
                         println!("Previously applied: {}", report.total_applied);
                     }
@@ -442,7 +466,7 @@ fn build_project_native_artifact(root: &PathBuf, manifest_name: &str, release: b
     }
 }
 
-fn try_run_embedded_app() -> Result<bool> {
+fn try_run_embedded_app(rt: &tokio::runtime::Runtime) -> Result<bool> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() > 1 {
         return Ok(false);
@@ -477,7 +501,7 @@ fn try_run_embedded_app() -> Result<bool> {
 
     project::load_dotenv(&root);
     let loaded = project::load_project_from_root(&root)?;
-    let result = runner::run_main(&loaded.program)?;
+    let result = rt.block_on(runner::run_main(&loaded.program))?;
     if !result.output.is_empty() {
         print!("{}", result.output);
     }
