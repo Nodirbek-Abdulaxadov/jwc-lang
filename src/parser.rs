@@ -3615,15 +3615,15 @@ mod tests {
         assert_eq!(id.params[0].ty, None);
     }
 
-    #[test]
-    fn runner_type_mismatch_returns_error() {
+    #[tokio::test]
+    async fn runner_type_mismatch_returns_error() {
         let src = r#"
             function takesInt(x: int) { print(x); }
             function main() { takesInt(true); }
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let result = crate::runner::run_main(&program);
+        let result = crate::runner::run_main(&program).await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Type error"));

@@ -35,8 +35,14 @@ async fn jwc_db_init() {
         recycling_method: deadpool_postgres::RecyclingMethod::Fast,
     };
     let mgr = deadpool_postgres::Manager::from_config(pg_cfg, tokio_postgres::NoTls, mgr_cfg);
+    // Default 64 matches the bundled interpreter's pool tuning; override via
+    // `JWC_DB_POOL_SIZE` for memory-constrained deployments.
+    let max_size: usize = std::env::var("JWC_DB_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(64);
     let pool = deadpool_postgres::Pool::builder(mgr)
-        .max_size(16)
+        .max_size(max_size)
         .build()
         .unwrap_or_else(|e| panic!("setConnectionString: pool build failed: {}", e));
     let _ = DB_POOL.set(pool);

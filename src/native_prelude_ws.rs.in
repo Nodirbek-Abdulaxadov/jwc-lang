@@ -265,7 +265,13 @@ async fn jwc_run_ws_handler(
     let key = match req.headers.get("sec-websocket-key") {
         Some(k) => k.clone(),
         None => {
-            let _ = write_status(&mut stream, 400, "Missing Sec-WebSocket-Key".to_string()).await;
+            let body = "Missing Sec-WebSocket-Key";
+            let resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
             return;
         }
     };

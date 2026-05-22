@@ -14,6 +14,64 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// Load a `.env` from the current working directory or the binary's directory.
+/// Mirrors `project::load_dotenv` so a standalone native binary picks up the
+/// same env layout the `jwc run`/`jwc serve` CLI does.
+fn jwc_load_dotenv() {
+    let candidates: Vec<std::path::PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            v.push(cwd.join(".env"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            // bin/release/app.exe → walk up to project root
+            if let Some(parent) = exe.parent() {
+                v.push(parent.join(".env"));
+                if let Some(g) = parent.parent() {
+                    v.push(g.join(".env"));
+                    if let Some(gg) = g.parent() {
+                        v.push(gg.join(".env"));
+                    }
+                }
+            }
+        }
+        v
+    };
+    let mut content = None;
+    for c in &candidates {
+        if let Ok(s) = std::fs::read_to_string(c) {
+            content = Some(s);
+            break;
+        }
+    }
+    let Some(content) = content else { return };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        if let Some((k, v)) = line.split_once('=') {
+            let k = k.trim();
+            let v = v.trim();
+            if std::env::var(k).is_err() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+    if std::env::var("DATABASE_URL").is_err() {
+        if let (Ok(u), Ok(p), Ok(h), Ok(port), Ok(d)) = (
+            std::env::var("PG_USER"),
+            std::env::var("PG_PASSWORD"),
+            std::env::var("PG_HOST"),
+            std::env::var("PG_PORT"),
+            std::env::var("PG_DATABASE"),
+        ) {
+            std::env::set_var(
+                "DATABASE_URL",
+                format!("postgresql://{}:{}@{}:{}/{}", u, p, h, port, d),
+            );
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 enum V {
     Null,
@@ -553,6 +611,24 @@ fn jwc_b_json_stringify(v: V) -> V {
     V::Str(jwc_to_json(&v))
 }
 
+fn jwc_b_env(name: V) -> V {
+    let n = match name {
+        V::Str(s) => s,
+        _ => return V::Str(String::new()),
+    };
+    V::Str(std::env::var(&n).unwrap_or_default())
+}
+
+fn jwc_b_int(v: V) -> V {
+    match v {
+        V::Int(_) => v,
+        V::Float(n) => V::Int(n as i64),
+        V::Str(s) => V::Int(s.parse::<i64>().unwrap_or(0)),
+        V::Bool(b) => V::Int(if b { 1 } else { 0 }),
+        _ => V::Int(0),
+    }
+}
+
 // --- HTTP runtime ------------------------------------------------------------
 //
 // Tokio-based async HTTP/1.0 server. One tokio task per connection; the
@@ -567,8 +643,7 @@ fn jwc_b_json_stringify(v: V) -> V {
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 
 /// Type of a generated route handler: an `async fn()` boxed/erased into a
 /// `Pin<Box<dyn Future>>` so we can store them in a homogeneous `Router`.
@@ -611,6 +686,8 @@ struct Request {
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
     path_params: BTreeMap<String, String>,
+    /// `true` if the request line was `HTTP/1.1`. Drives default keep-alive.
+    http_version_11: bool,
 }
 
 tokio::task_local! {
@@ -728,6 +805,15 @@ fn jwc_b_created(v: V) -> V {
 fn jwc_b_not_found(v: V) -> V {
     let body = body_string(v);
     make_response(404, body, "text/plain; charset=utf-8")
+}
+
+fn jwc_b_no_content(_v: V) -> V {
+    make_response(204, String::new(), "text/plain; charset=utf-8")
+}
+
+fn jwc_b_bad_request(v: V) -> V {
+    let body = body_string(v);
+    make_response(400, body, "text/plain; charset=utf-8")
 }
 
 fn jwc_b_unauthorized(v: V) -> V {
@@ -866,7 +952,7 @@ impl Router {
     }
 }
 
-// --- HTTP server -------------------------------------------------------------
+// --- HTTP server (axum-based, HTTP/1.1 + keep-alive) -------------------------
 
 struct HttpServer {
     port: u16,
@@ -879,150 +965,92 @@ impl HttpServer {
     }
 
     async fn run(self) {
-        let listener = match TcpListener::bind(("0.0.0.0", self.port)).await {
+        let app = axum::Router::new()
+            .fallback(axum::routing::any(handle_axum_request))
+            .with_state(self.router.clone());
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.port));
+        let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("[jwc] failed to bind 0.0.0.0:{}: {}", self.port, e);
+                eprintln!("[jwc] failed to bind {}: {}", addr, e);
                 std::process::exit(1);
             }
         };
-        eprintln!("[jwc] listening on http://0.0.0.0:{}", self.port);
-        loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let router = Arc::clone(&self.router);
-                    tokio::spawn(handle_connection(stream, router));
-                }
-                Err(e) => eprintln!("[jwc] accept failed: {}", e),
-            }
+        eprintln!("[jwc] listening on http://{}", addr);
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("[jwc] server error: {}", e);
         }
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, router: Arc<Router>) {
-    let req = match read_request(&mut stream).await {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = write_status(&mut stream, 400, format!("Bad Request: {}", e)).await;
-            return;
-        }
-    };
-
-    let (kind, handler, path_params) = match router.match_route(&req.method, &req.path) {
-        Some(found) => found,
-        None => {
-            let _ = write_status(&mut stream, 404, "Not Found".to_string()).await;
-            return;
-        }
-    };
-
-    let mut final_req = req;
-    final_req.path_params = path_params;
-    let req_arc = Arc::new(final_req);
-
-    match kind {
-        RouteKind::Http => {
-            let result = CURRENT_REQUEST
-                .scope(req_arc, async move { handler().await })
-                .await;
-            let (status, body, ct) = jwc_to_response(result);
-            let _ = write_response(&mut stream, status, &body, &ct).await;
-        }
-        RouteKind::Ws => {
-            // The WS dispatcher needs the request only for the handshake key;
-            // CURRENT_REQUEST is also populated so JWC handlers can read path
-            // params / headers from inside the WS body.
-            let req_for_dispatch = req_arc.clone();
-            CURRENT_REQUEST
-                .scope(req_arc, async move {
-                    jwc_run_ws_handler(stream, &req_for_dispatch, handler).await;
-                })
-                .await;
-        }
-    }
-}
-
-async fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
-    let mut buf: Vec<u8> = Vec::with_capacity(1024);
-    let mut chunk = [0u8; 1024];
-    let header_end;
-    loop {
-        let n = stream.read(&mut chunk).await.map_err(|e| e.to_string())?;
-        if n == 0 { return Err("connection closed before headers".into()); }
-        buf.extend_from_slice(&chunk[..n]);
-        if let Some(idx) = find_sub(&buf, b"\r\n\r\n") {
-            header_end = idx + 4;
-            break;
-        }
-        if buf.len() > 64 * 1024 {
-            return Err("headers exceed 64 KiB".into());
-        }
-    }
-
-    let head = std::str::from_utf8(&buf[..header_end - 4]).map_err(|e| e.to_string())?;
-    let mut lines = head.split("\r\n");
-    let first = lines.next().ok_or_else(|| "missing request line".to_string())?;
-    let mut parts = first.split_whitespace();
-    let method = parts.next().ok_or_else(|| "missing method".to_string())?.to_string();
-    let target = parts.next().ok_or_else(|| "missing target".to_string())?.to_string();
-    let (path, query) = split_query(&target);
-
-    let mut headers = BTreeMap::new();
-    for line in lines {
-        if let Some(colon) = line.find(':') {
-            let key = line[..colon].trim().to_lowercase();
-            let value = line[colon + 1..].trim().to_string();
-            headers.insert(key, value);
-        }
-    }
-
-    let body_len: usize = headers
-        .get("content-length")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let mut body = buf[header_end..].to_vec();
-    while body.len() < body_len {
-        let need = body_len - body.len();
-        let take = need.min(chunk.len());
-        let n = stream.read(&mut chunk[..take]).await.map_err(|e| e.to_string())?;
-        if n == 0 { break; }
-        body.extend_from_slice(&chunk[..n]);
-    }
-    body.truncate(body_len);
-
-    Ok(Request {
-        method: method.to_uppercase(),
-        path,
-        query,
-        headers,
-        body,
-        path_params: BTreeMap::new(),
-    })
-}
-
-fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() { return None; }
-    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
-}
-
-fn split_query(target: &str) -> (String, BTreeMap<String, String>) {
-    let mut query = BTreeMap::new();
-    let (path, qs) = match target.find('?') {
-        Some(i) => (&target[..i], &target[i + 1..]),
-        None => (target, ""),
-    };
-    if !qs.is_empty() {
-        for pair in qs.split('&') {
+async fn handle_axum_request(
+    axum::extract::State(router): axum::extract::State<Arc<Router>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let path_str = uri.path();
+    let mut query_map: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(q) = uri.query() {
+        for pair in q.split('&') {
             if pair.is_empty() { continue; }
             let (k, v) = match pair.find('=') {
                 Some(i) => (&pair[..i], &pair[i + 1..]),
                 None => (pair, ""),
             };
-            query.insert(url_decode(k), url_decode(v));
+            query_map.insert(url_decode(k), url_decode(v));
         }
     }
-    (path.to_string(), query)
+    let mut header_map: BTreeMap<String, String> = BTreeMap::new();
+    for (name, value) in headers.iter() {
+        header_map.insert(
+            name.as_str().to_ascii_lowercase(),
+            value.to_str().unwrap_or("").to_string(),
+        );
+    }
+    let method_str = method.as_str().to_string();
+
+    let (kind, handler, path_params) = match router.match_route(&method_str, path_str) {
+        Some(found) => found,
+        None => {
+            return axum::response::Response::builder()
+                .status(404)
+                .header("content-type", "text/plain; charset=utf-8")
+                .body("Not Found".into())
+                .unwrap();
+        }
+    };
+
+    if matches!(kind, RouteKind::Ws) {
+        return axum::response::Response::builder()
+            .status(501)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body("WebSocket not supported in native build yet; use `jwc run` or `jwc build` (without --native).".into())
+            .unwrap();
+    }
+
+    let req = Arc::new(Request {
+        method: method_str,
+        path: path_str.to_string(),
+        query: query_map,
+        headers: header_map,
+        body: body.to_vec(),
+        path_params,
+        http_version_11: true,
+    });
+
+    let result_v = CURRENT_REQUEST
+        .scope(req, async move { handler().await })
+        .await;
+
+    let (status, body_str, ct) = jwc_to_response(result_v);
+    let status_code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK);
+    axum::response::Response::builder()
+        .status(status_code)
+        .header("content-type", ct.as_str())
+        .body(body_str.into())
+        .unwrap()
 }
 
 fn url_decode(s: &str) -> String {
@@ -1043,46 +1071,6 @@ fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-async fn write_response(stream: &mut TcpStream, status: u16, body: &str, content_type: &str) -> std::io::Result<()> {
-    let reason = status_reason(status);
-    let head = format!(
-        "HTTP/1.0 {status} {reason}\r\nContent-Type: {ct}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
-        status = status,
-        reason = reason,
-        ct = content_type,
-        len = body.as_bytes().len(),
-    );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body.as_bytes()).await?;
-    stream.flush().await
-}
-
-async fn write_status(stream: &mut TcpStream, status: u16, body: String) -> std::io::Result<()> {
-    write_response(stream, status, &body, "text/plain; charset=utf-8").await
-}
-
-fn status_reason(s: u16) -> &'static str {
-    match s {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        409 => "Conflict",
-        422 => "Unprocessable Entity",
-        500 => "Internal Server Error",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        _ => "OK",
-    }
 }
 
 // --- async built-ins: sleep_ms / http_get / fetch_json -----------------------

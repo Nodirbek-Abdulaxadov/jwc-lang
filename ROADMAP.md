@@ -14,11 +14,11 @@
 | Phase 1 — MVP Core | ✅ Done |
 | Phase 2 — Language Completeness | ✅ Done |
 | Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean + serve --watch done; LSP/fmt/pkg deferred) |
-| Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
-| Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email stdlib done; queue/wasm/hub deferred) |
+| Phase 4 — Real Compiler (Native) | ⏳ Partial (native AOT via Rust codegen + cargo, async runtime, compile-time column validation; LLVM IR + cross-target build deferred) |
+| Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email + WebSocket + queue stdlib done; wasm/hub/Redis-cache deferred) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
-| Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp; ws deferred) |
+| Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp + WebSocket) |
 | Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
 
 ---
@@ -135,12 +135,16 @@
 - `select User with posts, profile from AppDb.User ...` — correlated `json_agg` subquery, kompayl-vaqt nav nomini tekshirish.
 - Validator: target entity + FK column + nav nomi mavjudligi tekshiriladi.
 
-### 2.6 async/await ⏳ partial — hybrid stage
+### 2.6 async/await ✅
 - ✅ Lexer: `async`, `await` keywordlar.
 - ✅ AST: `FunctionDecl.is_async` flag va `Expr::Await(Box<Expr>)`.
-- ✅ HTTP server endi axum + tokio asoslangan. Har request `spawn_blocking` orqali sync Vm'ga uzatiladi → modern HTTP/2, hyper performance, real WebSocket support.
-- ✅ WebSocket: `route WS "..."` syntaxsi + `ws_send`/`ws_recv`/`ws_close` built-inlar. Async axum socket va sync Vm o'rtasida unbounded mpsc kanal ko'prik (lifetime: per-connection).
-- **Qoldi:** Vm o'zini async qilish (recursive async fn, BoxFuture); `tokio-postgres` orqali async DB; await'lar haqiqiy yield qiladigan ishlash. Bu Phase 9 yoki keyingisi.
+- ✅ HTTP server axum + tokio; har request `tokio::spawn` (Phase 9 da
+  `spawn_blocking` olib tashlandi).
+- ✅ WebSocket: `route WS "..."` + `ws_send`/`ws_recv`/`ws_close`; frame
+  I/O endi `tokio::io::{AsyncReadExt, AsyncWriteExt}` orqali (Phase 9).
+- ✅ Vm o'zini async (recursive `#[async_recursion]`), DB layer
+  `tokio-postgres` + `deadpool-postgres`, `await` real yield qiladi.
+  Tafsilot — Phase 9 (Async runtime).
 
 ---
 
@@ -179,16 +183,27 @@
 
 **Maqsad:** Interpreter’ni siqib chiqarish, real native binary chiqarish.
 
-> Hozirgi `jwc build` — runtime CLI’ni `bin/{profile}/{name}.exe` ga **copy** qiladi. Bu Phase 4 emas, embedded launcher.
+> `jwc build` (alias `bundle`) hali ham embedded-launcher rejimi. Real
+> native AOT — `jwc build --native`: `src/native_build.rs` (2062 qator)
+> AST'dan Rust source generatsiya qiladi, `cargo --release` orqali tokio
+> + `tokio-postgres` + `reqwest` bilan stripped binary chiqaradi (Phase
+> 9 da to'liq async). LLVM IR yo'li hozircha tushirilmagan — kelajakda
+> faster cold start uchun.
 
 ### 4.1 IR ⬜ deferred
 - AST → JWC IR (linear three-address code).
 - Dead code elimination, constant folding.
 
-### 4.2 LLVM backend ⬜ deferred
-- JWC IR → LLVM IR → native binary.
-- Targets: `x86_64-linux`, `aarch64-darwin`, `x86_64-windows`.
-- `jwc build --target linux-x64 --release`.
+### 4.2 Native codegen ⏳ partial (Rust path)
+- ✅ Rust codegen yo'li: `native_build.rs` AST'ni Rust source'ga
+  tushiradi, `cargo --release` build qiladi. Route / user-fn /
+  middleware / errorHandler `Pin<Box<dyn Future<Output=V> + Send>>`
+  qaytaradi; `#[tokio::main(flavor = multi_thread)]` runtime.
+- ✅ `hellocompile` misoli — 1.1 MB stripped release binary
+  (`async_demo` reqwest + rustls bilan ~2.9 MB).
+- ⬜ LLVM IR path — JWC IR → LLVM IR → native binary.
+- ⬜ Cross-target: `jwc build --target linux-x64 --release`,
+  `aarch64-darwin`, `x86_64-windows`.
 
 ### 4.3 Kompayl-vaqt SQL validation ⏳ partial
 - ✅ Static check: `select Entity from CTX.Table` da `where Entity.col`/`orderby Entity.col` — `col` entitining haqiqiy maydoni ekanligi `parser::validate_program` ichida tekshiriladi.
@@ -208,11 +223,19 @@
 **Maqsad:** JWC ni global backend tiliga aylantirish.
 
 - **Standard library ⏳ partial:**
-  - ✅ Http client: `http_get(url[, headers])`, `http_post(url[, body[, headers]])` — `ureq` orqali, JSON envelope qaytaradi.
+  - ✅ Http client: `http_get(url)`, `http_post(url[, body[, headers]])`,
+    `fetch_json(url)` — `reqwest` + `rustls` orqali, async, JSON envelope
+    qaytaradi (`fetch_json` to'g'ridan-to'g'ri decoded value).
+  - ✅ Async helpers: `sleep_ms(ms)` — tokio scheduler'ga yield qiladi.
   - ✅ Auth: `jwt_sign(payload_json, secret)` / `jwt_verify(token, secret)` — HS256 (hmac + sha2 + base64).
   - ✅ Password hashing: `hash_password(pwd)` / `verify_password(pwd, hash)` — Argon2id (argon2 crate).
-  - ✅ WebSocket: axum migratsiyasidan keyin `route WS "..."` to'liq ishlaydi.
-  - ⬜ Qoldi: Cache (Redis durable backend), Storage (S3), SSE.
+  - ✅ Email (SMTP): `send_email(to, subject, body_html)` — `lettre` + `rustls`.
+  - ✅ Cache (in-memory, TTL): `cache_set/get/del/clear`.
+  - ✅ WebSocket: `route WS "..."`, `ws_send`/`ws_recv`/`ws_close` —
+    Phase 9 da to'liq async frame I/O.
+  - ✅ Background queue: `register_job_handler` / `enqueue` / `job_count`
+    (Phase 8).
+  - ⬜ Qoldi: Redis-backed cache, Storage (S3), SSE.
 - **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
 - **JWC Hub:** `hub.jwc.dev` — paket registry.
 - **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.
@@ -318,10 +341,14 @@ Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
   (full)`, `tokio-postgres`, `deadpool-postgres`, `async-recursion`,
   `reqwest (rustls)` qo'shildi.
 
-### 9.4 Maqsadli raqamlar
+### 9.5 Maqsadli raqamlar (verify pending)
 - GET (oddiy SELECT) c=100: **40–60k RPS**, p99 < 10ms.
 - POST: **30–50k RPS**.
 - c=500+ Linux'da real ravishda yelka tortishi mumkin (Windows loopback alohida holat).
+- Benchmark setup: `examples/bench.sh` (bombardier), `examples/bench.py`
+  (Python harness), `examples/jmeter/` (JMeter plan), `examples/bench-cs/`
+  (.NET baseline solishtirma uchun). Real natijalar — keyingi iteratsiyada
+  qo'shiladi.
 
 ---
 
@@ -341,13 +368,15 @@ Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
 
 ## Priority Timeline
 
+Phase 0–2, 6–9 tugallandi. Keyingi ish ustuvorligi:
+
 ```
-hozir   →  Phase 0 (legacy hack’lar tozalanadi)
-1-2 oy  →  Phase 1.4 / 1.5 / 1.6 (query, validate, typed handlers)
-3-6 oy  →  Phase 2.1 / 2.2 / 2.3 (types, SQL, try/catch)
-6-12 oy →  Phase 2.4-2.6 + Phase 3 (middleware, relations, LSP, package)
-12-24 oy→  Phase 4 (IR + LLVM + native + compile-time SQL)
-24+ oy  →  Phase 5 (stdlib, wasm, hub, self-hosting)
+hozir    →  Phase 9.5 — real benchmark natijalari (bench-cs/bench.py/jmeter)
+1-2 oy   →  Phase 3.1+ — LSP go-to-definition, autocomplete, semantic tokens
+2-4 oy   →  Phase 3.3 — `jwc fmt` (AST → source, comment preservation)
+4-8 oy   →  Phase 4.2 — native codegen kengaytmasi (cross-target, LLVM IR)
+8-12 oy  →  Phase 3.4 — package sistemasi (`jwcproj.json::dependencies`)
+12+ oy   →  Phase 5 — wasm target, hub.jwc.dev, Redis-backed cache, S3, SSE
 ```
 
 ---
@@ -363,15 +392,20 @@ hozir   →  Phase 0 (legacy hack’lar tozalanadi)
 
 ```
 src/
-  lexer.rs    317  tokenizer + template string + comment skip
-  ast.rs      135  Program / Model / Route / Function / Stmt / Expr
-  parser.rs  1541  full parser + program validator
-  runner.rs  1621  tree-walking interpreter + HTTP request dispatch
-  engine.rs   178  Postgres pool + SQL cache + result TTL cache
-  server.rs   210  tiny_http worker pool + metrics
-  sql.rs      199  Postgres DDL generator
-  migrate.rs  192  migrate add / up (down hali yo‘q)
-  project.rs  236  jwcproj parser + dotenv loader + source walker
-  diag.rs      27  byte offset → (line, col)
-  main.rs     345  CLI subcommands + embedded launcher
+  lexer.rs           422  tokenizer + template string + raw strings + comment skip
+  ast.rs             343  Program / Model / Route / Function / Stmt / Expr
+  parser.rs         3691  recursive-descent + validate_program (column checks)
+  runner.rs         5077  async tree-walking Vm + HTTP dispatch (async_recursion)
+  engine.rs          528  deadpool-postgres + tokio-postgres + prep cache + TTL cache
+  server.rs          380  axum + tokio::spawn + WebSocket + metrics
+  sql.rs             315  Postgres DDL generator
+  migrate.rs         443  migrate new / up / down (advisory lock)
+  project.rs         356  jwcproj parser + dotenv loader + source walker
+  diag.rs             31  byte offset → (line, col)
+  lint.rs            257  unused fn (W001) / unused middleware (W002)
+  queue.rs           380  in-process job queue + worker pool
+  native_build.rs   2062  AST → Rust source (async tokio AOT path)
+  main.rs            513  CLI subcommands + embedded launcher
 ```
+
+Jami: ~14.8k qator Rust.

@@ -243,7 +243,7 @@ where
         bail!("transaction already in progress on this task (nested transactions are not supported)");
     }
 
-    let mut conn = get_connection().await?;
+    let conn = get_connection().await?;
     conn.batch_execute("BEGIN;")
         .await
         .with_context(|| "Failed to BEGIN transaction")?;
@@ -254,7 +254,7 @@ where
 
     // Take the (possibly already taken) conn out
     let mut held = cell.lock().await;
-    if let Some(mut conn) = held.take() {
+    if let Some(conn) = held.take() {
         drop(held);
         match &result {
             Ok(_) => {
@@ -332,17 +332,49 @@ async fn query_text_on_conn(
         .await
         .with_context(|| "Failed to execute SQL query")?;
 
-    let mut parts = Vec::new();
-    for row in rows {
-        let value: Option<String> = row
-            .try_get(0)
-            .with_context(|| "Expected query to return text in first column")?;
-        if let Some(v) = value {
-            parts.push(v);
+    // Hot path: select/insert/update/delete RETURNING always project a single
+    // text column (json_agg/row_to_json), so the result has 0 or 1 rows.
+    // Skip Vec/join/trim allocations for that case.
+    match rows.len() {
+        0 => Ok(String::new()),
+        1 => {
+            let value: Option<String> = rows[0]
+                .try_get(0)
+                .with_context(|| "Expected query to return text in first column")?;
+            Ok(value.unwrap_or_default())
+        }
+        _ => {
+            let mut parts = Vec::with_capacity(rows.len());
+            for row in rows {
+                let value: Option<String> = row
+                    .try_get(0)
+                    .with_context(|| "Expected query to return text in first column")?;
+                if let Some(v) = value {
+                    parts.push(v);
+                }
+            }
+            Ok(parts.join("\n").trim().to_string())
         }
     }
+}
 
-    Ok(parts.join("\n").trim().to_string())
+/// Returns `Ok(Some(value))` when the result cache is enabled AND has a fresh
+/// entry for `cache_key`. Returns `Ok(None)` when caching is off or the key
+/// missed. Callers use this to short-circuit SQL building entirely on hit.
+pub fn try_cached_result(cache_key: &str) -> Result<Option<String>> {
+    let engine = engine()?;
+    if engine.result_ttl.is_none() {
+        return Ok(None);
+    }
+    let now = Instant::now();
+    let found = engine
+        .result_cache
+        .read()
+        .map_err(|_| anyhow!("Result cache lock poisoned"))?
+        .get(cache_key)
+        .filter(|cached| cached.expires_at > now)
+        .map(|cached| cached.value.clone());
+    Ok(found)
 }
 
 pub async fn query_text_with_optional_cache(

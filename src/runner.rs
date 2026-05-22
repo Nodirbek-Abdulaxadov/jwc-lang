@@ -1032,8 +1032,16 @@ impl<'a> Vm<'a> {
                     vars,
                     self,
                 ).await?;
+                // Cache hit short-circuit: skip get_or_compile_sql + DB roundtrip.
+                if let Some(cached) = engine::try_cached_result(&cache_key)? {
+                    return if cached == "null" || cached.is_empty() {
+                        Ok(Value::Null)
+                    } else {
+                        Ok(Value::Str(cached))
+                    };
+                }
                 let param_refs = boxed_params_to_refs(&boxed_params);
-                let compiled_sql = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
+                let compiled_sql = engine::get_or_compile_sql(&shape_key, || Ok(sql))?;
                 let result =
                     engine::query_text_with_optional_cache(&cache_key, &compiled_sql, &param_refs).await?;
                 if result == "null" || result.is_empty() {
@@ -1324,7 +1332,12 @@ impl<'a> Vm<'a> {
                         bail!("json(val) expects exactly 1 arg");
                     }
                     let val = self.eval_expr(&args[0], vars).await?;
-                    return Ok(Value::Str(val.as_string()));
+                    // Hot path: DB selects already return Value::Str(json_text).
+                    // Reuse it instead of cloning the (often-large) buffer.
+                    return Ok(match val {
+                        Value::Str(_) => val,
+                        other => Value::Str(other.as_string()),
+                    });
                 }
 
                 if name.eq_ignore_ascii_case("created") {

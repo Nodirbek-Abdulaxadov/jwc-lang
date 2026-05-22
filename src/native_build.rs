@@ -61,10 +61,18 @@ const BUILTINS: &[&str] = &[
     "ok",
     "created",
     "not_found",
+    "no_content",
     "unauthorized",
     "forbidden",
     "internal_error",
     "status_code",
+    // camelCase aliases the interpreter exposes; normalized in builtin_fn_name.
+    "notFound",
+    "noContent",
+    "internalError",
+    "statusCode",
+    "badRequest",
+    "bad_request",
     // DB.
     "setConnectionString",
     // WebSocket — only valid inside a `route WS "/path" { ... }` body.
@@ -75,6 +83,9 @@ const BUILTINS: &[&str] = &[
     "sleep_ms",
     "http_get",
     "fetch_json",
+    // Process env / type coercion (sync, no IO).
+    "env",
+    "int",
 ];
 
 /// Built-ins that codegen handles itself (not via `jwc_b_<name>` dispatch).
@@ -344,11 +355,8 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
         Expr::Call { name, args } => {
             // `print(...)` as an expression evaluates to V::Null after the
             // side effect — emit_expr handles the special case.
-            if name.contains('.') {
-                bail!(unsupported(&format!(
-                    "dotted call `{name}(...)` — namespaced functions need the module system (Phase 6)"
-                )));
-            }
+            // Dotted names (`Dome.fn`) are flattened by the parser into a
+            // single string; codegen sanitizes the `.` to `_` in user_fn_name.
             if name != "print"
                 && !funcs.contains(name)
                 && !builtins.contains(name.as_str())
@@ -441,10 +449,10 @@ fn codegen(program: &Program, needs_db: bool) -> Result<String> {
         .collect();
     let entities = collect_entities(program);
 
-    let needs_ws = program
-        .routes
-        .iter()
-        .any(|r| matches!(r.protocol, crate::ast::RouteProtocol::Ws));
+    // Always include the WS prelude so the HTTP dispatcher's
+    // `RouteKind::Ws => jwc_run_ws_handler(...)` reference resolves even when
+    // the program has no WS routes (dead-code-eliminated at link time).
+    let needs_ws = true;
 
     let mut out = String::new();
     out.push_str(PRELUDE);
@@ -487,7 +495,7 @@ fn codegen(program: &Program, needs_db: bool) -> Result<String> {
 
     emit_serve_impl(&mut out, &program.routes);
 
-    out.push_str("\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {\n    let _ = user_main().await;\n}\n");
+    out.push_str("\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {\n    jwc_load_dotenv();\n    let _ = user_main().await;\n}\n");
     Ok(out)
 }
 
@@ -502,7 +510,9 @@ fn collect_entities(program: &Program) -> HashMap<String, EntityMeta> {
             is_primary_key: f.is_primary_key,
         }).collect();
         out.insert(model.name.clone(), EntityMeta {
-            table: model.name.clone(),
+            // Postgres tables are snake_case (see sql::to_snake_case), so
+            // the generated SQL must match what migrations produced.
+            table: crate::sql::to_snake_case(&model.name),
             fields,
             navigations: model.navigations.clone(),
         });
@@ -687,11 +697,22 @@ fn emit_user_fn(out: &mut String, func: &FunctionDecl, ctx: &CodegenCtx) {
 }
 
 fn user_fn_name(name: &str) -> String {
-    format!("user_{name}")
+    // Dome-namespaced functions arrive as `Dome.fn`; sanitize the dot so the
+    // emitted Rust identifier is valid.
+    let safe = name.replace('.', "_");
+    format!("user_{safe}")
 }
 
 fn builtin_fn_name(name: &str) -> String {
-    format!("jwc_b_{name}")
+    let snake = match name {
+        "notFound" => "not_found",
+        "noContent" => "no_content",
+        "internalError" => "internal_error",
+        "statusCode" => "status_code",
+        "badRequest" => "bad_request",
+        _ => name,
+    };
+    format!("jwc_b_{snake}")
 }
 
 fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
@@ -1488,14 +1509,30 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             } else {
                 out.push_str(&builtin_fn_name(name));
             }
+            // HTTP response helpers in the prelude all take one V; the
+            // interpreter accepts 0-arg calls (`notFound()`, `noContent()`),
+            // so pad with V::Null when the user omitted the body.
+            let pads_to_one = !is_user
+                && args.is_empty()
+                && matches!(
+                    name.as_str(),
+                    "not_found" | "notFound" | "no_content" | "noContent"
+                    | "ok" | "created" | "unauthorized" | "forbidden"
+                    | "internal_error" | "internalError"
+                    | "bad_request" | "badRequest"
+                );
             out.push('(');
-            let mut first = true;
-            for a in args {
-                if !first {
-                    out.push_str(", ");
+            if pads_to_one {
+                out.push_str("V::Null");
+            } else {
+                let mut first = true;
+                for a in args {
+                    if !first {
+                        out.push_str(", ");
+                    }
+                    first = false;
+                    emit_expr(out, a, ctx);
                 }
-                first = false;
-                emit_expr(out, a, ctx);
             }
             out.push(')');
             if is_user || is_async_builtin {
@@ -1947,6 +1984,7 @@ fn render_cargo_toml(app_name: &str, needs_db: bool, needs_http_client: bool) ->
     let mut deps = String::new();
     deps.push_str("tokio = { version = \"1\", features = [\"full\"] }\n");
     deps.push_str("futures = \"0.3\"\n");
+    deps.push_str("axum = { version = \"0.7\", features = [\"http2\"] }\n");
     deps.push_str(
         "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"json\"] }\n",
     );
