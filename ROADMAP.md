@@ -12,14 +12,14 @@
 |-------|--------|
 | Phase 0 — Texnik qarz (legacy hack’larni tozalash) | ✅ Done |
 | Phase 1 — MVP Core | ✅ Done |
-| Phase 2 — Language Completeness | ✅ Done (real async deferred) |
+| Phase 2 — Language Completeness | ✅ Done |
 | Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean + serve --watch done; LSP/fmt/pkg deferred) |
 | Phase 4 — Real Compiler (Native) | ⏳ Partial (compile-time column validation done; IR/LLVM deferred) |
 | Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email stdlib done; queue/wasm/hub deferred) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
 | Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp; ws deferred) |
-| Phase 9 — Async runtime + perf ceiling | ⬜ Deferred (async Vm + tokio-postgres) |
+| Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
 
 ---
 
@@ -271,7 +271,7 @@
 - Diagnostics + hover ishlaydi (yuqorida 3.1'ga qarang).
 - **Qoldi:** go-to-definition, autocomplete, route/middleware hover, semantic tokens.
 
-## Phase 9 — Async runtime + perf ceiling ⬜ deferred
+## Phase 9 — Async runtime + perf ceiling ✅ done
 
 **Maqsad:** Hozirgi ~20k RPS shiftini Rust async stack darajasida (~50–100k RPS) ko'tarish.
 
@@ -287,20 +287,36 @@ Bottleneck — sync tree-walking `Vm` + `r2d2_postgres` (blocking driver).
 Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
 → async I/O bekor bo'ladi, har handler bitta thread band qiladi.
 
-### 9.1 Async Vm ⬜
-- `Stmt`/`Expr` evaluyatorlarini `async fn` ga aylantirish (`BoxFuture`'siz
-  iloji yo'q — recursive async fn).
-- `Flow::{Continue, Return, Break, ContinueLoop}` o'zgarmaydi.
-- Tree-walking saqlanadi (IR/LLVM Phase 4 da), shunchaki har step await-able.
+### 9.1 Async Vm ✅
+- `runner.rs` Vm to'liq async — `eval_expr` / `exec_block` / `call_function`
+  `#[async_recursion]` orqali, har joyda `.await`.
+- `Flow::{Continue, Return, Break, ContinueLoop}` o'zgarmadi.
+- Tree-walking saqlandi; har step await-able.
 
-### 9.2 `tokio-postgres` ⬜
-- `engine.rs`'ni `r2d2_postgres` (sync) → `deadpool-postgres` / `bb8-postgres` (async)'ga ko'chirish.
-- `engine::checkout()` → `async fn`. `TxGuard` ham async-aware.
-- TLS pathlar `tokio-postgres-rustls` bilan parallel.
+### 9.2 `tokio-postgres` ✅
+- `engine.rs` `r2d2_postgres` → `deadpool-postgres` + `tokio-postgres`'ga
+  ko'chdi. `engine::checkout()` async; `TxGuard` async-aware.
+- TLS pathlar `tokio-postgres-rustls` bilan ishlaydi.
+- Bind layer `Box<dyn ToSql + Sync + Send>` orqali — uuid / datetime real
+  Postgres typelariga bind qilinadi.
 
-### 9.3 `spawn_blocking` ni olib tashlash ⬜
-- `server.rs`'da `tokio::spawn` qilish, `spawn_blocking` butunlay yo'qoladi.
-- WebSocket bridge'ga ehtiyoj qolmaydi — Vm o'zi axum context'da yashaydi.
+### 9.3 `spawn_blocking` ni olib tashlash ✅
+- `server.rs` har request uchun `tokio::spawn` ishlatadi — `spawn_blocking`
+  butunlay yo'q.
+- WebSocket bridge'ga ehtiyoj qolmadi — frame I/O `tokio::io::{AsyncReadExt,
+  AsyncWriteExt}` orqali, `WS_STREAM` `tokio::task_local!` Arc<Mutex<TcpStream>>.
+
+### 9.4 Native AOT ham async ✅
+- `native_build.rs` route/user-fn/middleware/errorHandler uchun
+  `Pin<Box<dyn Future<Output=V> + Send>>` chiqaradi; `#[tokio::main(flavor =
+  multi_thread)]` runtime; `jwc_serve_impl` async; try/catch +
+  transaction async block ustida `futures::FutureExt::catch_unwind` orqali.
+- `native_prelude*.rs.in` — `tokio::net::TcpListener`, `tokio::spawn`,
+  task-local request context, async WS prelude, deadpool-postgres prelude,
+  `sleep_ms` / `http_get` / `fetch_json` async helperlar.
+- Workspace Cargo.toml: sync `r2d2*`/`postgres`/`ureq` o'chirildi; `tokio
+  (full)`, `tokio-postgres`, `deadpool-postgres`, `async-recursion`,
+  `reqwest (rustls)` qo'shildi.
 
 ### 9.4 Maqsadli raqamlar
 - GET (oddiy SELECT) c=100: **40–60k RPS**, p99 < 10ms.

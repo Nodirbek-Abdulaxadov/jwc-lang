@@ -22,16 +22,36 @@ Everything below ships in the `jwc` binary — no imports needed.
 ## HTTP client
 
 ```jwc
-let res = http_get("https://api.example.com/users");
-let posted = http_post(
-    "https://api.example.com/users",
-    "{\"name\":\"Najim\"}",
-    "{\"x-api-key\":\"abc\"}"
-);
+async function loadUsers() {
+    let res = await http_get("https://api.example.com/users");
+    let posted = await http_post(
+        "https://api.example.com/users",
+        "{\"name\":\"Najim\"}",
+        "{\"x-api-key\":\"abc\"}"
+    );
+    let parsed = await fetch_json("https://api.example.com/users");
+    return parsed;
+}
 ```
 
-Returns `{ "status": N, "body": <JSON or string> }`. Third arg of
-`http_post` is an optional JSON object of headers.
+- `http_get` / `http_post` return `{ "status": N, "body": <JSON or string> }`.
+- Third arg of `http_post` is an optional JSON object of headers.
+- `fetch_json(url)` does `http_get` + `json_parse` and returns the decoded
+  value directly.
+- All three are async — backed by `reqwest` + `rustls`, they yield while
+  the request is in flight.
+
+## Async helpers
+
+```jwc
+async function pause() {
+    await sleep_ms(250);   // non-blocking; yields to the tokio scheduler
+}
+```
+
+`sleep_ms(ms)` is the canonical async delay — use it instead of any
+blocking sleep so concurrent requests aren't serialised on the same
+worker.
 
 ## JWT (HS256)
 

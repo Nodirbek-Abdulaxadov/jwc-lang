@@ -219,9 +219,10 @@ route WS "/chat/{room}" {
 - `ws_close()` tears the socket down from the handler side.
 - Path params and middleware work the same as HTTP routes.
 
-> Built on axum + tokio. The interpreter itself is still synchronous, but
-> the HTTP layer is async — each request runs on `spawn_blocking`, so DB
-> calls inside JWC code still use the existing r2d2 pool unchanged.
+> Built on axum + tokio. The interpreter Vm and the native AOT runtime are
+> both fully async — each request is a real `tokio::spawn`'d task, DB calls
+> go through `deadpool-postgres`, and `ws_recv` / `ws_send` yield instead
+> of blocking a thread.
 
 ## Background jobs
 
@@ -365,6 +366,10 @@ let posted = http_post(
 - Returns `{ "status": N, "body": <JSON or string> }`.
 - 2nd arg of `http_post` is the request body; pass `null` for empty.
 - 3rd arg (optional) is a JSON object of headers.
+- `fetch_json(url)` is a shortcut for `http_get` + `json_parse` on the body —
+  it returns the decoded JSON value directly.
+- All three are async — `await` them inside `async function`s to yield
+  while the request is in flight.
 
 ## Password hashing (Argon2id)
 
@@ -544,19 +549,39 @@ let n_changed = raw_sql("DELETE FROM logs WHERE level = $1", "[\"debug\"]");
 - `SELECT`/`WITH` shape returns the first column as text; other shapes return
   the affected row count.
 
-## Async / Await (forward-compatible syntax)
+## Async / Await
+
+`async function` and `await expr` execute on a real `tokio` runtime, both in
+the interpreter (`jwc run` / `jwc serve`) and in the native AOT output
+(`jwc build --native`).
 
 ```jwc
 async function fetchUser(id: uuid): User {
     let row = await select User from db.Users where User.id == @id first;
     return row;
 }
+
+route GET "/slow/{ms}" {
+    await sleep_ms(path_param("ms"));   // yields, doesn't park a thread
+    return json({ ok: true });
+}
 ```
 
-The parser accepts `async function` and `await expr` so existing code can adopt
-the syntax now, but JWC still executes everything synchronously today — there
-is no real future or scheduler. The actual non-blocking runtime (`tokio` +
-`hyper`) is tracked as the next major effort, after Phase 2 ships.
+- Every HTTP / WebSocket request runs on its own `tokio::spawn` task — no
+  more `spawn_blocking`, no per-handler thread.
+- DB calls use `deadpool-postgres` + `tokio-postgres`; pooled connections
+  are checked out asynchronously.
+- Async builtins: `sleep_ms(ms)`, `http_get(url)`, `http_post(...)`,
+  `fetch_json(url)`, `ws_recv()`, `ws_send(msg)`, `enqueue(...)`. Inside an
+  `async function` you `await` them; the parser also accepts them
+  bare-form, in which case the runtime drives the future on a per-call
+  basis.
+- User-defined `async function`s compose normally — `await fetchUser(...)`
+  inside another `async function` propagates suspension.
+
+See `examples/async_demo` for a worked example (concurrent `/slow/{ms}`
+calls finish in parallel rather than serialising on a single worker
+thread).
 
 ## Middleware
 
