@@ -1,0 +1,80 @@
+// async_demo — exercises the new tokio-based async runtime.
+//
+// Try it:
+//   cargo run -- run examples/async_demo
+//   for i in 1 2 3; do curl -s localhost:8080/slow/3000 & done; wait
+//     ^^^ all three finish in ~3s (real concurrency, not 9s).
+//   curl -s localhost:8080/users/42
+//   wscat -c ws://localhost:8080/echo
+
+dbcontext AppDb : Postgres;
+
+entity Counter of AppDb {
+    id int pk autoincrement;
+    name text;
+    value int;
+}
+
+middleware logMw {
+    let _ = await sleep_ms(0);
+}
+
+errorHandler (e) {
+    return internal_error({ caught: e.message });
+}
+
+async function fetch_user(id) {
+    let body = await http_get("https://httpbin.org/anything/" + id);
+    return json_parse(body);
+}
+
+async function bump_counter(name) {
+    let existing = select Counter from AppDb.Counter where Counter.name == @name first;
+    if (existing == null) {
+        let c = new Counter();
+        c.name = name;
+        c.value = 1;
+        insert c into AppDb.Counter;
+        return c;
+    }
+    existing.value = existing.value + 1;
+    update existing in AppDb.Counter;
+    return existing;
+}
+
+route GET "/slow/{ms}" use logMw {
+    let ms = path_param("ms");
+    await sleep_ms(ms);
+    return json({ slept_ms: ms });
+}
+
+route GET "/users/{id}" {
+    try {
+        let user = await fetch_user(path_param("id"));
+        let hits = await bump_counter("users-fetched");
+        return json({ user: user, hits: hits.value });
+    } catch (e) {
+        return internal_error({ source: "fetch_user", message: e.message });
+    }
+}
+
+route GET "/notes/count" {
+    let total = select count(*) from AppDb.Counter;
+    return json({ counters: total });
+}
+
+route WS "/echo" {
+    while (true) {
+        let msg = await ws_recv();
+        if (msg == null) {
+            return null;
+        }
+        await ws_send("echo:" + msg);
+    }
+}
+
+async function main() {
+    setConnectionString();
+    print("async jwc up on :8080");
+    serve(8080);
+}

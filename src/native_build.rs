@@ -71,6 +71,10 @@ const BUILTINS: &[&str] = &[
     "ws_send",
     "ws_recv",
     "ws_close",
+    // Async I/O built-ins (real tokio after the async migration).
+    "sleep_ms",
+    "http_get",
+    "fetch_json",
 ];
 
 /// Built-ins that codegen handles itself (not via `jwc_b_<name>` dispatch).
@@ -695,9 +699,14 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
     match stmt {
         Stmt::Let { name, value } => {
             out.push_str(&pad);
-            out.push_str("let mut ");
-            out.push_str(&sanitize_ident(name));
-            out.push_str(": V = ");
+            if name == "_" {
+                // `let _: V = ...` — placeholder binding can't be `mut`.
+                out.push_str("let _: V = ");
+            } else {
+                out.push_str("let mut ");
+                out.push_str(&sanitize_ident(name));
+                out.push_str(": V = ");
+            }
             emit_expr(out, value, ctx);
             out.push_str(";\n");
         }
@@ -709,14 +718,17 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
             out.push_str(";\n");
         }
         Stmt::FieldAssign { var, field, value } => {
+            // Evaluate RHS into a temp first so the &mut and any & borrows of
+            // `var` don't overlap (Rust borrow checker rejects `f(&mut x, …, &x)`
+            // because arg evaluation order keeps the &mut alive across &).
             out.push_str(&pad);
-            out.push_str("jwc_set_field(&mut ");
+            out.push_str("{ let __rhs = ");
+            emit_expr(out, value, ctx);
+            out.push_str("; jwc_set_field(&mut ");
             out.push_str(&sanitize_ident(var));
             out.push_str(", \"");
             push_str_escaped(out, field);
-            out.push_str("\", ");
-            emit_expr(out, value, ctx);
-            out.push_str(");\n");
+            out.push_str("\", __rhs); }\n");
         }
         Stmt::Print(expr) => {
             out.push_str(&pad);
