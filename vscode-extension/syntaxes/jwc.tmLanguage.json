@@ -461,7 +461,11 @@
         },
         {
           "name": "keyword.control.import.jwc",
-          "match": "\\b(import|namespace)\\b"
+          "match": "\\b(import|namespace|mount|group)\\b"
+        },
+        {
+          "name": "storage.modifier.visibility.jwc",
+          "match": "\\b(public|private)\\b"
         },
         {
           "name": "keyword.declaration.dome.jwc",
@@ -503,7 +507,7 @@
 
     "field-modifiers": {
       "name": "storage.modifier.jwc",
-      "match": "\\b(pk|nullable|autoincrement|auto_increment|serial|unique|of|via|on)\\b"
+      "match": "\\b(pk|nullable|autoincrement|auto_increment|serial|unique|of|via|on|at)\\b"
     },
 
     "boolean-null": {

@@ -8,6 +8,52 @@ pub struct Program {
     /// Optional top-level fallback that catches uncaught errors from any
     /// route handler. Body sees `<catch_var>` bound to the error JSON.
     pub error_handler: Option<ErrorHandlerDecl>,
+    /// All `using ns.path;` statements collected from every file. Each entry
+    /// is attached to a namespace scope; used by the runtime resolver.
+    pub imports: Vec<ImportDecl>,
+    /// All `mount <ns> [at "/prefix"];` declarations. Library routes are
+    /// inactive until a mount references their namespace. The same namespace
+    /// may be mounted multiple times at different prefixes (e.g. `/api/foo`
+    /// and `/public/foo`) — each mount produces its own active route set.
+    pub mounts: Vec<MountDecl>,
+}
+
+/// Visibility marker for top-level declarations. Default is `Private` —
+/// only callable from within the same namespace. `pub function ...`,
+/// `pub entity ...`, etc., opt into export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    Public,
+    #[default]
+    Private,
+}
+
+/// `using foo.bar;` — opens namespace `foo.bar` for the file (and the
+/// namespace it declares). Names from that namespace become reachable
+/// both with and without the `foo.bar.` prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportDecl {
+    /// Dot-split namespace path, e.g. `"math.utils"` → `["math", "utils"]`.
+    pub path: Vec<String>,
+    /// Namespace declared by the file this `using` lives in. Empty Vec
+    /// means root. Used to compute import-visibility per call site.
+    pub in_namespace: Vec<String>,
+}
+
+/// `mount <ns> [at "/prefix"];` — activate a library namespace's routes
+/// (optionally under a path prefix). Middlewares come from the surrounding
+/// `group` block, not the mount itself, so the same `use` syntax that
+/// per-route uses can scope across both library mounts and own routes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountDecl {
+    /// Namespace path being mounted, e.g. `["greet"]` or `["pkg", "sub"]`.
+    pub target: Vec<String>,
+    /// Optional path prefix prepended to every route from the target ns.
+    /// `None` means mount at root (`/`).
+    pub prefix: Option<String>,
+    /// Middleware chain inherited from enclosing `group` blocks. Each name
+    /// is resolved against the symbol table at runtime (FQN-aware).
+    pub middlewares: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +66,9 @@ pub struct ErrorHandlerDecl {
 pub struct MiddlewareDecl {
     pub name: String,
     pub body: Vec<Stmt>,
+    /// Namespace this declaration lives in. Empty = root.
+    pub namespace: Vec<String>,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,12 +95,18 @@ pub struct RouteDecl {
     /// Names of middlewares applied to this route (in declaration order).
     pub middlewares: Vec<String>,
     pub protocol: RouteProtocol,
+    /// Namespace this route lives in. Routes from non-root namespaces are
+    /// inactive until activated via a `mount <ns> [at "/p"];` declaration.
+    pub namespace: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbContextDecl {
     pub name: String,
     pub driver: String,
+    /// Namespace this dbcontext lives in. Non-root dbcontexts come along
+    /// automatically whenever the project imports or mounts the namespace.
+    pub namespace: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +119,9 @@ pub struct ModelDecl {
     /// Navigation properties (relations) declared inside this entity.
     /// Empty for plain DTO classes.
     pub navigations: Vec<NavigationField>,
+    /// Namespace this model lives in. Empty = root.
+    pub namespace: Vec<String>,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +198,9 @@ pub struct FunctionDecl {
     /// the interpreter executes everything synchronously today; flag exists so
     /// AST is forward-compatible with the future tokio-based runtime.
     pub is_async: bool,
+    /// Namespace this function lives in. Empty = root.
+    pub namespace: Vec<String>,
+    pub visibility: Visibility,
 }
 
 /// Single comparison: `field op value`

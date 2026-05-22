@@ -42,6 +42,21 @@ pub enum Keyword {
     ErrorHandler,
     For,
     In,
+    /// `public function/entity/class/middleware/route ...` — makes the
+    /// declaration visible to other namespaces. Default is `private`.
+    Public,
+    /// `private function ...` — explicit private (same as omitting any
+    /// modifier; available for clarity).
+    Private,
+    /// `mount foo at "/path";` — activate a library namespace's routes
+    /// under an optional prefix. Inherits middlewares from any enclosing
+    /// `group` block.
+    Mount,
+    /// `group "/prefix" use Mw, ... { ... }` — wrap inner routes/mounts
+    /// with a shared prefix and middleware chain. Composes via nesting.
+    /// Either the prefix string or the `use` clause (or both) must be
+    /// present; both empty is rejected at parse time.
+    Group,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +131,10 @@ impl<'a> Lexer<'a> {
                 "or" => TokenKind::Keyword(Keyword::Or),
                 "namespace" => TokenKind::Keyword(Keyword::Namespace),
                 "import" => TokenKind::Keyword(Keyword::Import),
+                "public" => TokenKind::Keyword(Keyword::Public),
+                "private" => TokenKind::Keyword(Keyword::Private),
+                "mount" => TokenKind::Keyword(Keyword::Mount),
+                "group" => TokenKind::Keyword(Keyword::Group),
                 "true" => TokenKind::Keyword(Keyword::True),
                 "false" => TokenKind::Keyword(Keyword::False),
                 "null" => TokenKind::Keyword(Keyword::Null),

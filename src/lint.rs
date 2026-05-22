@@ -55,7 +55,22 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         }
     }
     for mw in &program.middlewares {
-        if !used_middlewares.contains(&mw.name.to_lowercase()) {
+        let short = mw.name.to_lowercase();
+        // FQN form: `ns.sub.name` (lowercased). Used by cross-namespace refs.
+        let fqn = if mw.namespace.is_empty() {
+            short.clone()
+        } else {
+            format!(
+                "{}.{}",
+                mw.namespace
+                    .iter()
+                    .map(|s| s.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                short
+            )
+        };
+        if !used_middlewares.contains(&short) && !used_middlewares.contains(&fqn) {
             warnings.push(LintWarning {
                 code: "W002",
                 message: format!(

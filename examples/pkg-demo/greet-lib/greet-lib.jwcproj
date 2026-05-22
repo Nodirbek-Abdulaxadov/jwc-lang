@@ -1,0 +1,7 @@
+{
+    "name": "greet-lib",
+    "version": "1.0.0",
+    "type": "pkg", //it means its not runnable
+    "pkgVersion": "0.1.0",
+    "dependencies": {}
+}

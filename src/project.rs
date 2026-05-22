@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -6,17 +7,106 @@ use serde::{Deserialize, Serialize};
 use crate::ast::Program;
 
 pub const PROJECT_FILE: &str = "jwcproj.json";
+pub const LOCK_FILE: &str = "jwcproj.lock";
+
+/// One dependency declaration. The JSON form is flexible:
+///
+/// ```json
+/// "http": "^1.2",                           // version range, registry source
+/// "auth": { "version": "^1", "registry": "https://registry.example/" },
+/// "shared": { "path": "../shared" },
+/// "ext": { "git": "https://github.com/x/y", "rev": "abc123" }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum DepSpec {
+    /// `"http": "^1.2"` — shorthand for a registry source with this version
+    /// requirement and the project's default registry URL.
+    Version(String),
+    /// Detailed form. Exactly one of `path`, `git`, or `version` is required.
+    Detailed(DetailedDep),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DetailedDep {
+    /// Semver requirement (e.g. `^1.2`, `>=0.3, <0.5`). Required for registry
+    /// or git sources where the resolver needs a version range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Local filesystem source. Relative to the project root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    /// Git source URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    /// Specific git revision (commit SHA or tag). Optional with `git`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
+    /// Override registry URL. Defaults to the project's `registry.url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+}
+
+/// Registry server configuration. Read from manifest, then overridden by
+/// `JWC_REGISTRY_URL` env at runtime if set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RegistryConfig {
+    /// Base URL for the index/download API (Cargo-shaped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// What this project IS. `App` is runnable (`jwc run/serve/build`),
+/// `Pkg` is a library — depend-on-only. Default is `App` for compatibility
+/// with projects that haven't adopted the `type` field yet.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectKind {
+    #[default]
+    App,
+    Pkg,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwcProject {
     pub name: String,
-    /// Supports both "languageVersion" (old) and "version" (new) field names
+    /// `"app"` (default) — runnable. `"pkg"` — library, depend-on-only.
+    #[serde(default, rename = "type")]
+    pub kind: ProjectKind,
+    /// Supports both "languageVersion" (old) and "version" (new) field names.
+    /// Note: this is the *project / language* version (used by `effective_version`),
+    /// not the package's published version — that lives in `pkg_version`.
     #[serde(rename = "languageVersion", default, skip_serializing_if = "String::is_empty")]
     pub language_version: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
+    /// Semver version of THIS package, used when other projects depend on it
+    /// via a path/git/registry source. Distinct from `version` (above) to
+    /// avoid breaking legacy projects that store the language version there.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "pkgVersion")]
+    pub pkg_version: Option<String>,
+    /// Structured dependency map. The legacy `Vec<String>` form is no longer
+    /// accepted — use either a version string or a detailed object per name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<String, DepSpec>,
+    /// Optional registry configuration. `JWC_REGISTRY_URL` env wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<RegistryConfig>,
+}
+
+impl JwcProject {
+    /// Fail if this project is a `pkg` — used by `jwc run/serve/build` so
+    /// libraries don't try to behave like runnable apps.
+    pub fn ensure_runnable(&self) -> Result<()> {
+        if matches!(self.kind, ProjectKind::Pkg) {
+            bail!(
+                "Project '{}' is declared as a package (type: \"pkg\") and cannot be run directly. \
+                Depend on it from an app project, or change its type to \"app\".",
+                self.name
+            );
+        }
+        Ok(())
+    }
 }
 
 impl JwcProject {
@@ -58,9 +148,12 @@ pub fn create_new_project(target_dir: &Path) -> Result<()> {
 
     let manifest = JwcProject {
         name,
+        kind: ProjectKind::App,
         language_version: String::new(),
         version: "1.0.0".to_string(),
-        dependencies: Vec::new(),
+        pkg_version: Some("0.1.0".to_string()),
+        dependencies: BTreeMap::new(),
+        registry: None,
     };
 
     let proj_filename = format!("{}.jwcproj", manifest.name);
@@ -145,6 +238,103 @@ fn find_manifest_in_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Strip JSONC-style `//` line comments and `/* ... */` block comments from a
+/// raw manifest string, preserving content inside double-quoted strings.
+/// Trailing commas before `}` or `]` are also tolerated (a common pitfall when
+/// the user removes a field and forgets to clean up the preceding comma).
+pub fn strip_jsonc_comments(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c as char);
+            if c == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b'/' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'/' {
+                // line comment — skip until newline (keep the newline)
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes[i + 1] == b'*' {
+                // block comment — skip until closing */
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+        }
+        out.push(c as char);
+        i += 1;
+    }
+
+    // Cheap trailing-comma fix: `,<whitespace>}` → `<whitespace>}` and same for `]`.
+    // Won't touch commas inside strings because we already stripped/preserved above.
+    let mut cleaned = String::with_capacity(out.len());
+    let chars: Vec<char> = out.chars().collect();
+    let mut j = 0;
+    let mut in_str = false;
+    while j < chars.len() {
+        let ch = chars[j];
+        if in_str {
+            cleaned.push(ch);
+            if ch == '\\' && j + 1 < chars.len() {
+                cleaned.push(chars[j + 1]);
+                j += 2;
+                continue;
+            }
+            if ch == '"' {
+                in_str = false;
+            }
+            j += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_str = true;
+            cleaned.push(ch);
+            j += 1;
+            continue;
+        }
+        if ch == ',' {
+            let mut k = j + 1;
+            while k < chars.len() && chars[k].is_whitespace() {
+                k += 1;
+            }
+            if k < chars.len() && (chars[k] == '}' || chars[k] == ']') {
+                // skip the comma; whitespace and the close bracket flow through
+                j += 1;
+                continue;
+            }
+        }
+        cleaned.push(ch);
+        j += 1;
+    }
+    cleaned
+}
+
 pub fn find_project_root(start: &Path) -> Result<PathBuf> {
     let start_dir = if start.is_file() {
         start
@@ -176,7 +366,8 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
 
     let manifest_raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest: JwcProject = serde_json::from_str(&manifest_raw)
+    let manifest_json = strip_jsonc_comments(&manifest_raw);
+    let manifest: JwcProject = serde_json::from_str(&manifest_json)
         .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
 
     let source_files = collect_jwc_files(root)?;
@@ -194,7 +385,7 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
         bail!("Project main.jwc not found");
     }
 
-    let mut source_text = String::new();
+    let mut program = Program::default();
     for path in &source_files {
         let rel = path
             .strip_prefix(root)
@@ -203,15 +394,24 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
             .replace('\\', "/");
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        source_text.push_str(&format!("// file: {rel}\n"));
-        source_text.push_str(&content);
-        if !source_text.ends_with('\n') {
-            source_text.push('\n');
-        }
-        source_text.push('\n');
+        let file_prog = crate::parser::parse_program(&content)
+            .with_context(|| format!("Failed to parse {}", rel))?;
+        merge_program(&mut program, file_prog)
+            .with_context(|| format!("While merging {}", rel))?;
     }
 
-    let program = crate::parser::parse_program(&source_text)?;
+    // Resolve and merge dependency packages, if any. The resolver caches
+    // sources under `~/.jwc/registry/` so subsequent loads are fast; for
+    // path sources nothing is downloaded.
+    if !manifest.dependencies.is_empty() {
+        let graph = crate::resolver::ensure_resolved(&manifest, root)
+            .with_context(|| "Failed to resolve dependencies")?;
+        for pkg in graph.iter() {
+            merge_dep_package(&mut program, pkg)
+                .with_context(|| format!("Failed to merge dependency '{}'", pkg.name))?;
+        }
+    }
+
     crate::parser::validate_program(&program)?;
 
     Ok(LoadedProject {
@@ -219,6 +419,84 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
         source_files,
         program,
     })
+}
+
+/// Walk a resolved dependency's source directory, parse every `.jwc` file
+/// it contains, and merge the result into `program`. Decls with no
+/// explicit `namespace` declaration get the package name as their default
+/// namespace so two deps with a clashing simple name don't collide.
+fn merge_dep_package(
+    program: &mut Program,
+    pkg: &crate::resolver::ResolvedPackage,
+) -> Result<()> {
+    let pkg_files = collect_jwc_files(&pkg.source_path).unwrap_or_default();
+    for path in &pkg_files {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let mut file_prog = crate::parser::parse_program(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        apply_default_namespace(&mut file_prog, &pkg.name);
+        // Dependency packages' error handlers are ignored — only the root
+        // project's errorHandler is honoured.
+        file_prog.error_handler = None;
+        // Mounts are activation decisions that belong to the consumer; a
+        // library declaring its own mounts shouldn't auto-activate them in
+        // the host project.
+        file_prog.mounts.clear();
+        merge_program(program, file_prog)?;
+    }
+    Ok(())
+}
+
+/// If a decl has no namespace tag, assign one based on the package name.
+/// Decls that already declared their own `namespace` keep it.
+fn apply_default_namespace(prog: &mut Program, default_ns: &str) {
+    let default = vec![default_ns.to_string()];
+    for f in &mut prog.functions {
+        if f.namespace.is_empty() {
+            f.namespace = default.clone();
+        }
+    }
+    for m in &mut prog.models {
+        if m.namespace.is_empty() {
+            m.namespace = default.clone();
+        }
+    }
+    for r in &mut prog.routes {
+        if r.namespace.is_empty() {
+            r.namespace = default.clone();
+        }
+    }
+    for mw in &mut prog.middlewares {
+        if mw.namespace.is_empty() {
+            mw.namespace = default.clone();
+        }
+    }
+    for c in &mut prog.dbcontexts {
+        if c.namespace.is_empty() {
+            c.namespace = default.clone();
+        }
+    }
+}
+
+/// Merge `incoming` (a per-file Program) into `combined`. Each file's
+/// declarations already carry the file's namespace tag; the merge just
+/// concatenates the lists and enforces the single-errorHandler invariant.
+pub fn merge_program(combined: &mut Program, incoming: Program) -> Result<()> {
+    combined.dbcontexts.extend(incoming.dbcontexts);
+    combined.models.extend(incoming.models);
+    combined.routes.extend(incoming.routes);
+    combined.functions.extend(incoming.functions);
+    combined.middlewares.extend(incoming.middlewares);
+    combined.imports.extend(incoming.imports);
+    combined.mounts.extend(incoming.mounts);
+    if let Some(eh) = incoming.error_handler {
+        if combined.error_handler.is_some() {
+            bail!("only one errorHandler is allowed across all project files");
+        }
+        combined.error_handler = Some(eh);
+    }
+    Ok(())
 }
 
 fn collect_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {

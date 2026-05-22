@@ -16,6 +16,11 @@ declarations you'll meet:
 - `middleware Name { ... }` — request preprocessor
 - `errorHandler (e) { ... }` — global catch-all
 - `dome Name { ... }` — static-class namespace
+- `namespace foo.bar;` — file-scoped package namespace
+- `import foo.bar;` — bring another namespace's public items into scope
+- `mount lib at "/p";` — activate a library's routes (optionally prefixed)
+- `group "/p" use Mw { ... }` — wrap inner routes/mounts with shared prefix + middleware
+- `public` / `private` — visibility modifier on functions / models / middleware
 
 Everything else is a statement or an expression.
 
@@ -120,6 +125,51 @@ route WS "/chat" {
 }
 ```
 
+## Packages
+
+A library project sets `"type": "pkg"` and lives in its own namespace:
+
+```jwc
+// greet-lib/main.jwc
+namespace greet;
+
+private function build_message(name: string): string { return `Hello, ${name}`; }
+public  function hello(name: string): string { return build_message(name); }
+
+public middleware RequestLog {
+    print(`[greet] inbound request`);
+    return null;
+}
+
+route GET "/greet/{name}" {
+    return json({ message: hello(path_param("name")) });
+}
+```
+
+The consumer adds the dep and activates what it wants:
+
+```bash
+jwc add greet-lib --path ../greet-lib
+```
+
+```jwc
+// app/main.jwc
+import greet;
+
+group "/api" use SomeMiddleware {
+    mount greet at "/greet";       // → /api/greet/greet/{name}
+}
+
+route GET "/" use greet.RequestLog {
+    return json({ message: greet.hello("world") });
+}
+
+function main() { serve(8080); }
+```
+
+See [examples/pkg-demo/](https://github.com/Nodirbek1KB/jwc-lang/tree/main/examples/pkg-demo)
+for an end-to-end demo with middleware, prefixed mounts, and visibility errors.
+
 ## What you can't do (yet)
 
 - Async runtime — the interpreter is sync; HTTP is async via
@@ -129,5 +179,6 @@ route WS "/chat" {
   are on the roadmap).
 - LLVM AOT compile — `jwc build` bundles the runtime; native code
   generation is the long-term Phase 4 goal.
-- Package manager — `jwcproj.json::dependencies` exists but is not
-  resolved yet.
+- Public registry — path and git sources work today;
+  `jwc-registry.1kb.uz` HTTP registry server is the next deliverable
+  (`jwc publish` / `jwc login` follow).

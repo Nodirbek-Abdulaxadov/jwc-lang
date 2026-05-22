@@ -6,8 +6,16 @@ use crate::ast::{
     AggregateKind, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
     FieldReference, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, NavigationField,
     NavigationKind, OnDeleteAction, Program, RouteDecl, RouteProtocol, SortDir, Stmt, TypeSpec,
-    TypedParam, ValidateField, ValidateRule, WhereExpr,
+    TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
 };
+
+fn visibility_from(is_pub: bool) -> Visibility {
+    if is_pub {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    }
+}
 use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
 
@@ -16,11 +24,26 @@ pub fn parse_program(source: &str) -> Result<Program> {
     parser.parse_program()
 }
 
+/// FQN helper used by validate_program. Identical shape to `runner::fqn_key`
+/// but duplicated here to avoid a dependency from parser → runner.
+fn ns_fqn(namespace: &[String], name: &str) -> String {
+    if namespace.is_empty() {
+        name.to_lowercase()
+    } else {
+        let ns = namespace
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        format!("{}.{}", ns, name.to_lowercase())
+    }
+}
+
 pub fn validate_program(program: &Program) -> Result<()> {
     let mut ctx_names = HashSet::new();
     let mut ctx_drivers: HashMap<String, String> = HashMap::new();
     for ctx in &program.dbcontexts {
-        let key = ctx.name.to_lowercase();
+        let key = ns_fqn(&ctx.namespace, &ctx.name);
         if !ctx_names.insert(key) {
             bail!("Duplicate dbcontext name: {}", ctx.name);
         }
@@ -37,7 +60,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
     let mut entity_fields_by_table: HashMap<(String, String), Vec<String>> = HashMap::new();
     let mut entity_navigations: HashMap<String, HashMap<String, NavigationField>> = HashMap::new();
     for model in &program.models {
-        let model_key = model.name.to_lowercase();
+        let model_key = ns_fqn(&model.namespace, &model.name);
         if !model_names.insert(model_key) {
             bail!("Duplicate model name: {}", model.name);
         }
@@ -45,7 +68,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
         if model.kind != ModelKind::Entity {
             continue;
         }
-        let key = model.name.to_lowercase();
+        let key = ns_fqn(&model.namespace, &model.name);
         if !entity_names.insert(key) {
             bail!("Duplicate entity name: {}", model.name);
         }
@@ -193,7 +216,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
     let mut fn_names = HashSet::new();
     for function in &program.functions {
-        let key = function.name.to_lowercase();
+        let key = ns_fqn(&function.namespace, &function.name);
         if !fn_names.insert(key) {
             bail!("Duplicate function name: {}", function.name);
         }
@@ -231,7 +254,14 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
         if let Some(handler) = &route.handler {
             let handler_key = handler.to_lowercase();
-            if !fn_names.contains(&handler_key) {
+            // Accept either a fully-qualified name or a bare function name that
+            // matches any declared function (any namespace).
+            let matches_any = fn_names.contains(&handler_key)
+                || program.functions.iter().any(|f| {
+                    let fqn = ns_fqn(&f.namespace, &f.name);
+                    fqn == handler_key || f.name.to_lowercase() == handler_key
+                });
+            if !matches_any {
                 bail!("Route handler '{}' is not defined as a function", handler);
             }
         }
@@ -260,7 +290,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
     let mut mw_names = HashSet::new();
     for mw in &program.middlewares {
-        let key = mw.name.to_lowercase();
+        let key = ns_fqn(&mw.namespace, &mw.name);
         if !mw_names.insert(key) {
             bail!("Duplicate middleware name: {}", mw.name);
         }
@@ -287,7 +317,13 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
     for route in &program.routes {
         for mw_ref in &route.middlewares {
-            if !mw_names.contains(&mw_ref.to_lowercase()) {
+            let key = mw_ref.to_lowercase();
+            let matches_any = mw_names.contains(&key)
+                || program.middlewares.iter().any(|m| {
+                    let fqn = ns_fqn(&m.namespace, &m.name);
+                    fqn == key || m.name.to_lowercase() == key
+                });
+            if !matches_any {
                 bail!(
                     "Route {} {} references unknown middleware '{}'",
                     route.method,
@@ -1332,6 +1368,22 @@ struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token,
     source_map: SourceMap,
+    /// Active namespace for the current file. `namespace foo.bar;` sets this
+    /// for the rest of the file. Cleared by `__jwc_namespace_reset__;` (see
+    /// `project::load_project_from_root` for the inter-file reset trick).
+    current_namespace: Vec<String>,
+    /// Stack of group contexts. Each entry contributes one path segment and
+    /// (optionally) middleware names to every `route` and `mount` parsed
+    /// inside it. Frames are pushed/popped around `group { ... }` blocks.
+    group_stack: Vec<GroupFrame>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GroupFrame {
+    /// Just this frame's own prefix segment (already starts with `/` or is empty).
+    prefix: String,
+    /// Just this frame's own middleware list (does not include outer frames).
+    middlewares: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -1342,51 +1394,145 @@ impl<'a> Parser<'a> {
             lexer,
             current,
             source_map: SourceMap::new(source),
+            current_namespace: Vec::new(),
+            group_stack: Vec::new(),
         })
+    }
+
+    /// The accumulated path prefix from every enclosing group, joined.
+    /// Always starts with `/` when non-empty; returns empty string at root.
+    fn group_prefix(&self) -> String {
+        let mut out = String::new();
+        for frame in &self.group_stack {
+            out.push_str(&frame.prefix);
+        }
+        out
+    }
+
+    /// All middleware names contributed by enclosing groups, in outer→inner
+    /// order. Each route's own `use Mw, ...` list is appended after this.
+    fn group_middlewares(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for frame in &self.group_stack {
+            out.extend(frame.middlewares.iter().cloned());
+        }
+        out
     }
 
     fn parse_program(&mut self) -> Result<Program> {
         let mut program = Program::default();
+        // Pending visibility modifier: Some(true) → next decl is public,
+        // Some(false) → explicit private, None → no modifier (defaults to
+        // private). Tracking three states catches `public public function`
+        // and `public private function` as user errors.
+        let mut pending_vis: Option<bool> = None;
 
         while !matches!(self.current.kind, TokenKind::Eof) {
+            // `public` / `private` modifiers immediately before a declaration.
+            if matches!(self.current.kind, TokenKind::Keyword(Keyword::Public)) {
+                if pending_vis.is_some() {
+                    return Err(self.error_here("duplicate visibility modifier"));
+                }
+                self.bump()?;
+                pending_vis = Some(true);
+                continue;
+            }
+            if matches!(self.current.kind, TokenKind::Keyword(Keyword::Private)) {
+                if pending_vis.is_some() {
+                    return Err(self.error_here("duplicate visibility modifier"));
+                }
+                self.bump()?;
+                pending_vis = Some(false);
+                continue;
+            }
+
+            // Snapshot the pending visibility for this iteration. The match
+            // arms that accept a modifier call `take()` so the next loop
+            // iteration starts clean; arms that reject one leave it as-is
+            // and we error out below.
+            let next_pub = pending_vis.unwrap_or(false);
+
             match &self.current.kind {
                 TokenKind::Keyword(Keyword::Import) => {
-                    self.parse_import_stmt()?;
+                    pending_vis = None;
+                    self.parse_import_stmt(&mut program)?;
                 }
                 TokenKind::Keyword(Keyword::Namespace) => {
-                    self.parse_namespace_stmt()?;
+                    pending_vis = None;
+                    self.parse_namespace_stmt(&program)?;
+                }
+                TokenKind::Keyword(Keyword::Mount) => {
+                    pending_vis = None;
+                    program.mounts.push(self.parse_mount_stmt()?);
+                }
+                TokenKind::Keyword(Keyword::Group) => {
+                    pending_vis = None;
+                    self.parse_group_block(&mut program)?;
                 }
                 TokenKind::Keyword(Keyword::DbContext) => {
-                    program.dbcontexts.push(self.parse_dbcontext_decl()?);
+                    pending_vis = None;
+                    let mut decl = self.parse_dbcontext_decl()?;
+                    decl.namespace = self.current_namespace.clone();
+                    program.dbcontexts.push(decl);
                 }
                 TokenKind::Keyword(Keyword::Entity) => {
-                    program.models.push(self.parse_model_decl(ModelKind::Entity)?);
+                    pending_vis = None;
+                    let mut decl = self.parse_model_decl(ModelKind::Entity)?;
+                    decl.namespace = self.current_namespace.clone();
+                    decl.visibility = visibility_from(next_pub);
+                    program.models.push(decl);
                 }
                 TokenKind::Keyword(Keyword::Class) => {
-                    program.models.push(self.parse_model_decl(ModelKind::Class)?);
+                    pending_vis = None;
+                    let mut decl = self.parse_model_decl(ModelKind::Class)?;
+                    decl.namespace = self.current_namespace.clone();
+                    decl.visibility = visibility_from(next_pub);
+                    program.models.push(decl);
                 }
                 TokenKind::Keyword(Keyword::Route) => {
-                    program.routes.push(self.parse_route_decl()?);
+                    pending_vis = None;
+                    let mut decl = self.parse_route_decl()?;
+                    decl.namespace = self.current_namespace.clone();
+                    // Visibility on routes is currently a no-op — routes are
+                    // activation-gated via `register` instead.
+                    program.routes.push(decl);
                 }
                 TokenKind::Keyword(Keyword::Function) => {
-                    program.functions.push(self.parse_function_decl(None)?);
+                    pending_vis = None;
+                    let mut fn_decl = self.parse_function_decl(None)?;
+                    fn_decl.namespace = self.current_namespace.clone();
+                    fn_decl.visibility = visibility_from(next_pub);
+                    program.functions.push(fn_decl);
                 }
                 TokenKind::Keyword(Keyword::Async) => {
+                    pending_vis = None;
                     self.bump()?;
                     if !matches!(self.current.kind, TokenKind::Keyword(Keyword::Function)) {
                         return Err(self.error_here("expected 'function' after 'async'"));
                     }
                     let mut fn_decl = self.parse_function_decl(None)?;
                     fn_decl.is_async = true;
+                    fn_decl.namespace = self.current_namespace.clone();
+                    fn_decl.visibility = visibility_from(next_pub);
                     program.functions.push(fn_decl);
                 }
                 TokenKind::Keyword(Keyword::Dome) => {
-                    self.parse_dome_decl(&mut program)?;
+                    pending_vis = None;
+                    self.parse_dome_decl(&mut program, next_pub)?;
                 }
                 TokenKind::Keyword(Keyword::Middleware) => {
-                    program.middlewares.push(self.parse_middleware_decl()?);
+                    pending_vis = None;
+                    let mut decl = self.parse_middleware_decl()?;
+                    decl.namespace = self.current_namespace.clone();
+                    decl.visibility = visibility_from(next_pub);
+                    program.middlewares.push(decl);
                 }
                 TokenKind::Keyword(Keyword::ErrorHandler) => {
+                    if pending_vis.is_some() {
+                        return Err(self.error_here(
+                            "visibility modifier is not valid on errorHandler",
+                        ));
+                    }
                     if program.error_handler.is_some() {
                         return Err(self.error_here("only one errorHandler is allowed per project"));
                     }
@@ -1400,10 +1546,16 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     return Err(self.error_here(
-                        "expected import, namespace, dbcontext, entity/class, route, function, middleware, errorHandler, or dome",
+                        "expected import, namespace, mount, group, public, private, dbcontext, entity/class, route, function, middleware, errorHandler, or dome",
                     ));
                 }
             }
+        }
+
+        if pending_vis.is_some() {
+            return Err(self.error_here(
+                "trailing visibility modifier has no declaration to apply to",
+            ));
         }
 
         Ok(program)
@@ -1421,7 +1573,11 @@ impl<'a> Parser<'a> {
             self.expect_symbol(';')?;
         }
 
-        Ok(DbContextDecl { name, driver })
+        Ok(DbContextDecl {
+            name,
+            driver,
+            namespace: Vec::new(),
+        })
     }
 
     fn skip_braced_block(&mut self) -> Result<()> {
@@ -1444,27 +1600,162 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_import_stmt(&mut self) -> Result<()> {
+    /// `import foo.bar;` — opens a package namespace for the current file.
+    /// Records the import scoped to the file's current namespace so the
+    /// resolver only applies it where it was declared.
+    fn parse_import_stmt(&mut self, program: &mut Program) -> Result<()> {
         self.expect_keyword(Keyword::Import)?;
-        self.parse_qualified_name()?;
+        let path = self.parse_qualified_path()?;
         self.expect_symbol(';')?;
+        program.imports.push(crate::ast::ImportDecl {
+            path,
+            in_namespace: self.current_namespace.clone(),
+        });
         Ok(())
     }
 
-    fn parse_namespace_stmt(&mut self) -> Result<()> {
+    /// `namespace foo.bar;` — sets the namespace for the rest of the file.
+    /// Only one `namespace` per file. Empty `program` check is used to
+    /// require it appear before any declaration.
+    fn parse_namespace_stmt(&mut self, program: &Program) -> Result<()> {
         self.expect_keyword(Keyword::Namespace)?;
-        self.parse_qualified_name()?;
+        let path = self.parse_qualified_path()?;
         self.expect_symbol(';')?;
+        if !self.current_namespace.is_empty() {
+            return Err(self.error_here("only one 'namespace' declaration is allowed per file"));
+        }
+        if !program.functions.is_empty()
+            || !program.models.is_empty()
+            || !program.routes.is_empty()
+            || !program.middlewares.is_empty()
+            || !program.dbcontexts.is_empty()
+        {
+            return Err(self.error_here(
+                "'namespace' must appear before any declaration in the file",
+            ));
+        }
+        self.current_namespace = path;
+        Ok(())
+    }
+
+    /// `mount foo [at "/prefix"];` — activate a library namespace's routes.
+    /// Inherits any prefix/middleware from enclosing `group` blocks.
+    fn parse_mount_stmt(&mut self) -> Result<crate::ast::MountDecl> {
+        self.expect_keyword(Keyword::Mount)?;
+        let target = self.parse_qualified_path()?;
+        if target.is_empty() {
+            return Err(self.error_here("expected namespace name after 'mount'"));
+        }
+
+        // Optional `at "/prefix"` segment.
+        let mut own_prefix: Option<String> = None;
+        if let TokenKind::Ident(v) = &self.current.kind {
+            if v.eq_ignore_ascii_case("at") {
+                self.bump()?;
+                let p = self.expect_string("expected prefix string after 'at'")?;
+                if !p.starts_with('/') {
+                    return Err(self.error_here("mount prefix must start with '/'"));
+                }
+                own_prefix = Some(p);
+            }
+        }
+        self.expect_symbol(';')?;
+
+        // Compose with enclosing group context.
+        let group_prefix = self.group_prefix();
+        let final_prefix = match (group_prefix.is_empty(), own_prefix) {
+            (true, None) => None,
+            (true, Some(p)) => Some(p),
+            (false, None) => Some(group_prefix),
+            (false, Some(p)) => Some(format!("{}{}", group_prefix, p)),
+        };
+
+        Ok(crate::ast::MountDecl {
+            target,
+            prefix: final_prefix,
+            middlewares: self.group_middlewares(),
+        })
+    }
+
+    /// `group ["/prefix"] [use Mw1, Mw2] { ITEMS... }` — wrap inner routes
+    /// and mounts with a shared prefix and middleware chain. Either the
+    /// prefix or the `use` clause (or both) must be present.
+    fn parse_group_block(&mut self, program: &mut Program) -> Result<()> {
+        self.expect_keyword(Keyword::Group)?;
+
+        let mut prefix = String::new();
+        if let TokenKind::String(_) = &self.current.kind {
+            let p = self.expect_string("expected group prefix string")?;
+            if !p.starts_with('/') {
+                return Err(self.error_here("group prefix must start with '/'"));
+            }
+            prefix = p;
+        }
+
+        let mut middlewares: Vec<String> = Vec::new();
+        if matches!(self.current.kind, TokenKind::Keyword(Keyword::Use)) {
+            self.bump()?;
+            // Each middleware is a qualified path (`Mw` or `pkg.Mw`).
+            middlewares.push(self.parse_qualified_name()?);
+            while self.check_symbol(',') {
+                self.bump()?;
+                middlewares.push(self.parse_qualified_name()?);
+            }
+        }
+
+        if prefix.is_empty() && middlewares.is_empty() {
+            return Err(self.error_here(
+                "group must have a prefix string, a `use` clause, or both",
+            ));
+        }
+
+        self.expect_symbol('{')?;
+        self.group_stack.push(GroupFrame { prefix, middlewares });
+        // Parse body as a mini top-level loop — only items that respect
+        // group context are allowed (route, mount, nested group).
+        while !self.check_symbol('}') {
+            match &self.current.kind {
+                TokenKind::Keyword(Keyword::Route) => {
+                    let mut decl = self.parse_route_decl()?;
+                    decl.namespace = self.current_namespace.clone();
+                    program.routes.push(decl);
+                }
+                TokenKind::Keyword(Keyword::Mount) => {
+                    program.mounts.push(self.parse_mount_stmt()?);
+                }
+                TokenKind::Keyword(Keyword::Group) => {
+                    self.parse_group_block(program)?;
+                }
+                TokenKind::Eof => {
+                    self.group_stack.pop();
+                    return Err(self.error_here("unterminated 'group' block"));
+                }
+                _ => {
+                    self.group_stack.pop();
+                    return Err(self.error_here(
+                        "only 'route', 'mount', or nested 'group' allowed inside a group block",
+                    ));
+                }
+            }
+        }
+        self.expect_symbol('}')?;
+        self.group_stack.pop();
         Ok(())
     }
 
     fn parse_qualified_name(&mut self) -> Result<String> {
+        let parts = self.parse_qualified_path()?;
+        Ok(parts.join("."))
+    }
+
+    /// Parses a dot-separated identifier sequence into its parts.
+    fn parse_qualified_path(&mut self) -> Result<Vec<String>> {
         let mut parts = vec![self.expect_ident("expected identifier")?];
         while self.check_symbol('.') {
             self.expect_symbol('.')?;
             parts.push(self.expect_ident("expected identifier after '.'")?);
         }
-        Ok(parts.join("."))
+        Ok(parts)
     }
 
     fn parse_model_decl(&mut self, kind: ModelKind) -> Result<ModelDecl> {
@@ -1555,6 +1846,8 @@ impl<'a> Parser<'a> {
             context_name,
             fields,
             navigations,
+            namespace: Vec::new(),
+            visibility: Visibility::Private,
         })
     }
 
@@ -1594,7 +1887,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_dome_decl(&mut self, program: &mut Program) -> Result<()> {
+    fn parse_dome_decl(&mut self, program: &mut Program, is_pub: bool) -> Result<()> {
         self.expect_keyword(Keyword::Dome)?;
         let dome_name = self.expect_ident("expected dome name")?;
         self.expect_symbol('{')?;
@@ -1602,7 +1895,10 @@ impl<'a> Parser<'a> {
         while !self.check_symbol('}') {
             match &self.current.kind {
                 TokenKind::Keyword(Keyword::Function) => {
-                    program.functions.push(self.parse_function_decl(Some(&dome_name))?);
+                    let mut decl = self.parse_function_decl(Some(&dome_name))?;
+                    decl.namespace = self.current_namespace.clone();
+                    decl.visibility = visibility_from(is_pub);
+                    program.functions.push(decl);
                 }
                 _ => {
                     return Err(self.error_here("expected function declaration inside dome block"))
@@ -1617,20 +1913,29 @@ impl<'a> Parser<'a> {
     fn parse_route_decl(&mut self) -> Result<RouteDecl> {
         self.expect_keyword(Keyword::Route)?;
         let method = self.expect_ident("expected HTTP method (GET/POST/PUT/DELETE/PATCH/WS)")?;
-        let path = self.expect_string("expected route path string")?;
+        let own_path = self.expect_string("expected route path string")?;
 
-        // Optional `use M1[, M2, ...]` middleware list
-        let middlewares = if self.current.kind == TokenKind::Keyword(Keyword::Use) {
+        // Apply enclosing group prefix to the path (if any). Routes outside
+        // any group keep their own path verbatim.
+        let group_prefix = self.group_prefix();
+        let path = if group_prefix.is_empty() {
+            own_path
+        } else {
+            format!("{}{}", group_prefix, own_path)
+        };
+
+        // Optional `use M1[, M2, ...]` middleware list. Group-supplied
+        // middlewares run BEFORE the route's own list. Each entry is a
+        // qualified path (`Mw` or `pkg.Mw`) — FQN resolved at runtime.
+        let mut middlewares = self.group_middlewares();
+        if self.current.kind == TokenKind::Keyword(Keyword::Use) {
             self.bump()?;
-            let mut names = vec![self.expect_ident("expected middleware name after 'use'")?];
+            middlewares.push(self.parse_qualified_name()?);
             while self.check_symbol(',') {
                 self.expect_symbol(',')?;
-                names.push(self.expect_ident("expected middleware name after ','")?);
+                middlewares.push(self.parse_qualified_name()?);
             }
-            names
-        } else {
-            Vec::new()
-        };
+        }
 
         let protocol = if method.eq_ignore_ascii_case("ws") {
             RouteProtocol::Ws
@@ -1655,6 +1960,7 @@ impl<'a> Parser<'a> {
                 body: Vec::new(),
                 middlewares,
                 protocol,
+                namespace: Vec::new(),
             });
         }
 
@@ -1666,6 +1972,7 @@ impl<'a> Parser<'a> {
             body,
             middlewares,
             protocol,
+            namespace: Vec::new(),
         })
     }
 
@@ -1712,7 +2019,12 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Middleware)?;
         let name = self.expect_ident("expected middleware name")?;
         let body = self.parse_block()?;
-        Ok(MiddlewareDecl { name, body })
+        Ok(MiddlewareDecl {
+            name,
+            body,
+            namespace: Vec::new(),
+            visibility: Visibility::Private,
+        })
     }
 
     fn parse_type_spec(&mut self) -> Result<TypeSpec> {
@@ -1787,6 +2099,8 @@ impl<'a> Parser<'a> {
             return_type,
             body,
             is_async: false,
+            namespace: Vec::new(),
+            visibility: Visibility::Private,
         })
     }
 
@@ -3686,6 +4000,11 @@ mod tests {
         "#;
 
         let err = parse_program(src).unwrap_err().to_string();
-        assert!(err.contains("expected import, namespace, dbcontext, entity/class"));
+        // The exact preamble varies with the keyword list; the stable hint
+        // is that the parser names the legal top-level forms.
+        assert!(
+            err.contains("expected") && err.contains("entity/class"),
+            "unexpected error: {err}"
+        );
     }
 }

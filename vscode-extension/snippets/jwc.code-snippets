@@ -349,5 +349,84 @@
       "}"
     ],
     "description": "Full CRUD routes for an entity"
+  },
+
+  "Namespace declaration": {
+    "prefix": "namespace",
+    "body": ["namespace ${1:my_pkg};", ""],
+    "description": "File-scoped namespace declaration"
+  },
+
+  "Import a package namespace": {
+    "prefix": "import",
+    "body": ["import ${1:greet};"],
+    "description": "Import another namespace's public members"
+  },
+
+  "Public function": {
+    "prefix": "pub-fn",
+    "body": [
+      "public function ${1:name}(${2:params}): ${3:type} {",
+      "\t${4:// body}",
+      "}"
+    ],
+    "description": "Public (exported) function"
+  },
+
+  "Private function": {
+    "prefix": "priv-fn",
+    "body": [
+      "private function ${1:name}(${2:params}): ${3:type} {",
+      "\t${4:// body}",
+      "}"
+    ],
+    "description": "Explicit private function (same as no modifier)"
+  },
+
+  "Public middleware": {
+    "prefix": "pub-middleware",
+    "body": [
+      "public middleware ${1:Name} {",
+      "\t${2:// return null to continue, return any value to short-circuit}",
+      "\treturn null;",
+      "}"
+    ],
+    "description": "Library-exported middleware"
+  },
+
+  "Mount a library": {
+    "prefix": "mount",
+    "body": ["mount ${1:greet}${2: at \"/${3:prefix}\"};"],
+    "description": "Activate a library's routes (optionally under a prefix)"
+  },
+
+  "Group with prefix + middleware": {
+    "prefix": "group",
+    "body": [
+      "group \"${1:/api}\" use ${2:Mw1}${3:, Mw2} {",
+      "\t${4:// route / mount / nested group}",
+      "}"
+    ],
+    "description": "Wrap routes and mounts with shared prefix + middleware chain"
+  },
+
+  "Group prefix only": {
+    "prefix": "group-prefix",
+    "body": [
+      "group \"${1:/api}\" {",
+      "\t${2:// route / mount / nested group}",
+      "}"
+    ],
+    "description": "Group with prefix, no middleware"
+  },
+
+  "Group middleware only": {
+    "prefix": "group-use",
+    "body": [
+      "group use ${1:Mw1}${2:, Mw2} {",
+      "\t${3:// route / mount / nested group}",
+      "}"
+    ],
+    "description": "Group with middleware, no prefix"
   }
 }

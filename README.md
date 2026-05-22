@@ -145,8 +145,114 @@ Main commands:
 - `jwc migrate new <name>`: Create migration files
 - `jwc migrate up`: Apply pending migrations
 - `jwc migrate down [--steps N]`: Rollback the most recent applied migration(s)
+- `jwc add <pkg> [--version <req>|--path <dir>|--git <url> [--rev <rev>]]`: Add a dependency
+- `jwc install` (alias `jwc fetch`): Resolve `jwcproj.lock` and populate `~/.jwc/registry/`
+- `jwc update [pkg]`: Re-resolve all (or one) deps within their semver ranges
+- `jwc remove <pkg>`: Drop a dependency
+- `jwc tree`: Print the resolved dependency tree
 
 Request logging is disabled by default.
+
+## Packages
+
+JWC has a Cargo-style package system. A project's manifest (`<name>.jwcproj`)
+declares a project `type` and its `dependencies`:
+
+```json
+{
+    "name": "myapp",
+    "type": "app",
+    "pkgVersion": "0.1.0",
+    "dependencies": {
+        "greet-lib":     { "path": "../greet-lib" },
+        "internal":      { "git": "git@github.com:org/internal.git", "rev": "v1.2.3" },
+        "http":          "^1.2"
+    }
+}
+```
+
+Field reference:
+
+- `type`: `"app"` (runnable, default) or `"pkg"` (library — `jwc run/serve/build` refuse to run it).
+- `pkgVersion`: semver of THIS package, used when another project depends on it.
+- `dependencies`: BTreeMap of dep specs. Each value can be a shorthand version
+  string (`"^1.2"`) or a detailed object with one of `path`, `git+rev`, or `version`+`registry`.
+- `//` line comments and `/* … */` block comments are accepted (JSONC), as are
+  trailing commas.
+
+A reproducible `jwcproj.lock` is written on the first resolve and re-read on
+subsequent runs to keep version selection stable.
+
+### Language-level package features
+
+Library code lives in a **namespace**:
+
+```jwc
+// greet-lib/main.jwc
+namespace greet;
+
+private function build_message(name: string): string { return `Hello, ${name}`; }
+public  function hello(name: string): string { return build_message(name); }
+
+public middleware RequestLog {
+    print(`[greet] inbound request`);
+    return null;
+}
+
+route GET "/ping"            { return json({ status: "ok" }); }
+route GET "/greet/{name}"   { return json({ message: hello(path_param("name")) }); }
+```
+
+- `namespace foo.bar;` at the top of a file scopes its declarations.
+- `public` exports a declaration to other namespaces. The default is `private`
+  (same-namespace only). `private` may also be written explicitly.
+- Library `route` declarations are **inactive** until the consumer mounts them.
+
+Consumer code:
+
+```jwc
+import greet;
+
+middleware Cors {
+    print("[cors] ok");
+    return null;
+}
+
+middleware ApiKey {
+    let key = header("X-API-Key");
+    if (key == null) { return unauthorized({ error: "missing X-API-Key" }); }
+    return null;
+}
+
+// `mount` activates a library's routes. Prefix is optional.
+mount greet at "/public";                 // → /public/ping, /public/greet/{name}
+
+// `group` wraps inner routes/mounts with a shared prefix and middleware chain.
+group "/api" use Cors, ApiKey {
+    mount greet at "/greet";              // → /api/greet/ping (Cors + ApiKey)
+
+    route GET "/me" {                     // own route inside the same group
+        return json({ user: "alice" });
+    }
+}
+
+// Cross-namespace middleware reference (FQN).
+route GET "/" use greet.RequestLog {
+    return json({ message: greet.hello("world") });
+}
+
+function main() {
+    serve(8080);
+}
+```
+
+`group` accepts a path prefix, a `use` chain, or both, and nests naturally
+(`group "/v1" use Auth { group "/admin" use AdminOnly { ... } }`). The same
+library may be mounted at multiple prefixes — each produces its own route set.
+
+A worked end-to-end example is in
+[examples/pkg-demo/](examples/pkg-demo/) — a `greet-lib` package and an `app`
+that consumes it via a path dependency.
 
 ## Query and Path Parameters
 

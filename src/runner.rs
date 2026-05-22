@@ -6,10 +6,86 @@ use tokio_postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
 
 use crate::ast::{
-    AggregateKind, DbOrderBy, ErrorHandlerDecl, Expr, FunctionDecl, MiddlewareDecl, ModelDecl,
-    ModelKind, NavigationKind, Program, RouteDecl, RouteProtocol, SortDir, Stmt, TypedParam,
-    ValidateField, ValidateRule, WhereExpr,
+    AggregateKind, DbOrderBy, ErrorHandlerDecl, Expr, FunctionDecl, ImportDecl, MiddlewareDecl,
+    ModelDecl, ModelKind, MountDecl, NavigationKind, Program, RouteDecl, RouteProtocol, SortDir,
+    Stmt, TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
 };
+
+/// Compute the FQN key for a decl: `"ns.sub.name"` (lowercase) or just `"name"`
+/// if the decl is in the root namespace.
+pub(crate) fn fqn_key(namespace: &[String], name: &str) -> String {
+    if namespace.is_empty() {
+        name.to_lowercase()
+    } else {
+        let ns = namespace
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        format!("{}.{}", ns, name.to_lowercase())
+    }
+}
+
+/// Expand the program's routes by applying each `mount` declaration.
+///
+/// - Root-namespace routes are always included verbatim.
+/// - For every `mount` whose target matches a library route's namespace, an
+///   active route is emitted with the mount's prefix prepended to the path
+///   and the mount's middleware chain prepended to the route's own list.
+/// - The same library namespace may be mounted multiple times (e.g.
+///   `mount greet at "/api";` and `mount greet at "/public";`) — each yields
+///   its own expanded route set.
+fn expand_routes(program: &Program) -> Vec<RouteDecl> {
+    use std::collections::HashMap;
+    let mut by_ns: HashMap<String, Vec<&RouteDecl>> = HashMap::new();
+    for r in &program.routes {
+        let key = r
+            .namespace
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        by_ns.entry(key).or_default().push(r);
+    }
+
+    let mut out: Vec<RouteDecl> = Vec::new();
+
+    // Root routes — always active.
+    if let Some(roots) = by_ns.get("") {
+        for r in roots {
+            out.push((*r).clone());
+        }
+    }
+
+    // Mounted library routes.
+    for mount in &program.mounts {
+        let key = mount
+            .target
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        if let Some(lib_routes) = by_ns.get(&key) {
+            for r in lib_routes {
+                out.push(apply_mount(r, mount));
+            }
+        }
+    }
+    out
+}
+
+/// Clone a library `RouteDecl` and apply a single mount: prepend prefix to
+/// the path, prepend the mount's middleware chain to the route's own list.
+fn apply_mount(route: &RouteDecl, mount: &MountDecl) -> RouteDecl {
+    let mut copy = route.clone();
+    if let Some(prefix) = &mount.prefix {
+        copy.path = format!("{}{}", prefix, copy.path);
+    }
+    let mut mws = mount.middlewares.clone();
+    mws.extend(route.middlewares.iter().cloned());
+    copy.middlewares = mws;
+    copy
+}
 
 use std::sync::Arc;
 use std::sync::OnceLock as StdOnceLock;
@@ -81,7 +157,11 @@ pub async fn run_ws_request(
     rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     tx: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<()> {
-    let route = program
+    // Build the Vm first so we get the post-`mount` expanded route table
+    // (a library WS route mounted at "/foo" is only reachable through the
+    // expanded copy, not the unprefixed library declaration).
+    let mut vm = Vm::new(program);
+    let route = vm
         .routes
         .iter()
         .find(|r| r.protocol == RouteProtocol::Ws && r.path == route_path)
@@ -90,8 +170,6 @@ pub async fn run_ws_request(
     let handler = route.handler.clone();
     let body_stmts = route.body.clone();
     let middleware_names: Vec<String> = route.middlewares.clone();
-
-    let mut vm = Vm::new(program);
     vm.current_path_params = Some(path_params);
     vm.current_headers = Some(headers);
 
@@ -146,9 +224,18 @@ struct Vm<'a> {
     functions: HashMap<String, &'a FunctionDecl>,
     /// Model schema map (entity + class) for runtime JSON validation on typed params/returns.
     models: HashMap<String, &'a ModelDecl>,
-    routes: Vec<&'a RouteDecl>,
+    /// Expanded, owned route set produced by `expand_routes(program)`.
+    /// Each mount on a library namespace contributes its own copies here,
+    /// already prefixed and middleware-chained.
+    routes: Vec<RouteDecl>,
     middlewares: HashMap<String, &'a MiddlewareDecl>,
     error_handler: Option<&'a ErrorHandlerDecl>,
+    /// All imports in the program, indexed by the namespace they live in.
+    imports_by_namespace: HashMap<String, Vec<&'a ImportDecl>>,
+    /// Namespace of the currently-executing function. Each `call_function`
+    /// pushes the callee's namespace; the previous value is restored on
+    /// return. Empty Vec = root namespace.
+    current_namespace_stack: Vec<Vec<String>>,
     /// Primary-key columns per table (keyed by both `Entity` name and its snake_case form).
     /// Empty Vec means no `pk` declared on that entity — falls back to a single `"id"` column.
     pk_by_table: HashMap<String, Vec<String>>,
@@ -173,22 +260,41 @@ struct Vm<'a> {
 
 impl<'a> Vm<'a> {
     fn new(program: &'a Program) -> Self {
-        let mut functions = HashMap::new();
+        // Functions: indexed by simple name AND fully-qualified name. The
+        // simple-name slot is the legacy fast path for root-namespace calls
+        // and most existing user code; the FQN slot disambiguates calls
+        // across namespaces (e.g., `math.add()`).
+        let mut functions: HashMap<String, &'a FunctionDecl> = HashMap::new();
         for function in &program.functions {
-            functions.insert(function.name.to_lowercase(), function);
+            let fqn = fqn_key(&function.namespace, &function.name);
+            functions.insert(fqn.clone(), function);
+            // Root-namespace functions also get a simple-name binding so
+            // existing call sites like `call_function("main")` keep working.
+            if function.namespace.is_empty() {
+                functions.insert(function.name.to_lowercase(), function);
+            }
         }
 
-        let mut models = HashMap::new();
+        let mut models: HashMap<String, &'a ModelDecl> = HashMap::new();
         for model in &program.models {
             if matches!(model.kind, ModelKind::Entity | ModelKind::Class) {
+                let fqn = fqn_key(&model.namespace, &model.name);
+                models.insert(fqn.clone(), model);
+                // Always keep a short-name binding so `new EntityName()` and
+                // DB lookups keep working even for non-root entities.
                 models.insert(model.name.to_lowercase(), model);
             }
         }
 
-        let routes = program.routes.iter().collect();
+        // Expand library routes per the program's `mount` declarations.
+        // Root routes are always active; library routes only appear here if
+        // a mount targets their namespace.
+        let routes: Vec<RouteDecl> = expand_routes(program);
 
-        let mut middlewares = HashMap::new();
+        let mut middlewares: HashMap<String, &'a MiddlewareDecl> = HashMap::new();
         for mw in &program.middlewares {
+            let fqn = fqn_key(&mw.namespace, &mw.name);
+            middlewares.insert(fqn, mw);
             middlewares.insert(mw.name.to_lowercase(), mw);
         }
 
@@ -207,12 +313,25 @@ impl<'a> Vm<'a> {
             pk_by_table.insert(crate::sql::to_snake_case(&model.name).to_lowercase(), pks);
         }
 
+        let mut imports_by_namespace: HashMap<String, Vec<&'a ImportDecl>> = HashMap::new();
+        for imp in &program.imports {
+            let ns_key = imp
+                .in_namespace
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(".");
+            imports_by_namespace.entry(ns_key).or_default().push(imp);
+        }
+
         Self {
             functions,
             models,
             routes,
             middlewares,
             error_handler: program.error_handler.as_ref(),
+            imports_by_namespace,
+            current_namespace_stack: Vec::new(),
             pk_by_table,
             dirty_fields: HashMap::new(),
             current_path_params: None,
@@ -226,6 +345,78 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Resolve a function name to a registered FunctionDecl using the
+    /// current namespace stack (caller context) and imported namespaces.
+    ///
+    /// Priority:
+    /// 1. If `name` contains a `.`, treat it as an explicit FQN.
+    /// 2. Caller's own namespace.
+    /// 3. Imported namespaces (from `using` statements in caller's file).
+    /// 4. Root namespace (legacy backward-compat: bare names always reach root).
+    fn resolve_function(&self, name: &str) -> Option<&'a FunctionDecl> {
+        // Fast path: exact FQN match (works for both qualified calls and
+        // root-namespace calls thanks to the dual binding in Vm::new).
+        if let Some(f) = self.functions.get(&name.to_lowercase()) {
+            return Some(*f);
+        }
+        // No literal dot — try caller-aware resolution.
+        if !name.contains('.') {
+            if let Some(caller_ns) = self.current_namespace_stack.last() {
+                if !caller_ns.is_empty() {
+                    let key = fqn_key(caller_ns, name);
+                    if let Some(f) = self.functions.get(&key) {
+                        return Some(*f);
+                    }
+                }
+                // Try each import in caller's namespace.
+                let ns_key = caller_ns
+                    .iter()
+                    .map(|s| s.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if let Some(imports) = self.imports_by_namespace.get(&ns_key) {
+                    for imp in imports {
+                        let key = fqn_key(&imp.path, name);
+                        if let Some(f) = self.functions.get(&key) {
+                            return Some(*f);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Visibility check for cross-namespace calls. Same namespace: always ok.
+    /// Different namespace: requires the callee to be Public.
+    fn check_visibility(&self, callee: &FunctionDecl) -> Result<()> {
+        let caller_ns = self
+            .current_namespace_stack
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        if caller_ns == callee.namespace {
+            return Ok(());
+        }
+        if matches!(callee.visibility, Visibility::Public) {
+            return Ok(());
+        }
+        bail!(
+            "Function '{}' is private to namespace '{}' and cannot be called from '{}'",
+            callee.name,
+            if callee.namespace.is_empty() {
+                "<root>".to_string()
+            } else {
+                callee.namespace.join(".")
+            },
+            if caller_ns.is_empty() {
+                "<root>".to_string()
+            } else {
+                caller_ns.join(".")
+            },
+        );
+    }
+
     #[async_recursion]
     async fn call_function(&mut self, name: &str, args: Vec<Value>) -> Result<Option<Value>> {
         const MAX_DEPTH: usize = 256;
@@ -233,17 +424,15 @@ impl<'a> Vm<'a> {
             bail!("Call stack depth exceeded ({MAX_DEPTH})");
         }
 
-        let function = self
-            .functions
-            .get(&name.to_lowercase())
-            .copied()
-            .ok_or_else(|| {
-                let suggestion = closest_match(name, self.functions.keys());
-                match suggestion {
-                    Some(s) => anyhow!("Unknown function: {name}. Did you mean '{s}'?"),
-                    None => anyhow!("Unknown function: {name}"),
-                }
-            })?;
+        let function = self.resolve_function(name).ok_or_else(|| {
+            let suggestion = closest_match(name, self.functions.keys());
+            match suggestion {
+                Some(s) => anyhow!("Unknown function: {name}. Did you mean '{s}'?"),
+                None => anyhow!("Unknown function: {name}"),
+            }
+        })?;
+
+        self.check_visibility(function)?;
 
         if function.params.len() != args.len() {
             bail!(
@@ -255,6 +444,7 @@ impl<'a> Vm<'a> {
         }
 
         self.depth += 1;
+        self.current_namespace_stack.push(function.namespace.clone());
 
         let mut vars = HashMap::new();
         for (param, value) in function.params.iter().zip(args.into_iter()) {
@@ -267,6 +457,7 @@ impl<'a> Vm<'a> {
         self.dirty_fields = saved_dirty;
         let flow = flow_result?;
         self.depth -= 1;
+        self.current_namespace_stack.pop();
 
         match flow {
             Flow::Continue => Ok(None),
@@ -1707,20 +1898,28 @@ impl<'a> Vm<'a> {
             ),
         };
 
-        for route in &self.routes {
+        // Routes are owned data (Vec<RouteDecl>) since mount-expansion now
+        // produces fresh copies. We pick the index here, then clone what we
+        // need before any &mut self call to keep the borrow checker happy.
+        let mut matched: Option<(usize, std::collections::HashMap<String, String>)> = None;
+        for (i, route) in self.routes.iter().enumerate() {
             if !method.eq_ignore_ascii_case(&route.method) {
                 continue;
             }
+            if let Some(params) = match_route_pattern(&route.path, &path) {
+                matched = Some((i, params));
+                break;
+            }
+        }
 
-            let Some(params) = match_route_pattern(&route.path, &path) else {
-                continue;
-            };
+        if let Some((idx, params)) = matched {
+            let handler: Option<String> = self.routes[idx].handler.clone();
+            let body_stmts: Vec<Stmt> = self.routes[idx].body.clone();
 
             let previous = self.current_path_params.take();
             self.current_path_params = Some(params);
 
-            if let Some(handler) = &route.handler {
-                let handler_name = handler.clone();
+            if let Some(handler_name) = handler {
                 let args = self.build_handler_args(&handler_name);
                 let result = self.call_function(&handler_name, args).await?;
                 if let Some(value) = result {
@@ -1729,7 +1928,7 @@ impl<'a> Vm<'a> {
                 }
             } else {
                 let mut route_vars = HashMap::new();
-                let flow = self.exec_block(&route.body, &mut route_vars).await?;
+                let flow = self.exec_block(&body_stmts, &mut route_vars).await?;
                 match flow {
                     Flow::Break | Flow::ContinueLoop => {
                         self.current_path_params = previous;

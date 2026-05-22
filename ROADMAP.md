@@ -172,10 +172,30 @@
 - ⬜ `jwc fmt` — formatlash. AST → source qayta chiqaruvi. Comment preservation muammosi.
 - ⬜ `jwc add <pkg>` — paket qo‘shish (3.4 ga bog‘liq).
 
-### 3.4 Package sistemasi ⬜ deferred
-- `jwcproj.json::dependencies` real ishlatiladi.
-- Local cache (`~/.jwc/registry/`) → kelajakda `hub.jwc.dev`.
-- Versioning: semver, `^1.2.3`.
+### 3.4 Package sistemasi ✅ shipped (path + git source; registry client deferred)
+- ✅ Strukturalashgan `jwcproj.json::dependencies` (`{ "pkg": "^1.2" }` / `{ "pkg": { "path": "../lib" } }` / `{ "pkg": { "git": "...", "rev": "..." } }`).
+- ✅ `type: "app" | "pkg"` manifest field — `pkg`-type loyihalar `jwc run/serve/build` ga rad etiladi (`load.manifest.ensure_runnable()`).
+- ✅ JSONC manifest format — `//` line va `/* */` block izohlar + trailing comma toleratsiyasi (`project::strip_jsonc_comments`).
+- ✅ Reproducible `jwcproj.lock` (semver, sha256, source URI) — [src/lockfile.rs](src/lockfile.rs).
+- ✅ Backtracking resolver, conflict zanjir reporting — [src/resolver/mod.rs](src/resolver/mod.rs).
+- ✅ Source backends: `PathSource` (lokal dir), `GitSource` (shell out to `git clone --depth 1` + `git checkout <rev>`), `RegistrySource` skeleton — [src/resolver/source.rs](src/resolver/source.rs).
+- ✅ User cache layout `~/.jwc/registry/<host>/<pkg>/<version>/` va `~/.jwc/registry/git/<host>-<rev>/` — [src/pkg_cache.rs](src/pkg_cache.rs).
+- ✅ Namespace + import + visibility til xususiyatlari:
+  - `namespace foo.bar;` fayl boshida
+  - `import foo.bar;` — paketning publik a'zolarini ochadi
+  - `public` / `private` — default private, opt-in eksport
+  - `mount greet [at "/prefix"];` — library route'larini yoqadi
+  - `group "/p" use Mw1, Mw2 { ... }` — prefix + middleware bilan o'rab oladi (recursive)
+- ✅ CLI komandalar: `jwc add` (`--path`/`--git`+`--rev`/`--version`), `jwc install`, `jwc update [pkg]`, `jwc remove <pkg>`, `jwc tree`.
+- ✅ Native build (`flatten_namespaces`) mount expansion + FQN resolution-ni codegen oldidan qiladi — interpreter bilan bir xil natija.
+- ✅ HTTP Registry klienti (Cargo-shape JSON index + tar+gzip extract + sha256 verify, configurable URL: env > manifest > built-in default) — [src/registry/client.rs](src/registry/client.rs).
+- ⚠️ **`hub.jwc.dev` registry server hali alohida repoda emas** — built-in default `https://jwc-registry.1kb.uz/` placeholder. Server up bo'lguncha `path =` va `git =` ishlatiladi.
+- ⬜ `jwc publish` — keyingi fazada.
+- ⬜ `jwc login` / `~/.jwc/credentials.json` — Bearer token placeholder bor, lekin yozish CLI yo'q.
+
+### 3.5 Package registry serveri ⬜ deferred (sibling repo)
+- Mustaqil HTTP service: Cargo-mos index API + tarball blob store.
+- Domain: `jwc-registry.1kb.uz`.
 
 ---
 
@@ -368,15 +388,16 @@ Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
 
 ## Priority Timeline
 
-Phase 0–2, 6–9 tugallandi. Keyingi ish ustuvorligi:
+Phase 0–2, 3.4 (path/git), 6–9 tugallandi. Keyingi ish ustuvorligi:
 
 ```
 hozir    →  Phase 9.5 — real benchmark natijalari (bench-cs/bench.py/jmeter)
 1-2 oy   →  Phase 3.1+ — LSP go-to-definition, autocomplete, semantic tokens
 2-4 oy   →  Phase 3.3 — `jwc fmt` (AST → source, comment preservation)
+4-8 oy   →  Phase 3.5 — `jwc-registry.1kb.uz` registry server (alohida repo)
 4-8 oy   →  Phase 4.2 — native codegen kengaytmasi (cross-target, LLVM IR)
-8-12 oy  →  Phase 3.4 — package sistemasi (`jwcproj.json::dependencies`)
-12+ oy   →  Phase 5 — wasm target, hub.jwc.dev, Redis-backed cache, S3, SSE
+8-12 oy  →  Phase 3.4 v1.1 — `jwc publish` / `jwc login` (registry server ishga tushgandan keyin)
+12+ oy   →  Phase 5 — wasm target, Redis-backed cache, S3, SSE
 ```
 
 ---

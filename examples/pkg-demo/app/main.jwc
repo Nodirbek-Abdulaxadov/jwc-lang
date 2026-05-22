@@ -1,0 +1,54 @@
+import greet;
+
+// --- Local middleware declared by the app -----------------------------
+
+// CORS preflight stub. Real impl would set response headers; for this
+// example we just log so you can see when it runs.
+middleware Cors {
+    print("[cors] ok");
+    return null;
+}
+
+// Requires an X-API-Key header. Short-circuits with 401 when absent.
+middleware ApiKey {
+    let key = header("X-API-Key");
+    if (key == null) {
+        return unauthorized({ error: "missing X-API-Key" });
+    }
+    return null;
+}
+
+// --- Mounts + groups --------------------------------------------------
+
+// Public health endpoint — Cors only, no auth.
+group "/health" use Cors {
+    route GET "/" {
+        return json({ status: "ok" });
+    }
+}
+
+// Library routes mounted under /api, behind both Cors and ApiKey.
+// Every route inside (own routes AND mounted ones) inherits the chain.
+group "/api" use Cors, ApiKey {
+    mount greet at "/greet";            // → /api/greet/ping, /api/greet/greet/{name}
+
+    route GET "/me" {                   // own route inside the same group
+        return json({ user: "alice" });
+    }
+}
+
+// Same library mounted again at a different prefix WITHOUT auth —
+// useful for public read-only endpoints. Demonstrates that one library
+// can be mounted in multiple places.
+mount greet at "/public";               // → /public/ping, /public/greet/{name}
+
+// Top-level route using a middleware EXPORTED by the library
+// (cross-namespace reference via FQN).
+route GET "/" use greet.RequestLog {
+    return json({ message: greet.hello("world") });
+}
+
+function main() {
+    print("starting pkg-demo on :8080");
+    serve(8080);
+}

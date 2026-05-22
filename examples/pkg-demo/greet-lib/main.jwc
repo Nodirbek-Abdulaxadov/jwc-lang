@@ -1,0 +1,33 @@
+namespace greet;
+
+private function build_message(name: string): string {
+    return `Hello, ${name}! Welcome to JWC.`;
+}
+
+public function hello(name: string): string {
+    return build_message(name);
+}
+
+public function shout(name: string): string {
+    return upper(build_message(name));
+}
+
+// Reusable middleware exported by the library. Consumers reference it by
+// its fully-qualified name: `greet.RequestLog`.
+//
+// Middleware contract: return null to continue, return any non-null Value
+// to short-circuit the request (the value becomes the response).
+public middleware RequestLog {
+    print(`[greet] inbound request`);
+    return null;
+}
+
+// Library routes — inactive until the consumer `mount`s them.
+route GET "/ping" {
+    return json({ source: "greet-lib", status: "ok" });
+}
+
+route GET "/greet/{name}" {
+    let name = path_param("name");
+    return json({ message: hello(name) });
+}

@@ -1,5 +1,5 @@
 use jwc::{
-    error_report, lint, migrate, native_build, parser, project, runner, server, sql,
+    cmd, error_report, lint, migrate, native_build, parser, project, runner, server, sql,
 };
 
 use std::{fs, path::PathBuf};
@@ -51,6 +51,41 @@ enum Command {
         #[command(subcommand)]
         command: MigrateCommand,
     },
+    /// Add a dependency to the project.
+    ///
+    /// Source flags (mutually exclusive): `--path`, `--git[ + --rev]`, or
+    /// just a version requirement (defaults to the configured registry).
+    Add {
+        /// Package name as it appears in the manifest.
+        pkg: String,
+        /// Semver requirement (e.g. `^1.2`, `=0.4.0`). Required for
+        /// registry/git sources unless `--path` is given.
+        #[arg(long)]
+        version: Option<String>,
+        /// Local filesystem source. Relative to the project root.
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Git URL.
+        #[arg(long)]
+        git: Option<String>,
+        /// Git revision (commit/tag).
+        #[arg(long)]
+        rev: Option<String>,
+    },
+    /// Fetch all deps from the lockfile into `~/.jwc/registry/`.
+    #[command(alias = "fetch")]
+    Install,
+    /// Re-resolve deps (optionally just one) within their semver ranges.
+    Update {
+        /// Restrict the update to a single package name. Omit to update all.
+        pkg: Option<String>,
+    },
+    /// Remove a dependency from the manifest and lockfile.
+    Remove {
+        pkg: String,
+    },
+    /// Print the resolved dependency tree.
+    Tree,
     /// Start a real HTTP server for a JWC project
     Serve {
         /// Project directory or jwcproj.json (defaults to current dir)
@@ -165,6 +200,7 @@ fn real_main() -> Result<()> {
                 let root = project::find_project_root(&target)?;
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
+                loaded.manifest.ensure_runnable()?;
                 let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = rt.block_on(runner::run_main(&loaded.program))?;
                 if !result.output.is_empty() { print!("{}", result.output); }
@@ -183,6 +219,7 @@ fn real_main() -> Result<()> {
                     .to_path_buf();
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
+                loaded.manifest.ensure_runnable()?;
                 let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = rt.block_on(runner::run_main(&loaded.program))?;
                 if !result.output.is_empty() { print!("{}", result.output); }
@@ -235,6 +272,7 @@ fn real_main() -> Result<()> {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             let loaded = project::load_project_from_root(&root)?;
+            loaded.manifest.ensure_runnable()?;
             let profile = if release { "release" } else { "debug" };
 
             if native {
@@ -282,6 +320,38 @@ fn real_main() -> Result<()> {
                 }
             }
         }
+        Command::Add { pkg, version, path, git, rev } => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            cmd::pkg::add(
+                &root,
+                &pkg,
+                version.as_deref(),
+                path.as_deref(),
+                git.as_deref(),
+                rev.as_deref(),
+            )?;
+        }
+        Command::Install => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            cmd::pkg::install(&root)?;
+        }
+        Command::Update { pkg } => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            cmd::pkg::update(&root, pkg.as_deref())?;
+        }
+        Command::Remove { pkg } => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            cmd::pkg::remove(&root, &pkg)?;
+        }
+        Command::Tree => {
+            let cwd = std::env::current_dir()?;
+            let root = project::find_project_root(&cwd)?;
+            cmd::pkg::tree(&root)?;
+        }
         Command::Serve {
             path,
             port,
@@ -303,6 +373,7 @@ fn real_main() -> Result<()> {
             } else {
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
+                loaded.manifest.ensure_runnable()?;
                 server::serve(&loaded.program, port, request_logging)?;
             }
         }
@@ -501,6 +572,7 @@ fn try_run_embedded_app(rt: &tokio::runtime::Runtime) -> Result<bool> {
 
     project::load_dotenv(&root);
     let loaded = project::load_project_from_root(&root)?;
+    loaded.manifest.ensure_runnable()?;
     let result = rt.block_on(runner::run_main(&loaded.program))?;
     if !result.output.is_empty() {
         print!("{}", result.output);

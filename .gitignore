@@ -1,3 +1,7 @@
 /target
 examples/*/bin/
 examples/*/.jwc-build/
+
+# Claude Code session artefacts
+.claude/scheduled_tasks.lock
+.claude/worktrees/

@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod cache;
+pub mod cmd;
 pub mod diag;
 pub mod email;
 pub mod engine;
@@ -13,12 +14,16 @@ pub mod error_report;
 pub mod jwt;
 pub mod lexer;
 pub mod lint;
+pub mod lockfile;
 pub mod migrate;
 pub mod native_build;
 pub mod parser;
 pub mod password;
+pub mod pkg_cache;
 pub mod project;
 pub mod queue;
+pub mod registry;
+pub mod resolver;
 pub mod runner;
 pub mod schema_diff;
 pub mod server;

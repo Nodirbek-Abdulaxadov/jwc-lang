@@ -59,6 +59,9 @@ The above is a working CRUD endpoint, complete with:
 - **Real stack out of the box** — HTTP/2 + WebSocket via axum, JWT,
   Argon2 password hashing, in-memory cache, SMTP email, in-process queue,
   LSP server.
+- **Cargo-style package system** — namespaces, `public`/`private`,
+  `mount`/`group`, `jwcproj.lock`, path and git sources today (HTTP
+  registry coming next).
 
 ## Where to next
 
@@ -69,12 +72,13 @@ The above is a working CRUD endpoint, complete with:
 
 ## Status
 
-The language is in active development. Phases 0–9 (core MVP, business
-logic, axum + WebSocket, LSP, in-process queue, DX polish, real
-async/await on tokio + `tokio-postgres`) are shipped and exercised by the
-[microblog](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/microblog)
+The language is in active development. Phases 0–9, plus Phase 3.4
+(package system: path/git deps, lockfile, `mount`/`group`,
+visibility) are shipped and exercised by the
+[microblog](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/microblog),
+[async_demo](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/async_demo),
 and
-[async_demo](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/async_demo)
-examples. The remaining vision items — LLVM AOT, package registry,
-multi-driver dbcontext — are tracked in
+[pkg-demo](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/pkg-demo)
+examples. The remaining vision items — LLVM AOT, public HTTP
+registry server, multi-driver dbcontext — are tracked in
 [ROADMAP.md](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md).

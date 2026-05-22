@@ -22,6 +22,13 @@
 //! --native): dbcontext / entity / class / middleware / errorHandler / route
 //! `-> handler` form, DB / WS / job-queue built-ins, `try`/`catch`,
 //! `transaction`, `await`. These land in subsequent slices.
+//!
+//! Package system: namespaces, `import`, and `mount`/`group` are honoured by
+//! `flatten_namespaces` before any codegen — function calls are resolved to
+//! their target FQN, library routes expanded per mount (prefix + middlewares
+//! applied), inactive ones dropped. Visibility (`public`/`private`) is
+//! enforced by the interpreter but NOT re-checked here; `validate_program`
+//! upstream is the single source of truth.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,7 +36,408 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::ast::{AggregateKind, Expr, FunctionDecl, ModelKind, NavigationField, Program, Stmt};
+use crate::ast::{
+    AggregateKind, Expr, FunctionDecl, ImportDecl, ModelKind, MountDecl, NavigationField, Program,
+    RouteDecl, Stmt,
+};
+
+/// Compute the FQN form a decl will be emitted under in generated Rust:
+/// lowercase, dot-joined, e.g. `"math.utils.add"`. Root decls (empty
+/// namespace) keep their bare name. `user_fn_name` later sanitises `.` to `_`
+/// so the resulting Rust identifier is valid.
+fn ns_fqn(ns: &[String], name: &str) -> String {
+    if ns.is_empty() {
+        name.to_lowercase()
+    } else {
+        format!(
+            "{}.{}",
+            ns.iter()
+                .map(|s| s.to_lowercase())
+                .collect::<Vec<_>>()
+                .join("."),
+            name.to_lowercase()
+        )
+    }
+}
+
+/// Apply one mount to a library route: prepend prefix, prepend middlewares.
+/// Same shape as the runner's helper so the interpreter and native binary
+/// produce identical effective route tables.
+fn apply_mount_to_route(route: &RouteDecl, mount: &MountDecl) -> RouteDecl {
+    let mut copy = route.clone();
+    if let Some(prefix) = &mount.prefix {
+        copy.path = format!("{}{}", prefix, copy.path);
+    }
+    let mut mws = mount.middlewares.clone();
+    mws.extend(route.middlewares.iter().cloned());
+    copy.middlewares = mws;
+    copy
+}
+
+/// Walk `program` and emit a new Program where every Decl `name` and every
+/// Expr::Call `name` is rewritten into its fully-qualified form. After this
+/// pass the rest of native_build can treat the AST as flat — no namespace
+/// awareness needed downstream.
+fn flatten_namespaces(program: &Program) -> Program {
+    // Index library routes by their namespace so each `mount` can find them
+    // when expanding. Same shape as `runner::expand_routes`.
+    let mut routes_by_ns: HashMap<String, Vec<&RouteDecl>> = HashMap::new();
+    for r in &program.routes {
+        let key = r
+            .namespace
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        routes_by_ns.entry(key).or_default().push(r);
+    }
+
+    // Dbcontexts always come along when their declaring namespace is
+    // referenced anywhere via `mount` or `import`. Compute that set here so
+    // we don't drop the dbcontext when the project depends on its entities.
+    let mut active_dbctx_ns: HashSet<String> = HashSet::new();
+    active_dbctx_ns.insert(String::new());
+    for m in &program.mounts {
+        active_dbctx_ns.insert(
+            m.target
+                .iter()
+                .map(|x| x.to_lowercase())
+                .collect::<Vec<_>>()
+                .join("."),
+        );
+    }
+    for imp in &program.imports {
+        active_dbctx_ns.insert(
+            imp.path
+                .iter()
+                .map(|x| x.to_lowercase())
+                .collect::<Vec<_>>()
+                .join("."),
+        );
+    }
+
+    // Build the lookup tables the resolver needs:
+    //   short_name → list of FQNs declaring that name (any namespace)
+    //   imports_by_ns → file-scoped `import` declarations per namespace
+    let mut fn_short_to_fqns: HashMap<String, Vec<String>> = HashMap::new();
+    let mut mw_short_to_fqns: HashMap<String, Vec<String>> = HashMap::new();
+    let mut fqn_set: HashSet<String> = HashSet::new();
+    for f in &program.functions {
+        let fqn = ns_fqn(&f.namespace, &f.name);
+        fn_short_to_fqns.entry(f.name.to_lowercase()).or_default().push(fqn.clone());
+        fqn_set.insert(fqn);
+    }
+    for m in &program.middlewares {
+        let fqn = ns_fqn(&m.namespace, &m.name);
+        mw_short_to_fqns.entry(m.name.to_lowercase()).or_default().push(fqn.clone());
+        fqn_set.insert(fqn);
+    }
+
+    let mut imports_by_ns: HashMap<String, Vec<&ImportDecl>> = HashMap::new();
+    for imp in &program.imports {
+        let key = imp
+            .in_namespace
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        imports_by_ns.entry(key).or_default().push(imp);
+    }
+
+    let resolver = NameResolver {
+        fn_short_to_fqns: &fn_short_to_fqns,
+        mw_short_to_fqns: &mw_short_to_fqns,
+        fqn_set: &fqn_set,
+        imports_by_ns: &imports_by_ns,
+    };
+
+    let mut out = Program::default();
+
+    // Functions: rename to FQN, walk body to resolve calls in caller's namespace.
+    for f in &program.functions {
+        let mut nf = f.clone();
+        nf.name = ns_fqn(&f.namespace, &f.name);
+        resolver.rewrite_stmts(&mut nf.body, &f.namespace);
+        nf.namespace = Vec::new();
+        out.functions.push(nf);
+    }
+
+    // Middlewares: same.
+    for m in &program.middlewares {
+        let mut nm = m.clone();
+        nm.name = ns_fqn(&m.namespace, &m.name);
+        resolver.rewrite_stmts(&mut nm.body, &m.namespace);
+        nm.namespace = Vec::new();
+        out.middlewares.push(nm);
+    }
+
+    // Helper to lower-and-resolve a single source route into the output set.
+    let emit_route = |out: &mut Program, r: &RouteDecl| {
+        let mut nr = r.clone();
+        nr.middlewares = nr
+            .middlewares
+            .iter()
+            .map(|m| resolver.resolve_mw(m, &r.namespace))
+            .collect();
+        if let Some(h) = &nr.handler {
+            nr.handler = Some(resolver.resolve_fn(h, &r.namespace));
+        }
+        resolver.rewrite_stmts(&mut nr.body, &r.namespace);
+        nr.namespace = Vec::new();
+        out.routes.push(nr);
+    };
+
+    // Root namespace routes — always active, emit as-is.
+    if let Some(roots) = routes_by_ns.get("") {
+        for r in roots {
+            emit_route(&mut out, r);
+        }
+    }
+
+    // Library routes — emit one copy per mount, with prefix and inherited
+    // middleware chain applied (same as runner::expand_routes).
+    for mount in &program.mounts {
+        let key = mount
+            .target
+            .iter()
+            .map(|x| x.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        if let Some(lib_routes) = routes_by_ns.get(&key) {
+            for r in lib_routes {
+                let mounted = apply_mount_to_route(r, mount);
+                emit_route(&mut out, &mounted);
+            }
+        }
+    }
+
+    // DbContexts come along when their namespace is mounted OR imported.
+    for c in &program.dbcontexts {
+        let key = c
+            .namespace
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        if !active_dbctx_ns.contains(&key) {
+            continue;
+        }
+        let mut nc = c.clone();
+        nc.namespace = Vec::new();
+        out.dbcontexts.push(nc);
+    }
+
+    // Models keep their unqualified name — entity/class lookup in native_build
+    // is still by simple name. Two models with the same short name across
+    // namespaces would already fail validate_program, so a collision here
+    // can't slip through.
+    out.models = program.models.clone();
+    for m in &mut out.models {
+        m.namespace = Vec::new();
+    }
+
+    out.error_handler = program.error_handler.clone();
+    // imports / mounts were consumed by this pass — drop them.
+    out
+}
+
+struct NameResolver<'a> {
+    fn_short_to_fqns: &'a HashMap<String, Vec<String>>,
+    mw_short_to_fqns: &'a HashMap<String, Vec<String>>,
+    fqn_set: &'a HashSet<String>,
+    imports_by_ns: &'a HashMap<String, Vec<&'a ImportDecl>>,
+}
+
+impl<'a> NameResolver<'a> {
+    /// Resolve a function reference written inside namespace `caller_ns` to
+    /// a concrete FQN. Falls back to the original name if no user function
+    /// matches (builtin or unknown — codegen will reject the latter).
+    fn resolve_fn(&self, name: &str, caller_ns: &[String]) -> String {
+        let lower = name.to_lowercase();
+        // 1. Already a known FQN.
+        if self.fqn_set.contains(&lower) {
+            return lower;
+        }
+        if !lower.contains('.') {
+            // 2. caller_ns.name
+            if !caller_ns.is_empty() {
+                let key = ns_fqn(caller_ns, name);
+                if self.fqn_set.contains(&key) {
+                    return key;
+                }
+            }
+            // 3. imports active in caller_ns.
+            let ns_key = caller_ns
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(".");
+            if let Some(imps) = self.imports_by_ns.get(&ns_key) {
+                for imp in imps {
+                    let key = ns_fqn(&imp.path, name);
+                    if self.fqn_set.contains(&key) {
+                        return key;
+                    }
+                }
+            }
+            // 4. Root.
+            if let Some(fqns) = self.fn_short_to_fqns.get(&lower) {
+                if let Some(root_fqn) = fqns.iter().find(|f| !f.contains('.')) {
+                    return root_fqn.clone();
+                }
+                // 5. Any single unique match.
+                if fqns.len() == 1 {
+                    return fqns[0].clone();
+                }
+            }
+        }
+        // Unresolved — leave as-is. Could be a builtin or an error to surface
+        // later in codegen.
+        lower
+    }
+
+    fn resolve_mw(&self, name: &str, caller_ns: &[String]) -> String {
+        let lower = name.to_lowercase();
+        if !lower.contains('.') {
+            if !caller_ns.is_empty() {
+                let key = ns_fqn(caller_ns, name);
+                if self
+                    .mw_short_to_fqns
+                    .values()
+                    .flatten()
+                    .any(|f| f == &key)
+                {
+                    return key;
+                }
+            }
+            if let Some(fqns) = self.mw_short_to_fqns.get(&lower) {
+                if let Some(root_fqn) = fqns.iter().find(|f| !f.contains('.')) {
+                    return root_fqn.clone();
+                }
+                if fqns.len() == 1 {
+                    return fqns[0].clone();
+                }
+            }
+        }
+        lower
+    }
+
+    fn rewrite_stmts(&self, stmts: &mut [Stmt], caller_ns: &[String]) {
+        for s in stmts {
+            self.rewrite_stmt(s, caller_ns);
+        }
+    }
+
+    fn rewrite_stmt(&self, s: &mut Stmt, caller_ns: &[String]) {
+        match s {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::FieldAssign { value, .. }
+            | Stmt::Print(value)
+            | Stmt::Expr(value) => self.rewrite_expr(value, caller_ns),
+            Stmt::Return(Some(v)) => self.rewrite_expr(v, caller_ns),
+            Stmt::If { cond, then_body, else_body } => {
+                self.rewrite_expr(cond, caller_ns);
+                self.rewrite_stmts(then_body, caller_ns);
+                if let Some(eb) = else_body {
+                    self.rewrite_stmts(eb, caller_ns);
+                }
+            }
+            Stmt::While { cond, body } => {
+                self.rewrite_expr(cond, caller_ns);
+                self.rewrite_stmts(body, caller_ns);
+            }
+            Stmt::Try { body, catch_body, .. } => {
+                self.rewrite_stmts(body, caller_ns);
+                self.rewrite_stmts(catch_body, caller_ns);
+            }
+            Stmt::Transaction { body } => self.rewrite_stmts(body, caller_ns),
+            Stmt::ForIn { iter, body, .. } => {
+                self.rewrite_expr(iter, caller_ns);
+                self.rewrite_stmts(body, caller_ns);
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_expr(&self, e: &mut Expr, caller_ns: &[String]) {
+        match e {
+            Expr::Call { name, args } => {
+                let lower = name.to_lowercase();
+                // Only rewrite if it looks like a user function ref. If the
+                // resolver returns something different, swap it in.
+                let resolved = self.resolve_fn(&lower, caller_ns);
+                if resolved != lower {
+                    *name = resolved;
+                }
+                for a in args {
+                    self.rewrite_expr(a, caller_ns);
+                }
+            }
+            Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => {
+                self.rewrite_expr(inner, caller_ns)
+            }
+            Expr::Add(a, b)
+            | Expr::Sub(a, b)
+            | Expr::Mul(a, b)
+            | Expr::Div(a, b)
+            | Expr::Mod(a, b)
+            | Expr::Eq(a, b)
+            | Expr::Neq(a, b)
+            | Expr::Lt(a, b)
+            | Expr::Lte(a, b)
+            | Expr::Gt(a, b)
+            | Expr::Gte(a, b)
+            | Expr::And(a, b)
+            | Expr::Or(a, b) => {
+                self.rewrite_expr(a, caller_ns);
+                self.rewrite_expr(b, caller_ns);
+            }
+            Expr::ObjectLit(pairs) => {
+                for (_, v) in pairs {
+                    self.rewrite_expr(v, caller_ns);
+                }
+            }
+            Expr::DbSelect { where_clause, limit, offset, .. } => {
+                if let Some(wc) = where_clause {
+                    self.rewrite_where(wc, caller_ns);
+                }
+                if let Some(l) = limit {
+                    self.rewrite_expr(l, caller_ns);
+                }
+                if let Some(o) = offset {
+                    self.rewrite_expr(o, caller_ns);
+                }
+            }
+            Expr::DbCount { where_clause, .. } | Expr::DbAggregate { where_clause, .. } => {
+                if let Some(wc) = where_clause {
+                    self.rewrite_where(wc, caller_ns);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_where(&self, wc: &mut crate::ast::WhereExpr, caller_ns: &[String]) {
+        use crate::ast::WhereExpr;
+        match wc {
+            WhereExpr::Atom(a) => self.rewrite_expr(&mut a.rhs, caller_ns),
+            WhereExpr::InList { values, .. } => {
+                for v in values {
+                    self.rewrite_expr(v, caller_ns);
+                }
+            }
+            WhereExpr::Between { low, high, .. } => {
+                self.rewrite_expr(low, caller_ns);
+                self.rewrite_expr(high, caller_ns);
+            }
+            WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
+                self.rewrite_where(l, caller_ns);
+                self.rewrite_where(r, caller_ns);
+            }
+        }
+    }
+}
 
 const BUILD_DIR_NAME: &str = ".jwc-build";
 
@@ -206,6 +614,12 @@ fn program_uses_http_client(program: &Program) -> bool {
 }
 
 pub fn compile(program: &Program, root: &Path, app_name: &str, release: bool) -> Result<CompileReport> {
+    // Flatten namespaces / imports / mounts before any other pass so every
+    // downstream step (reject_unsupported, codegen) sees a single
+    // root-namespace Program with FQN-keyed names and expanded route copies.
+    let flat = flatten_namespaces(program);
+    let program = &flat;
+
     reject_unsupported(program)?;
 
     let cargo = find_cargo().context(
@@ -441,6 +855,8 @@ const PRELUDE_DB: &str = include_str!("native_prelude_db.rs.in");
 const PRELUDE_WS: &str = include_str!("native_prelude_ws.rs.in");
 
 fn codegen(program: &Program, needs_db: bool) -> Result<String> {
+    // `program` is already a flattened Program (see compile()) — every
+    // FunctionDecl/Stmt::Call references functions by their resolved FQN.
     let known_funcs: HashSet<String> = program
         .functions
         .iter()

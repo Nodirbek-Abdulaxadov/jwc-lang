@@ -4,10 +4,13 @@ Syntax highlighting, snippets, and LSP-powered diagnostics for [JWC (Just Web Co
 
 ## Features
 
-- Syntax highlighting for `.jwc` files
-- Snippets for routes, entities, queries, CRUD scaffolds
-- Diagnostics (parse + validate + lint) via `jwc-lsp`
-- Hover info on entities / classes / functions
+- Syntax highlighting for `.jwc` files (including the package keywords
+  `namespace`, `import`, `mount`, `group`, `public`, `private`).
+- Snippets for routes, entities, queries, CRUD scaffolds, and package
+  pieces (`namespace`, `import`, `mount`, `group`, `pub-fn`, `priv-fn`,
+  `pub-middleware`).
+- Diagnostics (parse + validate + lint) via `jwc-lsp`.
+- Hover info on entities / classes / functions.
 
 ## Requirements
 
