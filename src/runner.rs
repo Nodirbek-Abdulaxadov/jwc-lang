@@ -11,6 +11,115 @@ use crate::ast::{
     Stmt, TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
 };
 
+/// Known error kinds for typed-catch dispatch (Phase 10.5).
+///
+/// `"Error"` is the catch-all super-kind — every error matches it, equivalent
+/// to a bare `catch (e)` without a type annotation. Specific kinds match
+/// only when the error chain looks like it came from that subsystem.
+pub(crate) const JWC_ERROR_KINDS: &[&str] = &[
+    "Error",
+    "DbError",
+    "HttpError",
+    "ValidationError",
+    "TimeoutError",
+];
+
+/// Classify an `anyhow::Error` into one of the well-known JWC error kinds.
+///
+/// v1 is pattern-based — it inspects the messages on the error chain looking
+/// for signature substrings each subsystem leaves behind (deadpool/postgres
+/// for DB, reqwest/http for HTTP, validate-body shape for Validation, tokio
+/// timeout for Timeout). When nothing matches we return `"Error"`, which
+/// also matches a `catch (e: Error)` clause and any untyped catch.
+///
+/// Future versions can switch to a typed `JwcError` enum and downcast on the
+/// chain — keep the classifier signature stable so callers don't change.
+pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
+    let mut msgs: Vec<String> = e.chain().map(|c| c.to_string().to_lowercase()).collect();
+    let blob = msgs.join("\n");
+    msgs.push(blob);
+    let combined = msgs.join("\n");
+
+    let has = |needles: &[&str]| -> bool {
+        needles.iter().any(|n| combined.contains(n))
+    };
+
+    if has(&[
+        "validate body",
+        "validation failed",
+        "field '",
+        "required",
+        "minlength",
+        "maxlength",
+        "is not declared on",
+        "type error",
+    ]) {
+        return "ValidationError";
+    }
+    if has(&[
+        "deadpool",
+        "tokio-postgres",
+        "postgres",
+        "db error",
+        "no connection",
+        "pool",
+        "advisory lock",
+        "migration",
+        "sql",
+    ]) {
+        return "DbError";
+    }
+    if has(&["timeout", "deadline", "elapsed"]) {
+        return "TimeoutError";
+    }
+    if has(&[
+        "http",
+        "reqwest",
+        "status code",
+        "url",
+        "fetch_json",
+        "http_get",
+        "http_post",
+    ]) {
+        return "HttpError";
+    }
+    "Error"
+}
+
+/// Returns true when an error of `kind` should be caught by a `catch (e: T)`
+/// clause whose annotated type is `catch_type` (or any error if `catch_type`
+/// is `None`). `"Error"` as the catch type matches everything, mirroring the
+/// untyped catch.
+pub(crate) fn catch_type_matches(catch_type: Option<&str>, kind: &str) -> bool {
+    match catch_type {
+        None => true,
+        Some("Error") => true,
+        Some(t) => t == kind,
+    }
+}
+
+/// Best closest-known-kind suggestion for an unknown catch-type identifier.
+/// Returns `None` when nothing is similar enough to surface as a hint.
+pub(crate) fn closest_known_kind(target: &str) -> Option<&'static str> {
+    let target_lc = target.to_ascii_lowercase();
+    let threshold = std::cmp::max(2, target_lc.len() / 3);
+    let mut best: Option<(usize, &'static str)> = None;
+    for &candidate in JWC_ERROR_KINDS {
+        if candidate.eq_ignore_ascii_case(target) {
+            continue;
+        }
+        let dist = levenshtein(&target_lc, &candidate.to_ascii_lowercase());
+        if dist > threshold {
+            continue;
+        }
+        match best {
+            Some((d, _)) if d <= dist => {}
+            _ => best = Some((dist, candidate)),
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 /// Compute the FQN key for a decl: `"ns.sub.name"` (lowercase) or just `"name"`
 /// if the decl is in the root namespace.
 pub(crate) fn fqn_key(namespace: &[String], name: &str) -> String {
@@ -838,13 +947,20 @@ impl<'a> Vm<'a> {
             Stmt::Try {
                 body,
                 catch_var,
-                catch_type: _,
+                catch_type,
                 catch_body,
             } => {
                 let try_result = self.exec_block(body, vars).await;
                 match try_result {
                     Ok(flow) => Ok(flow),
                     Err(e) => {
+                        let kind = classify_jwc_error(&e);
+                        if !catch_type_matches(catch_type.as_deref(), kind) {
+                            // Annotated `catch (e: T)` clause that doesn't match
+                            // this error kind — re-raise so an outer handler
+                            // (or the errorHandler) gets a shot at it.
+                            return Err(e);
+                        }
                         let mut all_msgs: Vec<String> = e
                             .chain()
                             .map(|c| c.to_string())
@@ -855,6 +971,7 @@ impl<'a> Vm<'a> {
                             all_msgs.remove(0)
                         };
                         let err_obj = json!({
+                            "type": kind,
                             "message": message,
                             "causes": all_msgs,
                         });

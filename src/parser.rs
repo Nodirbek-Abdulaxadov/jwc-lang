@@ -843,9 +843,25 @@ fn validate_stmt(
         }
         Stmt::Try {
             body,
+            catch_type,
             catch_body,
             ..
         } => {
+            if let Some(t) = catch_type {
+                if !crate::runner::JWC_ERROR_KINDS.contains(&t.as_str()) {
+                    let kinds = crate::runner::JWC_ERROR_KINDS.join(", ");
+                    let hint = match crate::runner::closest_known_kind(t) {
+                        Some(s) => format!(" — did you mean `{}`?", s),
+                        None => String::new(),
+                    };
+                    bail!(
+                        "unknown catch type `{}`{}. Known kinds: {}",
+                        t,
+                        hint,
+                        kinds
+                    );
+                }
+            }
             validate_stmts(
                 body,
                 ctx_names,

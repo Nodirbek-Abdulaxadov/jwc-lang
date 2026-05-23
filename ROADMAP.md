@@ -20,7 +20,7 @@
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
 | Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp + WebSocket) |
 | Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
-| Phase 10 — Observability + streaming + SSE | ⬜ Planned (tracing/OTel, stream `select`, `route SSE`, typed-catch dispatch, native cross-target) |
+| Phase 10 — Observability + streaming + SSE | ⏳ Partial (10.5 typed-catch dispatch ✅ v1; tracing/OTel, stream `select`, `route SSE`, native cross-target qoldi) |
 
 ---
 
@@ -126,7 +126,7 @@
 ### 2.3 `try / catch` ✅
 - Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.
 - Catch var bound: `{"message": "...", "causes": [...]}` JSON sifatida.
-- `catch_type` AST'da saqlanadi, hozircha barcha xatolarni ushlaydi (typed dispatch — Phase 10.5 da).
+- `catch_type` Phase 10.5 da real ishladi — message-pattern classifier orqali type'ga qarab dispatch; noma'lum kinds kompayl vaqtida bail.
 
 ### 2.4 Middleware ✅
 - Top-level `middleware Name { ... }` deklaratsiyasi.
@@ -432,14 +432,22 @@ shiftini ham shu Phase'da o'lchab tasdiqlaymiz.
 - Subscriber registry: `sse_broadcast(topic, payload)` — pub/sub uchun
   in-process channel.
 
-### 10.5 Typed-catch dispatch (Phase 2.3 davomi)
-- `catch (e: DbError)` / `catch (e: ValidationError)` — error type'ga
-  qarab branch.
-- Built-in error class hierarchy: `Error`, `DbError`, `HttpError`,
-  `ValidationError`, `TimeoutError`.
-- `try { ... } catch (e: DbError) { ... } catch (e) { ... }` — birinchi
-  mos tip ushlaydi.
-- Compile-time: noma'lum error type aniqlanadi (`closest_match`).
+### 10.5 Typed-catch dispatch ✅ v1
+- ✅ Built-in error kinds (`runner::JWC_ERROR_KINDS`): `Error`,
+  `DbError`, `HttpError`, `ValidationError`, `TimeoutError`.
+- ✅ `catch (e: DbError)` filter — runtime message-pattern classifier
+  (`runner::classify_jwc_error`) ishlaydi; type mos kelmasa xato qayta
+  ko'tariladi (outer handler / `errorHandler` ushlaydi).
+- ✅ Catch'da bound bo'lgan err JSON endi `{ "type": kind, "message", "causes" }` —
+  `e.type` orqali user code branch qila oladi.
+- ✅ Validator: noma'lum catch type "Did you mean?" hint bilan kompayl
+  vaqtida bail qiladi (`closest_known_kind`).
+- ✅ Native AOT codegen mirror'i: `jwc_classify_error` + `jwc_catch_type_matches`
+  prelude'da, mismatch'da `resume_unwind`.
+- ⬜ **Qoldi v2:** bir `try` blokda bir nechta `catch` clause
+  (`catch (e: DbError) {} catch (e) {}`) — hozir bitta catch. Bu AST refactor.
+- ⬜ **Qoldi v2:** classifierni `JwcError` enum + `.downcast_ref` ga
+  ko'chirish — message-pattern brittle.
 
 ### 10.6 Native cross-target (Phase 4.2 davomi)
 - `jwc build --native --target x86_64-unknown-linux-musl` — static binary.

@@ -1268,8 +1268,8 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
         Stmt::ValidateBody { fields } => {
             emit_validate_body(out, &pad, fields, ctx);
         }
-        Stmt::Try { body, catch_var, catch_body, .. } => {
-            emit_try_catch(out, &pad, body, catch_var, catch_body, indent, ctx);
+        Stmt::Try { body, catch_var, catch_type, catch_body, .. } => {
+            emit_try_catch(out, &pad, body, catch_var, catch_type.as_deref(), catch_body, indent, ctx);
         }
         Stmt::Transaction { body } => {
             emit_transaction(out, &pad, body, indent, ctx);
@@ -1282,6 +1282,7 @@ fn emit_try_catch(
     pad: &str,
     body: &[Stmt],
     catch_var: &str,
+    catch_type: Option<&str>,
     catch_body: &[Stmt],
     indent: usize,
     ctx: &CodegenCtx,
@@ -1317,12 +1318,27 @@ fn emit_try_catch(
     out.push_str(&inner);
     out.push_str("}\n");
 
-    // On panic, bind error to catch_var and run catch_body.
+    // On panic, classify the error, optionally filter by catch_type, then
+    // bind error to catch_var and run catch_body. Mismatched typed catches
+    // re-raise via `resume_unwind` so an outer handler can see them.
     out.push_str(&inner);
     out.push_str("if let Err(__e) = __res {\n");
     out.push_str(&inner2);
+    out.push_str("let __msg = jwc_panic_payload_to_string(__e);\n");
+    out.push_str(&inner2);
+    out.push_str("let __kind = jwc_classify_error(&__msg);\n");
+    let type_arg = match catch_type {
+        Some(t) => format!("Some(\"{}\")", t.replace('\\', "\\\\").replace('"', "\\\"")),
+        None => "None".to_string(),
+    };
+    out.push_str(&inner2);
     out.push_str(&format!(
-        "let mut {}: V = jwc_error_value(jwc_panic_payload_to_string(__e));\n",
+        "if !jwc_catch_type_matches({}, __kind) {{ std::panic::resume_unwind(Box::new(__msg)); }}\n",
+        type_arg
+    ));
+    out.push_str(&inner2);
+    out.push_str(&format!(
+        "let mut {}: V = jwc_error_value(__msg);\n",
         sanitize_ident(catch_var),
     ));
     for s in catch_body {

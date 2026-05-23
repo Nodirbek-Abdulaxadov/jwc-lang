@@ -12,10 +12,18 @@
 //! container, set `DATABASE_URL` to point at it, and serialise tests with a
 //! `Mutex<()>` so each one gets a fresh `public` schema. This mirrors how the
 //! production runtime sees the world, while keeping isolation per test.
+//!
+//! ## Async note
+//!
+//! Phase 9 moved `engine` / `runner` / `migrate` to async APIs backed by
+//! `deadpool-postgres` + `tokio-postgres`. Tests therefore run on a
+//! `#[tokio::test(flavor = "multi_thread")]` runtime so the synchronous
+//! `testcontainers` boot path can coexist with the async DB calls.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use anyhow::bail;
 use jwc::engine;
 use jwc::migrate;
 use jwc::parser::{parse_program, validate_program};
@@ -63,12 +71,13 @@ fn shared_postgres_url() -> Option<&'static str> {
 
 /// Acquire the global test lock and reset the `public` schema. Returns `None`
 /// when Docker is unavailable — callers then early-return as a graceful skip.
-fn fresh_schema() -> Option<(std::sync::MutexGuard<'static, ()>, &'static str)> {
+async fn fresh_schema() -> Option<(std::sync::MutexGuard<'static, ()>, &'static str)> {
     let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let url = shared_postgres_url()?;
-    let mut client = engine::connect_for_migrations(url).ok()?;
+    let client = engine::connect_for_migrations(url).await.ok()?;
     client
         .batch_execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        .await
         .ok()?;
     Some((guard, url))
 }
@@ -94,42 +103,50 @@ fn write_project(root: &std::path::Path, main_jwc: &str, manifest_name: &str) {
     std::fs::write(root.join("main.jwc"), main_jwc).unwrap();
 }
 
-#[test]
-fn engine_init_and_basic_query() {
-    let Some((_g, url)) = fresh_schema() else {
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_init_and_basic_query() {
+    let Some((_g, url)) = fresh_schema().await else {
         skip_notice("engine_init_and_basic_query");
         return;
     };
     engine::init_engine(url).expect("init engine");
-    let result = engine::query_text("SELECT 'hello'::text", &[]).expect("query");
+    let result = engine::query_text("SELECT 'hello'::text", &[])
+        .await
+        .expect("query");
     assert_eq!(result, "hello");
 }
 
-#[test]
-fn transaction_commit_persists() {
-    let Some((_g, url)) = fresh_schema() else {
+#[tokio::test(flavor = "multi_thread")]
+async fn transaction_commit_persists() {
+    let Some((_g, url)) = fresh_schema().await else {
         skip_notice("transaction_commit_persists");
         return;
     };
     engine::init_engine(url).expect("init engine");
 
-    engine::exec(
-        "CREATE TABLE tx_commit (id integer PRIMARY KEY);",
-        &[],
-    )
-    .expect("create table");
+    engine::exec("CREATE TABLE tx_commit (id integer PRIMARY KEY);", &[])
+        .await
+        .expect("create table");
 
-    let tx = engine::begin_tx().expect("begin");
-    engine::exec("INSERT INTO tx_commit VALUES (1);", &[]).expect("insert");
-    tx.commit().expect("commit");
+    // `with_tx` commits on Ok and rolls back on Err. A successful body
+    // therefore exercises the commit path — equivalent to the old
+    // `begin_tx()` + `tx.commit()` flow.
+    engine::with_tx(|| async {
+        engine::exec("INSERT INTO tx_commit VALUES (1);", &[]).await?;
+        Ok(())
+    })
+    .await
+    .expect("with_tx commit");
 
-    let count = engine::query_text("SELECT COUNT(*)::text FROM tx_commit;", &[]).unwrap();
+    let count = engine::query_text("SELECT COUNT(*)::text FROM tx_commit;", &[])
+        .await
+        .unwrap();
     assert_eq!(count, "1");
 }
 
-#[test]
-fn transaction_rollback_on_drop_without_commit() {
-    let Some((_g, url)) = fresh_schema() else {
+#[tokio::test(flavor = "multi_thread")]
+async fn transaction_rollback_on_drop_without_commit() {
+    let Some((_g, url)) = fresh_schema().await else {
         skip_notice("transaction_rollback_on_drop_without_commit");
         return;
     };
@@ -139,25 +156,33 @@ fn transaction_rollback_on_drop_without_commit() {
         "CREATE TABLE tx_rollback (id integer PRIMARY KEY);",
         &[],
     )
+    .await
     .expect("create table");
 
-    {
-        let tx = engine::begin_tx().expect("begin");
-        engine::exec("INSERT INTO tx_rollback VALUES (1);", &[]).expect("insert");
-        // Intentionally drop without commit — TxGuard's Drop must issue ROLLBACK.
-        drop(tx);
-    }
+    // The old `begin_tx()` returned a `TxGuard` whose `Drop` issued `ROLLBACK`
+    // when not committed. The new async API expresses the same contract via
+    // `with_tx`: any `Err` returned from the body triggers a rollback. We
+    // force that branch with a sentinel error and assert the row was not
+    // persisted.
+    let res: anyhow::Result<()> = engine::with_tx(|| async {
+        engine::exec("INSERT INTO tx_rollback VALUES (1);", &[]).await?;
+        bail!("force rollback for test");
+    })
+    .await;
+    assert!(res.is_err(), "with_tx body should have returned Err");
 
-    let count = engine::query_text("SELECT COUNT(*)::text FROM tx_rollback;", &[]).unwrap();
+    let count = engine::query_text("SELECT COUNT(*)::text FROM tx_rollback;", &[])
+        .await
+        .unwrap();
     assert_eq!(
         count, "0",
-        "row leaked despite dropped TxGuard — RAII rollback didn't fire"
+        "row leaked despite Err-returning with_tx body — rollback didn't fire"
     );
 }
 
-#[test]
-fn migrate_up_then_down_roundtrip() {
-    let Some((_g, url)) = fresh_schema() else {
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_up_then_down_roundtrip() {
+    let Some((_g, url)) = fresh_schema().await else {
         skip_notice("migrate_up_then_down_roundtrip");
         return;
     };
@@ -182,15 +207,15 @@ fn migrate_up_then_down_roundtrip() {
         .expect("create migration");
     assert!(migration.up_path.exists());
 
-    let first =
-        migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
-            .expect("apply first time");
+    let first = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
+        .await
+        .expect("apply first time");
     assert_eq!(first.applied, 1);
     assert_eq!(first.skipped, 0);
 
-    let second =
-        migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
-            .expect("apply second time");
+    let second = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
+        .await
+        .expect("apply second time");
     assert_eq!(
         second.applied, 0,
         "second up should be a no-op"
@@ -198,8 +223,9 @@ fn migrate_up_then_down_roundtrip() {
     assert_eq!(second.skipped, 1);
 
     // The table must exist after `up`.
-    let exists =
-        engine::query_text("SELECT to_regclass('public.note')::text", &[]).unwrap();
+    let exists = engine::query_text("SELECT to_regclass('public.note')::text", &[])
+        .await
+        .unwrap();
     assert!(
         exists != "null" && !exists.is_empty(),
         "expected 'note' table after migrate up, got '{exists}'"
@@ -212,21 +238,23 @@ fn migrate_up_then_down_roundtrip() {
         .replace(".up.sql", ".down.sql");
     std::fs::write(&down_path, "DROP TABLE IF EXISTS note;\n").unwrap();
 
-    let rolled =
-        migrate::rollback_migrations(&project_root, Some(url.to_string()), 1)
-            .expect("rollback");
+    let rolled = migrate::rollback_migrations(&project_root, Some(url.to_string()), 1)
+        .await
+        .expect("rollback");
     assert_eq!(rolled.rolled_back, 1);
 
-    let after = engine::query_text("SELECT to_regclass('public.note')::text", &[]).unwrap();
+    let after = engine::query_text("SELECT to_regclass('public.note')::text", &[])
+        .await
+        .unwrap();
     assert!(
         after.is_empty() || after == "null",
         "table 'note' still present after migrate down, got '{after}'"
     );
 }
 
-#[test]
-fn migration_advisory_lock_blocks_concurrent_runs() {
-    let Some((_g, url)) = fresh_schema() else {
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_advisory_lock_blocks_concurrent_runs() {
+    let Some((_g, url)) = fresh_schema().await else {
         skip_notice("migration_advisory_lock_blocks_concurrent_runs");
         return;
     };
@@ -249,15 +277,19 @@ fn migration_advisory_lock_blocks_concurrent_runs() {
 
     // Hold the advisory lock manually from another connection, then try to
     // run the migration. The migrate helper must bail rather than block.
-    let mut holder = engine::connect_for_migrations(url).expect("holder client");
+    let holder = engine::connect_for_migrations(url)
+        .await
+        .expect("holder client");
     holder
         .execute(
             "SELECT pg_advisory_lock($1);",
             &[&0x6a77632d6d6967_i64],
         )
+        .await
         .expect("acquire lock");
 
     let err = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
+        .await
         .err()
         .map(|e| e.to_string())
         .unwrap_or_default();
@@ -266,14 +298,14 @@ fn migration_advisory_lock_blocks_concurrent_runs() {
         "expected advisory-lock error, got: {err}"
     );
 
-    holder
+    let _ = holder
         .execute("SELECT pg_advisory_unlock($1);", &[&0x6a77632d6d6967_i64])
-        .ok();
+        .await;
 }
 
-#[test]
-fn runner_run_request_full_crud() {
-    let Some((_g, url)) = fresh_schema() else {
+#[tokio::test(flavor = "multi_thread")]
+async fn runner_run_request_full_crud() {
+    let Some((_g, url)) = fresh_schema().await else {
         skip_notice("runner_run_request_full_crud");
         return;
     };
@@ -289,6 +321,7 @@ fn runner_run_request_full_crud() {
         );"#,
         &[],
     )
+    .await
     .unwrap();
 
     let src = r#"
@@ -332,21 +365,25 @@ fn runner_run_request_full_crud() {
         "/users",
         Some(r#"{"id":1,"name":"Najim","email":"n@example.com"}"#.to_string()),
     )
+    .await
     .expect("POST run");
     assert_eq!(status_post, 201);
     assert!(body_post.contains("\"name\":\"Najim\""));
 
-    let (status_get, body_get) =
-        runner::run_request(&program, "GET", "/users/1", None).expect("GET run");
+    let (status_get, body_get) = runner::run_request(&program, "GET", "/users/1", None)
+        .await
+        .expect("GET run");
     assert_eq!(status_get, 200);
     assert!(body_get.contains("\"email\":\"n@example.com\""));
 
-    let (status_del, _) =
-        runner::run_request(&program, "DELETE", "/users/1", None).expect("DELETE run");
+    let (status_del, _) = runner::run_request(&program, "DELETE", "/users/1", None)
+        .await
+        .expect("DELETE run");
     assert_eq!(status_del, 204);
 
-    let (status_404, _) =
-        runner::run_request(&program, "GET", "/users/1", None).expect("GET after delete");
+    let (status_404, _) = runner::run_request(&program, "GET", "/users/1", None)
+        .await
+        .expect("GET after delete");
     assert_eq!(status_404, 404);
 }
 

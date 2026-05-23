@@ -136,9 +136,66 @@ fn jwc_take_return() -> Option<V> {
     JWC_RETURN_SLOT.with(|s| s.borrow_mut().take())
 }
 
+// Classify an error message string into one of the well-known JWC error
+// kinds — mirrors `runner::classify_jwc_error` for the native AOT path.
+fn jwc_classify_error(msg: &str) -> &'static str {
+    let lc = msg.to_ascii_lowercase();
+    let has = |needles: &[&str]| -> bool { needles.iter().any(|n| lc.contains(n)) };
+    if has(&[
+        "validate body",
+        "validation failed",
+        "field '",
+        "required",
+        "minlength",
+        "maxlength",
+        "is not declared on",
+        "type error",
+    ]) {
+        return "ValidationError";
+    }
+    if has(&[
+        "deadpool",
+        "tokio-postgres",
+        "postgres",
+        "db error",
+        "no connection",
+        "pool",
+        "advisory lock",
+        "migration",
+        "sql",
+    ]) {
+        return "DbError";
+    }
+    if has(&["timeout", "deadline", "elapsed"]) {
+        return "TimeoutError";
+    }
+    if has(&[
+        "http",
+        "reqwest",
+        "status code",
+        "url",
+        "fetch_json",
+        "http_get",
+        "http_post",
+    ]) {
+        return "HttpError";
+    }
+    "Error"
+}
+
+fn jwc_catch_type_matches(catch_type: Option<&str>, kind: &str) -> bool {
+    match catch_type {
+        None => true,
+        Some("Error") => true,
+        Some(t) => t == kind,
+    }
+}
+
 // Builds the V passed to `errorHandler (e)` and `try {} catch (e)`.
 fn jwc_error_value(msg: String) -> V {
+    let kind = jwc_classify_error(&msg).to_string();
     let mut m = BTreeMap::new();
+    m.insert("type".to_string(), V::Str(kind));
     m.insert("message".to_string(), V::Str(msg));
     m.insert("causes".to_string(), V::Array(Vec::new()));
     V::Object(m)
