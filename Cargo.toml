@@ -48,3 +48,4 @@ url = "2"
 [dev-dependencies]
 testcontainers = { version = "0.20", features = ["blocking"] }
 testcontainers-modules = { version = "0.8", features = ["postgres", "blocking"] }
+tempfile = "3"

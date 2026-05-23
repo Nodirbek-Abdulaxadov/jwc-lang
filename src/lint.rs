@@ -95,7 +95,6 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
             });
         }
     }
-
     warnings
 }
 
