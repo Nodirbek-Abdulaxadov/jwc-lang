@@ -36,6 +36,16 @@ enum Command {
         /// editor / CI integration.
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         json: bool,
+        /// Print the description for a single diagnostic code from the
+        /// catalog and exit, instead of linting. Accepts `WNNN` and
+        /// `ENNN`. Example: `jwc lint --explain W004`.
+        #[arg(long, value_name = "CODE")]
+        explain: Option<String>,
+        /// Print the entire diagnostic-code catalog (both W and E codes)
+        /// as a JSON array and exit. Useful for editor integrations that
+        /// want to render code-aware tooltips offline.
+        #[arg(long = "list-codes", action = ArgAction::SetTrue, default_value_t = false)]
+        list_codes: bool,
     },
     /// Bundle the project: copies JWC runtime + launcher into bin/{debug,release}.
     ///
@@ -285,7 +295,43 @@ fn real_main() -> Result<()> {
                 loaded.source_files.len()
             );
         }
-        Command::Lint { json } => {
+        Command::Lint {
+            json,
+            explain,
+            list_codes,
+        } => {
+            // `--explain` and `--list-codes` are catalog lookups that
+            // shouldn't trigger project load. Honour them first.
+            if let Some(code) = explain {
+                let code_upper = code.to_uppercase();
+                let desc = jwc::error_codes::lookup_warning(&code_upper)
+                    .or_else(|| jwc::error_codes::lookup_error(&code_upper));
+                match desc {
+                    Some(d) => {
+                        println!("{code_upper}: {d}");
+                        return Ok(());
+                    }
+                    None => anyhow::bail!(
+                        "Unknown diagnostic code `{code_upper}`. Use `--list-codes` to see the full catalog."
+                    ),
+                }
+            }
+            if list_codes {
+                let mut all: Vec<serde_json::Value> = Vec::new();
+                for d in jwc::error_codes::LINT_WARNINGS {
+                    all.push(
+                        serde_json::json!({ "code": d.code, "description": d.description, "severity": "warning" }),
+                    );
+                }
+                for d in jwc::error_codes::VALIDATOR_ERRORS {
+                    all.push(
+                        serde_json::json!({ "code": d.code, "description": d.description, "severity": "error" }),
+                    );
+                }
+                println!("{}", serde_json::Value::Array(all));
+                return Ok(());
+            }
+
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             let loaded = project::load_project_from_root(&root)?;
