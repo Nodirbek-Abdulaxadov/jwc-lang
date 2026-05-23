@@ -1,4 +1,4 @@
-use jwc::{cmd, error_report, native_build, parser, project, runner, server, sql};
+use jwc::{cmd, error_report, native_build, parser, project, runner, server};
 
 use std::{fs, path::PathBuf};
 
@@ -207,32 +207,9 @@ fn real_main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::New { name } => {
-            let target = PathBuf::from(name);
-            project::create_new_project(&target)?;
-            println!("Created project: {}", target.display());
-            println!("Try:");
-            println!("  cd {}", target.display());
-            println!("  jwc test");
-            println!("  jwc build");
-        }
-        Command::Check { file } => {
-            let source = read_source(&file)?;
-            let program = parser::parse_program(&source)
-                .with_context(|| format!("Failed to parse {}", file.display()))?;
-            parser::validate_program(&program)
-                .with_context(|| format!("Validation failed for {}", file.display()))?;
-            println!("OK");
-        }
-        Command::GenSql { file } => {
-            let source = read_source(&file)?;
-            let program = parser::parse_program(&source)
-                .with_context(|| format!("Failed to parse {}", file.display()))?;
-            parser::validate_program(&program)
-                .with_context(|| format!("Validation failed for {}", file.display()))?;
-            let schema_sql = sql::generate_postgres_schema_sql(&program)?;
-            print!("{}", schema_sql);
-        }
+        Command::New { name } => cmd::check::new_project(&PathBuf::from(name))?,
+        Command::Check { file } => cmd::check::check(&file)?,
+        Command::GenSql { file } => cmd::check::gen_sql(&file)?,
         Command::Run {
             path,
             request_logging,
@@ -288,16 +265,7 @@ fn real_main() -> Result<()> {
                 }
             }
         }
-        Command::Test => {
-            let cwd = std::env::current_dir()?;
-            let root = project::find_project_root(&cwd)?;
-            let loaded = project::load_project_from_root(&root)?;
-            println!(
-                "OK: project '{}' ({} source files)",
-                loaded.manifest.name,
-                loaded.source_files.len()
-            );
-        }
+        Command::Test => cmd::check::test()?,
         Command::Lint {
             json,
             explain,
