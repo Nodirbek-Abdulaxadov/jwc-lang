@@ -1,4 +1,4 @@
-use jwc::{cmd, error_report, lint, native_build, parser, project, runner, server, sql};
+use jwc::{cmd, error_report, native_build, parser, project, runner, server, sql};
 
 use std::{fs, path::PathBuf};
 
@@ -303,64 +303,12 @@ fn real_main() -> Result<()> {
             explain,
             list_codes,
         } => {
-            // `--explain` and `--list-codes` are catalog lookups that
-            // shouldn't trigger project load. Honour them first.
             if let Some(code) = explain {
-                let code_upper = code.to_uppercase();
-                let desc = jwc::error_codes::lookup_warning(&code_upper)
-                    .or_else(|| jwc::error_codes::lookup_error(&code_upper));
-                match desc {
-                    Some(d) => {
-                        println!("{code_upper}: {d}");
-                        return Ok(());
-                    }
-                    None => anyhow::bail!(
-                        "Unknown diagnostic code `{code_upper}`. Use `--list-codes` to see the full catalog."
-                    ),
-                }
-            }
-            if list_codes {
-                let mut all: Vec<serde_json::Value> = Vec::new();
-                for d in jwc::error_codes::LINT_WARNINGS {
-                    all.push(
-                        serde_json::json!({ "code": d.code, "description": d.description, "severity": "warning" }),
-                    );
-                }
-                for d in jwc::error_codes::VALIDATOR_ERRORS {
-                    all.push(
-                        serde_json::json!({ "code": d.code, "description": d.description, "severity": "error" }),
-                    );
-                }
-                println!("{}", serde_json::Value::Array(all));
-                return Ok(());
-            }
-
-            let cwd = std::env::current_dir()?;
-            let root = project::find_project_root(&cwd)?;
-            let loaded = project::load_project_from_root(&root)?;
-            let warnings = lint::lint_program(&loaded.program);
-            if json {
-                let payload: Vec<serde_json::Value> = warnings
-                    .iter()
-                    .map(|w| serde_json::json!({ "code": w.code, "message": w.message }))
-                    .collect();
-                println!("{}", serde_json::Value::Array(payload));
-            } else if warnings.is_empty() {
-                println!(
-                    "No lint warnings for project '{}' ({} source files).",
-                    loaded.manifest.name,
-                    loaded.source_files.len()
-                );
+                cmd::lint::explain(&code)?;
+            } else if list_codes {
+                cmd::lint::list_codes()?;
             } else {
-                for w in &warnings {
-                    println!(
-                        "warning[{code}]: {message}",
-                        code = w.code,
-                        message = w.message
-                    );
-                }
-                println!();
-                println!("{} warning(s) found.", warnings.len());
+                cmd::lint::run(json)?;
             }
         }
         Command::Build {
