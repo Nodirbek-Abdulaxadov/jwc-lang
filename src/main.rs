@@ -54,6 +54,13 @@ enum Command {
         /// Useful for inspecting / debugging codegen. Requires --native.
         #[arg(long = "emit-rust-source", action = ArgAction::SetTrue, default_value_t = false)]
         emit_rust_source: bool,
+        /// Cross-compile to a specific Rust target triple
+        /// (e.g. `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`).
+        /// The host's installed rustup toolchain must already provide the
+        /// target — install via `rustup target add <triple>`. Requires
+        /// --native.
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Manage SQL migrations for Postgres
     Migrate {
@@ -311,6 +318,7 @@ fn real_main() -> Result<()> {
             release,
             native,
             emit_rust_source,
+            target,
         } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
@@ -320,6 +328,9 @@ fn real_main() -> Result<()> {
 
             if emit_rust_source && !native {
                 anyhow::bail!("--emit-rust-source requires --native");
+            }
+            if target.is_some() && !native {
+                anyhow::bail!("--target requires --native");
             }
 
             if native {
@@ -332,8 +343,17 @@ fn real_main() -> Result<()> {
                     println!("Source:  {}", out.display());
                     return Ok(());
                 }
-                let report = native_build::compile(&loaded.program, &root, &app_name, release)?;
+                let report = native_build::compile_with_target(
+                    &loaded.program,
+                    &root,
+                    &app_name,
+                    release,
+                    target.as_deref(),
+                )?;
                 println!("Native build complete ({profile})");
+                if let Some(t) = target.as_deref() {
+                    println!("Target: {t}");
+                }
                 println!("Project: {}", loaded.manifest.name);
                 println!("Binary:  {}", report.binary_path.display());
                 println!("Workspace: {}", report.workspace.display());

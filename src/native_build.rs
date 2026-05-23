@@ -614,6 +614,21 @@ pub fn compile(
     app_name: &str,
     release: bool,
 ) -> Result<CompileReport> {
+    compile_with_target(program, root, app_name, release, None)
+}
+
+/// Same as [`compile`] but lets the caller cross-compile to a Rust target
+/// triple (e.g. `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`).
+/// `None` keeps the host behaviour. The host's installed rustup toolchain
+/// must already provide the target; if cargo can't find the target it
+/// bails with cargo's own error.
+pub fn compile_with_target(
+    program: &Program,
+    root: &Path,
+    app_name: &str,
+    release: bool,
+    target: Option<&str>,
+) -> Result<CompileReport> {
     // Flatten namespaces / imports / mounts before any other pass so every
     // downstream step (reject_unsupported, codegen) sees a single
     // root-namespace Program with FQN-keyed names and expanded route copies.
@@ -632,8 +647,8 @@ pub fn compile(
     let needs_http_client = program_uses_http_client(program);
     let rust_src = codegen(program, needs_db)?;
     let workspace = scaffold_workspace(root, app_name, &rust_src, needs_db, needs_http_client)?;
-    let bin = invoke_cargo(&cargo, &workspace, app_name, release)?;
-    let final_path = copy_to_project_bin(root, &bin, release)?;
+    let bin = invoke_cargo(&cargo, &workspace, app_name, release, target)?;
+    let final_path = copy_to_project_bin(root, &bin, release, target)?;
 
     Ok(CompileReport {
         binary_path: final_path,
@@ -2716,11 +2731,20 @@ strip = true
 
 // --- Cargo invocation ---------------------------------------------------------
 
-fn invoke_cargo(cargo: &Path, workspace: &Path, app_name: &str, release: bool) -> Result<PathBuf> {
+fn invoke_cargo(
+    cargo: &Path,
+    workspace: &Path,
+    app_name: &str,
+    release: bool,
+    target: Option<&str>,
+) -> Result<PathBuf> {
     let mut cmd = Command::new(cargo);
     cmd.arg("build").current_dir(workspace);
     if release {
         cmd.arg("--release");
+    }
+    if let Some(t) = target {
+        cmd.arg("--target").arg(t);
     }
     cmd.arg("--bin").arg(app_name);
 
@@ -2732,12 +2756,18 @@ fn invoke_cargo(cargo: &Path, workspace: &Path, app_name: &str, release: bool) -
     }
 
     let profile_dir = if release { "release" } else { "debug" };
-    let exe = if cfg!(windows) {
+    let exe = if target_is_windows(target) {
         format!("{app_name}.exe")
     } else {
         app_name.to_string()
     };
-    let bin = workspace.join("target").join(profile_dir).join(&exe);
+    // With --target, cargo emits to target/<triple>/<profile>/ instead of
+    // target/<profile>/.
+    let mut bin = workspace.join("target");
+    if let Some(t) = target {
+        bin = bin.join(t);
+    }
+    let bin = bin.join(profile_dir).join(&exe);
     if !bin.is_file() {
         bail!(
             "cargo reported success but binary not found: {}",
@@ -2747,9 +2777,30 @@ fn invoke_cargo(cargo: &Path, workspace: &Path, app_name: &str, release: bool) -
     Ok(bin)
 }
 
-fn copy_to_project_bin(root: &Path, src: &Path, release: bool) -> Result<PathBuf> {
+/// Cargo's target triples follow the `<arch>-<vendor>-<sys>-<env>?`
+/// convention. The third segment ("sys") is enough to tell us whether
+/// the produced executable will carry a `.exe` suffix.
+fn target_is_windows(target: Option<&str>) -> bool {
+    match target {
+        Some(t) => t.contains("-windows-"),
+        None => cfg!(windows),
+    }
+}
+
+fn copy_to_project_bin(
+    root: &Path,
+    src: &Path,
+    release: bool,
+    target: Option<&str>,
+) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
-    let bin_dir = root.join("bin").join(profile);
+    // With --target, segregate the produced artifact under
+    // bin/<target>/<profile>/ so multiple target builds can coexist.
+    let bin_dir = if let Some(t) = target {
+        root.join("bin").join(t).join(profile)
+    } else {
+        root.join("bin").join(profile)
+    };
     std::fs::create_dir_all(&bin_dir)
         .with_context(|| format!("Failed to create {}", bin_dir.display()))?;
     let file_name = src
