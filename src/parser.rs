@@ -1463,7 +1463,7 @@ fn validate_type_spec_postgres(ty: &TypeSpec) -> Result<()> {
             }
             Ok(())
         }
-        "bigint" | "bool" | "uuid" | "datetime" | "json" => {
+        "bigint" | "bool" | "uuid" | "datetime" | "json" | "bytes" | "byte[]" => {
             if !ty.args.is_empty() {
                 bail!("{} does not accept args", ty.name);
             }

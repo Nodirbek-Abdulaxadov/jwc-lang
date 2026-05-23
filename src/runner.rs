@@ -715,6 +715,18 @@ impl<'a> Vm<'a> {
                     value.type_name()
                 ),
             },
+            // `bytes` / `byte[]` cross the JSON boundary as a base64
+            // string. Accept any string for now (length / charset
+            // validation lands with a real `Value::Bytes` variant in a
+            // follow-up sprint); reject everything else with a clear
+            // message so the surprise surface is small.
+            "bytes" | "byte[]" => match &value {
+                Value::Str(_) => Ok(value),
+                _ => bail!(
+                    "Type error: {subject} expects bytes (base64 string), got {}",
+                    value.type_name()
+                ),
+            },
             model_ty => {
                 let model = self.models.get(&model_ty.to_lowercase());
                 if model.is_none() {
@@ -853,6 +865,12 @@ impl<'a> Vm<'a> {
             "double" | "float" | "decimal" => value.is_number(),
             "bool" | "boolean" => value.is_boolean(),
             "json" => value.is_object() || value.is_array(),
+            // bytes / byte[]: payloads cross JSON as base64 strings. We
+            // accept any string here and leave decoding to user code (or
+            // a future `decode_base64()` helper). Length / charset
+            // validation is intentionally lax for now — Phase 2.1 v2 will
+            // tighten this when a real `bytes` Value variant lands.
+            "bytes" | "byte[]" => value.is_string(),
             other => {
                 if let Some(model) = self.models.get(other) {
                     return self
