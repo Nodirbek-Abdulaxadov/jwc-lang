@@ -171,10 +171,11 @@
 - ✅ Phase 10.5: typed catch noma'lum kind uchun `closest_known_kind` hint.
 - ✅ Sprint 4: W003 lint — empty function body (handler returns null silently).
   Duplicate routes endi validator-level (E-level) bo'lib qoldi — W-level emas.
+- ✅ Sprint 4: W004 missing-`first` heuristic — `select Entity ... where
+  Entity.pk == @x` (top-level `==` atom, no `and`/`or`) `first` siz array
+  qaytaradi → warn. PK metadata `program.models` orqali olinadi.
 - ⬜ Qoldi: `error[E001]` numbered diagnostic codelar tizimi (catalog +
   parser bail messages refactor).
-- ⬜ Qoldi: missing `first` on single-row select heuristic — entity PK
-  metadata'ni lint'ga uzatish kerak.
 
 ### 3.3 CLI ⏳ qisman
 - ✅ `jwc lint` — `lint.rs::lint_program`: unused function (W001) va unused middleware (W002).
@@ -509,7 +510,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 1 | Verify & Hygiene | ✅ qisman | rustfmt + clippy + CI gate ✅, CONTRIBUTING.md ✅, code map refresh ✅. 10.1 perf bench ⏳ blocked-on-infra. |
 | 2 | Type system finishing | ⏳ qisman | uuid/datetime/decimal/json/bigint ✅ (Phase 2.1). `byte[]` + explicit koersiyalar + sema pass — deferred. |
 | 3 | LSP power | ⬜ deferred | go-to-definition, autocomplete, semantic tokens, route/middleware hover. |
-| 4 | Diagnostics polish | ⏳ qisman | W003 empty function body ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. E001 codes + missing-`first` heuristic — deferred. |
+| 4 | Diagnostics polish | ⏳ qisman | W003 empty function body ✅, W004 missing-`first` heuristic ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. E001 numbered codes catalog — deferred. |
 | 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
 | 6 | SQL completeness | ⬜ deferred | `group by` / `having` + insert/update/delete payload field-check + DB schema drift — alohida sessiya. |
 | 7 | Code health refactor | ⬜ deferred | runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |

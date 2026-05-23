@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Expr, Program, Stmt, WhereExpr};
 
@@ -78,6 +78,72 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         }
     }
 
+    // W004 — `select Entity from ... where Entity.pk == @x` without `first`
+    // returns an array on success even though the user almost certainly
+    // wants a single row. The heuristic only fires on a top-level equality
+    // atom (no `and`/`or`/`in`/`between`) — anything more complex might
+    // legitimately want the full match set.
+    let pk_columns: HashMap<String, HashSet<String>> = program
+        .models
+        .iter()
+        .map(|m| {
+            (
+                m.name.to_lowercase(),
+                m.fields
+                    .iter()
+                    .filter(|f| f.is_primary_key)
+                    .map(|f| f.name.to_lowercase())
+                    .collect(),
+            )
+        })
+        .collect();
+
+    let mut select_sites: Vec<(String, bool, Option<WhereExpr>)> = Vec::new();
+    for f in &program.functions {
+        collect_select_sites(&f.body, &mut select_sites);
+    }
+    for r in &program.routes {
+        collect_select_sites(&r.body, &mut select_sites);
+    }
+    for mw in &program.middlewares {
+        collect_select_sites(&mw.body, &mut select_sites);
+    }
+    if let Some(eh) = &program.error_handler {
+        collect_select_sites(&eh.body, &mut select_sites);
+    }
+    for (entity, first, where_clause) in &select_sites {
+        if *first {
+            continue;
+        }
+        let where_clause = match where_clause {
+            Some(w) => w,
+            None => continue,
+        };
+        if let WhereExpr::Atom(atom) = where_clause {
+            if atom.op != "==" && atom.op != "=" {
+                continue;
+            }
+            // Field can be "Entity.col" or just "col"; in the unqualified
+            // form we still check against the targeted entity's PKs.
+            let col = atom
+                .field
+                .rsplit('.')
+                .next()
+                .unwrap_or(&atom.field)
+                .to_lowercase();
+            if let Some(pks) = pk_columns.get(&entity.to_lowercase()) {
+                if pks.contains(&col) {
+                    warnings.push(LintWarning {
+                        code: "W004",
+                        message: format!(
+                            "single-row `select {entity}` on PK `{col}` is missing `first` — add `first` to return one row instead of an array"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // W003 — empty body on a declared function or route. Almost always a
     // WIP leftover that shipped accidentally; the runtime silently returns
     // null which then surfaces downstream as a confusing error.
@@ -93,6 +159,91 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         }
     }
     warnings
+}
+
+/// Walk the statement tree and record `(entity, first, where_clause)` for
+/// every `DbSelect` expression seen inside any expression form. Used by
+/// the W004 missing-`first` heuristic.
+fn collect_select_sites(
+    stmts: &[Stmt],
+    out: &mut Vec<(String, bool, Option<WhereExpr>)>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::FieldAssign { value, .. }
+            | Stmt::Print(value)
+            | Stmt::Expr(value) => collect_select_sites_expr(value, out),
+            Stmt::Return(Some(value)) => collect_select_sites_expr(value, out),
+            Stmt::If { cond, then_body, else_body } => {
+                collect_select_sites_expr(cond, out);
+                collect_select_sites(then_body, out);
+                if let Some(b) = else_body {
+                    collect_select_sites(b, out);
+                }
+            }
+            Stmt::While { cond, body } => {
+                collect_select_sites_expr(cond, out);
+                collect_select_sites(body, out);
+            }
+            Stmt::Try { body, catch_body, .. } => {
+                collect_select_sites(body, out);
+                collect_select_sites(catch_body, out);
+            }
+            Stmt::Transaction { body } => collect_select_sites(body, out),
+            Stmt::ForIn { iter, body, .. } => {
+                collect_select_sites_expr(iter, out);
+                collect_select_sites(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_select_sites_expr(
+    expr: &Expr,
+    out: &mut Vec<(String, bool, Option<WhereExpr>)>,
+) {
+    match expr {
+        Expr::DbSelect { entity, where_clause, first, .. } => {
+            out.push((
+                entity.clone(),
+                *first,
+                where_clause.as_ref().map(|w| (**w).clone()),
+            ));
+        }
+        Expr::Await(inner) | Expr::Neg(inner) | Expr::Not(inner) => {
+            collect_select_sites_expr(inner, out);
+        }
+        Expr::ObjectLit(fields) => {
+            for (_, v) in fields {
+                collect_select_sites_expr(v, out);
+            }
+        }
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Eq(a, b)
+        | Expr::Neq(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Lte(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Gte(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b) => {
+            collect_select_sites_expr(a, out);
+            collect_select_sites_expr(b, out);
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                collect_select_sites_expr(a, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
@@ -282,6 +433,72 @@ mod tests {
                 .iter()
                 .any(|w| w.code == "W003" && w.message.contains("todo_later")),
             "expected W003 for empty body, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn missing_first_on_pk_select_is_w004() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(120);
+            }
+            function findUser(id) {
+                return select User from AppDb.User where User.id == @id;
+            }
+            function main() { findUser("x"); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            warnings.iter().any(|w| w.code == "W004" && w.message.contains("first")),
+            "expected W004, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn first_on_pk_select_does_not_trigger_w004() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(120);
+            }
+            function findUser(id) {
+                return select User from AppDb.User where User.id == @id first;
+            }
+            function main() { findUser("x"); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            !warnings.iter().any(|w| w.code == "W004"),
+            "expected no W004, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn non_pk_filter_does_not_trigger_w004() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                name varchar(120);
+            }
+            function findByName(n) {
+                return select User from AppDb.User where User.name == @n;
+            }
+            function main() { findByName("x"); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            !warnings.iter().any(|w| w.code == "W004"),
+            "non-PK filter must not flag W004, got: {warnings:?}"
         );
     }
 
