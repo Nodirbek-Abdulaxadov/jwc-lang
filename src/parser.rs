@@ -1029,7 +1029,10 @@ fn validate_expr(
             if entity != "*" {
                 let entity_key = entity.to_lowercase();
                 let expected_ctx = entity_contexts.get(&entity_key).ok_or_else(|| {
-                    anyhow!("Unknown entity '{}' used in select expression", entity)
+                    anyhow!(
+                        "error[E002]: Unknown entity '{}' used in select expression",
+                        entity
+                    )
                 })?;
 
                 if let Some(expected_ctx) = expected_ctx {
@@ -1391,7 +1394,7 @@ fn resolve_entity_driver(
         let key = context_name.to_lowercase();
         let driver = ctx_drivers.get(&key).ok_or_else(|| {
             anyhow!(
-                "Entity '{}' references unknown dbcontext '{}'",
+                "error[E001]: Entity '{}' references unknown dbcontext '{}'",
                 entity.name,
                 context_name
             )
@@ -1411,7 +1414,7 @@ fn resolve_entity_context_name(
         let key = context_name.to_lowercase();
         if !ctx_names.contains(&key) {
             bail!(
-                "Entity '{}' references unknown dbcontext '{}'",
+                "error[E001]: Entity '{}' references unknown dbcontext '{}'",
                 entity.name,
                 context_name
             );
