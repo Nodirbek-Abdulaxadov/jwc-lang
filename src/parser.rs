@@ -1021,6 +1021,8 @@ fn validate_expr(
             // a separate walk that has access to `entity_navigations`.
             with_relations: _,
             projection,
+            group_by,
+            having,
         } => {
             let ctx_key = validate_context_exists(context_var, ctx_names)?;
 
@@ -1080,6 +1082,35 @@ fn validate_expr(
                         );
                     }
                 }
+                for grp in group_by {
+                    let col = strip_entity_prefix(grp);
+                    if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
+                        bail!(
+                            "Unknown column '{}' in GROUP BY of {}.{}",
+                            col,
+                            context_var,
+                            table
+                        );
+                    }
+                }
+            }
+
+            if having.is_some() && group_by.is_empty() {
+                bail!(
+                    "`having` requires `group by` — found `having` on select {} from {}.{} without a `group by` clause",
+                    entity,
+                    context_var,
+                    table
+                );
+            }
+            if let Some(hv) = having {
+                validate_where_expr(
+                    hv,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
             }
 
             if let Some(where_clause) = where_clause {
@@ -2970,6 +3001,36 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // optional `group by Entity.col [, Entity.col ...]`
+        // `group` is a lexer keyword (used by `parse_group_block` at the
+        // top level) so we match by TokenKind rather than identifier text.
+        // `by` is read as a plain identifier.
+        let group_by = if self.current.kind == TokenKind::Keyword(Keyword::Group) {
+            self.bump()?;
+            let by_kw = self.expect_ident("expected 'by' after 'group'")?;
+            if !by_kw.eq_ignore_ascii_case("by") {
+                return Err(self.error_here("expected 'by' after 'group'"));
+            }
+            let mut cols = vec![self.parse_field_path()?];
+            while self.check_symbol(',') {
+                self.expect_symbol(',')?;
+                cols.push(self.parse_field_path()?);
+            }
+            cols
+        } else {
+            Vec::new()
+        };
+
+        // optional `having COND [and|or COND ...]` — only meaningful after a
+        // `group by`, but the parser is permissive; validate_program enforces
+        // the dependency.
+        let having = if self.check_ident_eq("having") {
+            self.bump()?;
+            Some(Box::new(self.parse_where_or()?))
+        } else {
+            None
+        };
+
         // optional `orderby FIELD [asc|desc]`
         let order_by = if self.check_ident_eq("orderby") {
             self.bump()?;
@@ -3023,6 +3084,8 @@ impl<'a> Parser<'a> {
             first,
             with_relations,
             projection,
+            group_by,
+            having,
         })
     }
 

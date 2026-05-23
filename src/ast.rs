@@ -403,6 +403,8 @@ pub enum Expr {
     },
     /// `select [Entity|*] [ { col1, col2, ... } ] [with rel, ...] from CTX.TABLE
     ///        [where COND [and|or COND ...]]
+    ///        [group by Entity.col [, ...]]
+    ///        [having COND [and|or COND ...]]
     ///        [orderby FIELD [asc|desc]]
     ///        [limit N] [offset N] [first]`
     DbSelect {
@@ -419,6 +421,15 @@ pub enum Expr {
         /// Column-name subset to project (`select User { name, email } ...`).
         /// Empty vec means `SELECT *` — every column from the source table.
         projection: Vec<String>,
+        /// `group by Entity.col [, ...]` — column paths to GROUP BY at the
+        /// SQL layer. Each entry is a `field` string in the same shape as
+        /// `where Entity.col`. Empty vec when no `group by` was written.
+        group_by: Vec<String>,
+        /// `having <cond>` — post-aggregation filter applied after GROUP BY.
+        /// Same shape as `where_clause`; only meaningful when `group_by` is
+        /// non-empty, but the parser stores it unconditionally and the
+        /// emitter just inlines whatever's here.
+        having: Option<Box<WhereExpr>>,
     },
     /// `await expr` — placeholder for the future async runtime; today this
     /// is a transparent pass-through that evaluates the inner expression.

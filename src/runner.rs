@@ -1377,6 +1377,8 @@ impl<'a> Vm<'a> {
                 first,
                 with_relations,
                 projection,
+                group_by,
+                having,
             } => {
                 let table_name = crate::sql::to_snake_case(table);
                 let nav_subqueries = build_navigation_subqueries(
@@ -1395,6 +1397,8 @@ impl<'a> Vm<'a> {
                     *first,
                     &nav_subqueries,
                     projection,
+                    group_by,
+                    having.as_deref(),
                     vars,
                     self,
                 )
@@ -3574,6 +3578,8 @@ async fn build_select_sql(
     first: bool,
     nav_subqueries: &[NavigationSubquery],
     projection: &[String],
+    group_by: &[String],
+    having: Option<&WhereExpr>,
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm<'_>,
 ) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>, String, String)> {
@@ -3586,6 +3592,27 @@ async fn build_select_sql(
         let where_sql =
             build_where_sql(wc, &mut params, &mut shape_bits, &mut cache_bits, vars, vm).await?;
         sql_where = format!(" WHERE {}", where_sql);
+    }
+
+    // GROUP BY + HAVING — emitted between WHERE and ORDER BY. The shape /
+    // cache keys include the column list so two different groupings don't
+    // collide in the prepared-statement cache.
+    let mut sql_group = String::new();
+    if !group_by.is_empty() {
+        let cols: Vec<String> = group_by
+            .iter()
+            .map(|f| format!("\"{}\"", field_path_to_col(f)))
+            .collect();
+        sql_group = format!(" GROUP BY {}", cols.join(", "));
+        shape_bits.push(format!("group:{}", cols.join(",")));
+        cache_bits.push(format!("group:{}", cols.join(",")));
+    }
+
+    let mut sql_having = String::new();
+    if let Some(hv) = having {
+        let having_sql =
+            build_where_sql(hv, &mut params, &mut shape_bits, &mut cache_bits, vars, vm).await?;
+        sql_having = format!(" HAVING {}", having_sql);
     }
 
     let mut sql_order = String::new();
@@ -3652,8 +3679,14 @@ async fn build_select_sql(
     };
 
     let inner_sql = format!(
-        "SELECT {} FROM \"{}\" t{}{}{}",
-        inner_projection, table_name, sql_where, sql_order, sql_limit_offset
+        "SELECT {} FROM \"{}\" t{}{}{}{}{}",
+        inner_projection,
+        table_name,
+        sql_where,
+        sql_group,
+        sql_having,
+        sql_order,
+        sql_limit_offset
     );
 
     let sql = if first {
