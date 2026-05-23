@@ -1,4 +1,4 @@
-use jwc::{cmd, error_report, native_build, parser, project, runner, server};
+use jwc::{cmd, error_report, parser, project, runner, server};
 
 use std::{fs, path::PathBuf};
 
@@ -221,7 +221,7 @@ fn real_main() -> Result<()> {
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
                 loaded.manifest.ensure_runnable()?;
-                let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
+                let _ = cmd::build::project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = rt.block_on(runner::run_main(&loaded.program))?;
                 if !result.output.is_empty() {
                     print!("{}", result.output);
@@ -242,7 +242,7 @@ fn real_main() -> Result<()> {
                 project::load_dotenv(&root);
                 let loaded = project::load_project_from_root(&root)?;
                 loaded.manifest.ensure_runnable()?;
-                let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
+                let _ = cmd::build::project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = rt.block_on(runner::run_main(&loaded.program))?;
                 if !result.output.is_empty() {
                     print!("{}", result.output);
@@ -284,56 +284,7 @@ fn real_main() -> Result<()> {
             native,
             emit_rust_source,
             target,
-        } => {
-            let cwd = std::env::current_dir()?;
-            let root = project::find_project_root(&cwd)?;
-            let loaded = project::load_project_from_root(&root)?;
-            loaded.manifest.ensure_runnable()?;
-            let profile = if release { "release" } else { "debug" };
-
-            if emit_rust_source && !native {
-                anyhow::bail!("--emit-rust-source requires --native");
-            }
-            if target.is_some() && !native {
-                anyhow::bail!("--target requires --native");
-            }
-
-            if native {
-                let app_name = sanitize_app_name(&loaded.manifest.name);
-                if emit_rust_source {
-                    let out =
-                        native_build::emit_rust_source(&loaded.program, &root, &app_name, release)?;
-                    println!("Emitted generated Rust source ({profile})");
-                    println!("Project: {}", loaded.manifest.name);
-                    println!("Source:  {}", out.display());
-                    return Ok(());
-                }
-                let report = native_build::compile_with_target(
-                    &loaded.program,
-                    &root,
-                    &app_name,
-                    release,
-                    target.as_deref(),
-                )?;
-                println!("Native build complete ({profile})");
-                if let Some(t) = target.as_deref() {
-                    println!("Target: {t}");
-                }
-                println!("Project: {}", loaded.manifest.name);
-                println!("Binary:  {}", report.binary_path.display());
-                println!("Workspace: {}", report.workspace.display());
-            } else {
-                let out_path =
-                    build_project_native_artifact(&root, &loaded.manifest.name, release)?;
-                println!("Bundled runtime + launcher ({profile})");
-                println!("Project: {}", loaded.manifest.name);
-                println!("Launcher: {}", out_path.display());
-                println!("Note: this bundles the JWC runtime alongside your project.");
-                println!(
-                    "      For real AOT-compiled binaries, pass --native (Phase 4 — incremental)."
-                );
-            }
-        }
+        } => cmd::build::run(release, native, emit_rust_source, target)?,
         Command::Migrate { command } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
@@ -491,94 +442,6 @@ fn is_jwc_path(p: &std::path::Path) -> bool {
 
 fn read_source(path: &std::path::Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
-}
-
-fn sanitize_app_name(name: &str) -> String {
-    let mut out = String::new();
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-            out.push(ch.to_ascii_lowercase());
-        }
-    }
-    if out.is_empty() {
-        "app".to_string()
-    } else {
-        out
-    }
-}
-
-#[cfg(not(windows))]
-fn build_launcher_script() -> String {
-    r#"#!/usr/bin/env bash
-set -euo pipefail
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SELF_DIR/jwc-runtime" run "$ROOT_DIR" "$@"
-"#
-    .to_string()
-}
-
-fn build_project_native_artifact(
-    root: &std::path::Path,
-    manifest_name: &str,
-    release: bool,
-) -> Result<PathBuf> {
-    let profile = if release { "release" } else { "debug" };
-    let bin_dir = root.join("bin").join(profile);
-    std::fs::create_dir_all(&bin_dir)?;
-
-    let app_name = sanitize_app_name(manifest_name);
-    let runtime_src = std::env::current_exe()?;
-
-    #[cfg(windows)]
-    {
-        let out_path = bin_dir.join(format!("{app_name}.exe"));
-        std::fs::copy(&runtime_src, &out_path).with_context(|| {
-            format!(
-                "Failed to copy runtime from {} to {}",
-                runtime_src.display(),
-                out_path.display()
-            )
-        })?;
-
-        // Clean up legacy sidecar from older builds; executable now self-resolves project root.
-        let root_meta = bin_dir.join(format!("{app_name}.jwcroot"));
-        if root_meta.is_file() {
-            let _ = std::fs::remove_file(&root_meta);
-        }
-
-        Ok(out_path)
-    }
-
-    #[cfg(not(windows))]
-    {
-        let out_path = bin_dir.join(&app_name);
-        let script = build_launcher_script();
-        std::fs::write(&out_path, script)?;
-
-        let runtime_dst = bin_dir.join("jwc-runtime");
-        std::fs::copy(&runtime_src, &runtime_dst).with_context(|| {
-            format!(
-                "Failed to copy runtime from {} to {}",
-                runtime_src.display(),
-                runtime_dst.display()
-            )
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&out_path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&out_path, perms)?;
-
-            let mut runtime_perms = std::fs::metadata(&runtime_dst)?.permissions();
-            runtime_perms.set_mode(0o755);
-            std::fs::set_permissions(&runtime_dst, runtime_perms)?;
-        }
-
-        Ok(out_path)
-    }
 }
 
 fn try_run_embedded_app(rt: &tokio::runtime::Runtime) -> Result<bool> {
