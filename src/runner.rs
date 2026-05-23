@@ -2768,7 +2768,7 @@ impl<'a> Vm<'a> {
         };
         if !self.functions.contains_key(&handler.to_lowercase()) {
             bail!(
-                "register_job_handler: handler function '{}' is not defined in this program",
+                "error[E010]: register_job_handler: handler function '{}' is not defined in this program",
                 handler
             );
         }

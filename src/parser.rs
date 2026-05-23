@@ -246,7 +246,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
         let key = format!("{} {}", method, route.path);
         if !route_keys.insert(key) {
-            bail!("Duplicate route: {} {}", method, route.path);
+            bail!("error[E005]: Duplicate route: {} {}", method, route.path);
         }
 
         if route.handler.is_some() && !route.body.is_empty() {
@@ -832,7 +832,7 @@ fn validate_stmt(
         ),
         Stmt::ValidateBody { fields } => {
             if fields.is_empty() {
-                bail!("validate body block has no fields");
+                bail!("error[E007]: validate body block has no fields");
             }
             Ok(())
         }
@@ -849,7 +849,12 @@ fn validate_stmt(
                         Some(s) => format!(" — did you mean `{}`?", s),
                         None => String::new(),
                     };
-                    bail!("unknown catch type `{}`{}. Known kinds: {}", t, hint, kinds);
+                    bail!(
+                        "error[E008]: unknown catch type `{}`{}. Known kinds: {}",
+                        t,
+                        hint,
+                        kinds
+                    );
                 }
             }
             validate_stmts(
@@ -1089,7 +1094,7 @@ fn validate_expr(
                     let col = strip_entity_prefix(grp);
                     if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                         bail!(
-                            "Unknown column '{}' in GROUP BY of {}.{}",
+                            "error[E004]: Unknown column '{}' in GROUP BY of {}.{}",
                             col,
                             context_var,
                             table
@@ -1100,7 +1105,7 @@ fn validate_expr(
 
             if having.is_some() && group_by.is_empty() {
                 bail!(
-                    "`having` requires `group by` — found `having` on select {} from {}.{} without a `group by` clause",
+                    "error[E009]: `having` requires `group by` — found `having` on select {} from {}.{} without a `group by` clause",
                     entity,
                     context_var,
                     table
