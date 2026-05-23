@@ -57,8 +57,31 @@ try {
     $installDir = Join-Path $env:LOCALAPPDATA 'jwc\bin'
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-    $exeDst = Join-Path $installDir 'jwc.exe'
-    Copy-Item -Force $exeSrc $exeDst
+    # Robust copy: if the destination is in use (e.g. an LSP launched by an
+    # editor is holding it open), Move the locked file aside before copying.
+    function Install-Binary([string] $name, [string] $sourcePath) {
+        $dst = Join-Path $installDir $name
+        try {
+            Copy-Item -Force $sourcePath $dst
+        } catch {
+            $stale = "$dst.old-$(Get-Random)"
+            Move-Item -LiteralPath $dst -Destination $stale -Force
+            Copy-Item -Force $sourcePath $dst
+            Write-Host "(replaced an in-use $name; old binary parked at $stale — safe to delete)"
+        }
+        Write-Host "Installed: $dst"
+    }
+
+    Install-Binary 'jwc.exe' $exeSrc
+
+    # Also install jwc-lsp if it was built alongside. The VS Code extension
+    # auto-discovers it on PATH or under $LOCALAPPDATA\jwc\bin.
+    $lspSrc = Join-Path (Split-Path -Parent $exeSrc) 'jwc-lsp.exe'
+    if (Test-Path $lspSrc) {
+        Install-Binary 'jwc-lsp.exe' $lspSrc
+    } else {
+        Write-Host "(jwc-lsp.exe not found next to $exeSrc — skipping LSP install)"
+    }
 
     # Add installDir to USER PATH if missing
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

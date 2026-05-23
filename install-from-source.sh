@@ -89,6 +89,19 @@ chmod +x "$exe_dst"
 
 echo "Installed: $exe_dst"
 
+# Install jwc-lsp alongside if it was built next to jwc — the VS Code
+# extension expects it on PATH or in $HOME/.local/bin / $LOCALAPPDATA/jwc/bin.
+src_dir="$(dirname -- "$exe_src")"
+lsp_src="$src_dir/jwc-lsp"
+if [[ -f "$lsp_src" ]]; then
+    lsp_dst="$install_dir/jwc-lsp"
+    cp -f "$lsp_src" "$lsp_dst"
+    chmod +x "$lsp_dst"
+    echo "Installed: $lsp_dst"
+else
+    echo "(jwc-lsp not found at $lsp_src — skipping LSP install)"
+fi
+
 if [[ ":${PATH}:" != *":${install_dir}:"* ]]; then
     echo "Note: ${install_dir} is not in your PATH."
     echo "Add this line to your shell profile (e.g. ~/.bashrc or ~/.zshrc):"

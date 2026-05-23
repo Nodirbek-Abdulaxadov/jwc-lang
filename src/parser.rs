@@ -262,7 +262,12 @@ pub fn validate_program(program: &Program) -> Result<()> {
                     fqn == handler_key || f.name.to_lowercase() == handler_key
                 });
             if !matches_any {
-                bail!("Route handler '{}' is not defined as a function", handler);
+                // Qualified handler (`pkg.fn`) may live in a dependency that
+                // single-file validation can't see — let the runtime resolver
+                // catch a real miss.
+                if !handler.contains('.') {
+                    bail!("Route handler '{}' is not defined as a function", handler);
+                }
             }
         }
 
@@ -324,6 +329,12 @@ pub fn validate_program(program: &Program) -> Result<()> {
                     fqn == key || m.name.to_lowercase() == key
                 });
             if !matches_any {
+                // Qualified references (`pkg.Mw`) may target a namespace that
+                // lives in another file or a dependency package — single-file
+                // validation can't see those. Defer the check to runtime.
+                if mw_ref.contains('.') {
+                    continue;
+                }
                 bail!(
                     "Route {} {} references unknown middleware '{}'",
                     route.method,
