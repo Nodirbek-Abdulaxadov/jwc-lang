@@ -629,7 +629,9 @@ mod tests {
         validate_program(&program).unwrap();
         let warnings = lint_program(&program);
         assert!(
-            warnings.iter().any(|w| w.code == "W006" && w.message.contains("early")),
+            warnings
+                .iter()
+                .any(|w| w.code == "W006" && w.message.contains("early")),
             "expected W005 for unreachable code, got: {warnings:?}"
         );
     }

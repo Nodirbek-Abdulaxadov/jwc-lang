@@ -33,7 +33,10 @@ pub const LINT_WARNINGS: &[DiagnosticCode] = &[
     d("W001", "function declared but never called"),
     d("W002", "middleware declared but never attached to a route"),
     d("W003", "function body is empty (returns null silently)"),
-    d("W004", "single-row select on PK is missing `first` (returns array instead of row)"),
+    d(
+        "W004",
+        "single-row select on PK is missing `first` (returns array instead of row)",
+    ),
     d("W005", "user-declared function shadows a built-in name"),
     d("W006", "unreachable statement after top-level `return`"),
 ];
@@ -45,29 +48,53 @@ pub const LINT_WARNINGS: &[DiagnosticCode] = &[
 ///
 /// Status: catalog only — not yet wired into `bail!` call sites.
 pub const VALIDATOR_ERRORS: &[DiagnosticCode] = &[
-    d("E001", "unknown dbcontext referenced in select / insert / update / delete"),
-    d("E002", "unknown entity referenced in select / insert / update / delete"),
+    d(
+        "E001",
+        "unknown dbcontext referenced in select / insert / update / delete",
+    ),
+    d(
+        "E002",
+        "unknown entity referenced in select / insert / update / delete",
+    ),
     d("E003", "entity / dbcontext mismatch on select or mutation"),
-    d("E004", "unknown column in WHERE / ORDER BY / projection / GROUP BY"),
+    d(
+        "E004",
+        "unknown column in WHERE / ORDER BY / projection / GROUP BY",
+    ),
     d("E005", "duplicate route declaration (same method + path)"),
-    d("E006", "navigation property references an unknown entity / column"),
+    d(
+        "E006",
+        "navigation property references an unknown entity / column",
+    ),
     d("E007", "validate body block has no fields"),
-    d("E008", "unknown catch type — must be one of the known JwcErrorKind names"),
+    d(
+        "E008",
+        "unknown catch type — must be one of the known JwcErrorKind names",
+    ),
     d("E009", "HAVING used without GROUP BY"),
-    d("E010", "register_job_handler references a function that doesn't exist"),
+    d(
+        "E010",
+        "register_job_handler references a function that doesn't exist",
+    ),
 ];
 
 /// Lookup a warning code → description. Returns `None` for unknown
 /// codes; useful for editor integrations that want to render a tooltip
 /// or for tests that assert the catalog is complete.
 pub fn lookup_warning(code: &str) -> Option<&'static str> {
-    LINT_WARNINGS.iter().find(|d| d.code == code).map(|d| d.description)
+    LINT_WARNINGS
+        .iter()
+        .find(|d| d.code == code)
+        .map(|d| d.description)
 }
 
 /// Lookup a validator error code → description. Symmetric with
 /// `lookup_warning`.
 pub fn lookup_error(code: &str) -> Option<&'static str> {
-    VALIDATOR_ERRORS.iter().find(|d| d.code == code).map(|d| d.description)
+    VALIDATOR_ERRORS
+        .iter()
+        .find(|d| d.code == code)
+        .map(|d| d.description)
 }
 
 #[cfg(test)]
@@ -129,9 +156,7 @@ mod tests {
         // Every W-code that `lint::lint_program` can emit must be
         // present in the catalog — drift between the two would mean
         // tooling can't render a description.
-        let emitted = [
-            "W001", "W002", "W003", "W004", "W005", "W006",
-        ];
+        let emitted = ["W001", "W002", "W003", "W004", "W005", "W006"];
         for code in emitted {
             assert!(
                 lookup_warning(code).is_some(),
