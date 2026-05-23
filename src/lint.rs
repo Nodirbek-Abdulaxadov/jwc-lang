@@ -81,6 +81,21 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         }
     }
 
+    // W003 — empty body on a declared function or route. Almost always a
+    // WIP leftover that shipped accidentally; the runtime silently returns
+    // null which then surfaces downstream as a confusing error.
+    for function in &program.functions {
+        if function.body.is_empty() {
+            warnings.push(LintWarning {
+                code: "W003",
+                message: format!(
+                    "function '{}' has an empty body — handler returns null silently",
+                    function.name
+                ),
+            });
+        }
+    }
+
     warnings
 }
 
@@ -253,6 +268,37 @@ mod tests {
         validate_program(&program).unwrap();
         let warnings = lint_program(&program);
         assert!(!warnings.iter().any(|w| w.code == "W002"));
+    }
+
+    #[test]
+    fn empty_function_body_is_w003() {
+        let src = r#"
+            function todo_later() { }
+            function main() { todo_later(); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            warnings.iter().any(|w| w.code == "W003" && w.message.contains("todo_later")),
+            "expected W003 for empty body, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn non_empty_function_body_does_not_trigger_w003() {
+        let src = r#"
+            function ok() { return 1; }
+            route GET "/x" { return json("y"); }
+            function main() { ok(); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            !warnings.iter().any(|w| w.code == "W003"),
+            "expected no W003, got: {warnings:?}"
+        );
     }
 
     #[test]
