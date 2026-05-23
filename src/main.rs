@@ -1,4 +1,4 @@
-use jwc::{cmd, error_report, lint, migrate, native_build, parser, project, runner, server, sql};
+use jwc::{cmd, error_report, lint, native_build, parser, project, runner, server, sql};
 
 use std::{fs, path::PathBuf};
 
@@ -375,32 +375,14 @@ fn real_main() -> Result<()> {
             project::load_dotenv(&root);
 
             match command {
-                MigrateCommand::New { name } => {
-                    let created = migrate::create_migration(&root, &name)?;
-                    println!("Migration created:");
-                    println!("  {}", created.up_path.display());
-                    println!("  {}", created.down_path.display());
-                }
+                MigrateCommand::New { name } => cmd::migrate::new(&root, &name)?,
                 MigrateCommand::Up { database_url } => {
-                    let report =
-                        rt.block_on(migrate::apply_pending_migrations(&root, database_url))?;
-                    println!("Migrations applied: {}", report.applied);
-                    println!("Already applied: {}", report.skipped);
-                    println!("Total found: {}", report.total);
+                    rt.block_on(cmd::migrate::up(&root, database_url))?
                 }
                 MigrateCommand::Down {
                     steps,
                     database_url,
-                } => {
-                    if steps == 0 {
-                        println!("No-op (steps=0)");
-                    } else {
-                        let report =
-                            rt.block_on(migrate::rollback_migrations(&root, database_url, steps))?;
-                        println!("Rolled back: {}", report.rolled_back);
-                        println!("Previously applied: {}", report.total_applied);
-                    }
-                }
+                } => rt.block_on(cmd::migrate::down(&root, database_url, steps))?,
             }
         }
         Command::Add {
