@@ -42,6 +42,10 @@ pub struct Job {
     pub payload: String,
     pub enqueued_at: Instant,
     pub attempts: u32,
+    /// True when `enqueue_urgent` (rather than `enqueue`) put this job on
+    /// the queue. Used by `Queue::push_urgent` to preserve the urgent
+    /// block ordering invariant.
+    pub is_urgent: bool,
 }
 
 /// Shared queue state. Wrapped in `Mutex` and paired with a `Condvar` so
@@ -78,13 +82,36 @@ impl Queue {
         self.handlers.get(job_name).cloned()
     }
 
-    /// Append a job to the back of the queue.
+    /// Append a job to the back of the queue (normal priority — FIFO).
     pub fn push(&mut self, job: Job) {
         self.pending.push_back(job);
     }
 
-    /// Pop the oldest job. Used by both workers and the synchronous unit
-    /// tests below.
+    /// Insert a job at the FRONT of the queue so the next worker grabs it
+    /// ahead of all already-pending normal-priority jobs. Used by
+    /// `enqueue_urgent` for time-sensitive work (e.g. password-reset
+    /// emails, payment webhooks). Multiple urgent jobs themselves stay
+    /// FIFO relative to each other by always inserting after the existing
+    /// urgent block.
+    pub fn push_urgent(&mut self, job: Job) {
+        // Walk past the current urgent block (everything marked urgent).
+        // We don't carry a flag on Job — instead "urgent" means "was
+        // pushed via push_urgent and still hasn't been popped". Since
+        // push_urgent only puts at the front, the urgent block lives at
+        // the front; we insert after it to preserve insertion order
+        // within the urgent block.
+        let insert_at = self
+            .pending
+            .iter()
+            .position(|j| !j.is_urgent)
+            .unwrap_or(self.pending.len());
+        let mut job = job;
+        job.is_urgent = true;
+        self.pending.insert(insert_at, job);
+    }
+
+    /// Pop the next job (front of the queue). Workers and the synchronous
+    /// unit tests below both call this.
     pub fn pop(&mut self) -> Option<Job> {
         self.pending.pop_front()
     }
@@ -167,10 +194,29 @@ pub fn enqueue(name: &str, payload: &str) {
         payload: payload.to_string(),
         enqueued_at: Instant::now(),
         attempts: 0,
+        is_urgent: false,
     };
     let st = state();
     let mut q = st.queue.lock().expect("queue mutex poisoned");
     q.push(job);
+    st.cv.notify_one();
+}
+
+/// Insert an urgent job ahead of every already-pending normal-priority
+/// job. Useful for password-reset emails, payment webhooks, and other
+/// time-sensitive work that shouldn't wait behind a backlog of batch
+/// jobs. Multiple urgent jobs themselves run FIFO relative to each other.
+pub fn enqueue_urgent(name: &str, payload: &str) {
+    let job = Job {
+        name: name.to_string(),
+        payload: payload.to_string(),
+        enqueued_at: Instant::now(),
+        attempts: 0,
+        is_urgent: true,
+    };
+    let st = state();
+    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    q.push_urgent(job);
     st.cv.notify_one();
 }
 
@@ -383,6 +429,7 @@ mod tests {
             payload: "x".to_string(),
             enqueued_at: Instant::now(),
             attempts: 2,
+            is_urgent: false,
         };
         requeue_after_failure(job);
 
@@ -408,6 +455,34 @@ mod tests {
         // After removal, defaults take over.
         assert_eq!(max_attempts_from_env(), 3);
         assert_eq!(base_backoff_from_env(), 1000);
+    }
+
+    #[test]
+    fn enqueue_urgent_jumps_ahead_of_normal_jobs() {
+        let _g = lock();
+        reset_for_tests();
+
+        enqueue("normal_a", "1");
+        enqueue("normal_b", "2");
+        enqueue_urgent("password_reset", "3");
+        enqueue("normal_c", "4");
+        enqueue_urgent("payment_webhook", "5");
+
+        let st = state();
+        let mut q = st.queue.lock().unwrap();
+        let order: Vec<String> = (0..5).map(|_| q.pop().unwrap().name).collect();
+        assert_eq!(
+            order,
+            vec![
+                // Urgent block, FIFO within itself.
+                "password_reset".to_string(),
+                "payment_webhook".to_string(),
+                // Normal block, FIFO.
+                "normal_a".to_string(),
+                "normal_b".to_string(),
+                "normal_c".to_string(),
+            ]
+        );
     }
 
     #[test]

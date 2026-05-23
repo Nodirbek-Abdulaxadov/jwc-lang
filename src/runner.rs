@@ -1511,6 +1511,10 @@ impl<'a> Vm<'a> {
                     return self.eval_enqueue_call(args, vars).await;
                 }
 
+                if name.eq_ignore_ascii_case("enqueue_urgent") {
+                    return self.eval_enqueue_urgent_call(args, vars).await;
+                }
+
                 if name.eq_ignore_ascii_case("job_count") {
                     return self.eval_job_count_call(args, vars).await;
                 }
@@ -2798,6 +2802,32 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
+    async fn eval_enqueue_urgent_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("enqueue_urgent(name, payload_json) expects exactly 2 args");
+        }
+        let name = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            other => bail!(
+                "enqueue_urgent(name, payload_json): name must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let payload = match self.eval_expr(&args[1], vars).await? {
+            Value::Str(s) => s,
+            other => bail!(
+                "enqueue_urgent(name, payload_json): payload_json must be string, got {}",
+                other.type_name()
+            ),
+        };
+        crate::queue::enqueue_urgent(&name, &payload);
+        Ok(Value::Void)
+    }
+
     async fn eval_job_count_call(
         &mut self,
         args: &[Expr],
@@ -3569,6 +3599,10 @@ fn value_to_cache_fragment(val: &Value) -> String {
     }
 }
 
+// Wide signature is intentional — this is the shared SELECT builder used by
+// the runtime path. Splitting into a builder struct is tracked under the
+// runner.rs modularisation sprint (Sprint 7).
+#[allow(clippy::too_many_arguments)]
 async fn build_select_sql(
     table_name: String,
     where_clause: Option<&WhereExpr>,
@@ -3680,13 +3714,7 @@ async fn build_select_sql(
 
     let inner_sql = format!(
         "SELECT {} FROM \"{}\" t{}{}{}{}{}",
-        inner_projection,
-        table_name,
-        sql_where,
-        sql_group,
-        sql_having,
-        sql_order,
-        sql_limit_offset
+        inner_projection, table_name, sql_where, sql_group, sql_having, sql_order, sql_limit_offset
     );
 
     let sql = if first {
