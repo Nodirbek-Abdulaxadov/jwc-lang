@@ -116,6 +116,11 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -217,6 +222,68 @@ impl LanguageServer for Backend {
             contents: HoverContents::Scalar(MarkedString::String(summary)),
             range: None,
         }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> LspResult<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let text = match self.documents.read().await.get(&uri).cloned() {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let ident = match identifier_at(&text, position) {
+            Some(name) => name,
+            None => return Ok(None),
+        };
+
+        // Re-parse to confirm the name corresponds to a real top-level decl.
+        // Cross-file resolution is intentionally out of scope for v1.
+        let program = match parse_program(&text) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+
+        let key = ident.to_lowercase();
+        let (kind, canonical_name) = if let Some(f) = program
+            .functions
+            .iter()
+            .find(|f| f.name.to_lowercase() == key)
+        {
+            ("function", f.name.clone())
+        } else if let Some(m) = program.models.iter().find(|m| m.name.to_lowercase() == key) {
+            let k = match m.kind {
+                ModelKind::Entity => "entity",
+                ModelKind::Class => "class",
+            };
+            (k, m.name.clone())
+        } else if let Some(mw) = program
+            .middlewares
+            .iter()
+            .find(|m| m.name.to_lowercase() == key)
+        {
+            ("middleware", mw.name.clone())
+        } else {
+            return Ok(None);
+        };
+
+        let range = match find_decl_name_range(&text, kind, &canonical_name) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        Ok(Some(GotoDefinitionResponse::Scalar(Location {
+            uri,
+            range,
+        })))
+    }
+
+    async fn completion(&self, _params: CompletionParams) -> LspResult<Option<CompletionResponse>> {
+        Ok(Some(CompletionResponse::Array(static_completion_items())))
     }
 }
 
@@ -434,6 +501,135 @@ fn collect_document_symbols(source: &str, uri: &Url) -> Vec<SymbolInformation> {
         }
     }
     out
+}
+
+/// Locate the source range of a top-level declaration name. `kind` is one of
+/// `"function"`, `"entity"`, `"class"`, or `"middleware"`. Used by
+/// `goto_definition` to map an AST-confirmed decl back to its source span.
+///
+/// Anchored at the start of the line because JWC top-level forms don't get
+/// indented; tolerates an optional `pub ` and (for functions) `async `.
+fn find_decl_name_range(source: &str, kind: &str, name: &str) -> Option<Range> {
+    let escaped = regex::escape(name);
+    let pattern = match kind {
+        "function" => format!(
+            r#"^\s*(?:pub\s+)?(?:async\s+)?function\s+({})\b"#,
+            escaped
+        ),
+        "entity" => format!(r#"^\s*(?:pub\s+)?entity\s+({})\b"#, escaped),
+        "class" => format!(r#"^\s*(?:pub\s+)?class\s+({})\b"#, escaped),
+        "middleware" => format!(r#"^\s*(?:pub\s+)?middleware\s+({})\b"#, escaped),
+        _ => return None,
+    };
+    let re = Regex::new(&pattern).ok()?;
+    for (line_idx, line) in source.lines().enumerate() {
+        if let Some(caps) = re.captures(line) {
+            let m = caps.get(1)?;
+            return Some(Range {
+                start: Position {
+                    line: line_idx as u32,
+                    character: m.start() as u32,
+                },
+                end: Position {
+                    line: line_idx as u32,
+                    character: m.end() as u32,
+                },
+            });
+        }
+    }
+    None
+}
+
+/// Static completion list returned for every `textDocument/completion`
+/// request. Built from a fixed table so we don't need to track cursor
+/// context yet — context-sensitive completion is a follow-up sprint.
+fn static_completion_items() -> Vec<CompletionItem> {
+    const KEYWORDS: &[&str] = &[
+        "function",
+        "route",
+        "entity",
+        "middleware",
+        "dbcontext",
+        "try",
+        "catch",
+        "transaction",
+        "for",
+        "if",
+        "else",
+        "return",
+        "let",
+        "validate",
+        "body",
+        "where",
+        "group",
+        "having",
+        "orderby",
+        "limit",
+        "offset",
+        "first",
+        "with",
+        "from",
+        "into",
+        "in",
+        "using",
+        "mount",
+        "pub",
+        "async",
+        "await",
+    ];
+
+    const BUILTINS: &[&str] = &[
+        "json",
+        "notFound",
+        "unauthorized",
+        "forbidden",
+        "created",
+        "internalError",
+        "body",
+        "header",
+        "path_param",
+        "query_param",
+        "print",
+        "now",
+        "uuid",
+        "hash_password",
+        "verify_password",
+        "jwt_sign",
+        "jwt_verify",
+        "cache_set",
+        "cache_get",
+        "cache_del",
+        "send_email",
+        "http_get",
+        "http_post",
+        "fetch_json",
+        "sleep_ms",
+        "ws_send",
+        "ws_recv",
+        "ws_close",
+        "enqueue",
+        "register_job_handler",
+        "job_count",
+        "json_parse",
+        "json_stringify",
+    ];
+
+    let mut items = Vec::with_capacity(KEYWORDS.len() + BUILTINS.len());
+    for kw in KEYWORDS {
+        items.push(CompletionItem {
+            label: (*kw).to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            ..Default::default()
+        });
+    }
+    for bi in BUILTINS {
+        items.push(CompletionItem {
+            label: (*bi).to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            ..Default::default()
+        });
+    }
+    items
 }
 
 #[tokio::main(flavor = "multi_thread")]

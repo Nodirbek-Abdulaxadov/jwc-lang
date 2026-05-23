@@ -36,5 +36,6 @@ pub mod registry;
 pub mod resolver;
 pub mod runner;
 pub mod schema_diff;
+pub mod sema;
 pub mod server;
 pub mod sql;

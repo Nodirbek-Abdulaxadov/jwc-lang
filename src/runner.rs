@@ -716,12 +716,15 @@ impl<'a> Vm<'a> {
                 ),
             },
             // `bytes` / `byte[]` cross the JSON boundary as a base64
-            // string. Accept any string for now (length / charset
-            // validation lands with a real `Value::Bytes` variant in a
-            // follow-up sprint); reject everything else with a clear
-            // message so the surprise surface is small.
+            // string. We validate the charset / padding shape via
+            // `base64::decode` so callers fail fast on garbage; the
+            // decoded bytes are intentionally discarded — a real
+            // `Value::Bytes` variant lands in a follow-up sprint.
             "bytes" | "byte[]" => match &value {
-                Value::Str(_) => Ok(value),
+                Value::Str(s) if looks_like_base64(s) => Ok(value),
+                Value::Str(s) => bail!(
+                    "Type error: {subject} expects bytes (base64 string), got \"{s}\""
+                ),
                 _ => bail!(
                     "Type error: {subject} expects bytes (base64 string), got {}",
                     value.type_name()
@@ -4261,6 +4264,22 @@ fn strip_generic_wrapper<'a>(s: &'a str, wrapper: &str) -> Option<&'a str> {
 
 /// `8-4-4-4-12` hex pattern. Hyphen positions are checked; characters can be
 /// uppercase or lowercase hex. Matches RFC 4122 textual form.
+/// Cheap base64 sniff used by typed-param `bytes` / `byte[]` checks.
+/// We require a non-empty input whose length is a multiple of 4 and run
+/// the standard `base64` decoder to confirm charset + padding. Strict
+/// padding matches the typical wire shape (JSON-encoded payloads from
+/// browsers / mobile SDKs). URL-safe variants are deliberately rejected
+/// for now — callers should re-encode them, or wait for the proper
+/// `Value::Bytes` variant which will accept both alphabets.
+fn looks_like_base64(s: &str) -> bool {
+    if s.is_empty() || s.len() % 4 != 0 {
+        return false;
+    }
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    STANDARD.decode(s).is_ok()
+}
+
 fn looks_like_uuid(s: &str) -> bool {
     if s.len() != 36 {
         return false;
@@ -5675,5 +5694,40 @@ mod tests {
             .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "{\"ok\":true}");
+    }
+
+    #[test]
+    fn check_typed_value_accepts_base64_for_bytes() {
+        // Empty program — no models / functions needed; we only exercise
+        // the type-name dispatch inside `check_typed_value`.
+        let program = Program::default();
+        let vm = Vm::new(&program);
+
+        // "hello" base64-encoded == "aGVsbG8=". Valid standard base64.
+        let ok = vm
+            .check_typed_value("p", "bytes", Value::Str("aGVsbG8=".to_string()))
+            .expect("valid base64 should pass");
+        assert_eq!(ok, Value::Str("aGVsbG8=".to_string()));
+
+        // `byte[]` alias should behave the same way.
+        vm.check_typed_value("p", "byte[]", Value::Str("aGVsbG8=".to_string()))
+            .expect("byte[] alias accepts base64");
+
+        // Non-base64 (`!` is not in the standard alphabet) must fail.
+        let err = vm
+            .check_typed_value("p", "bytes", Value::Str("not!base64".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("expects bytes"),
+            "expected bytes type-error, got: {err}"
+        );
+
+        // Wrong shape (Int) must also fail.
+        let err = vm
+            .check_typed_value("p", "bytes", Value::Int(1))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expects bytes"));
     }
 }

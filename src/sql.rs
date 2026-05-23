@@ -132,6 +132,12 @@ pub(crate) fn map_type_postgres(ty: &TypeSpec, field_name: &str) -> Result<(Stri
         "uuid" => "uuid".to_string(),
         "bool" => "boolean".to_string(),
         "json" => "jsonb".to_string(),
+        // `byte[]` / `bytes` syntax isn't reachable via the parser today
+        // (entity `parse_type_spec` only accepts a bare identifier), so
+        // the canonical entity-column spelling is `bytea`. Map all three
+        // to Postgres `BYTEA` for forward-compat with whatever the
+        // function-param parser produces.
+        "bytea" | "bytes" | "byte[]" => "bytea".to_string(),
         "datetime" | "timestamp" => "timestamptz".to_string(),
         "bigint" => "bigint".to_string(),
         "int" => {
@@ -295,6 +301,23 @@ mod tests {
         let program = parse_program(src).unwrap();
         let err = validate_program(&program).unwrap_err().to_string();
         assert!(err.contains("unknown entity"));
+    }
+
+    #[test]
+    fn bytea_column_is_generated() {
+        let src = r#"
+            entity Blob {
+                id uuid pk;
+                payload bytea;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let sql = generate_postgres_schema_sql(&program).unwrap();
+        assert!(
+            sql.contains("\"payload\" bytea NOT NULL"),
+            "expected bytea column in DDL, got:\n{sql}"
+        );
     }
 
     #[test]
