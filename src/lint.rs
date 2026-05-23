@@ -144,6 +144,59 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         }
     }
 
+    // W006 — unreachable statements after a top-level `return`. Anything
+    // sitting after `return` at the same block level cannot run; flag the
+    // first such statement as the suspicious one (later ones are obvious
+    // once the first is fixed). Only checks the top-level function /
+    // route / middleware body — branch-bodies inside if/while/try are
+    // exempt because their statements after `return` ARE reachable when
+    // the branch isn't taken. (W005 is taken by builtin-name-shadow.)
+    fn first_dead_after_return(stmts: &[Stmt]) -> Option<usize> {
+        for (i, s) in stmts.iter().enumerate() {
+            if matches!(s, Stmt::Return(_)) && i + 1 < stmts.len() {
+                return Some(i + 1);
+            }
+        }
+        None
+    }
+    for f in &program.functions {
+        if first_dead_after_return(&f.body).is_some() {
+            warnings.push(LintWarning {
+                code: "W006",
+                message: format!(
+                    "function '{}' has statements after a top-level `return` — they cannot run",
+                    f.name
+                ),
+            });
+        }
+    }
+    for r in &program.routes {
+        if r.handler.is_some() {
+            continue;
+        }
+        if first_dead_after_return(&r.body).is_some() {
+            warnings.push(LintWarning {
+                code: "W006",
+                message: format!(
+                    "route `{} {}` has statements after a top-level `return` — they cannot run",
+                    r.method.to_uppercase(),
+                    r.path
+                ),
+            });
+        }
+    }
+    for mw in &program.middlewares {
+        if first_dead_after_return(&mw.body).is_some() {
+            warnings.push(LintWarning {
+                code: "W006",
+                message: format!(
+                    "middleware '{}' has statements after a top-level `return` — they cannot run",
+                    mw.name
+                ),
+            });
+        }
+    }
+
     // W003 — empty body on a declared function or route. Almost always a
     // WIP leftover that shipped accidentally; the runtime silently returns
     // null which then surfaces downstream as a confusing error.
@@ -171,7 +224,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
     for function in &program.functions {
         if builtins.contains(function.name.as_str()) {
             warnings.push(LintWarning {
-                code: "W005",
+                code: "W006",
                 message: format!(
                     "function '{}' shadows a built-in — calls resolve to the user-defined version, hiding the built-in",
                     function.name
@@ -425,7 +478,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.code == "W005" && w.message.contains("json")),
+                .any(|w| w.code == "W006" && w.message.contains("json")),
             "expected W005 for shadowed built-in 'json', got: {warnings:?}"
         );
     }
@@ -440,7 +493,7 @@ mod tests {
         validate_program(&program).unwrap();
         let warnings = lint_program(&program);
         assert!(
-            !warnings.iter().any(|w| w.code == "W005"),
+            !warnings.iter().any(|w| w.code == "W006"),
             "non-shadowing function should not be W005, got: {warnings:?}"
         );
     }
@@ -560,6 +613,42 @@ mod tests {
         assert!(
             !warnings.iter().any(|w| w.code == "W004"),
             "non-PK filter must not flag W004, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn unreachable_after_return_is_w005() {
+        let src = r#"
+            function early() {
+                return 1;
+                print("unreachable");
+            }
+            function main() { early(); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            warnings.iter().any(|w| w.code == "W006" && w.message.contains("early")),
+            "expected W005 for unreachable code, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn return_in_if_branch_does_not_trigger_w005() {
+        let src = r#"
+            function safe(x) {
+                if (x == 0) { return 0; }
+                return x + 1;
+            }
+            function main() { safe(1); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            !warnings.iter().any(|w| w.code == "W006"),
+            "return-in-if-branch must not trigger W005, got: {warnings:?}"
         );
     }
 
