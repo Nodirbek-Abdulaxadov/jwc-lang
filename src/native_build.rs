@@ -641,6 +641,28 @@ pub fn compile(program: &Program, root: &Path, app_name: &str, release: bool) ->
     })
 }
 
+/// Run codegen only and write the generated Rust source into the project's
+/// `bin/<profile>/<app>.generated.rs`. Skips cargo entirely. Lets users
+/// inspect / debug exactly what the native pipeline would compile.
+pub fn emit_rust_source(program: &Program, root: &Path, app_name: &str, release: bool) -> Result<PathBuf> {
+    let flat = flatten_namespaces(program);
+    let program = &flat;
+
+    reject_unsupported(program)?;
+
+    let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
+    let rust_src = codegen(program, needs_db)?;
+
+    let profile = if release { "release" } else { "debug" };
+    let out_dir = root.join("bin").join(profile);
+    std::fs::create_dir_all(&out_dir)
+        .with_context(|| format!("create bin/{profile} dir"))?;
+    let out_path = out_dir.join(format!("{app_name}.generated.rs"));
+    std::fs::write(&out_path, rust_src)
+        .with_context(|| format!("write {}", out_path.display()))?;
+    Ok(out_path)
+}
+
 // --- Unsupported-shape rejection ----------------------------------------------
 
 fn reject_unsupported(program: &Program) -> Result<()> {

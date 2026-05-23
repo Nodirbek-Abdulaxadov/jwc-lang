@@ -45,6 +45,11 @@ enum Command {
         /// Compile to a real native binary instead of bundling the interpreter.
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         native: bool,
+        /// Dump the generated Rust source the native pipeline would compile,
+        /// without running cargo. Output: bin/<profile>/<app>.generated.rs.
+        /// Useful for inspecting / debugging codegen. Requires --native.
+        #[arg(long = "emit-rust-source", action = ArgAction::SetTrue, default_value_t = false)]
+        emit_rust_source: bool,
     },
     /// Manage SQL migrations for Postgres
     Migrate {
@@ -268,15 +273,26 @@ fn real_main() -> Result<()> {
                 println!("{} warning(s) found.", warnings.len());
             }
         }
-        Command::Build { release, native } => {
+        Command::Build { release, native, emit_rust_source } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             let loaded = project::load_project_from_root(&root)?;
             loaded.manifest.ensure_runnable()?;
             let profile = if release { "release" } else { "debug" };
 
+            if emit_rust_source && !native {
+                anyhow::bail!("--emit-rust-source requires --native");
+            }
+
             if native {
                 let app_name = sanitize_app_name(&loaded.manifest.name);
+                if emit_rust_source {
+                    let out = native_build::emit_rust_source(&loaded.program, &root, &app_name, release)?;
+                    println!("Emitted generated Rust source ({profile})");
+                    println!("Project: {}", loaded.manifest.name);
+                    println!("Source:  {}", out.display());
+                    return Ok(());
+                }
                 let report = native_build::compile(&loaded.program, &root, &app_name, release)?;
                 println!("Native build complete ({profile})");
                 println!("Project: {}", loaded.manifest.name);
