@@ -239,7 +239,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
         let method = route.method.to_ascii_uppercase();
         if !matches!(
             method.as_str(),
-            "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS"
+            "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS" | "SSE"
         ) {
             bail!("Unsupported route method: {}", route.method);
         }
@@ -2057,13 +2057,15 @@ impl<'a> Parser<'a> {
 
         let protocol = if method.eq_ignore_ascii_case("ws") {
             RouteProtocol::Ws
+        } else if method.eq_ignore_ascii_case("sse") {
+            RouteProtocol::Sse
         } else {
             RouteProtocol::Http
         };
-        let method = if protocol == RouteProtocol::Ws {
-            "WS".to_string()
-        } else {
-            method
+        let method = match protocol {
+            RouteProtocol::Ws => "WS".to_string(),
+            RouteProtocol::Sse => "SSE".to_string(),
+            RouteProtocol::Http => method,
         };
 
         if self.check_symbol('-') {

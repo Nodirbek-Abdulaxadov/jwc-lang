@@ -453,12 +453,13 @@ shiftini ham shu Phase'da o'lchab tasdiqlaymiz.
 - `break` / `early return` — server-side cursor close.
 - JSON streaming response: `return ndjson(stream)` — chunked transfer.
 
-### 10.4 Server-Sent Events
-- `route SSE "/feed"` syntaxsi — `route WS` ga parallel.
-- Built-in: `sse_send(event_name, data)`, `sse_close()`.
-- Avtomatik `Content-Type: text/event-stream`, `keep-alive`, `Last-Event-ID`.
-- Subscriber registry: `sse_broadcast(topic, payload)` — pub/sub uchun
-  in-process channel.
+### 10.4 Server-Sent Events ⏳ v1 syntax-only
+- ✅ `route SSE "/feed"` syntaxsi — `route WS` ga parallel. AST'da
+  `RouteProtocol::Sse` variant; method normalisation "SSE" formaga.
+- ✅ Validator: `SSE` known method ro'yxatida.
+- ⬜ v2: `Content-Type: text/event-stream` + chunked transport,
+  `sse_send(event_name, data)`, `sse_close()`, `sse_broadcast(topic,
+  payload)` builtinlar + per-topic subscriber registry.
 
 ### 10.5 Typed-catch dispatch ✅ v1
 - ✅ Built-in error kinds (`runner::JWC_ERROR_KINDS`): `Error`,

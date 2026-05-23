@@ -81,6 +81,11 @@ pub enum ModelKind {
 pub enum RouteProtocol {
     Http,
     Ws,
+    /// Server-Sent Events. Syntax is recognised end-to-end (parser +
+    /// validator) but the runtime dispatch is a stub — Phase 10.4 v2 will
+    /// flesh out the chunked `text/event-stream` transport, `sse_send`,
+    /// `sse_close`, and the per-topic `sse_broadcast` registry.
+    Sse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
