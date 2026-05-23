@@ -521,7 +521,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 1 | Verify & Hygiene | ✅ qisman | rustfmt + clippy + CI gate ✅, CONTRIBUTING.md ✅, code map refresh ✅. 10.1 perf bench ⏳ blocked-on-infra. |
 | 2 | Type system finishing | ⏳ qisman | uuid/datetime/decimal/json/bigint ✅ (Phase 2.1). `byte[]` + explicit koersiyalar + sema pass — deferred. |
 | 3 | LSP power | ⬜ deferred | go-to-definition, autocomplete, semantic tokens, route/middleware hover. |
-| 4 | Diagnostics polish | ⏳ qisman | W003 empty body, W004 missing-`first`, W005 builtin-shadow, W006 unreachable-after-return ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. Numbered-code catalog `src/error_codes.rs` ✅ (W001..W006, E001..E010 stub). Bail-site wiring — qoldi. |
+| 4 | Diagnostics polish | ⏳ qisman | W003 empty body, W004 missing-`first`, W005 builtin-shadow, W006 unreachable-after-return ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. Numbered-code catalog `src/error_codes.rs` ✅ (W001..W006, E001..E010). Bail-site wiring: E001/E002/E004/E005/E007/E008/E009/E010 ✅; E003/E006 — qoldi. |
 | 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
 | 6 | SQL completeness | ⏳ qisman | `group by` + `having` ✅ (AST + parser + runner SQL + validator + 5 tests). Insert/update/delete payload field-check + DB schema drift — qoldi. |
 | 7 | Code health refactor | ⏳ qisman | `cmd/pkg.rs` extracted (Add/Install/Update/Remove/Tree) ✅. `builtins.rs` extracted (BUILTINS/SPECIAL_BUILTINS — shared by lint + native) ✅. runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |
