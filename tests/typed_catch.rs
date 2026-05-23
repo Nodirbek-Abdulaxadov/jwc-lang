@@ -42,9 +42,8 @@ fn every_known_kind_validates() {
             }}
             "#
         );
-        validate_source(&src).unwrap_or_else(|err| {
-            panic!("known kind `{kind}` should validate, got error: {err}")
-        });
+        validate_source(&src)
+            .unwrap_or_else(|err| panic!("known kind `{kind}` should validate, got error: {err}"));
     }
 }
 

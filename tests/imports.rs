@@ -110,7 +110,10 @@ fn import_collects_imports_scoped_to_file_namespace() {
     assert_eq!(prog.imports.len(), 2);
     assert_eq!(prog.imports[0].path, vec!["math"]);
     assert_eq!(prog.imports[0].in_namespace, vec!["consumer"]);
-    assert_eq!(prog.imports[1].path, vec!["utils".to_string(), "strings".to_string()]);
+    assert_eq!(
+        prog.imports[1].path,
+        vec!["utils".to_string(), "strings".to_string()]
+    );
 }
 
 #[test]

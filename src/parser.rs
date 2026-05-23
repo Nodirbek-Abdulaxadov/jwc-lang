@@ -80,11 +80,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
             db_tables.insert((ctx_name.clone(), model.name.to_lowercase()));
             db_tables.insert((ctx_name.clone(), to_snake_case(&model.name).to_lowercase()));
 
-            let fields: Vec<String> = model
-                .fields
-                .iter()
-                .map(|f| f.name.to_lowercase())
-                .collect();
+            let fields: Vec<String> = model.fields.iter().map(|f| f.name.to_lowercase()).collect();
             entity_fields_by_table.insert(
                 (ctx_name.clone(), model.name.to_lowercase()),
                 fields.clone(),
@@ -100,7 +96,11 @@ pub fn validate_program(program: &Program) -> Result<()> {
         for field in &model.fields {
             let field_key = field.name.to_lowercase();
             if !field_names.insert(field_key) {
-                bail!("Duplicate field '{}' in entity '{}'", field.name, model.name);
+                bail!(
+                    "Duplicate field '{}' in entity '{}'",
+                    field.name,
+                    model.name
+                );
             }
 
             validate_type_spec_for_driver(&field.ty, &resolved_driver)
@@ -225,7 +225,11 @@ pub fn validate_program(program: &Program) -> Result<()> {
         for param in &function.params {
             let param_key = param.name.to_lowercase();
             if !param_names.insert(param_key) {
-                bail!("Function '{}': duplicate parameter '{}'", function.name, param.name);
+                bail!(
+                    "Function '{}': duplicate parameter '{}'",
+                    function.name,
+                    param.name
+                );
             }
         }
     }
@@ -380,12 +384,8 @@ pub fn validate_program(program: &Program) -> Result<()> {
                 }
             }
         }
-        check_typed_field_access_in_stmts(
-            &function.body,
-            &mut locals,
-            &model_fields_for_typecheck,
-        )
-        .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
+        check_typed_field_access_in_stmts(&function.body, &mut locals, &model_fields_for_typecheck)
+            .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
     }
 
     Ok(())
@@ -454,9 +454,7 @@ fn check_typed_field_access_in_stmt(
             }
             Ok(())
         }
-        Stmt::Print(e) | Stmt::Expr(e) => {
-            check_typed_field_access_in_expr(e, locals, model_fields)
-        }
+        Stmt::Print(e) | Stmt::Expr(e) => check_typed_field_access_in_expr(e, locals, model_fields),
         Stmt::Return(Some(e)) => check_typed_field_access_in_expr(e, locals, model_fields),
         Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::ValidateBody { .. } => Ok(()),
         Stmt::If {
@@ -481,9 +479,7 @@ fn check_typed_field_access_in_stmt(
             check_typed_field_access_in_stmts(body, locals, model_fields)?;
             check_typed_field_access_in_stmts(catch_body, locals, model_fields)
         }
-        Stmt::Transaction { body } => {
-            check_typed_field_access_in_stmts(body, locals, model_fields)
-        }
+        Stmt::Transaction { body } => check_typed_field_access_in_stmts(body, locals, model_fields),
         Stmt::ForIn { var, iter, body } => {
             check_typed_field_access_in_expr(iter, locals, model_fields)?;
             // Loop variable is currently untyped — it's an array element from
@@ -496,9 +492,10 @@ fn check_typed_field_access_in_stmt(
             }
             res
         }
-        Stmt::DbInsert { .. } | Stmt::DbUpdate { .. } | Stmt::DbDelete { .. } | Stmt::DbDeleteWhere { .. } => {
-            Ok(())
-        }
+        Stmt::DbInsert { .. }
+        | Stmt::DbUpdate { .. }
+        | Stmt::DbDelete { .. }
+        | Stmt::DbDeleteWhere { .. } => Ok(()),
     }
 }
 
@@ -624,9 +621,7 @@ fn check_with_relations_in_stmt(
         | Stmt::FieldAssign { value, .. }
         | Stmt::Print(value)
         | Stmt::Expr(value)
-        | Stmt::Return(Some(value)) => {
-            check_with_relations_in_expr(value, entity_navigations)
-        }
+        | Stmt::Return(Some(value)) => check_with_relations_in_expr(value, entity_navigations),
         Stmt::If {
             cond,
             then_body,
@@ -854,12 +849,7 @@ fn validate_stmt(
                         Some(s) => format!(" — did you mean `{}`?", s),
                         None => String::new(),
                     };
-                    bail!(
-                        "unknown catch type `{}`{}. Known kinds: {}",
-                        t,
-                        hint,
-                        kinds
-                    );
+                    bail!("unknown catch type `{}`{}. Known kinds: {}", t, hint, kinds);
                 }
             }
             validate_stmts(
@@ -885,8 +875,20 @@ fn validate_stmt(
             entity_fields_by_table,
         ),
         Stmt::ForIn { iter, body, .. } => {
-            validate_expr(iter, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
-            validate_stmts(body, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
+            validate_expr(
+                iter,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
+            validate_stmts(
+                body,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
         }
         Stmt::DbInsert {
             context_var, table, ..
@@ -930,10 +932,21 @@ fn validate_expr(
     entity_fields_by_table: &HashMap<(String, String), Vec<String>>,
 ) -> Result<()> {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) => Ok(()),
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::Var(_) => Ok(()),
         Expr::Call { args, .. } => {
             for arg in args {
-                validate_expr(arg, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+                validate_expr(
+                    arg,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
             }
             Ok(())
         }
@@ -1108,7 +1121,13 @@ fn validate_expr(
         ),
         Expr::ObjectLit(fields) => {
             for (_, value) in fields {
-                validate_expr(value, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+                validate_expr(
+                    value,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
             }
             Ok(())
         }
@@ -1125,8 +1144,20 @@ fn validate_expr(
         | Expr::Gte(l, r)
         | Expr::And(l, r)
         | Expr::Or(l, r) => {
-            validate_expr(l, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
-            validate_expr(r, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
+            validate_expr(
+                l,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
+            validate_expr(
+                r,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
         }
         Expr::Neg(inner) => validate_expr(
             inner,
@@ -1193,17 +1224,47 @@ fn validate_where_expr(
         ),
         WhereExpr::InList { values, .. } => {
             for v in values {
-                validate_expr(v, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
+                validate_expr(
+                    v,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
             }
             Ok(())
         }
         WhereExpr::Between { low, high, .. } => {
-            validate_expr(low, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
-            validate_expr(high, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
+            validate_expr(
+                low,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
+            validate_expr(
+                high,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
         }
         WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
-            validate_where_expr(l, ctx_names, entity_contexts, db_tables, entity_fields_by_table)?;
-            validate_where_expr(r, ctx_names, entity_contexts, db_tables, entity_fields_by_table)
+            validate_where_expr(
+                l,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )?;
+            validate_where_expr(
+                r,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
         }
     }
 }
@@ -1556,9 +1617,9 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Keyword(Keyword::ErrorHandler) => {
                     if pending_vis.is_some() {
-                        return Err(self.error_here(
-                            "visibility modifier is not valid on errorHandler",
-                        ));
+                        return Err(
+                            self.error_here("visibility modifier is not valid on errorHandler")
+                        );
                     }
                     if program.error_handler.is_some() {
                         return Err(self.error_here("only one errorHandler is allowed per project"));
@@ -1580,9 +1641,9 @@ impl<'a> Parser<'a> {
         }
 
         if pending_vis.is_some() {
-            return Err(self.error_here(
-                "trailing visibility modifier has no declaration to apply to",
-            ));
+            return Err(
+                self.error_here("trailing visibility modifier has no declaration to apply to")
+            );
         }
 
         Ok(program)
@@ -1657,9 +1718,9 @@ impl<'a> Parser<'a> {
             || !program.middlewares.is_empty()
             || !program.dbcontexts.is_empty()
         {
-            return Err(self.error_here(
-                "'namespace' must appear before any declaration in the file",
-            ));
+            return Err(
+                self.error_here("'namespace' must appear before any declaration in the file")
+            );
         }
         self.current_namespace = path;
         Ok(())
@@ -1731,13 +1792,14 @@ impl<'a> Parser<'a> {
         }
 
         if prefix.is_empty() && middlewares.is_empty() {
-            return Err(self.error_here(
-                "group must have a prefix string, a `use` clause, or both",
-            ));
+            return Err(self.error_here("group must have a prefix string, a `use` clause, or both"));
         }
 
         self.expect_symbol('{')?;
-        self.group_stack.push(GroupFrame { prefix, middlewares });
+        self.group_stack.push(GroupFrame {
+            prefix,
+            middlewares,
+        });
         // Parse body as a mini top-level loop — only items that respect
         // group context are allowed (route, mount, nested group).
         while !self.check_symbol('}') {
@@ -1927,9 +1989,7 @@ impl<'a> Parser<'a> {
                     decl.visibility = visibility_from(is_pub);
                     program.functions.push(decl);
                 }
-                _ => {
-                    return Err(self.error_here("expected function declaration inside dome block"))
-                }
+                _ => return Err(self.error_here("expected function declaration inside dome block")),
             }
         }
 
@@ -2223,7 +2283,11 @@ impl<'a> Parser<'a> {
                 }
                 let (ctx, table) = self.parse_db_ref()?;
                 self.expect_symbol(';')?;
-                Ok(Stmt::DbInsert { var, context_var: ctx, table })
+                Ok(Stmt::DbInsert {
+                    var,
+                    context_var: ctx,
+                    table,
+                })
             }
             TokenKind::Ident(s) if s.eq_ignore_ascii_case("update") => {
                 self.bump()?;
@@ -2234,7 +2298,11 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 let (ctx, table) = self.parse_db_ref()?;
                 self.expect_symbol(';')?;
-                Ok(Stmt::DbUpdate { var, context_var: ctx, table })
+                Ok(Stmt::DbUpdate {
+                    var,
+                    context_var: ctx,
+                    table,
+                })
             }
             TokenKind::Ident(s) if s.eq_ignore_ascii_case("delete") => {
                 self.bump()?;
@@ -2244,9 +2312,8 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     let (ctx, table) = self.parse_db_ref()?;
                     if !self.check_ident_eq("where") {
-                        return Err(self.error_here(
-                            "bulk 'delete from CTX.Table' requires a 'where' clause",
-                        ));
+                        return Err(self
+                            .error_here("bulk 'delete from CTX.Table' requires a 'where' clause"));
                     }
                     self.bump()?;
                     let where_clause = Box::new(self.parse_where_or()?);
@@ -2265,7 +2332,11 @@ impl<'a> Parser<'a> {
                 }
                 let (ctx, table) = self.parse_db_ref()?;
                 self.expect_symbol(';')?;
-                Ok(Stmt::DbDelete { var, context_var: ctx, table })
+                Ok(Stmt::DbDelete {
+                    var,
+                    context_var: ctx,
+                    table,
+                })
             }
             TokenKind::Ident(_) => {
                 let name = match self.current.kind.clone() {
@@ -2463,11 +2534,7 @@ impl<'a> Parser<'a> {
         };
         let token = match self.current.kind.clone() {
             TokenKind::Number(v) => v,
-            _ => {
-                return Err(
-                    self.error_here(&format!("expected numeric argument for {rule_name}"))
-                )
-            }
+            _ => return Err(self.error_here(&format!("expected numeric argument for {rule_name}"))),
         };
         self.bump()?;
         self.expect_symbol(')')?;
@@ -2853,9 +2920,9 @@ impl<'a> Parser<'a> {
         let projection = if self.check_symbol('{') {
             self.expect_symbol('{')?;
             if entity == "*" {
-                return Err(self.error_here(
-                    "projection `{ ... }` requires a named entity, not '*'",
-                ));
+                return Err(
+                    self.error_here("projection `{ ... }` requires a named entity, not '*'")
+                );
             }
             let mut cols = Vec::new();
             if !self.check_symbol('}') {
@@ -2993,7 +3060,9 @@ impl<'a> Parser<'a> {
             self.bump()?;
             let low = self.parse_in_value()?;
             if self.current.kind != TokenKind::Keyword(Keyword::And) {
-                return Err(self.error_here("expected 'and' between bounds in 'between ... and ...'"));
+                return Err(
+                    self.error_here("expected 'and' between bounds in 'between ... and ...'")
+                );
             }
             self.bump()?;
             let high = self.parse_in_value()?;
@@ -3083,7 +3152,8 @@ impl<'a> Parser<'a> {
     fn parse_db_int_arg(&mut self, clause: &str) -> Result<Expr> {
         if self.check_symbol('@') {
             self.bump()?;
-            let name = self.expect_ident(&format!("expected parameter name after '@' in {clause}"))?;
+            let name =
+                self.expect_ident(&format!("expected parameter name after '@' in {clause}"))?;
             return Ok(Expr::Var(name));
         }
         self.parse_expr()
@@ -3361,7 +3431,12 @@ mod tests {
             crate::ast::Stmt::Let { name, value } => {
                 assert_eq!(name, "cars");
                 match value {
-                    crate::ast::Expr::DbSelect { entity, table, first, .. } => {
+                    crate::ast::Expr::DbSelect {
+                        entity,
+                        table,
+                        first,
+                        ..
+                    } => {
                         assert_eq!(entity, "CarEntity");
                         assert_eq!(table, "Cars");
                         assert!(!first);
@@ -3384,7 +3459,11 @@ mod tests {
         let program = parse_program(src).unwrap();
         match &program.functions[0].body[0] {
             crate::ast::Stmt::Let { value, .. } => match value {
-                crate::ast::Expr::DbSelect { where_clause, first, .. } => {
+                crate::ast::Expr::DbSelect {
+                    where_clause,
+                    first,
+                    ..
+                } => {
                     assert!(first);
                     let wc = where_clause.as_ref().unwrap();
                     let atom = match wc.as_ref() {
@@ -3586,22 +3665,27 @@ mod tests {
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
 
-        let user = program
-            .models
-            .iter()
-            .find(|m| m.name == "User")
-            .unwrap();
+        let user = program.models.iter().find(|m| m.name == "User").unwrap();
         assert_eq!(user.navigations.len(), 2);
         assert_eq!(user.navigations[0].name, "posts");
-        assert_eq!(user.navigations[0].kind, crate::ast::NavigationKind::OneToMany);
+        assert_eq!(
+            user.navigations[0].kind,
+            crate::ast::NavigationKind::OneToMany
+        );
         assert_eq!(user.navigations[0].target_entity, "Post");
         assert_eq!(user.navigations[0].target_field, "user_id");
-        assert_eq!(user.navigations[1].kind, crate::ast::NavigationKind::OneToOne);
+        assert_eq!(
+            user.navigations[1].kind,
+            crate::ast::NavigationKind::OneToOne
+        );
 
         match &program.functions[0].body[0] {
             crate::ast::Stmt::Let { value, .. } => match value {
                 crate::ast::Expr::DbSelect { with_relations, .. } => {
-                    assert_eq!(with_relations, &vec!["posts".to_string(), "profile".to_string()]);
+                    assert_eq!(
+                        with_relations,
+                        &vec!["posts".to_string(), "profile".to_string()]
+                    );
                 }
                 _ => panic!("expected DbSelect"),
             },

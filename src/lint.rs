@@ -40,10 +40,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         if !called.contains(&function.name.to_lowercase()) {
             warnings.push(LintWarning {
                 code: "W001",
-                message: format!(
-                    "function '{}' is defined but never called",
-                    function.name
-                ),
+                message: format!("function '{}' is defined but never called", function.name),
             });
         }
     }
@@ -249,7 +246,9 @@ mod tests {
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
         let warnings = lint_program(&program);
-        assert!(warnings.iter().any(|w| w.code == "W001" && w.message.contains("helper")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.code == "W001" && w.message.contains("helper")));
     }
 
     #[test]
@@ -279,7 +278,9 @@ mod tests {
         validate_program(&program).unwrap();
         let warnings = lint_program(&program);
         assert!(
-            warnings.iter().any(|w| w.code == "W003" && w.message.contains("todo_later")),
+            warnings
+                .iter()
+                .any(|w| w.code == "W003" && w.message.contains("todo_later")),
             "expected W003 for empty body, got: {warnings:?}"
         );
     }
@@ -312,6 +313,8 @@ mod tests {
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
         let warnings = lint_program(&program);
-        assert!(warnings.iter().any(|w| w.code == "W002" && w.message.contains("Unused")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.code == "W002" && w.message.contains("Unused")));
     }
 }

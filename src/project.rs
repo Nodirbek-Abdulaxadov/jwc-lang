@@ -76,14 +76,22 @@ pub struct JwcProject {
     /// Supports both "languageVersion" (old) and "version" (new) field names.
     /// Note: this is the *project / language* version (used by `effective_version`),
     /// not the package's published version — that lives in `pkg_version`.
-    #[serde(rename = "languageVersion", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "languageVersion",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub language_version: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
     /// Semver version of THIS package, used when other projects depend on it
     /// via a path/git/registry source. Distinct from `version` (above) to
     /// avoid breaking legacy projects that store the language version there.
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "pkgVersion")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "pkgVersion"
+    )]
     pub pkg_version: Option<String>,
     /// Structured dependency map. The legacy `Vec<String>` form is no longer
     /// accepted — use either a version string or a detailed object per name.
@@ -361,8 +369,8 @@ pub fn find_project_root(start: &Path) -> Result<PathBuf> {
 }
 
 pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
-    let manifest_path = find_manifest_in_dir(root)
-        .ok_or_else(|| anyhow!("jwc project not found"))?;
+    let manifest_path =
+        find_manifest_in_dir(root).ok_or_else(|| anyhow!("jwc project not found"))?;
 
     let manifest_raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
@@ -396,8 +404,7 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
             .with_context(|| format!("Failed to read {}", path.display()))?;
         let file_prog = crate::parser::parse_program(&content)
             .with_context(|| format!("Failed to parse {}", rel))?;
-        merge_program(&mut program, file_prog)
-            .with_context(|| format!("While merging {}", rel))?;
+        merge_program(&mut program, file_prog).with_context(|| format!("While merging {}", rel))?;
     }
 
     // Resolve and merge dependency packages, if any. The resolver caches
@@ -425,10 +432,7 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
 /// it contains, and merge the result into `program`. Decls with no
 /// explicit `namespace` declaration get the package name as their default
 /// namespace so two deps with a clashing simple name don't collide.
-fn merge_dep_package(
-    program: &mut Program,
-    pkg: &crate::resolver::ResolvedPackage,
-) -> Result<()> {
+fn merge_dep_package(program: &mut Program, pkg: &crate::resolver::ResolvedPackage) -> Result<()> {
     let pkg_files = collect_jwc_files(&pkg.source_path).unwrap_or_default();
     for path in &pkg_files {
         let content = std::fs::read_to_string(path)
@@ -524,8 +528,8 @@ fn collect_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)
-        .with_context(|| format!("Failed to read {}", dir.display()))?
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -557,7 +561,9 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// Lines are parsed as `KEY=VALUE`. Comments (`#`) and blank lines are skipped.
 pub fn load_dotenv(dir: &Path) {
     let env_path = dir.join(".env");
-    let Ok(content) = std::fs::read_to_string(&env_path) else { return };
+    let Ok(content) = std::fs::read_to_string(&env_path) else {
+        return;
+    };
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -582,7 +588,10 @@ pub fn load_dotenv(dir: &Path) {
             std::env::var("PG_PORT"),
             std::env::var("PG_DATABASE"),
         ) {
-            let url = format!("postgresql://{}:{}@{}:{}/{}", user, password, host, port, db);
+            let url = format!(
+                "postgresql://{}:{}@{}:{}/{}",
+                user, password, host, port, db
+            );
             std::env::set_var("DATABASE_URL", url);
         }
     }
@@ -597,7 +606,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        std::env::temp_dir().join(format!("jwc-newproj-{}-{}-{}", label, std::process::id(), nanos))
+        std::env::temp_dir().join(format!(
+            "jwc-newproj-{}-{}-{}",
+            label,
+            std::process::id(),
+            nanos
+        ))
     }
 
     #[test]
@@ -617,7 +631,10 @@ mod tests {
         );
         assert!(dir.join("main.jwc").is_file());
         assert!(dir.join(".gitignore").is_file(), ".gitignore not created");
-        assert!(dir.join(".env.example").is_file(), ".env.example not created");
+        assert!(
+            dir.join(".env.example").is_file(),
+            ".env.example not created"
+        );
 
         let gi = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert!(gi.contains(".env"));

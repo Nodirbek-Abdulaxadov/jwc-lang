@@ -29,7 +29,10 @@ fn emit_rust_source_writes_to_expected_path_with_header() {
 
     let out = emit_rust_source(&program, root, "emittest", false).expect("emit");
 
-    assert_eq!(out, root.join("bin").join("debug").join("emittest.generated.rs"));
+    assert_eq!(
+        out,
+        root.join("bin").join("debug").join("emittest.generated.rs")
+    );
     let body = fs::read_to_string(&out).expect("read generated");
     assert!(!body.is_empty(), "generated source is empty");
     assert!(
@@ -47,6 +50,11 @@ fn emit_rust_source_respects_release_profile_dir() {
 
     let out = emit_rust_source(&program, root, "rel_app", true).expect("emit");
 
-    assert_eq!(out, root.join("bin").join("release").join("rel_app.generated.rs"));
+    assert_eq!(
+        out,
+        root.join("bin")
+            .join("release")
+            .join("rel_app.generated.rs")
+    );
     assert!(out.exists(), "release output not written");
 }

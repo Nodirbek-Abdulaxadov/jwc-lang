@@ -240,7 +240,9 @@ where
         })
         .unwrap_or(false);
     if already_open {
-        bail!("transaction already in progress on this task (nested transactions are not supported)");
+        bail!(
+            "transaction already in progress on this task (nested transactions are not supported)"
+        );
     }
 
     let conn = get_connection().await?;
@@ -430,11 +432,7 @@ pub async fn exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
     exec_on_conn(&conn, sql, params).await
 }
 
-async fn exec_on_conn(
-    conn: &PgConn,
-    sql: &str,
-    params: &[&(dyn ToSql + Sync)],
-) -> Result<u64> {
+async fn exec_on_conn(conn: &PgConn, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
     let stmt = conn
         .prepare_cached(sql)
         .await

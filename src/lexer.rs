@@ -299,10 +299,15 @@ impl<'a> Lexer<'a> {
                     };
                     self.i += hc.len_utf8();
                     match hc {
-                        '{' => { depth += 1; hole.push(hc); }
+                        '{' => {
+                            depth += 1;
+                            hole.push(hc);
+                        }
                         '}' => {
                             depth -= 1;
-                            if depth == 0 { break; }
+                            if depth == 0 {
+                                break;
+                            }
                             hole.push(hc);
                         }
                         _ => hole.push(hc),
@@ -325,7 +330,10 @@ impl<'a> Lexer<'a> {
                     'r' => lit.push('\r'),
                     't' => lit.push('\t'),
                     '$' => lit.push('$'),
-                    _ => { lit.push('\\'); lit.push(esc); }
+                    _ => {
+                        lit.push('\\');
+                        lit.push(esc);
+                    }
                 }
                 continue;
             }
@@ -405,7 +413,10 @@ mod tests {
             lexer.next_token().unwrap().kind,
             TokenKind::Keyword(Keyword::DbContext)
         ));
-        assert!(matches!(lexer.next_token().unwrap().kind, TokenKind::Ident(_)));
+        assert!(matches!(
+            lexer.next_token().unwrap().kind,
+            TokenKind::Ident(_)
+        ));
     }
 
     #[test]

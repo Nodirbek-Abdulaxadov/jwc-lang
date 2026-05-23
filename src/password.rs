@@ -49,7 +49,9 @@ mod tests {
 
     #[test]
     fn verify_errors_on_malformed_hash() {
-        let err = verify_password("x", "not-a-real-phc-hash").unwrap_err().to_string();
+        let err = verify_password("x", "not-a-real-phc-hash")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("malformed"));
     }
 }

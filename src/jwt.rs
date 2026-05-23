@@ -41,10 +41,7 @@ pub fn verify_hs256(token: &str, secret: &str) -> Result<String> {
     let header: JsonValue = serde_json::from_slice(&header_bytes)
         .map_err(|_| anyhow!("jwt_verify: header is not JSON"))?;
 
-    let alg = header
-        .get("alg")
-        .and_then(|v| v.as_str())
-        .unwrap_or("none");
+    let alg = header.get("alg").and_then(|v| v.as_str()).unwrap_or("none");
     if alg != "HS256" {
         bail!("jwt_verify: only HS256 is supported, got '{alg}'");
     }

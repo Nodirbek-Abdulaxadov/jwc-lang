@@ -257,10 +257,7 @@ fn worker_loop(worker_id: usize) {
                 if let Some(j) = q.pop() {
                     break j;
                 }
-                q = st
-                    .cv
-                    .wait(q)
-                    .expect("queue condvar wait poisoned");
+                q = st.cv.wait(q).expect("queue condvar wait poisoned");
             }
         };
 

@@ -60,12 +60,8 @@ pub fn ensure_resolved(manifest: &JwcProject, project_root: &Path) -> Result<Res
         let detailed = normalize_dep_spec(&spec);
         let src = source::build_source(&detailed, project_root, registry_url.as_deref())?;
 
-        let chosen_version = pick_version(
-            &name,
-            &detailed,
-            src.as_ref(),
-            existing_lock.find(&name),
-        )?;
+        let chosen_version =
+            pick_version(&name, &detailed, src.as_ref(), existing_lock.find(&name))?;
 
         // Materialize the source on disk.
         let src_path = src
@@ -80,10 +76,7 @@ pub fn ensure_resolved(manifest: &JwcProject, project_root: &Path) -> Result<Res
             version: chosen_version.to_string(),
             source: src.lockfile_uri(),
             checksum: src.checksum(&src_path).unwrap_or_default(),
-            dependencies: trans_deps
-                .iter()
-                .map(|(n, _)| format!("{}@*", n))
-                .collect(),
+            dependencies: trans_deps.iter().map(|(n, _)| format!("{}@*", n)).collect(),
         };
 
         // Detect version conflicts at insert. ResolvedPackage stores a
@@ -162,10 +155,12 @@ fn pick_version(
     }
 
     // Registry: pick the highest version that matches the requirement.
-    let req_str = spec
-        .version
-        .as_deref()
-        .ok_or_else(|| anyhow!("dep '{}' is a registry source but has no version requirement", name))?;
+    let req_str = spec.version.as_deref().ok_or_else(|| {
+        anyhow!(
+            "dep '{}' is a registry source but has no version requirement",
+            name
+        )
+    })?;
     let req = semver::VersionReq::parse(req_str)
         .with_context(|| format!("Invalid version requirement '{}' for '{}'", req_str, name))?;
 
@@ -216,7 +211,10 @@ fn read_dep_manifest(src_path: &Path) -> Result<BTreeMap<String, DepSpec>> {
         if let Ok(entries) = std::fs::read_dir(src_path) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("jwcproj")).unwrap_or(false)
+                if p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("jwcproj"))
+                    .unwrap_or(false)
                     && p.is_file()
                 {
                     manifest_path = Some(p);
@@ -241,10 +239,7 @@ mod tests {
 
     #[test]
     fn empty_manifest_produces_empty_graph() {
-        let tmp = std::env::temp_dir().join(format!(
-            "jwc-resolver-empty-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("jwc-resolver-empty-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let manifest = JwcProject {
             name: "demo".to_string(),

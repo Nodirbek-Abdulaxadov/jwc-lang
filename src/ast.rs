@@ -220,7 +220,10 @@ pub struct DbWhere {
 pub enum WhereExpr {
     Atom(DbWhere),
     /// `field in (expr1, expr2, ...)` — SQL `"field" IN ($1, $2, ...)`.
-    InList { field: String, values: Vec<Expr> },
+    InList {
+        field: String,
+        values: Vec<Expr>,
+    },
     /// `field between @low and @high` — SQL `"field" BETWEEN $1 AND $2`.
     Between {
         field: String,
@@ -276,10 +279,20 @@ pub struct ValidateField {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    Let { name: String, value: Expr },
-    Assign { name: String, value: Expr },
+    Let {
+        name: String,
+        value: Expr,
+    },
+    Assign {
+        name: String,
+        value: Expr,
+    },
     /// `var.field = value;` — sets one field on a JSON-object variable
-    FieldAssign { var: String, field: String, value: Expr },
+    FieldAssign {
+        var: String,
+        field: String,
+        value: Expr,
+    },
     Print(Expr),
     If {
         cond: Expr,
@@ -296,7 +309,9 @@ pub enum Stmt {
     Return(Option<Expr>),
     /// `validate body { field: rule, rule; ... }` — runs against `body()` JSON
     /// and short-circuits the route with a 400 response if any rule fails.
-    ValidateBody { fields: Vec<ValidateField> },
+    ValidateBody {
+        fields: Vec<ValidateField>,
+    },
     /// `try { ... } catch (var[: ErrorType]) { ... }` — catches any runtime
     /// error from the try body and binds the error to `var` as a JSON object
     /// `{"message": "..."}` before running the catch body.
@@ -311,16 +326,34 @@ pub enum Stmt {
     /// `transaction { ... }` — all DB statements inside run on a single
     /// pooled connection wrapped in a SQL transaction; an uncaught error
     /// rolls back, otherwise commits at the end of the block.
-    Transaction { body: Vec<Stmt> },
+    Transaction {
+        body: Vec<Stmt>,
+    },
     /// `for VAR in EXPR { ... }` — iterate over a JSON array (returned by
     /// `select`, `body()` parsed array, etc). `VAR` is rebound per iteration.
-    ForIn { var: String, iter: Expr, body: Vec<Stmt> },
+    ForIn {
+        var: String,
+        iter: Expr,
+        body: Vec<Stmt>,
+    },
     /// `insert VAR into CTX.TABLE;`
-    DbInsert { var: String, context_var: String, table: String },
+    DbInsert {
+        var: String,
+        context_var: String,
+        table: String,
+    },
     /// `update VAR in CTX.TABLE;`
-    DbUpdate { var: String, context_var: String, table: String },
+    DbUpdate {
+        var: String,
+        context_var: String,
+        table: String,
+    },
     /// `delete VAR from CTX.TABLE;`
-    DbDelete { var: String, context_var: String, table: String },
+    DbDelete {
+        var: String,
+        context_var: String,
+        table: String,
+    },
     /// `delete from CTX.TABLE where COND ...;` — bulk delete without a
     /// preloaded object. `where` is required (a missing where would wipe the
     /// whole table) and is enforced at parse time.
@@ -340,11 +373,19 @@ pub enum Expr {
     Bool(bool),
     Null,
     Var(String),
-    Call { name: String, args: Vec<Expr> },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
     /// `var.field` — reads one field from a JSON-object variable
-    FieldGet { var: String, field: String },
+    FieldGet {
+        var: String,
+        field: String,
+    },
     /// `new EntityName()` — creates an empty JSON object `{}`
-    NewEntity { entity: String },
+    NewEntity {
+        entity: String,
+    },
     /// `select count(*) from CTX.TABLE [where COND ...]` — returns `int`.
     DbCount {
         context_var: String,

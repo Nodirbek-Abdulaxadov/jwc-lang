@@ -95,11 +95,7 @@ fn write_project(root: &std::path::Path, main_jwc: &str, manifest_name: &str) {
         "{{\n    \"name\": \"{}\",\n    \"version\": \"1.0.0\",\n    \"dependencies\": []\n}}\n",
         manifest_name
     );
-    std::fs::write(
-        root.join(format!("{}.jwcproj", manifest_name)),
-        manifest,
-    )
-    .unwrap();
+    std::fs::write(root.join(format!("{}.jwcproj", manifest_name)), manifest).unwrap();
     std::fs::write(root.join("main.jwc"), main_jwc).unwrap();
 }
 
@@ -152,12 +148,9 @@ async fn transaction_rollback_on_drop_without_commit() {
     };
     engine::init_engine(url).expect("init engine");
 
-    engine::exec(
-        "CREATE TABLE tx_rollback (id integer PRIMARY KEY);",
-        &[],
-    )
-    .await
-    .expect("create table");
+    engine::exec("CREATE TABLE tx_rollback (id integer PRIMARY KEY);", &[])
+        .await
+        .expect("create table");
 
     // The old `begin_tx()` returned a `TxGuard` whose `Drop` issued `ROLLBACK`
     // when not committed. The new async API expresses the same contract via
@@ -203,8 +196,7 @@ async fn migrate_up_then_down_roundtrip() {
         "proj",
     );
 
-    let migration = migrate::create_migration(&project_root, "init")
-        .expect("create migration");
+    let migration = migrate::create_migration(&project_root, "init").expect("create migration");
     assert!(migration.up_path.exists());
 
     let first = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
@@ -216,10 +208,7 @@ async fn migrate_up_then_down_roundtrip() {
     let second = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
         .await
         .expect("apply second time");
-    assert_eq!(
-        second.applied, 0,
-        "second up should be a no-op"
-    );
+    assert_eq!(second.applied, 0, "second up should be a no-op");
     assert_eq!(second.skipped, 1);
 
     // The table must exist after `up`.
@@ -281,10 +270,7 @@ async fn migration_advisory_lock_blocks_concurrent_runs() {
         .await
         .expect("holder client");
     holder
-        .execute(
-            "SELECT pg_advisory_lock($1);",
-            &[&0x6a77632d6d6967_i64],
-        )
+        .execute("SELECT pg_advisory_lock($1);", &[&0x6a77632d6d6967_i64])
         .await
         .expect("acquire lock");
 

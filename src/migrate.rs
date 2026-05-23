@@ -283,10 +283,7 @@ struct MigrationLock;
 impl MigrationLock {
     async fn acquire(client: &Client) -> Result<MigrationLock> {
         let row = client
-            .query_one(
-                "SELECT pg_try_advisory_lock($1);",
-                &[&MIGRATION_LOCK_KEY],
-            )
+            .query_one("SELECT pg_try_advisory_lock($1);", &[&MIGRATION_LOCK_KEY])
             .await
             .with_context(|| "Failed to request migration advisory lock")?;
         let got: bool = row.try_get(0)?;

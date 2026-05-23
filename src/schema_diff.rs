@@ -230,7 +230,10 @@ fn parse_create_tables(sql: &str) -> Vec<TableSnapshot> {
     let mut out = Vec::new();
 
     for cap in create_re.captures_iter(sql) {
-        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let body = cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
         let entries = split_top_level_commas(body);
@@ -404,7 +407,12 @@ fn apply_alter_statements(sql: &str, tables: &mut Vec<TableSnapshot>) {
     for cap in add_re.captures_iter(sql) {
         let table = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
         let col = cap.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
-        let tail = cap.get(3).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+        let tail = cap
+            .get(3)
+            .map(|m| m.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let upper = tail.to_uppercase();
         let is_nullable = !upper.contains("NOT NULL");
         let mut sql_type = tail.clone();
@@ -448,7 +456,12 @@ fn apply_alter_statements(sql: &str, tables: &mut Vec<TableSnapshot>) {
     for cap in type_re.captures_iter(sql) {
         let table = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
         let col = cap.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
-        let mut new_type = cap.get(3).map(|m| m.as_str()).unwrap_or("").trim().to_string();
+        let mut new_type = cap
+            .get(3)
+            .map(|m| m.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         // Strip optional `USING ...` tail so we keep only the type itself.
         if let Some(pos) = new_type.to_uppercase().find(" USING ") {
             new_type.truncate(pos);
@@ -494,10 +507,8 @@ fn apply_alter_statements(sql: &str, tables: &mut Vec<TableSnapshot>) {
 
 /// Replay `DROP TABLE` statements onto the running snapshot.
 fn apply_drop_statements(sql: &str, tables: &mut Vec<TableSnapshot>) {
-    let re = Regex::new(
-        r#"(?is)DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?"([A-Za-z_][A-Za-z0-9_]*)"\s*;"#,
-    )
-    .expect("static regex compiles");
+    let re = Regex::new(r#"(?is)DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?"([A-Za-z_][A-Za-z0-9_]*)"\s*;"#)
+        .expect("static regex compiles");
     for cap in re.captures_iter(sql) {
         if let Some(name) = cap.get(1).map(|m| m.as_str()) {
             tables.retain(|t| t.name != name);
@@ -748,7 +759,10 @@ mod tests {
     fn new_entity_produces_create_table() {
         let new = vec![table(
             "user",
-            vec![col("id", "uuid", false, true), col("name", "text", true, false)],
+            vec![
+                col("id", "uuid", false, true),
+                col("name", "text", true, false),
+            ],
         )];
         let diff = compute_diff(&[], &new);
         assert_eq!(diff.len(), 1);
@@ -764,7 +778,10 @@ mod tests {
     fn same_schema_produces_no_diff() {
         let snap = vec![table(
             "user",
-            vec![col("id", "uuid", false, true), col("name", "text", true, false)],
+            vec![
+                col("id", "uuid", false, true),
+                col("name", "text", true, false),
+            ],
         )];
         let diff = compute_diff(&snap, &snap);
         assert!(diff.is_empty(), "expected empty diff, got {:?}", diff);
@@ -835,8 +852,14 @@ mod tests {
 
     #[test]
     fn changed_type_emits_alter_column_type() {
-        let old = vec![table("user", vec![col("name", "varchar(50)", false, false)])];
-        let new = vec![table("user", vec![col("name", "varchar(120)", false, false)])];
+        let old = vec![table(
+            "user",
+            vec![col("name", "varchar(50)", false, false)],
+        )];
+        let new = vec![table(
+            "user",
+            vec![col("name", "varchar(120)", false, false)],
+        )];
         let diff = compute_diff(&old, &new);
         assert_eq!(diff.len(), 1);
         assert!(matches!(

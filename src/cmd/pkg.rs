@@ -42,7 +42,10 @@ pub fn add(
     } else if let Some(v) = version {
         DepSpec::Version(v.to_string())
     } else {
-        bail!("`jwc add {}` needs at least one source: --path, --git, or a version requirement", name);
+        bail!(
+            "`jwc add {}` needs at least one source: --path, --git, or a version requirement",
+            name
+        );
     };
 
     manifest.dependencies.insert(name.to_string(), spec);

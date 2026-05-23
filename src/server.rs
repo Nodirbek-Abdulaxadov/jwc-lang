@@ -8,14 +8,17 @@
 //! the async socket and the blocking JWC handler thread.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use axum::{
     body::Bytes,
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Path, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, State,
+    },
     http::{HeaderMap, Method, StatusCode, Uri},
     response::Response,
     routing::get,
@@ -52,7 +55,8 @@ impl ServerMetrics {
     }
 
     fn record_latency_us(&self, latency_us: u64) {
-        self.total_latency_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.total_latency_us
+            .fetch_add(latency_us, Ordering::Relaxed);
         let mut observed = self.max_latency_us.load(Ordering::Relaxed);
         while latency_us > observed {
             match self.max_latency_us.compare_exchange_weak(
@@ -218,9 +222,7 @@ fn build_router(state: AppState) -> Router {
         );
     }
 
-    router
-        .fallback(handle_http_fallback)
-        .with_state(state)
+    router.fallback(handle_http_fallback).with_state(state)
 }
 
 fn ensure_leading_slash(p: &str) -> String {
@@ -289,10 +291,7 @@ async fn handle_http_fallback(
         }
         Ok(Err(e)) => {
             state.metrics.failed.fetch_add(1, Ordering::Relaxed);
-            error_report::log_runtime_error(
-                &format!("HTTP {} {} failed", method, uri.path()),
-                &e,
-            );
+            error_report::log_runtime_error(&format!("HTTP {} {} failed", method, uri.path()), &e);
             let msg = error_report::to_single_line(&e).replace('"', "'");
             let body = format!("{{\"error\":\"{msg}\"}}");
             let mut resp = Response::new(body.into());

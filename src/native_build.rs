@@ -124,12 +124,18 @@ fn flatten_namespaces(program: &Program) -> Program {
     let mut fqn_set: HashSet<String> = HashSet::new();
     for f in &program.functions {
         let fqn = ns_fqn(&f.namespace, &f.name);
-        fn_short_to_fqns.entry(f.name.to_lowercase()).or_default().push(fqn.clone());
+        fn_short_to_fqns
+            .entry(f.name.to_lowercase())
+            .or_default()
+            .push(fqn.clone());
         fqn_set.insert(fqn);
     }
     for m in &program.middlewares {
         let fqn = ns_fqn(&m.namespace, &m.name);
-        mw_short_to_fqns.entry(m.name.to_lowercase()).or_default().push(fqn.clone());
+        mw_short_to_fqns
+            .entry(m.name.to_lowercase())
+            .or_default()
+            .push(fqn.clone());
         fqn_set.insert(fqn);
     }
 
@@ -301,12 +307,7 @@ impl<'a> NameResolver<'a> {
         if !lower.contains('.') {
             if !caller_ns.is_empty() {
                 let key = ns_fqn(caller_ns, name);
-                if self
-                    .mw_short_to_fqns
-                    .values()
-                    .flatten()
-                    .any(|f| f == &key)
-                {
+                if self.mw_short_to_fqns.values().flatten().any(|f| f == &key) {
                     return key;
                 }
             }
@@ -336,7 +337,11 @@ impl<'a> NameResolver<'a> {
             | Stmt::Print(value)
             | Stmt::Expr(value) => self.rewrite_expr(value, caller_ns),
             Stmt::Return(Some(v)) => self.rewrite_expr(v, caller_ns),
-            Stmt::If { cond, then_body, else_body } => {
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 self.rewrite_expr(cond, caller_ns);
                 self.rewrite_stmts(then_body, caller_ns);
                 if let Some(eb) = else_body {
@@ -347,7 +352,9 @@ impl<'a> NameResolver<'a> {
                 self.rewrite_expr(cond, caller_ns);
                 self.rewrite_stmts(body, caller_ns);
             }
-            Stmt::Try { body, catch_body, .. } => {
+            Stmt::Try {
+                body, catch_body, ..
+            } => {
                 self.rewrite_stmts(body, caller_ns);
                 self.rewrite_stmts(catch_body, caller_ns);
             }
@@ -398,7 +405,12 @@ impl<'a> NameResolver<'a> {
                     self.rewrite_expr(v, caller_ns);
                 }
             }
-            Expr::DbSelect { where_clause, limit, offset, .. } => {
+            Expr::DbSelect {
+                where_clause,
+                limit,
+                offset,
+                ..
+            } => {
                 if let Some(wc) = where_clause {
                     self.rewrite_where(wc, caller_ns);
                 }
@@ -521,10 +533,10 @@ struct EntityField {
 /// the codegen only needs to pick a `jwc_param_*` boxing helper, not emit DDL.
 #[derive(Clone, Copy)]
 enum PgKind {
-    Int,    // int / int2 / int4 / int8 / bigint
-    Float,  // double / decimal / float / real
+    Int,   // int / int2 / int4 / int8 / bigint
+    Float, // double / decimal / float / real
     Bool,
-    Str,    // string / varchar / text / uuid / datetime — all carried as text
+    Str, // string / varchar / text / uuid / datetime — all carried as text
 }
 
 fn pg_kind_for(type_name: &str) -> PgKind {
@@ -554,11 +566,26 @@ fn program_uses_http_client(program: &Program) -> bool {
                 args.iter().any(walk_expr)
             }
             Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => walk_expr(inner),
-            Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Mod(a, b)
-            | Expr::Eq(a, b) | Expr::Neq(a, b) | Expr::Lt(a, b) | Expr::Lte(a, b)
-            | Expr::Gt(a, b) | Expr::Gte(a, b) | Expr::And(a, b) | Expr::Or(a, b) => walk_expr(a) || walk_expr(b),
+            Expr::Add(a, b)
+            | Expr::Sub(a, b)
+            | Expr::Mul(a, b)
+            | Expr::Div(a, b)
+            | Expr::Mod(a, b)
+            | Expr::Eq(a, b)
+            | Expr::Neq(a, b)
+            | Expr::Lt(a, b)
+            | Expr::Lte(a, b)
+            | Expr::Gt(a, b)
+            | Expr::Gte(a, b)
+            | Expr::And(a, b)
+            | Expr::Or(a, b) => walk_expr(a) || walk_expr(b),
             Expr::ObjectLit(pairs) => pairs.iter().any(|(_, v)| walk_expr(v)),
-            Expr::DbSelect { where_clause, limit, offset, .. } => {
+            Expr::DbSelect {
+                where_clause,
+                limit,
+                offset,
+                ..
+            } => {
                 where_clause.as_deref().map(walk_where).unwrap_or(false)
                     || limit.as_deref().map(walk_expr).unwrap_or(false)
                     || offset.as_deref().map(walk_expr).unwrap_or(false)
@@ -580,40 +607,63 @@ fn program_uses_http_client(program: &Program) -> bool {
     }
     fn walk_stmt(s: &Stmt) -> bool {
         match s {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::FieldAssign { value, .. }
-            | Stmt::Print(value) | Stmt::Expr(value) => walk_expr(value),
-            Stmt::If { cond, then_body, else_body } => {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::FieldAssign { value, .. }
+            | Stmt::Print(value)
+            | Stmt::Expr(value) => walk_expr(value),
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 walk_expr(cond)
                     || then_body.iter().any(walk_stmt)
-                    || else_body.as_ref().map(|b| b.iter().any(walk_stmt)).unwrap_or(false)
+                    || else_body
+                        .as_ref()
+                        .map(|b| b.iter().any(walk_stmt))
+                        .unwrap_or(false)
             }
             Stmt::While { cond, body } => walk_expr(cond) || body.iter().any(walk_stmt),
             Stmt::ForIn { iter, body, .. } => walk_expr(iter) || body.iter().any(walk_stmt),
             Stmt::Return(Some(e)) => walk_expr(e),
-            Stmt::Try { body, catch_body, .. } => {
-                body.iter().any(walk_stmt) || catch_body.iter().any(walk_stmt)
-            }
+            Stmt::Try {
+                body, catch_body, ..
+            } => body.iter().any(walk_stmt) || catch_body.iter().any(walk_stmt),
             Stmt::Transaction { body } => body.iter().any(walk_stmt),
             Stmt::DbDeleteWhere { where_clause, .. } => walk_where(where_clause),
             _ => false,
         }
     }
     for f in &program.functions {
-        if f.body.iter().any(walk_stmt) { return true; }
+        if f.body.iter().any(walk_stmt) {
+            return true;
+        }
     }
     for r in &program.routes {
-        if r.body.iter().any(walk_stmt) { return true; }
+        if r.body.iter().any(walk_stmt) {
+            return true;
+        }
     }
     for m in &program.middlewares {
-        if m.body.iter().any(walk_stmt) { return true; }
+        if m.body.iter().any(walk_stmt) {
+            return true;
+        }
     }
     if let Some(eh) = &program.error_handler {
-        if eh.body.iter().any(walk_stmt) { return true; }
+        if eh.body.iter().any(walk_stmt) {
+            return true;
+        }
     }
     false
 }
 
-pub fn compile(program: &Program, root: &Path, app_name: &str, release: bool) -> Result<CompileReport> {
+pub fn compile(
+    program: &Program,
+    root: &Path,
+    app_name: &str,
+    release: bool,
+) -> Result<CompileReport> {
     // Flatten namespaces / imports / mounts before any other pass so every
     // downstream step (reject_unsupported, codegen) sees a single
     // root-namespace Program with FQN-keyed names and expanded route copies.
@@ -644,7 +694,12 @@ pub fn compile(program: &Program, root: &Path, app_name: &str, release: bool) ->
 /// Run codegen only and write the generated Rust source into the project's
 /// `bin/<profile>/<app>.generated.rs`. Skips cargo entirely. Lets users
 /// inspect / debug exactly what the native pipeline would compile.
-pub fn emit_rust_source(program: &Program, root: &Path, app_name: &str, release: bool) -> Result<PathBuf> {
+pub fn emit_rust_source(
+    program: &Program,
+    root: &Path,
+    app_name: &str,
+    release: bool,
+) -> Result<PathBuf> {
     let flat = flatten_namespaces(program);
     let program = &flat;
 
@@ -655,11 +710,9 @@ pub fn emit_rust_source(program: &Program, root: &Path, app_name: &str, release:
 
     let profile = if release { "release" } else { "debug" };
     let out_dir = root.join("bin").join(profile);
-    std::fs::create_dir_all(&out_dir)
-        .with_context(|| format!("create bin/{profile} dir"))?;
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("create bin/{profile} dir"))?;
     let out_path = out_dir.join(format!("{app_name}.generated.rs"));
-    std::fs::write(&out_path, rust_src)
-        .with_context(|| format!("write {}", out_path.display()))?;
+    std::fs::write(&out_path, rust_src).with_context(|| format!("write {}", out_path.display()))?;
     Ok(out_path)
 }
 
@@ -688,7 +741,11 @@ fn reject_unsupported(program: &Program) -> Result<()> {
         .map(|f| f.name.clone())
         .chain(program.middlewares.iter().map(|m| m.name.clone()))
         .collect();
-    let builtins: HashSet<&str> = BUILTINS.iter().chain(SPECIAL_BUILTINS.iter()).copied().collect();
+    let builtins: HashSet<&str> = BUILTINS
+        .iter()
+        .chain(SPECIAL_BUILTINS.iter())
+        .copied()
+        .collect();
 
     for func in &program.functions {
         if func.name == "main" && !func.params.is_empty() {
@@ -723,7 +780,11 @@ fn check_stmt(stmt: &Stmt, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             check_expr(e, funcs, builtins)
         }
         Stmt::FieldAssign { value, .. } => check_expr(value, funcs, builtins),
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             check_expr(cond, funcs, builtins)?;
             check_block(then_body, funcs, builtins)?;
             if let Some(e) = else_body {
@@ -750,7 +811,9 @@ fn check_stmt(stmt: &Stmt, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
         Stmt::DbInsert { .. } | Stmt::DbUpdate { .. } | Stmt::DbDelete { .. } => Ok(()),
         Stmt::DbDeleteWhere { where_clause, .. } => check_where(where_clause, funcs, builtins),
         Stmt::ValidateBody { .. } => Ok(()),
-        Stmt::Try { body, catch_body, .. } => {
+        Stmt::Try {
+            body, catch_body, ..
+        } => {
             check_block(body, funcs, builtins)?;
             check_block(catch_body, funcs, builtins)
         }
@@ -760,9 +823,12 @@ fn check_stmt(stmt: &Stmt, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
 
 fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) -> Result<()> {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) => {
-            Ok(())
-        }
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::Var(_) => Ok(()),
         Expr::Add(a, b)
         | Expr::Sub(a, b)
         | Expr::Mul(a, b)
@@ -793,10 +859,7 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             // side effect — emit_expr handles the special case.
             // Dotted names (`Dome.fn`) are flattened by the parser into a
             // single string; codegen sanitizes the `.` to `_` in user_fn_name.
-            if name != "print"
-                && !funcs.contains(name)
-                && !builtins.contains(name.as_str())
-            {
+            if name != "print" && !funcs.contains(name) && !builtins.contains(name.as_str()) {
                 bail!(unsupported(&format!(
                     "call to `{name}(...)` — unknown function. Define it or use one of the built-ins: {}, serve",
                     BUILTINS.join(", ")
@@ -820,7 +883,12 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             }
             Ok(())
         }
-        Expr::DbSelect { where_clause, limit, offset, .. } => {
+        Expr::DbSelect {
+            where_clause,
+            limit,
+            offset,
+            ..
+        } => {
             if let Some(w) = where_clause {
                 check_where(w, funcs, builtins)?;
             }
@@ -835,7 +903,11 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
     }
 }
 
-fn check_where(w: &crate::ast::WhereExpr, funcs: &HashSet<String>, builtins: &HashSet<&str>) -> Result<()> {
+fn check_where(
+    w: &crate::ast::WhereExpr,
+    funcs: &HashSet<String>,
+    builtins: &HashSet<&str>,
+) -> Result<()> {
     use crate::ast::WhereExpr;
     match w {
         WhereExpr::Atom(a) => check_expr(&a.rhs, funcs, builtins),
@@ -940,20 +1012,29 @@ fn codegen(program: &Program, needs_db: bool) -> Result<String> {
 fn collect_entities(program: &Program) -> HashMap<String, EntityMeta> {
     let mut out = HashMap::new();
     for model in &program.models {
-        if !matches!(model.kind, ModelKind::Entity) { continue; }
-        let fields = model.fields.iter().map(|f| EntityField {
-            name: f.name.clone(),
-            pg: pg_kind_for(&f.ty.name),
-            is_auto_increment: f.is_auto_increment,
-            is_primary_key: f.is_primary_key,
-        }).collect();
-        out.insert(model.name.clone(), EntityMeta {
-            // Postgres tables are snake_case (see sql::to_snake_case), so
-            // the generated SQL must match what migrations produced.
-            table: crate::sql::to_snake_case(&model.name),
-            fields,
-            navigations: model.navigations.clone(),
-        });
+        if !matches!(model.kind, ModelKind::Entity) {
+            continue;
+        }
+        let fields = model
+            .fields
+            .iter()
+            .map(|f| EntityField {
+                name: f.name.clone(),
+                pg: pg_kind_for(&f.ty.name),
+                is_auto_increment: f.is_auto_increment,
+                is_primary_key: f.is_primary_key,
+            })
+            .collect();
+        out.insert(
+            model.name.clone(),
+            EntityMeta {
+                // Postgres tables are snake_case (see sql::to_snake_case), so
+                // the generated SQL must match what migrations produced.
+                table: crate::sql::to_snake_case(&model.name),
+                fields,
+                navigations: model.navigations.clone(),
+            },
+        );
     }
     out
 }
@@ -984,7 +1065,12 @@ impl<'a> CodegenCtx<'a> {
     }
 }
 
-fn emit_route_handler(out: &mut String, idx: usize, route: &crate::ast::RouteDecl, ctx: &CodegenCtx) {
+fn emit_route_handler(
+    out: &mut String,
+    idx: usize,
+    route: &crate::ast::RouteDecl,
+    ctx: &CodegenCtx,
+) {
     out.push_str(&format!(
         "\nfn route_{idx}_inner() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> + Send>> {{\n"
     ));
@@ -997,7 +1083,11 @@ fn emit_route_handler(out: &mut String, idx: usize, route: &crate::ast::RouteDec
     }
     if let Some(handler) = &route.handler {
         let args = handler_arg_exprs(handler, ctx);
-        out.push_str(&format!("        return {}({}).await;\n", user_fn_name(handler), args));
+        out.push_str(&format!(
+            "        return {}({}).await;\n",
+            user_fn_name(handler),
+            args
+        ));
     } else {
         for stmt in &route.body {
             emit_stmt(out, stmt, 2, ctx);
@@ -1106,7 +1196,11 @@ fn emit_serve_impl(out: &mut String, routes: &[crate::ast::RouteDecl]) {
 
 /// `users/{id}` and `/users/{id}` both reach the runtime as `/users/{id}`.
 fn normalise_path(p: &str) -> String {
-    if p.starts_with('/') { p.to_string() } else { format!("/{p}") }
+    if p.starts_with('/') {
+        p.to_string()
+    } else {
+        format!("/{p}")
+    }
 }
 
 fn emit_user_fn(out: &mut String, func: &FunctionDecl, ctx: &CodegenCtx) {
@@ -1195,7 +1289,11 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
             emit_expr(out, expr, ctx);
             out.push_str(");\n");
         }
-        Stmt::If { cond, then_body, else_body } => {
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             out.push_str(&pad);
             out.push_str("if jwc_truthy(&");
             emit_expr(out, cond, ctx);
@@ -1284,14 +1382,33 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
         Stmt::DbDelete { var, table, .. } => {
             emit_db_delete_by_var(out, &pad, var, table, ctx);
         }
-        Stmt::DbDeleteWhere { table, where_clause, .. } => {
+        Stmt::DbDeleteWhere {
+            table,
+            where_clause,
+            ..
+        } => {
             emit_db_delete_where(out, &pad, table, where_clause, ctx);
         }
         Stmt::ValidateBody { fields } => {
             emit_validate_body(out, &pad, fields, ctx);
         }
-        Stmt::Try { body, catch_var, catch_type, catch_body, .. } => {
-            emit_try_catch(out, &pad, body, catch_var, catch_type.as_deref(), catch_body, indent, ctx);
+        Stmt::Try {
+            body,
+            catch_var,
+            catch_type,
+            catch_body,
+            ..
+        } => {
+            emit_try_catch(
+                out,
+                &pad,
+                body,
+                catch_var,
+                catch_type.as_deref(),
+                catch_body,
+                indent,
+                ctx,
+            );
         }
         Stmt::Transaction { body } => {
             emit_transaction(out, &pad, body, indent, ctx);
@@ -1313,7 +1430,9 @@ fn emit_try_catch(
     out.push_str(pad);
     out.push_str("{\n");
     out.push_str(&inner);
-    out.push_str("let __res = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {\n");
+    out.push_str(
+        "let __res = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {\n",
+    );
 
     ctx.enter_closure();
     for s in body {
@@ -1379,7 +1498,9 @@ fn emit_transaction(out: &mut String, pad: &str, body: &[Stmt], indent: usize, c
     out.push_str(&inner);
     out.push_str("let _ = jwc_db_exec(\"BEGIN\", vec![]).await;\n");
     out.push_str(&inner);
-    out.push_str("let __res = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {\n");
+    out.push_str(
+        "let __res = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {\n",
+    );
 
     ctx.enter_closure();
     for s in body {
@@ -1421,7 +1542,12 @@ fn emit_transaction(out: &mut String, pad: &str, body: &[Stmt], indent: usize, c
     out.push_str("}\n");
 }
 
-fn emit_validate_body(out: &mut String, pad: &str, fields: &[crate::ast::ValidateField], ctx: &CodegenCtx) {
+fn emit_validate_body(
+    out: &mut String,
+    pad: &str,
+    fields: &[crate::ast::ValidateField],
+    ctx: &CodegenCtx,
+) {
     out.push_str(pad);
     out.push_str("{\n");
     let inner = format!("{pad}    ");
@@ -1488,7 +1614,9 @@ fn emit_validate_body(out: &mut String, pad: &str, fields: &[crate::ast::Validat
     out.push_str(&inner2);
     out.push_str("__payload.insert(\"status\".to_string(), V::Int(400));\n");
     out.push_str(&inner2);
-    out.push_str("__payload.insert(\"error\".to_string(), V::Str(\"Validation failed\".to_string()));\n");
+    out.push_str(
+        "__payload.insert(\"error\".to_string(), V::Str(\"Validation failed\".to_string()));\n",
+    );
     out.push_str(&inner2);
     out.push_str("__payload.insert(\"fields\".to_string(), V::Object(__errors));\n");
     out.push_str(&inner2);
@@ -1516,7 +1644,11 @@ fn pk_fields(meta: &EntityMeta) -> Vec<&EntityField> {
     let mut pks: Vec<&EntityField> = meta.fields.iter().filter(|f| f.is_primary_key).collect();
     if pks.is_empty() {
         // Fall back to a field literally named `id` (mirrors runner.rs default).
-        if let Some(f) = meta.fields.iter().find(|f| f.name.eq_ignore_ascii_case("id")) {
+        if let Some(f) = meta
+            .fields
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case("id"))
+        {
             pks.push(f);
         }
     }
@@ -1528,19 +1660,30 @@ fn emit_db_insert(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
         Some(m) => m,
         None => {
             out.push_str(pad);
-            out.push_str(&format!("panic!(\"insert into unknown entity {}\");\n", table));
+            out.push_str(&format!(
+                "panic!(\"insert into unknown entity {}\");\n",
+                table
+            ));
             return;
         }
     };
-    let cols: Vec<&EntityField> = meta.fields.iter().filter(|f| !f.is_auto_increment).collect();
+    let cols: Vec<&EntityField> = meta
+        .fields
+        .iter()
+        .filter(|f| !f.is_auto_increment)
+        .collect();
     let mut sql = format!("INSERT INTO \"{}\" (", meta.table);
     for (i, f) in cols.iter().enumerate() {
-        if i > 0 { sql.push_str(", "); }
+        if i > 0 {
+            sql.push_str(", ");
+        }
         sql.push_str(&format!("\"{}\"", f.name));
     }
     sql.push_str(") VALUES (");
     for i in 0..cols.len() {
-        if i > 0 { sql.push_str(", "); }
+        if i > 0 {
+            sql.push_str(", ");
+        }
         sql.push_str(&format!("${}", i + 1));
     }
     sql.push(')');
@@ -1565,7 +1708,10 @@ fn emit_db_insert(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
     out.push_str(&inner);
     out.push_str("];\n");
     out.push_str(&inner);
-    out.push_str(&format!("let _ = jwc_db_exec(\"{}\", __params).await;\n", escape_sql(&sql)));
+    out.push_str(&format!(
+        "let _ = jwc_db_exec(\"{}\", __params).await;\n",
+        escape_sql(&sql)
+    ));
     out.push_str(pad);
     out.push_str("}\n");
 }
@@ -1575,7 +1721,10 @@ fn emit_db_update(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
         Some(m) => m,
         None => {
             out.push_str(pad);
-            out.push_str(&format!("panic!(\"update on unknown entity {}\");\n", table));
+            out.push_str(&format!(
+                "panic!(\"update on unknown entity {}\");\n",
+                table
+            ));
             return;
         }
     };
@@ -1587,17 +1736,24 @@ fn emit_db_update(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
         .collect();
     if set_cols.is_empty() {
         out.push_str(pad);
-        out.push_str(&format!("panic!(\"update on `{}` has no non-PK columns to set\");\n", table));
+        out.push_str(&format!(
+            "panic!(\"update on `{}` has no non-PK columns to set\");\n",
+            table
+        ));
         return;
     }
     let mut sql = format!("UPDATE \"{}\" SET ", meta.table);
     for (i, f) in set_cols.iter().enumerate() {
-        if i > 0 { sql.push_str(", "); }
+        if i > 0 {
+            sql.push_str(", ");
+        }
         sql.push_str(&format!("\"{}\" = ${}", f.name, i + 1));
     }
     sql.push_str(" WHERE ");
     for (i, p) in pks.iter().enumerate() {
-        if i > 0 { sql.push_str(" AND "); }
+        if i > 0 {
+            sql.push_str(" AND ");
+        }
         sql.push_str(&format!("\"{}\" = ${}", p.name, set_cols.len() + i + 1));
     }
 
@@ -1621,7 +1777,10 @@ fn emit_db_update(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
     out.push_str(&inner);
     out.push_str("];\n");
     out.push_str(&inner);
-    out.push_str(&format!("let _ = jwc_db_exec(\"{}\", __params).await;\n", escape_sql(&sql)));
+    out.push_str(&format!(
+        "let _ = jwc_db_exec(\"{}\", __params).await;\n",
+        escape_sql(&sql)
+    ));
     out.push_str(pad);
     out.push_str("}\n");
 }
@@ -1631,14 +1790,19 @@ fn emit_db_delete_by_var(out: &mut String, pad: &str, var: &str, table: &str, ct
         Some(m) => m,
         None => {
             out.push_str(pad);
-            out.push_str(&format!("panic!(\"delete from unknown entity {}\");\n", table));
+            out.push_str(&format!(
+                "panic!(\"delete from unknown entity {}\");\n",
+                table
+            ));
             return;
         }
     };
     let pks = pk_fields(meta);
     let mut sql = format!("DELETE FROM \"{}\" WHERE ", meta.table);
     for (i, p) in pks.iter().enumerate() {
-        if i > 0 { sql.push_str(" AND "); }
+        if i > 0 {
+            sql.push_str(" AND ");
+        }
         sql.push_str(&format!("\"{}\" = ${}", p.name, i + 1));
     }
 
@@ -1662,7 +1826,10 @@ fn emit_db_delete_by_var(out: &mut String, pad: &str, var: &str, table: &str, ct
     out.push_str(&inner);
     out.push_str("];\n");
     out.push_str(&inner);
-    out.push_str(&format!("let _ = jwc_db_exec(\"{}\", __params).await;\n", escape_sql(&sql)));
+    out.push_str(&format!(
+        "let _ = jwc_db_exec(\"{}\", __params).await;\n",
+        escape_sql(&sql)
+    ));
     out.push_str(pad);
     out.push_str("}\n");
 }
@@ -1678,7 +1845,10 @@ fn emit_db_delete_where(
         Some(m) => m,
         None => {
             out.push_str(pad);
-            out.push_str(&format!("panic!(\"delete from unknown entity {}\");\n", table));
+            out.push_str(&format!(
+                "panic!(\"delete from unknown entity {}\");\n",
+                table
+            ));
             return;
         }
     };
@@ -1703,7 +1873,10 @@ fn emit_db_delete_where(
     out.push_str(&inner);
     out.push_str("];\n");
     out.push_str(&inner);
-    out.push_str(&format!("let _ = jwc_db_exec(\"{}\", __params).await;\n", escape_sql(&sql)));
+    out.push_str(&format!(
+        "let _ = jwc_db_exec(\"{}\", __params).await;\n",
+        escape_sql(&sql)
+    ));
     out.push_str(pad);
     out.push_str("}\n");
 }
@@ -1722,7 +1895,11 @@ struct WhereBuilder<'a> {
 
 impl<'a> WhereBuilder<'a> {
     fn new(entity: &'a EntityMeta) -> Self {
-        WhereBuilder { entity, sql: String::new(), params: Vec::new() }
+        WhereBuilder {
+            entity,
+            sql: String::new(),
+            params: Vec::new(),
+        }
     }
 
     fn col_kind(&self, raw_field: &str) -> Result<(String, PgKind)> {
@@ -1955,8 +2132,13 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             // Async builtins implemented in the prelude as `async fn jwc_b_*`.
             let is_async_builtin = matches!(
                 name.as_str(),
-                "sleep_ms" | "http_get" | "fetch_json" | "setConnectionString"
-                | "ws_send" | "ws_recv" | "ws_close"
+                "sleep_ms"
+                    | "http_get"
+                    | "fetch_json"
+                    | "setConnectionString"
+                    | "ws_send"
+                    | "ws_recv"
+                    | "ws_close"
             );
             if is_user {
                 out.push_str(&user_fn_name(name));
@@ -1970,10 +2152,18 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 && args.is_empty()
                 && matches!(
                     name.as_str(),
-                    "not_found" | "notFound" | "no_content" | "noContent"
-                    | "ok" | "created" | "unauthorized" | "forbidden"
-                    | "internal_error" | "internalError"
-                    | "bad_request" | "badRequest"
+                    "not_found"
+                        | "notFound"
+                        | "no_content"
+                        | "noContent"
+                        | "ok"
+                        | "created"
+                        | "unauthorized"
+                        | "forbidden"
+                        | "internal_error"
+                        | "internalError"
+                        | "bad_request"
+                        | "badRequest"
                 );
             out.push('(');
             if pads_to_one {
@@ -2017,10 +2207,20 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 ctx,
             );
         }
-        Expr::DbCount { table, where_clause, .. } => {
+        Expr::DbCount {
+            table,
+            where_clause,
+            ..
+        } => {
             emit_db_count(out, table, where_clause.as_deref(), ctx);
         }
-        Expr::DbAggregate { kind, field, table, where_clause, .. } => {
+        Expr::DbAggregate {
+            kind,
+            field,
+            table,
+            where_clause,
+            ..
+        } => {
             emit_db_aggregate(out, *kind, field, table, where_clause.as_deref(), ctx);
         }
         Expr::Await(inner) => {
@@ -2064,7 +2264,10 @@ fn emit_db_select(
                 None => {
                     out.push_str(&format!(
                         "{{ compile_error!({:?}); V::Null }}",
-                        format!("unknown projection column `{}` on entity `{}`", c, meta.table),
+                        format!(
+                            "unknown projection column `{}` on entity `{}`",
+                            c, meta.table
+                        ),
                     ));
                     return;
                 }
@@ -2080,7 +2283,12 @@ fn emit_db_select(
         let pks = pk_fields(meta);
         let mut cols: Vec<String> = projection
             .iter()
-            .filter_map(|c| meta.fields.iter().find(|f| f.name.eq_ignore_ascii_case(c)).map(|f| format!("\"{}\"", f.name)))
+            .filter_map(|c| {
+                meta.fields
+                    .iter()
+                    .find(|f| f.name.eq_ignore_ascii_case(c))
+                    .map(|f| format!("\"{}\"", f.name))
+            })
             .collect();
         for p in &pks {
             let q = format!("\"{}\"", p.name);
@@ -2101,7 +2309,11 @@ fn emit_db_select(
     }
     let mut plans: Vec<NavPlan> = Vec::new();
     for rel in with_relations {
-        let nav = match meta.navigations.iter().find(|n| n.name.eq_ignore_ascii_case(rel)) {
+        let nav = match meta
+            .navigations
+            .iter()
+            .find(|n| n.name.eq_ignore_ascii_case(rel))
+        {
             Some(n) => n,
             None => {
                 out.push_str(&format!(
@@ -2116,7 +2328,10 @@ fn emit_db_select(
             None => {
                 out.push_str(&format!(
                     "{{ compile_error!({:?}); V::Null }}",
-                    format!("navigation `{}` targets unknown entity `{}`", rel, nav.target_entity),
+                    format!(
+                        "navigation `{}` targets unknown entity `{}`",
+                        rel, nav.target_entity
+                    ),
                 ));
                 return;
             }
@@ -2125,18 +2340,28 @@ fn emit_db_select(
         if pks.is_empty() {
             out.push_str(&format!(
                 "{{ compile_error!({:?}); V::Null }}",
-                format!("entity `{}` has no PK; `with {}` needs one", meta.table, rel),
+                format!(
+                    "entity `{}` has no PK; `with {}` needs one",
+                    meta.table, rel
+                ),
             ));
             return;
         }
-        plans.push(NavPlan { nav, target, parent_pk: pks[0] });
+        plans.push(NavPlan {
+            nav,
+            target,
+            parent_pk: pks[0],
+        });
     }
 
     let mut sql = format!("SELECT {} FROM \"{}\"", select_clause, meta.table);
     let mut wb = WhereBuilder::new(meta);
     if let Some(w) = where_clause {
         if let Err(e) = wb.emit(w) {
-            out.push_str(&format!("{{ compile_error!({:?}); V::Null }}", e.to_string()));
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                e.to_string()
+            ));
             return;
         }
         sql.push_str(" WHERE ");
@@ -2224,7 +2449,10 @@ fn emit_db_aggregate(
     let meta = match ctx.entities.get(table) {
         Some(m) => m,
         None => {
-            out.push_str(&format!("panic!(\"aggregate on unknown entity {}\")", table));
+            out.push_str(&format!(
+                "panic!(\"aggregate on unknown entity {}\")",
+                table
+            ));
             return;
         }
     };
@@ -2232,7 +2460,11 @@ fn emit_db_aggregate(
         Some((_, c)) => c,
         None => field,
     };
-    let f = match meta.fields.iter().find(|f| f.name.eq_ignore_ascii_case(col_name)) {
+    let f = match meta
+        .fields
+        .iter()
+        .find(|f| f.name.eq_ignore_ascii_case(col_name))
+    {
         Some(f) => f,
         None => {
             out.push_str(&format!(
@@ -2255,7 +2487,10 @@ fn emit_db_aggregate(
     let mut wb = WhereBuilder::new(meta);
     if let Some(w) = where_clause {
         if let Err(e) = wb.emit(w) {
-            out.push_str(&format!("{{ compile_error!({:?}); V::Null }}", e.to_string()));
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                e.to_string()
+            ));
             return;
         }
         sql.push_str(" WHERE ");
@@ -2292,7 +2527,10 @@ fn emit_db_count(
     let mut wb = WhereBuilder::new(meta);
     if let Some(w) = where_clause {
         if let Err(e) = wb.emit(w) {
-            out.push_str(&format!("{{ compile_error!({:?}); V::Null }}", e.to_string()));
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                e.to_string()
+            ));
             return;
         }
         sql.push_str(" WHERE ");
@@ -2348,14 +2586,58 @@ fn push_str_escaped(out: &mut String, s: &str) {
 fn sanitize_ident(name: &str) -> String {
     if matches!(
         name,
-        "fn" | "let" | "mut" | "if" | "else" | "while" | "for" | "in" | "loop"
-            | "break" | "continue" | "return" | "match" | "struct" | "enum" | "impl"
-            | "trait" | "use" | "mod" | "pub" | "crate" | "self" | "Self" | "super"
-            | "where" | "as" | "type" | "const" | "static" | "ref" | "move" | "dyn"
-            | "async" | "await" | "true" | "false" | "box" | "abstract" | "become"
-            | "do" | "final" | "macro" | "override" | "priv" | "typeof" | "unsized"
-            | "virtual" | "yield" | "try" | "union"
-    ) || name.starts_with("jwc_") || name.starts_with("user_") || name == "V"
+        "fn" | "let"
+            | "mut"
+            | "if"
+            | "else"
+            | "while"
+            | "for"
+            | "in"
+            | "loop"
+            | "break"
+            | "continue"
+            | "return"
+            | "match"
+            | "struct"
+            | "enum"
+            | "impl"
+            | "trait"
+            | "use"
+            | "mod"
+            | "pub"
+            | "crate"
+            | "self"
+            | "Self"
+            | "super"
+            | "where"
+            | "as"
+            | "type"
+            | "const"
+            | "static"
+            | "ref"
+            | "move"
+            | "dyn"
+            | "async"
+            | "await"
+            | "true"
+            | "false"
+            | "box"
+            | "abstract"
+            | "become"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+            | "try"
+            | "union"
+    ) || name.starts_with("jwc_")
+        || name.starts_with("user_")
+        || name == "V"
     {
         format!("var_{name}")
     } else {
@@ -2370,7 +2652,11 @@ fn find_cargo() -> Result<PathBuf> {
         return Ok(path);
     }
     if let Some(home) = dirs_home() {
-        let candidate = home.join(".jwc").join("toolchain").join("bin").join(cargo_exe_name());
+        let candidate = home
+            .join(".jwc")
+            .join("toolchain")
+            .join("bin")
+            .join(cargo_exe_name());
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -2391,7 +2677,11 @@ fn which_cargo() -> Result<PathBuf> {
 }
 
 fn cargo_exe_name() -> &'static str {
-    if cfg!(windows) { "cargo.exe" } else { "cargo" }
+    if cfg!(windows) {
+        "cargo.exe"
+    } else {
+        "cargo"
+    }
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -2415,8 +2705,11 @@ fn scaffold_workspace(
         .with_context(|| format!("Failed to create {}", src_dir.display()))?;
 
     let cargo_toml = workspace.join("Cargo.toml");
-    std::fs::write(&cargo_toml, render_cargo_toml(app_name, needs_db, needs_http_client))
-        .with_context(|| format!("Failed to write {}", cargo_toml.display()))?;
+    std::fs::write(
+        &cargo_toml,
+        render_cargo_toml(app_name, needs_db, needs_http_client),
+    )
+    .with_context(|| format!("Failed to write {}", cargo_toml.display()))?;
 
     let main_rs = src_dir.join("main.rs");
     std::fs::write(&main_rs, rust_src)
@@ -2496,7 +2789,10 @@ fn invoke_cargo(cargo: &Path, workspace: &Path, app_name: &str, release: bool) -
     };
     let bin = workspace.join("target").join(profile_dir).join(&exe);
     if !bin.is_file() {
-        bail!("cargo reported success but binary not found: {}", bin.display());
+        bail!(
+            "cargo reported success but binary not found: {}",
+            bin.display()
+        );
     }
     Ok(bin)
 }

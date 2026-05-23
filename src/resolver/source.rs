@@ -70,7 +70,10 @@ pub fn build_source(
             project_root.join(path)
         };
         if !abs.is_dir() {
-            bail!("Path dependency does not exist or is not a directory: {}", abs.display());
+            bail!(
+                "Path dependency does not exist or is not a directory: {}",
+                abs.display()
+            );
         }
         return Ok(Box::new(PathSource { path: abs }));
     }
@@ -86,7 +89,11 @@ pub fn build_source(
         .registry
         .as_deref()
         .or(default_registry)
-        .ok_or_else(|| anyhow!("No registry URL configured (set 'registry.url' in jwcproj or JWC_REGISTRY_URL)"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "No registry URL configured (set 'registry.url' in jwcproj or JWC_REGISTRY_URL)"
+            )
+        })?;
     Ok(Box::new(RegistrySource {
         base_url: url.to_string(),
     }))
@@ -137,7 +144,13 @@ impl Source for GitSource {
         pkg_cache::ensure_parent(&target)?;
 
         let status = std::process::Command::new("git")
-            .args(["clone", "--depth", "1", &self.url, target.to_string_lossy().as_ref()])
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                &self.url,
+                target.to_string_lossy().as_ref(),
+            ])
             .status()
             .with_context(|| format!("Failed to run `git clone {}`", self.url))?;
         if !status.success() {
@@ -146,9 +159,16 @@ impl Source for GitSource {
 
         if self.rev != "HEAD" {
             let status = std::process::Command::new("git")
-                .args(["-C", target.to_string_lossy().as_ref(), "checkout", &self.rev])
+                .args([
+                    "-C",
+                    target.to_string_lossy().as_ref(),
+                    "checkout",
+                    &self.rev,
+                ])
                 .status()
-                .with_context(|| format!("Failed to checkout {} in {}", self.rev, target.display()))?;
+                .with_context(|| {
+                    format!("Failed to checkout {} in {}", self.rev, target.display())
+                })?;
             if !status.success() {
                 bail!("git checkout {} failed (exit {})", self.rev, status);
             }

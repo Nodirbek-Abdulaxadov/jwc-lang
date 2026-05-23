@@ -49,8 +49,7 @@ enum TlsMode {
 }
 
 fn read_env_var(name: &str) -> Result<String> {
-    let v = std::env::var(name)
-        .map_err(|_| anyhow!("send_email: {name} is required"))?;
+    let v = std::env::var(name).map_err(|_| anyhow!("send_email: {name} is required"))?;
     if v.trim().is_empty() {
         bail!("send_email: {name} is required");
     }
@@ -81,9 +80,7 @@ fn load_config() -> Result<SmtpConfig> {
         "starttls" => TlsMode::StartTls,
         "tls" | "implicit" | "smtps" => TlsMode::ImplicitTls,
         "none" | "plaintext" | "off" => TlsMode::None,
-        other => bail!(
-            "send_email: invalid JWC_SMTP_TLS '{other}' (expected starttls|tls|none)"
-        ),
+        other => bail!("send_email: invalid JWC_SMTP_TLS '{other}' (expected starttls|tls|none)"),
     };
     Ok(SmtpConfig {
         host,

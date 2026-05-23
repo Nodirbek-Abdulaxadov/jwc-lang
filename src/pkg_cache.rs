@@ -58,7 +58,9 @@ pub fn registry_cache_dir(host: &str) -> PathBuf {
 /// specific package version. The directory layout inside is whatever the
 /// tarball / git snapshot contained.
 pub fn pkg_dir(host: &str, name: &str, version: &str) -> PathBuf {
-    registry_cache_dir(host).join(sanitize_segment(name)).join(sanitize_segment(version))
+    registry_cache_dir(host)
+        .join(sanitize_segment(name))
+        .join(sanitize_segment(version))
 }
 
 /// Git clones live separately so the same git URL at different revisions
@@ -101,7 +103,10 @@ mod tests {
 
     #[test]
     fn sanitize_strips_slashes_and_colons() {
-        assert_eq!(sanitize_segment("https://example.com/path"), "https___example.com_path");
+        assert_eq!(
+            sanitize_segment("https://example.com/path"),
+            "https___example.com_path"
+        );
         assert_eq!(sanitize_segment(""), "_");
         assert_eq!(sanitize_segment("v1.2.3"), "v1.2.3");
     }

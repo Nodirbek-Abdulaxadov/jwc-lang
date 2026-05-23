@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use tokio_postgres::types::ToSql;
 use serde_json::{json, Value as JsonValue};
+use tokio_postgres::types::ToSql;
 
 use crate::ast::{
     AggregateKind, DbOrderBy, ErrorHandlerDecl, Expr, FunctionDecl, ImportDecl, MiddlewareDecl,
@@ -40,9 +40,7 @@ pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
     msgs.push(blob);
     let combined = msgs.join("\n");
 
-    let has = |needles: &[&str]| -> bool {
-        needles.iter().any(|n| combined.contains(n))
-    };
+    let has = |needles: &[&str]| -> bool { needles.iter().any(|n| combined.contains(n)) };
 
     if has(&[
         "validate body",
@@ -196,9 +194,9 @@ fn apply_mount(route: &RouteDecl, mount: &MountDecl) -> RouteDecl {
     copy
 }
 
+use async_recursion::async_recursion;
 use std::sync::Arc;
 use std::sync::OnceLock as StdOnceLock;
-use async_recursion::async_recursion;
 
 tokio::task_local! {
     /// Active WebSocket channels for the current handler task. `ws_send`
@@ -329,7 +327,8 @@ pub async fn run_request_with_headers(
 /// is discarded — handlers communicate via side effects (db, cache, email).
 pub async fn run_handler(program: &Program, function_name: &str, payload: String) -> Result<()> {
     let mut vm = Vm::new(program);
-    vm.call_function(function_name, vec![Value::Str(payload)]).await?;
+    vm.call_function(function_name, vec![Value::Str(payload)])
+        .await?;
     Ok(())
 }
 
@@ -557,7 +556,8 @@ impl<'a> Vm<'a> {
         }
 
         self.depth += 1;
-        self.current_namespace_stack.push(function.namespace.clone());
+        self.current_namespace_stack
+            .push(function.namespace.clone());
 
         let mut vars = HashMap::new();
         for (param, value) in function.params.iter().zip(args.into_iter()) {
@@ -640,47 +640,66 @@ impl<'a> Vm<'a> {
                 Value::Str(_) => Ok(value),
                 Value::Int(n) => Ok(Value::Str(n.to_string())),
                 Value::Float(n) => Ok(Value::Str(format_float(*n))),
-                _ => bail!("Type error: {subject} expects string, got {}", value.type_name()),
+                _ => bail!(
+                    "Type error: {subject} expects string, got {}",
+                    value.type_name()
+                ),
             },
             "int" | "integer" | "number" | "bigint" => match &value {
                 Value::Int(_) => Ok(value),
                 Value::Float(n) if n.fract() == 0.0 => Ok(Value::Int(*n as i64)),
-                Value::Str(s) => s
-                    .parse::<i64>()
-                    .map(Value::Int)
-                    .map_err(|_| anyhow!("Type error: {subject} expects int, got string \"{}\"", s)),
-                _ => bail!("Type error: {subject} expects int, got {}", value.type_name()),
+                Value::Str(s) => s.parse::<i64>().map(Value::Int).map_err(|_| {
+                    anyhow!("Type error: {subject} expects int, got string \"{}\"", s)
+                }),
+                _ => bail!(
+                    "Type error: {subject} expects int, got {}",
+                    value.type_name()
+                ),
             },
             "double" | "float" => match &value {
                 Value::Float(_) => Ok(value),
                 Value::Int(n) => Ok(Value::Float(*n as f64)),
-                Value::Str(s) => s
-                    .parse::<f64>()
-                    .map(Value::Float)
-                    .map_err(|_| anyhow!("Type error: {subject} expects double, got string \"{}\"", s)),
-                _ => bail!("Type error: {subject} expects double, got {}", value.type_name()),
+                Value::Str(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
+                    anyhow!("Type error: {subject} expects double, got string \"{}\"", s)
+                }),
+                _ => bail!(
+                    "Type error: {subject} expects double, got {}",
+                    value.type_name()
+                ),
             },
             "bool" | "boolean" => match &value {
                 Value::Bool(_) => Ok(value),
-                _ => bail!("Type error: {subject} expects bool, got {}", value.type_name()),
+                _ => bail!(
+                    "Type error: {subject} expects bool, got {}",
+                    value.type_name()
+                ),
             },
             "uuid" => match &value {
                 Value::Str(s) if looks_like_uuid(s) => Ok(value),
                 Value::Str(s) => bail!("Type error: {subject} expects uuid, got string \"{s}\""),
-                _ => bail!("Type error: {subject} expects uuid, got {}", value.type_name()),
+                _ => bail!(
+                    "Type error: {subject} expects uuid, got {}",
+                    value.type_name()
+                ),
             },
             "datetime" | "timestamp" => match &value {
                 Value::Str(s) if looks_like_datetime(s) => Ok(value),
                 Value::Str(s) => {
                     bail!("Type error: {subject} expects datetime (ISO 8601), got string \"{s}\"")
                 }
-                _ => bail!("Type error: {subject} expects datetime, got {}", value.type_name()),
+                _ => bail!(
+                    "Type error: {subject} expects datetime, got {}",
+                    value.type_name()
+                ),
             },
             "decimal" => match &value {
                 Value::Float(_) | Value::Int(_) => Ok(value),
                 Value::Str(s) if s.parse::<f64>().is_ok() => Ok(Value::Str(s.clone())),
                 Value::Str(s) => bail!("Type error: {subject} expects decimal, got string \"{s}\""),
-                _ => bail!("Type error: {subject} expects decimal, got {}", value.type_name()),
+                _ => bail!(
+                    "Type error: {subject} expects decimal, got {}",
+                    value.type_name()
+                ),
             },
             "json" => match &value {
                 Value::Str(s) => {
@@ -691,7 +710,10 @@ impl<'a> Vm<'a> {
                     }
                 }
                 Value::Null => Ok(value),
-                _ => bail!("Type error: {subject} expects json, got {}", value.type_name()),
+                _ => bail!(
+                    "Type error: {subject} expects json, got {}",
+                    value.type_name()
+                ),
             },
             model_ty => {
                 let model = self.models.get(&model_ty.to_lowercase());
@@ -732,9 +754,9 @@ impl<'a> Vm<'a> {
         let parsed: JsonValue = serde_json::from_str(&raw)
             .map_err(|_| anyhow!("Type error: {subject} expects List<{elem_ty}>, got non-json"))?;
 
-        let arr = parsed
-            .as_array()
-            .ok_or_else(|| anyhow!("Type error: {subject} expects List<{elem_ty}>, got non-array"))?;
+        let arr = parsed.as_array().ok_or_else(|| {
+            anyhow!("Type error: {subject} expects List<{elem_ty}>, got non-array")
+        })?;
 
         for (i, item) in arr.iter().enumerate() {
             if !self.json_value_matches_type(item, elem_ty) {
@@ -763,9 +785,17 @@ impl<'a> Vm<'a> {
         self.validate_model_object(subject, model, value)
     }
 
-    fn validate_model_object(&self, subject: &str, model: &ModelDecl, value: &JsonValue) -> Result<()> {
+    fn validate_model_object(
+        &self,
+        subject: &str,
+        model: &ModelDecl,
+        value: &JsonValue,
+    ) -> Result<()> {
         let Some(obj) = value.as_object() else {
-            bail!("Type error: {subject} expects {}, got non-object json", model.name);
+            bail!(
+                "Type error: {subject} expects {}, got non-object json",
+                model.name
+            );
         };
 
         for field in &model.fields {
@@ -825,7 +855,9 @@ impl<'a> Vm<'a> {
             "json" => value.is_object() || value.is_array(),
             other => {
                 if let Some(model) = self.models.get(other) {
-                    return self.validate_json_against_model("nested model", model, value).is_ok();
+                    return self
+                        .validate_json_against_model("nested model", model, value)
+                        .is_ok();
                 }
                 true
             }
@@ -833,7 +865,11 @@ impl<'a> Vm<'a> {
     }
 
     #[async_recursion]
-    async fn exec_block(&mut self, stmts: &[Stmt], vars: &mut HashMap<String, Value>) -> Result<Flow> {
+    async fn exec_block(
+        &mut self,
+        stmts: &[Stmt],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Flow> {
         for stmt in stmts {
             let flow = self.exec_stmt(stmt, vars).await?;
             if !matches!(flow, Flow::Continue) {
@@ -930,7 +966,11 @@ impl<'a> Vm<'a> {
                 let json_str = match current {
                     Value::Str(s) => s,
                     Value::Null => "{}".to_string(),
-                    other => bail!("FieldAssign: '{}' is not an object, got {}", var, other.type_name()),
+                    other => bail!(
+                        "FieldAssign: '{}' is not an object, got {}",
+                        var,
+                        other.type_name()
+                    ),
                 };
                 let mut doc: serde_json::Value = serde_json::from_str(&json_str)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
@@ -961,10 +1001,7 @@ impl<'a> Vm<'a> {
                             // (or the errorHandler) gets a shot at it.
                             return Err(e);
                         }
-                        let mut all_msgs: Vec<String> = e
-                            .chain()
-                            .map(|c| c.to_string())
-                            .collect();
+                        let mut all_msgs: Vec<String> = e.chain().map(|c| c.to_string()).collect();
                         let message = if all_msgs.is_empty() {
                             "unknown error".to_string()
                         } else {
@@ -999,9 +1036,7 @@ impl<'a> Vm<'a> {
                 // reference, which is fine because `with_tx` polls it
                 // immediately to completion.
                 let outcome: Result<Flow> = engine::with_tx(|| {
-                    Box::pin(async move {
-                        self.exec_block(&body_clone, vars).await
-                    })
+                    Box::pin(async move { self.exec_block(&body_clone, vars).await })
                 })
                 .await;
                 outcome
@@ -1038,8 +1073,12 @@ impl<'a> Vm<'a> {
                     }
                 }
                 match prior {
-                    Some(p) => { vars.insert(key.clone(), p); }
-                    None => { vars.remove(&key); }
+                    Some(p) => {
+                        vars.insert(key.clone(), p);
+                    }
+                    None => {
+                        vars.remove(&key);
+                    }
                 }
                 if let Some(d) = prior_dirty {
                     self.dirty_fields.insert(key, d);
@@ -1070,7 +1109,11 @@ impl<'a> Vm<'a> {
 
                 Ok(Flow::Continue)
             }
-            Stmt::DbInsert { var, context_var: _, table } => {
+            Stmt::DbInsert {
+                var,
+                context_var: _,
+                table,
+            } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
                 let (sql, boxed_params) = build_insert_sql(&table_name, &json_str)?;
@@ -1082,18 +1125,18 @@ impl<'a> Vm<'a> {
                 engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
-            Stmt::DbUpdate { var, context_var: _, table } => {
+            Stmt::DbUpdate {
+                var,
+                context_var: _,
+                table,
+            } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
                 let pk_fields = self.resolve_pk_fields(table);
                 let key = var.to_lowercase();
                 let dirty_snapshot = self.dirty_fields.get(&key).cloned();
-                let (sql, boxed_params) = build_update_sql(
-                    &table_name,
-                    &json_str,
-                    &pk_fields,
-                    dirty_snapshot.as_ref(),
-                )?;
+                let (sql, boxed_params) =
+                    build_update_sql(&table_name, &json_str, &pk_fields, dirty_snapshot.as_ref())?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let returned = engine::query_text(&sql, &param_refs).await?;
                 if !returned.is_empty() && returned != "null" {
@@ -1104,7 +1147,11 @@ impl<'a> Vm<'a> {
                 engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
-            Stmt::DbDelete { var, context_var: _, table } => {
+            Stmt::DbDelete {
+                var,
+                context_var: _,
+                table,
+            } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
                 let pk_fields = self.resolve_pk_fields(table);
@@ -1130,7 +1177,8 @@ impl<'a> Vm<'a> {
                     &mut cache_bits,
                     vars,
                     self,
-                ).await?;
+                )
+                .await?;
                 let sql = format!("DELETE FROM \"{}\" WHERE {};", table_name, where_sql);
                 let param_refs = boxed_params_to_refs(&params);
                 let _ = engine::exec(&sql, &param_refs).await?;
@@ -1228,7 +1276,8 @@ impl<'a> Vm<'a> {
                         &mut cache_bits,
                         vars,
                         self,
-                    ).await?;
+                    )
+                    .await?;
                     format!(" WHERE {}", s)
                 } else {
                     String::new()
@@ -1239,13 +1288,16 @@ impl<'a> Vm<'a> {
                     agg_sql, table_name, where_sql
                 );
                 let shape_key = format!("aggregate|table:{table_name}|{}", shape_bits.join("|"));
-                let cache_key =
-                    format!("result|aggregate|table:{table_name}|{}", cache_bits.join("|"));
+                let cache_key = format!(
+                    "result|aggregate|table:{table_name}|{}",
+                    cache_bits.join("|")
+                );
 
                 let param_refs = boxed_params_to_refs(&params);
                 let compiled = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
                 let result =
-                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs).await?;
+                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs)
+                        .await?;
                 let trimmed = result.trim();
                 if trimmed.is_empty() || trimmed == "null" {
                     return Ok(Value::Null);
@@ -1276,7 +1328,8 @@ impl<'a> Vm<'a> {
                         &mut cache_bits,
                         vars,
                         self,
-                    ).await?;
+                    )
+                    .await?;
                     format!(" WHERE {}", s)
                 } else {
                     String::new()
@@ -1306,7 +1359,8 @@ impl<'a> Vm<'a> {
                 let param_refs = boxed_params_to_refs(&params);
                 let compiled = engine::get_or_compile_sql(&shape_key, || Ok(sql.clone()))?;
                 let result =
-                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs).await?;
+                    engine::query_text_with_optional_cache(&cache_key, &compiled, &param_refs)
+                        .await?;
                 let n = result.trim().parse::<i64>().with_context(|| {
                     format!("count(*): expected integer text, got '{}'", result.trim())
                 })?;
@@ -1343,7 +1397,8 @@ impl<'a> Vm<'a> {
                     projection,
                     vars,
                     self,
-                ).await?;
+                )
+                .await?;
                 // Cache hit short-circuit: skip get_or_compile_sql + DB roundtrip.
                 if let Some(cached) = engine::try_cached_result(&cache_key)? {
                     return if cached == "null" || cached.is_empty() {
@@ -1355,7 +1410,8 @@ impl<'a> Vm<'a> {
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let compiled_sql = engine::get_or_compile_sql(&shape_key, || Ok(sql))?;
                 let result =
-                    engine::query_text_with_optional_cache(&cache_key, &compiled_sql, &param_refs).await?;
+                    engine::query_text_with_optional_cache(&cache_key, &compiled_sql, &param_refs)
+                        .await?;
                 if result == "null" || result.is_empty() {
                     Ok(Value::Null)
                 } else {
@@ -1487,22 +1543,34 @@ impl<'a> Vm<'a> {
                     return self.eval_length_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("lower") {
-                    return self.eval_string_call(args, vars, "lower", |s| s.to_lowercase()).await;
+                    return self
+                        .eval_string_call(args, vars, "lower", |s| s.to_lowercase())
+                        .await;
                 }
                 if name.eq_ignore_ascii_case("upper") {
-                    return self.eval_string_call(args, vars, "upper", |s| s.to_uppercase()).await;
+                    return self
+                        .eval_string_call(args, vars, "upper", |s| s.to_uppercase())
+                        .await;
                 }
                 if name.eq_ignore_ascii_case("trim") {
-                    return self.eval_string_call(args, vars, "trim", |s| s.trim().to_string()).await;
+                    return self
+                        .eval_string_call(args, vars, "trim", |s| s.trim().to_string())
+                        .await;
                 }
                 if name.eq_ignore_ascii_case("contains") {
                     return self.eval_contains_call(args, vars).await;
                 }
                 if name.eq_ignore_ascii_case("starts_with") {
-                    return self.eval_two_string_bool_call(args, vars, "starts_with", |s, p| s.starts_with(p)).await;
+                    return self
+                        .eval_two_string_bool_call(args, vars, "starts_with", |s, p| {
+                            s.starts_with(p)
+                        })
+                        .await;
                 }
                 if name.eq_ignore_ascii_case("ends_with") {
-                    return self.eval_two_string_bool_call(args, vars, "ends_with", |s, p| s.ends_with(p)).await;
+                    return self
+                        .eval_two_string_bool_call(args, vars, "ends_with", |s, p| s.ends_with(p))
+                        .await;
                 }
                 if name.eq_ignore_ascii_case("replace") {
                     return self.eval_replace_call(args, vars).await;
@@ -1555,10 +1623,9 @@ impl<'a> Vm<'a> {
                         match self.eval_expr(arg, vars).await? {
                             Value::Int(n) if n > 0 && n <= 65535 => n as u16,
                             Value::Int(n) => bail!("serve(): invalid port {n}"),
-                            other => bail!(
-                                "serve(port): port must be int, got {}",
-                                other.type_name()
-                            ),
+                            other => {
+                                bail!("serve(port): port must be int, got {}", other.type_name())
+                            }
                         }
                     } else {
                         8080
@@ -1604,10 +1671,7 @@ impl<'a> Vm<'a> {
                     let n = match self.eval_expr(&args[0], vars).await? {
                         Value::Int(n) if n >= 0 => n as u64,
                         Value::Int(n) => bail!("sleep_ms(n): n must be >= 0, got {n}"),
-                        other => bail!(
-                            "sleep_ms(n): n must be int, got {}",
-                            other.type_name()
-                        ),
+                        other => bail!("sleep_ms(n): n must be int, got {}", other.type_name()),
                     };
                     tokio::time::sleep(std::time::Duration::from_millis(n)).await;
                     return Ok(Value::Null);
@@ -1658,7 +1722,8 @@ impl<'a> Vm<'a> {
                     }
                     let val = self.eval_expr(&args[0], vars).await?;
                     let s = val.as_string();
-                    let result = if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&s) {
+                    let result = if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&s)
+                    {
                         match doc.as_object_mut() {
                             Some(obj) => {
                                 obj.insert("status".into(), json!(201));
@@ -1699,7 +1764,10 @@ impl<'a> Vm<'a> {
                 for arg in args {
                     values.push(self.eval_expr(arg, vars).await?);
                 }
-                Ok(self.call_function(name, values).await?.unwrap_or(Value::Void))
+                Ok(self
+                    .call_function(name, values)
+                    .await?
+                    .unwrap_or(Value::Void))
             }
             Expr::Await(inner) => self.eval_expr(inner, vars).await,
             Expr::Not(inner) => match self.eval_expr(inner, vars).await? {
@@ -1728,14 +1796,20 @@ impl<'a> Vm<'a> {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
                     (Value::Str(a), b) => Ok(Value::Str(format!("{a}{}", b.as_string()))),
                     (a, Value::Str(b)) => Ok(Value::Str(format!("{}{b}", a.as_string()))),
-                    (a, b) => bail!("Unsupported '+' for {} and {}", a.type_name(), b.type_name()),
+                    (a, b) => bail!(
+                        "Unsupported '+' for {} and {}",
+                        a.type_name(),
+                        b.type_name()
+                    ),
                 }
             }
             Expr::Sub(left, right) => {
-                self.eval_numeric_bin(left, right, vars, |a, b| a - b, |a, b| a - b).await
+                self.eval_numeric_bin(left, right, vars, |a, b| a - b, |a, b| a - b)
+                    .await
             }
             Expr::Mul(left, right) => {
-                self.eval_numeric_bin(left, right, vars, |a, b| a * b, |a, b| a * b).await
+                self.eval_numeric_bin(left, right, vars, |a, b| a * b, |a, b| a * b)
+                    .await
             }
             Expr::Div(left, right) => {
                 let l = self.eval_expr(left, vars).await?;
@@ -1749,7 +1823,11 @@ impl<'a> Vm<'a> {
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
                     (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
                     (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
-                    (a, b) => bail!("Unsupported '/' for {} and {}", a.type_name(), b.type_name()),
+                    (a, b) => bail!(
+                        "Unsupported '/' for {} and {}",
+                        a.type_name(),
+                        b.type_name()
+                    ),
                 }
             }
             Expr::Mod(left, right) => {
@@ -1764,7 +1842,11 @@ impl<'a> Vm<'a> {
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
                     (Value::Int(a), Value::Float(b)) => Ok(Value::Float((a as f64) % b)),
                     (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a % (b as f64))),
-                    (a, b) => bail!("Unsupported '%' for {} and {}", a.type_name(), b.type_name()),
+                    (a, b) => bail!(
+                        "Unsupported '%' for {} and {}",
+                        a.type_name(),
+                        b.type_name()
+                    ),
                 }
             }
             Expr::Neg(inner) => {
@@ -1786,9 +1868,15 @@ impl<'a> Vm<'a> {
                 Ok(Value::Bool(l != r))
             }
             Expr::Lt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a < b).await,
-            Expr::Lte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a <= b).await,
+            Expr::Lte(left, right) => {
+                self.eval_numeric_cmp(left, right, vars, |a, b| a <= b)
+                    .await
+            }
             Expr::Gt(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a > b).await,
-            Expr::Gte(left, right) => self.eval_numeric_cmp(left, right, vars, |a, b| a >= b).await,
+            Expr::Gte(left, right) => {
+                self.eval_numeric_cmp(left, right, vars, |a, b| a >= b)
+                    .await
+            }
             Expr::And(left, right) => {
                 let l = self.eval_expr(left, vars).await?;
                 match l {
@@ -1839,7 +1927,11 @@ impl<'a> Vm<'a> {
             (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_func(a, b))),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_func(a as f64, b))),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_func(a, b as f64))),
-            (a, b) => bail!("Unsupported numeric op for {} and {}", a.type_name(), b.type_name()),
+            (a, b) => bail!(
+                "Unsupported numeric op for {} and {}",
+                a.type_name(),
+                b.type_name()
+            ),
         }
     }
 
@@ -1860,7 +1952,11 @@ impl<'a> Vm<'a> {
             (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(func(a, b))),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Bool(func(a as f64, b))),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(func(a, b as f64))),
-            (a, b) => bail!("Unsupported comparison for {} and {}", a.type_name(), b.type_name()),
+            (a, b) => bail!(
+                "Unsupported comparison for {} and {}",
+                a.type_name(),
+                b.type_name()
+            ),
         }
     }
 
@@ -1928,11 +2024,13 @@ impl<'a> Vm<'a> {
             Ok(Some(resp))
         } else if let Some(ref handler_name) = handler {
             let args = self.build_handler_args(handler_name);
-            self.call_function(handler_name, args).await
+            self.call_function(handler_name, args)
+                .await
                 .map(|v| v.map(|v| v.as_string()))
         } else {
             let mut route_vars = HashMap::new();
-            self.exec_block(&body_stmts, &mut route_vars).await
+            self.exec_block(&body_stmts, &mut route_vars)
+                .await
                 .map(|flow| match flow {
                     Flow::Return(Some(v)) => Some(v.as_string()),
                     Flow::Return(None) => Some("null".to_string()),
@@ -2217,7 +2315,10 @@ impl<'a> Vm<'a> {
         let name = self.eval_expr(&args[0], vars).await?;
         let name = match name {
             Value::Str(v) => v,
-            other => bail!("path_param(name): name must be string, got {}", other.type_name()),
+            other => bail!(
+                "path_param(name): name must be string, got {}",
+                other.type_name()
+            ),
         };
 
         let params = self
@@ -2270,7 +2371,10 @@ impl<'a> Vm<'a> {
         }
         let url = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
-            other => bail!("http_get(url): url must be string, got {}", other.type_name()),
+            other => bail!(
+                "http_get(url): url must be string, got {}",
+                other.type_name()
+            ),
         };
 
         let headers_json = if let Some(arg) = args.get(1) {
@@ -2506,7 +2610,9 @@ impl<'a> Vm<'a> {
                 other.type_name()
             ),
         };
-        Ok(Value::Bool(crate::password::verify_password(&pwd, &stored)?))
+        Ok(Value::Bool(crate::password::verify_password(
+            &pwd, &stored,
+        )?))
     }
 
     async fn eval_cache_get_call(
@@ -2554,9 +2660,9 @@ impl<'a> Vm<'a> {
         };
         let ttl = match self.eval_expr(&args[2], vars).await? {
             Value::Int(n) if n >= 0 => n as u64,
-            Value::Int(n) => bail!(
-                "cache_set(key, value, ttl_secs): ttl_secs must be >= 0, got {n}"
-            ),
+            Value::Int(n) => {
+                bail!("cache_set(key, value, ttl_secs): ttl_secs must be >= 0, got {n}")
+            }
             other => bail!(
                 "cache_set(key, value, ttl_secs): ttl_secs must be int, got {}",
                 other.type_name()
@@ -2709,7 +2815,10 @@ impl<'a> Vm<'a> {
         }
         let name = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
-            other => bail!("header(name): name must be string, got {}", other.type_name()),
+            other => bail!(
+                "header(name): name must be string, got {}",
+                other.type_name()
+            ),
         };
         let key = name.to_ascii_lowercase();
         let value = self
@@ -2732,7 +2841,10 @@ impl<'a> Vm<'a> {
         }
         let key = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
-            other => bail!("context(key): key must be string, got {}", other.type_name()),
+            other => bail!(
+                "context(key): key must be string, got {}",
+                other.type_name()
+            ),
         };
         Ok(self
             .request_context
@@ -2771,7 +2883,10 @@ impl<'a> Vm<'a> {
         }
         let sql = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
-            other => bail!("raw_sql(sql, ...): sql must be string, got {}", other.type_name()),
+            other => bail!(
+                "raw_sql(sql, ...): sql must be string, got {}",
+                other.type_name()
+            ),
         };
 
         let mut boxed_params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
@@ -2865,7 +2980,10 @@ impl<'a> Vm<'a> {
         let sql = self.eval_expr(&args[0], vars).await?;
         let sql = match sql {
             Value::Str(v) => v,
-            other => bail!("db_query(sql): sql must be string, got {}", other.type_name()),
+            other => bail!(
+                "db_query(sql): sql must be string, got {}",
+                other.type_name()
+            ),
         };
 
         let database_url = std::env::var("DATABASE_URL")
@@ -2958,11 +3076,17 @@ impl<'a> Vm<'a> {
         let s = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Bool(false)),
-            other => bail!("{name}: first arg must be string, got {}", other.type_name()),
+            other => bail!(
+                "{name}: first arg must be string, got {}",
+                other.type_name()
+            ),
         };
         let p = match self.eval_expr(&args[1], vars).await? {
             Value::Str(s) => s,
-            other => bail!("{name}: second arg must be string, got {}", other.type_name()),
+            other => bail!(
+                "{name}: second arg must be string, got {}",
+                other.type_name()
+            ),
         };
         Ok(Value::Bool(op(&s, &p)))
     }
@@ -3002,7 +3126,10 @@ impl<'a> Vm<'a> {
                     ),
                 }
             }
-            other => bail!("contains: haystack must be string/array, got {}", other.type_name()),
+            other => bail!(
+                "contains: haystack must be string/array, got {}",
+                other.type_name()
+            ),
         }
     }
 
@@ -3067,10 +3194,13 @@ impl<'a> Vm<'a> {
         let raw = match self.eval_expr(&args[0], vars).await? {
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Null),
-            other => bail!("{name}: xs must be array (JSON string), got {}", other.type_name()),
+            other => bail!(
+                "{name}: xs must be array (JSON string), got {}",
+                other.type_name()
+            ),
         };
-        let parsed: JsonValue = serde_json::from_str(&raw)
-            .map_err(|_| anyhow!("{name}: xs is not valid JSON"))?;
+        let parsed: JsonValue =
+            serde_json::from_str(&raw).map_err(|_| anyhow!("{name}: xs is not valid JSON"))?;
         let arr = parsed
             .as_array()
             .ok_or_else(|| anyhow!("{name}: xs is not a JSON array"))?;
@@ -3091,8 +3221,8 @@ impl<'a> Vm<'a> {
             Value::Null => return Ok(Value::Null),
             other => bail!("json_parse: s must be string, got {}", other.type_name()),
         };
-        let parsed: JsonValue = serde_json::from_str(&s)
-            .map_err(|e| anyhow!("json_parse: invalid JSON: {e}"))?;
+        let parsed: JsonValue =
+            serde_json::from_str(&s).map_err(|e| anyhow!("json_parse: invalid JSON: {e}"))?;
         Ok(json_to_value(&parsed))
     }
 
@@ -3108,7 +3238,11 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(value_to_json_smart(&v).to_string()))
     }
 
-    async fn eval_uuid_call(&mut self, args: &[Expr], _vars: &mut HashMap<String, Value>) -> Result<Value> {
+    async fn eval_uuid_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
         if !args.is_empty() {
             bail!("uuid() expects no args");
         }
@@ -3128,11 +3262,17 @@ impl<'a> Vm<'a> {
 
         let source = match self.eval_expr(&args[0], vars).await? {
             Value::Str(v) => v,
-            other => bail!("set_json_field: first arg must be string json, got {}", other.type_name()),
+            other => bail!(
+                "set_json_field: first arg must be string json, got {}",
+                other.type_name()
+            ),
         };
         let field = match self.eval_expr(&args[1], vars).await? {
             Value::Str(v) => v,
-            other => bail!("set_json_field: field must be string, got {}", other.type_name()),
+            other => bail!(
+                "set_json_field: field must be string, got {}",
+                other.type_name()
+            ),
         };
         let value = self.eval_expr(&args[2], vars).await?;
 
@@ -3146,7 +3286,6 @@ impl<'a> Vm<'a> {
 
         Ok(Value::Str(json_value.to_string()))
     }
-
 }
 
 /// Extract the column name from a field path like `"Entity.field"` → `"field"`
@@ -3184,7 +3323,10 @@ fn get_var_as_json(var: &str, vars: &HashMap<String, Value>) -> Result<String> {
 
 /// Build `INSERT INTO "table" (...) VALUES (...) RETURNING *` from a JSON object string
 /// Uses a CTE so all columns (including SERIAL id) are returned.
-fn build_insert_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
+fn build_insert_sql(
+    table: &str,
+    json_str: &str,
+) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "insert: value is not valid JSON")?;
     let obj = doc
@@ -3200,8 +3342,10 @@ fn build_insert_sql(table: &str, json_str: &str) -> Result<(String, Vec<Box<dyn 
 
     let fields: Vec<String> = filtered.iter().map(|(k, _)| format!("\"{}\"", k)).collect();
     let placeholders: Vec<String> = (1..=filtered.len()).map(|i| format!("${}", i)).collect();
-    let params: Vec<Box<dyn ToSql + Sync + Send>> =
-        filtered.iter().map(|(_, v)| json_value_to_sql_param(v)).collect();
+    let params: Vec<Box<dyn ToSql + Sync + Send>> = filtered
+        .iter()
+        .map(|(_, v)| json_value_to_sql_param(v))
+        .collect();
     Ok((format!(
         "WITH _ins AS (INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING *) SELECT row_to_json(t)::text FROM _ins t;",
         table,
@@ -3243,10 +3387,8 @@ fn build_update_sql(
         pk_values.push(v);
     }
 
-    let pk_set: std::collections::HashSet<String> = pk_fields
-        .iter()
-        .map(|p| p.to_lowercase())
-        .collect();
+    let pk_set: std::collections::HashSet<String> =
+        pk_fields.iter().map(|p| p.to_lowercase()).collect();
     let mut updates: Vec<(&String, &serde_json::Value)> = obj
         .iter()
         .filter(|(k, _)| !pk_set.contains(&k.to_lowercase()))
@@ -3390,7 +3532,10 @@ fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 fn boxed_params_to_refs(params: &[Box<dyn ToSql + Sync + Send>]) -> Vec<&(dyn ToSql + Sync)> {
-    params.iter().map(|p| p.as_ref() as &(dyn ToSql + Sync)).collect()
+    params
+        .iter()
+        .map(|p| p.as_ref() as &(dyn ToSql + Sync))
+        .collect()
 }
 
 fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync + Send> {
@@ -3438,14 +3583,8 @@ async fn build_select_sql(
     let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
 
     if let Some(wc) = where_clause {
-        let where_sql = build_where_sql(
-            wc,
-            &mut params,
-            &mut shape_bits,
-            &mut cache_bits,
-            vars,
-            vm,
-        ).await?;
+        let where_sql =
+            build_where_sql(wc, &mut params, &mut shape_bits, &mut cache_bits, vars, vm).await?;
         sql_where = format!(" WHERE {}", where_sql);
     }
 
@@ -3490,10 +3629,7 @@ async fn build_select_sql(
     let base_cols: Vec<String> = if projection.is_empty() {
         Vec::new()
     } else {
-        projection
-            .iter()
-            .map(|c| format!("t.\"{}\"", c))
-            .collect()
+        projection.iter().map(|c| format!("t.\"{}\"", c)).collect()
     };
     let inner_projection = if nav_subqueries.is_empty() && base_cols.is_empty() {
         "*".to_string()
@@ -3508,11 +3644,7 @@ async fn build_select_sql(
             cache_bits.push(format!("project:{}", projection.join(",")));
         }
         for nav in nav_subqueries {
-            bits.push(format!(
-                "{} AS \"{}\"",
-                nav.sql_fragment("t"),
-                nav.alias()
-            ));
+            bits.push(format!("{} AS \"{}\"", nav.sql_fragment("t"), nav.alias()));
             shape_bits.push(format!("with:{}", nav.alias()));
             cache_bits.push(format!("with:{}", nav.alias()));
         }
@@ -3609,9 +3741,7 @@ fn build_navigation_subqueries(
             .navigations
             .iter()
             .find(|n| n.name.to_lowercase() == rel_key)
-            .ok_or_else(|| {
-                anyhow!("entity '{}' has no navigation '{}'", entity, rel)
-            })?;
+            .ok_or_else(|| anyhow!("entity '{}' has no navigation '{}'", entity, rel))?;
         out.push(NavigationSubquery {
             name: nav.name.clone(),
             kind: nav.kind,
@@ -3751,9 +3881,9 @@ fn connection_string_from_arg(raw: &str) -> Result<String> {
             "setConnectionString(arg): expected a postgres:// URL or a JSON object literal, got '{trimmed}'"
         )
     })?;
-    let obj = parsed
-        .as_object()
-        .ok_or_else(|| anyhow!("setConnectionString(arg): expected a JSON object, got non-object"))?;
+    let obj = parsed.as_object().ok_or_else(|| {
+        anyhow!("setConnectionString(arg): expected a JSON object, got non-object")
+    })?;
 
     let host = pick_string_field(obj, "host")?;
     let port = obj
@@ -3784,9 +3914,7 @@ fn pick_string_field(
     obj.get(key)
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .ok_or_else(|| {
-            anyhow!(
-                "setConnectionString({{ ... }}): missing or non-string field '{key}'"
-            )
+            anyhow!("setConnectionString({{ ... }}): missing or non-string field '{key}'")
         })
 }
 
@@ -3983,9 +4111,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i + 1;
         for (j, cb) in b.iter().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (curr[j] + 1)
-                .min(prev[j + 1] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (curr[j] + 1).min(prev[j + 1] + 1).min(prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -4127,7 +4253,11 @@ fn check_numeric_bound(value: Option<&JsonValue>, bound: &str, is_min: bool) -> 
     match value {
         Some(JsonValue::Number(n)) => {
             let v = n.as_f64().unwrap_or(0.0);
-            let ok = if is_min { v >= bound_num } else { v <= bound_num };
+            let ok = if is_min {
+                v >= bound_num
+            } else {
+                v <= bound_num
+            };
             if ok {
                 None
             } else {
@@ -4454,7 +4584,9 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, _body) = run_request(&program, "GET", "/missing", None).await.unwrap();
+        let (status, _body) = run_request(&program, "GET", "/missing", None)
+            .await
+            .unwrap();
         assert_eq!(status, 404);
     }
 
@@ -4484,7 +4616,8 @@ mod tests {
             "POST",
             "/brands",
             Some("{\"id\":1,\"name\":\"Acme\"}".to_string()),
-        ).await
+        )
+        .await
         .unwrap();
 
         assert_eq!(status, 200);
@@ -4512,14 +4645,10 @@ mod tests {
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
 
-        let err = run_request(
-            &program,
-            "POST",
-            "/brands",
-            Some("{\"id\":1}".to_string()),
-        ).await
-        .unwrap_err()
-        .to_string();
+        let err = run_request(&program, "POST", "/brands", Some("{\"id\":1}".to_string()))
+            .await
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("expects field 'name'"));
     }
@@ -4535,7 +4664,9 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/items?limit=10&q=hello", None).await.unwrap();
+        let (status, body) = run_request(&program, "GET", "/items?limit=10&q=hello", None)
+            .await
+            .unwrap();
         assert_eq!(status, 200);
         assert!(body.contains("limit=10"));
         assert!(body.contains("q=hello"));
@@ -4860,7 +4991,8 @@ mod tests {
         // the 14th hex digit (index 14, position [14..15] in the dashed form).
         for line in &lines {
             assert_eq!(
-                line.as_bytes()[14], b'4',
+                line.as_bytes()[14],
+                b'4',
                 "expected v4 version nibble in {line}"
             );
         }
@@ -4896,7 +5028,8 @@ mod tests {
             HashMap::new(),
             rx_to_vm,
             tx_from_vm,
-        ).await
+        )
+        .await
         .unwrap();
 
         let received = rx_from_vm.try_recv().expect("ws_send fired");
@@ -4916,10 +5049,7 @@ mod tests {
         assert_eq!(program.routes.len(), 1);
         assert_eq!(program.routes[0].method, "WS");
         assert_eq!(program.routes[0].path, "/chat/{room}");
-        assert_eq!(
-            program.routes[0].protocol,
-            crate::ast::RouteProtocol::Ws
-        );
+        assert_eq!(program.routes[0].protocol, crate::ast::RouteProtocol::Ws);
     }
 
     #[tokio::test]
@@ -4963,7 +5093,10 @@ mod tests {
         assert!(out.contains("[\"a\",\"b\",\"c\"]"));
         // length(parts) — array of 3 strings → 3.
         let lines: Vec<&str> = out.lines().collect();
-        assert!(lines.last().map(|l| l.trim() == "3").unwrap_or(false), "{out}");
+        assert!(
+            lines.last().map(|l| l.trim() == "3").unwrap_or(false),
+            "{out}"
+        );
     }
 
     #[tokio::test]
@@ -5259,7 +5392,9 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("authorization".into(), "Bearer xyz".into());
         let (status_ok, body_ok) =
-            run_request_with_headers(&program, "GET", "/secret", None, headers).await.unwrap();
+            run_request_with_headers(&program, "GET", "/secret", None, headers)
+                .await
+                .unwrap();
         assert_eq!(status_ok, 200);
         assert_eq!(body_ok, "payload");
     }
@@ -5305,7 +5440,9 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/users/42", None).await.unwrap();
+        let (status, body) = run_request(&program, "GET", "/users/42", None)
+            .await
+            .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "user=42");
     }
@@ -5321,7 +5458,9 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/search?q=jwc", None).await.unwrap();
+        let (status, body) = run_request(&program, "GET", "/search?q=jwc", None)
+            .await
+            .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "q=jwc");
     }
@@ -5339,13 +5478,10 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(
-            &program,
-            "POST",
-            "/users",
-            Some("{\"age\":10}".to_string()),
-        ).await
-        .unwrap();
+        let (status, body) =
+            run_request(&program, "POST", "/users", Some("{\"age\":10}".to_string()))
+                .await
+                .unwrap();
         assert_eq!(status, 400);
         assert!(body.contains("\"errors\""));
         assert!(body.contains("\"name\""));
@@ -5369,7 +5505,8 @@ mod tests {
             "POST",
             "/users",
             Some("{\"name\":\"Najim\",\"age\":25}".to_string()),
-        ).await
+        )
+        .await
         .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "ok");
@@ -5392,7 +5529,8 @@ mod tests {
             "POST",
             "/score",
             Some("{\"value\":250}".to_string()),
-        ).await
+        )
+        .await
         .unwrap();
         assert_eq!(status, 400);
         assert!(body.contains("max(100)"));
@@ -5407,7 +5545,9 @@ mod tests {
         "#;
         let program = parse_program(src).unwrap();
         validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/ping?ignored=1", None).await.unwrap();
+        let (status, body) = run_request(&program, "GET", "/ping?ignored=1", None)
+            .await
+            .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "{\"ok\":true}");
     }

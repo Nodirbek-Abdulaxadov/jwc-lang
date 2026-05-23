@@ -1,6 +1,4 @@
-use jwc::{
-    cmd, error_report, lint, migrate, native_build, parser, project, runner, server, sql,
-};
+use jwc::{cmd, error_report, lint, migrate, native_build, parser, project, runner, server, sql};
 
 use std::{fs, path::PathBuf};
 
@@ -92,9 +90,7 @@ enum Command {
         pkg: Option<String>,
     },
     /// Remove a dependency from the manifest and lockfile.
-    Remove {
-        pkg: String,
-    },
+    Remove { pkg: String },
     /// Print the resolved dependency tree.
     Tree,
     /// Start a real HTTP server for a JWC project
@@ -214,7 +210,9 @@ fn real_main() -> Result<()> {
                 loaded.manifest.ensure_runnable()?;
                 let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = rt.block_on(runner::run_main(&loaded.program))?;
-                if !result.output.is_empty() { print!("{}", result.output); }
+                if !result.output.is_empty() {
+                    print!("{}", result.output);
+                }
                 if let Some(port) = result.serve_port {
                     server::serve(&loaded.program, port, request_logging)?;
                 }
@@ -233,7 +231,9 @@ fn real_main() -> Result<()> {
                 loaded.manifest.ensure_runnable()?;
                 let _ = build_project_native_artifact(&root, &loaded.manifest.name, false)?;
                 let result = rt.block_on(runner::run_main(&loaded.program))?;
-                if !result.output.is_empty() { print!("{}", result.output); }
+                if !result.output.is_empty() {
+                    print!("{}", result.output);
+                }
                 if let Some(port) = result.serve_port {
                     server::serve(&loaded.program, port, request_logging)?;
                 }
@@ -244,7 +244,9 @@ fn real_main() -> Result<()> {
                 parser::validate_program(&program)
                     .with_context(|| format!("Validation failed for {}", target.display()))?;
                 let result = rt.block_on(runner::run_main(&program))?;
-                if !result.output.is_empty() { print!("{}", result.output); }
+                if !result.output.is_empty() {
+                    print!("{}", result.output);
+                }
                 if let Some(port) = result.serve_port {
                     server::serve(&program, port, request_logging)?;
                 }
@@ -279,13 +281,21 @@ fn real_main() -> Result<()> {
                 );
             } else {
                 for w in &warnings {
-                    println!("warning[{code}]: {message}", code = w.code, message = w.message);
+                    println!(
+                        "warning[{code}]: {message}",
+                        code = w.code,
+                        message = w.message
+                    );
                 }
                 println!();
                 println!("{} warning(s) found.", warnings.len());
             }
         }
-        Command::Build { release, native, emit_rust_source } => {
+        Command::Build {
+            release,
+            native,
+            emit_rust_source,
+        } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             let loaded = project::load_project_from_root(&root)?;
@@ -299,7 +309,8 @@ fn real_main() -> Result<()> {
             if native {
                 let app_name = sanitize_app_name(&loaded.manifest.name);
                 if emit_rust_source {
-                    let out = native_build::emit_rust_source(&loaded.program, &root, &app_name, release)?;
+                    let out =
+                        native_build::emit_rust_source(&loaded.program, &root, &app_name, release)?;
                     println!("Emitted generated Rust source ({profile})");
                     println!("Project: {}", loaded.manifest.name);
                     println!("Source:  {}", out.display());
@@ -311,12 +322,15 @@ fn real_main() -> Result<()> {
                 println!("Binary:  {}", report.binary_path.display());
                 println!("Workspace: {}", report.workspace.display());
             } else {
-                let out_path = build_project_native_artifact(&root, &loaded.manifest.name, release)?;
+                let out_path =
+                    build_project_native_artifact(&root, &loaded.manifest.name, release)?;
                 println!("Bundled runtime + launcher ({profile})");
                 println!("Project: {}", loaded.manifest.name);
                 println!("Launcher: {}", out_path.display());
                 println!("Note: this bundles the JWC runtime alongside your project.");
-                println!("      For real AOT-compiled binaries, pass --native (Phase 4 — incremental).");
+                println!(
+                    "      For real AOT-compiled binaries, pass --native (Phase 4 — incremental)."
+                );
             }
         }
         Command::Migrate { command } => {
@@ -332,23 +346,34 @@ fn real_main() -> Result<()> {
                     println!("  {}", created.down_path.display());
                 }
                 MigrateCommand::Up { database_url } => {
-                    let report = rt.block_on(migrate::apply_pending_migrations(&root, database_url))?;
+                    let report =
+                        rt.block_on(migrate::apply_pending_migrations(&root, database_url))?;
                     println!("Migrations applied: {}", report.applied);
                     println!("Already applied: {}", report.skipped);
                     println!("Total found: {}", report.total);
                 }
-                MigrateCommand::Down { steps, database_url } => {
+                MigrateCommand::Down {
+                    steps,
+                    database_url,
+                } => {
                     if steps == 0 {
                         println!("No-op (steps=0)");
                     } else {
-                        let report = rt.block_on(migrate::rollback_migrations(&root, database_url, steps))?;
+                        let report =
+                            rt.block_on(migrate::rollback_migrations(&root, database_url, steps))?;
                         println!("Rolled back: {}", report.rolled_back);
                         println!("Previously applied: {}", report.total_applied);
                     }
                 }
             }
         }
-        Command::Add { pkg, version, path, git, rev } => {
+        Command::Add {
+            pkg,
+            version,
+            path,
+            git,
+            rev,
+        } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             cmd::pkg::add(
@@ -436,7 +461,9 @@ fn run_serve_with_watch(root: &PathBuf, port: u16, request_logging: bool) -> Res
         if request_logging {
             cmd.arg("--request-logging");
         }
-        let mut child = cmd.spawn().with_context(|| "watch: failed to spawn child")?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| "watch: failed to spawn child")?;
         println!("[watch] Server started (pid {})", child.id());
 
         // Drain any backlog so the first event after spawn isn't a stale one.
@@ -506,7 +533,11 @@ exec "$SELF_DIR/jwc-runtime" run "$ROOT_DIR" "$@"
     .to_string()
 }
 
-fn build_project_native_artifact(root: &PathBuf, manifest_name: &str, release: bool) -> Result<PathBuf> {
+fn build_project_native_artifact(
+    root: &PathBuf,
+    manifest_name: &str,
+    release: bool,
+) -> Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
     let bin_dir = root.join("bin").join(profile);
     std::fs::create_dir_all(&bin_dir)?;

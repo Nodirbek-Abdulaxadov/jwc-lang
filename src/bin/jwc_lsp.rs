@@ -281,16 +281,16 @@ fn identifier_at(text: &str, position: Position) -> Option<String> {
 fn hover_summary(program: &Program, name: &str) -> Option<String> {
     let key = name.to_lowercase();
 
-    if let Some(model) = program
-        .models
-        .iter()
-        .find(|m| m.name.to_lowercase() == key)
-    {
+    if let Some(model) = program.models.iter().find(|m| m.name.to_lowercase() == key) {
         let kind = match model.kind {
             ModelKind::Entity => "entity",
             ModelKind::Class => "class",
         };
-        let field_word = if model.fields.len() == 1 { "field" } else { "fields" };
+        let field_word = if model.fields.len() == 1 {
+            "field"
+        } else {
+            "fields"
+        };
         let summary = match (&model.context_name, model.kind == ModelKind::Entity) {
             (Some(ctx), true) => format!(
                 "{kind} {} of {ctx} ({} {field_word})",
@@ -324,7 +324,11 @@ fn hover_summary(program: &Program, name: &str) -> Option<String> {
             Some(ty) => format!(": {ty}"),
             None => String::new(),
         };
-        let prefix = if func.is_async { "async function" } else { "function" };
+        let prefix = if func.is_async {
+            "async function"
+        } else {
+            "function"
+        };
         return Some(format!("{prefix} {}({params}){ret}", func.name));
     }
 
@@ -421,9 +425,8 @@ mod tests {
             function main() { print("hi"); }
         "#;
         let diags = Backend::compute_diagnostics(src);
-        assert!(diags
-            .iter()
-            .any(|d| d.severity == Some(DiagnosticSeverity::WARNING)
-                && d.message.contains("helper")));
+        assert!(diags.iter().any(
+            |d| d.severity == Some(DiagnosticSeverity::WARNING) && d.message.contains("helper")
+        ));
     }
 }
