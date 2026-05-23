@@ -78,8 +78,8 @@ async fn interpreter_and_native_emit_agree_for_small_programs() {
         );
 
         // 3. emit Rust source into an isolated temp dir
-        let tmp = tempfile::tempdir()
-            .unwrap_or_else(|e| panic!("[{}] tempdir failed: {e}", case.name));
+        let tmp =
+            tempfile::tempdir().unwrap_or_else(|e| panic!("[{}] tempdir failed: {e}", case.name));
         let out_path = emit_rust_source(&program, tmp.path(), case.name, false)
             .unwrap_or_else(|e| panic!("[{}] emit_rust_source failed: {e}", case.name));
 

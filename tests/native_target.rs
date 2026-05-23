@@ -46,8 +46,8 @@ fn target_without_native_is_rejected() {
 
 #[test]
 fn unknown_target_is_rejected_with_known_targets_hint() {
-    let err = validate_target(Some("foo-bar"), true)
-        .expect_err("expected unknown triple to be rejected");
+    let err =
+        validate_target(Some("foo-bar"), true).expect_err("expected unknown triple to be rejected");
     let msg = format!("{err}");
     assert!(
         msg.contains("unsupported target 'foo-bar'"),

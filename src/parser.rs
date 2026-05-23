@@ -475,25 +475,15 @@ fn check_mutation_fields_in_stmt(
                 if let Some(fields) = entity_fields.get(&entity.to_lowercase()) {
                     let needle = field.to_lowercase();
                     if !fields.iter().any(|f| f == &needle) {
-                        bail!(
-                            "Unknown column '{}' on entity '{}'",
-                            field,
-                            entity
-                        );
+                        bail!("Unknown column '{}' on entity '{}'", field, entity);
                     }
                 }
             }
             Ok(())
         }
-        Stmt::DbInsert {
-            var, table, ..
-        }
-        | Stmt::DbUpdate {
-            var, table, ..
-        }
-        | Stmt::DbDelete {
-            var, table, ..
-        } => {
+        Stmt::DbInsert { var, table, .. }
+        | Stmt::DbUpdate { var, table, .. }
+        | Stmt::DbDelete { var, table, .. } => {
             if let Some(entity) = bindings.get(&var.to_lowercase()) {
                 if !table_matches_entity(table, entity) {
                     bail!(
@@ -570,9 +560,7 @@ fn check_mutation_fields_in_stmt(
             *bindings = intersect_bindings(&try_state, &catch_state);
             Ok(())
         }
-        Stmt::Transaction { body } => {
-            check_mutation_fields_in_stmts(body, bindings, entity_fields)
-        }
+        Stmt::Transaction { body } => check_mutation_fields_in_stmts(body, bindings, entity_fields),
     }
 }
 

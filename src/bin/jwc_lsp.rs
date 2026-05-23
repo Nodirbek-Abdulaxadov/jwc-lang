@@ -512,10 +512,7 @@ fn collect_document_symbols(source: &str, uri: &Url) -> Vec<SymbolInformation> {
 fn find_decl_name_range(source: &str, kind: &str, name: &str) -> Option<Range> {
     let escaped = regex::escape(name);
     let pattern = match kind {
-        "function" => format!(
-            r#"^\s*(?:pub\s+)?(?:async\s+)?function\s+({})\b"#,
-            escaped
-        ),
+        "function" => format!(r#"^\s*(?:pub\s+)?(?:async\s+)?function\s+({})\b"#, escaped),
         "entity" => format!(r#"^\s*(?:pub\s+)?entity\s+({})\b"#, escaped),
         "class" => format!(r#"^\s*(?:pub\s+)?class\s+({})\b"#, escaped),
         "middleware" => format!(r#"^\s*(?:pub\s+)?middleware\s+({})\b"#, escaped),

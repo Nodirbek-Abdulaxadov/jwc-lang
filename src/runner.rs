@@ -722,9 +722,9 @@ impl<'a> Vm<'a> {
             // `Value::Bytes` variant lands in a follow-up sprint.
             "bytes" | "byte[]" => match &value {
                 Value::Str(s) if looks_like_base64(s) => Ok(value),
-                Value::Str(s) => bail!(
-                    "Type error: {subject} expects bytes (base64 string), got \"{s}\""
-                ),
+                Value::Str(s) => {
+                    bail!("Type error: {subject} expects bytes (base64 string), got \"{s}\"")
+                }
                 _ => bail!(
                     "Type error: {subject} expects bytes (base64 string), got {}",
                     value.type_name()
@@ -4272,7 +4272,7 @@ fn strip_generic_wrapper<'a>(s: &'a str, wrapper: &str) -> Option<&'a str> {
 /// for now — callers should re-encode them, or wait for the proper
 /// `Value::Bytes` variant which will accept both alphabets.
 fn looks_like_base64(s: &str) -> bool {
-    if s.is_empty() || s.len() % 4 != 0 {
+    if s.is_empty() || !s.len().is_multiple_of(4) {
         return false;
     }
     use base64::engine::general_purpose::STANDARD;
