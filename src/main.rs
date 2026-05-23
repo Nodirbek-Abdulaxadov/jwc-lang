@@ -135,6 +135,24 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         stdout: bool,
     },
+    /// Generate an OpenAPI 3.0 JSON spec from the current project.
+    ///
+    /// v1 best-effort: per-route path/query params + requestBody for
+    /// POST/PUT/PATCH, 200 response (referencing the handler return type
+    /// when it matches a known model), 400 when `validate body` is used,
+    /// 401 when an `Auth*` middleware is attached. WebSocket and SSE
+    /// routes are skipped. Use `--out` to write to a file, `--pretty` to
+    /// indent the JSON.
+    Openapi {
+        /// Project directory (defaults to the current directory).
+        path: Option<PathBuf>,
+        /// Output file. When omitted, the JSON is printed to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Pretty-print the JSON with indentation.
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        pretty: bool,
+    },
     /// Start a real HTTP server for a JWC project
     Serve {
         /// Project directory or jwcproj.json (defaults to current dir)
@@ -317,6 +335,7 @@ fn real_main() -> Result<()> {
         Command::Login { token, registry } => cmd::publish::login(&token, registry.as_deref())?,
         Command::Publish => rt.block_on(cmd::publish::publish())?,
         Command::Swagger { stdout } => cmd::swagger::run(stdout)?,
+        Command::Openapi { path, out, pretty } => cmd::openapi::run(path, out, pretty)?,
         Command::Fmt { path, check } => cmd::fmt::run(path, check)?,
         Command::Serve {
             path,

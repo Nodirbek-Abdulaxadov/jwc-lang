@@ -5,6 +5,7 @@ pub mod check;
 pub mod fmt;
 pub mod lint;
 pub mod migrate;
+pub mod openapi;
 pub mod pkg;
 pub mod publish;
 pub mod run;
