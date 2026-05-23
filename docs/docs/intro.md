@@ -1,84 +1,49 @@
 ---
 slug: /
 sidebar_position: 1
-title: Introduction
 ---
 
 # JWC
 
-**JWC** (Just Web Code) is a small backend-first language for building API +
-database applications. The compiler is written in Rust and ships a single CLI
-that parses, validates, runs, and bundles your project.
+**Backend-first programming language with HTTP routes, entities, and SQL as first-class language constructs.**
 
-```jwc title="users-api.jwc"
-dbcontext AppDb : Postgres;
+```jwc
+dbcontext AppDb { driver = "postgres"; }
 
-entity User of AppDb {
-    id uuid pk;
-    email varchar(120);
-    name varchar(60);
+entity User {
+    id: int pk;
+    name: string;
+    email: string;
 }
 
-route POST "users" {
-    validate body {
-        email: required, pattern(r"^[^@]+@[^@]+\.[^@]+$");
-        name:  required, minLength(2), maxLength(60);
-    }
-    let req = body();
-    let u = new User();
-    u.id = uuid();
-    u.email = req.email;
-    u.name = req.name;
-    insert u into AppDb.User;
-    return created(u);
+route GET "/users" {
+    let users = select User from AppDb.User orderby User.id;
+    return json(users);
 }
 
-route GET "users/{id}" {
-    let u = select User from AppDb.User where User.id == @id first;
-    if (u == null) { return notFound(); }
-    return json(u);
-}
+function main() { serve(8080); }
 ```
 
-The above is a working CRUD endpoint, complete with:
+`jwc run` → server up on `:8080`. That's the whole app.
 
-- Compile-time entity / column / FK validation
-- Parameterized SQL (no injection)
-- Body validation (regex via raw strings)
-- Typed JSON response handling
+## What's here
 
-## Why JWC
-
-- **SQL is a first-class statement**, not a string. `select`, `insert`,
-  `update`, `delete` are real syntax; columns and tables are checked at
-  compile time.
-- **Routes, middleware, validation, transactions, and background jobs are
-  language features** — no framework on top of a general-purpose language.
-- **One binary** — `jwc` is the compiler, runner, server, migrator, linter,
-  and bundler.
-- **Real stack out of the box** — HTTP/2 + WebSocket via axum, JWT,
-  Argon2 password hashing, in-memory cache, SMTP email, in-process queue,
-  LSP server.
-- **Cargo-style package system** — namespaces, `public`/`private`,
-  `mount`/`group`, `jwcproj.lock`, path and git sources today (HTTP
-  registry coming next).
-
-## Where to next
-
-- **[Getting started](./getting-started.md)** — install the CLI and create your first project.
-- **[Language tour](./language-tour.md)** — entities, routes, middleware, transactions, in ~10 minutes.
-- **[Standard library](./stdlib.md)** — what's available out of the box.
-- **[Database guide](./db.md)** — query syntax, navigation, migrations, transactions.
+| Section | What it covers |
+|---|---|
+| [Getting started](./getting-started/install) | Install, hello world, project layout |
+| [Language](./language/syntax) | Types, variables, functions, control flow, async |
+| [Data](./data/dbcontext) | Entities, select / insert / update / delete, migrations, transactions |
+| [Backend](./backend/routes) | Routes, middleware, validation, error handler, websockets, queue |
+| [Standard library](./stdlib/strings) | String, array, JSON, HTTP, JWT, hashing, email, cache |
+| [Packages](./packages/manifest) | Manifest, dependencies, registry, `jwc publish` |
+| [CLI](./cli/overview) | Every `jwc` subcommand + flag |
+| [Deployment](./deployment/native-build) | Bundled launcher, native AOT, Docker, k8s |
 
 ## Status
 
-The language is in active development. Phases 0–9, plus Phase 3.4
-(package system: path/git deps, lockfile, `mount`/`group`,
-visibility) are shipped and exercised by the
-[microblog](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/microblog),
-[async_demo](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/async_demo),
-and
-[pkg-demo](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/tree/main/examples/pkg-demo)
-examples. The remaining vision items — LLVM AOT, public HTTP
-registry server, multi-driver dbcontext — are tracked in
-[ROADMAP.md](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md).
+- **Interpreter** — production-ready (`jwc run`, `jwc serve`).
+- **Native AOT** — partial. Most programs compile via `jwc build --native` (Rust-source path).
+- **LLVM IR backend** — skeleton only ([Sprint 13](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md)).
+- **Registry** — live at [`registry-jwc.1kb.uz`](https://registry-jwc.1kb.uz).
+
+See [`ROADMAP.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md) for the full per-feature status.

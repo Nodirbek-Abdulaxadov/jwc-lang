@@ -1,88 +1,74 @@
 ---
-title: Control flow & expressions
-sidebar_position: 3
+sidebar_position: 4
 ---
 
-# Control flow & expressions
+# Control flow
 
-## Variables
+## if / else
 
 ```jwc
-let name = "JWC";    // immutable-style declaration (rebind needs `=`)
-name = "JWC 2";      // rebind to a new value
+if (count > 100) {
+    return ok({ tier: "gold" });
+} else if (count > 10) {
+    return ok({ tier: "silver" });
+} else {
+    return ok({ tier: "bronze" });
+}
 ```
 
-`let` declares; subsequent bare assignment rebinds. Shadowing within the
-same scope is rejected at runtime.
+There's no `unless` / no ternary expression. Use plain `if`.
 
-## Literals
-
-```jwc
-let n   = 42;
-let f   = 0.25;
-let s   = "hi";
-let raw = r"\d+\.\d+";              // raw string — no escape processing
-let tpl = `user=${user.name}`;     // template string
-let b   = true;
-let z   = null;
-let obj = { name: "Najim", age: 25 };
-```
-
-JSON object literals (`{ k: v }`) evaluate to a JSON-string `Value`.
-Nested arrays / objects already carried as JSON embed raw, so
-`return json({ items: posts, total: count });` produces
-`{"items": [...], "total": 5}` rather than the double-encoded form.
-
-## Operators
-
-| | |
-|---|---|
-| Arithmetic | `+ - * / %`, unary `-` |
-| Comparison | `== != < <= > >=` |
-| Logical | `and`, `or`, unary `!` |
-| String concat | `+` (right-hand side coerced to string) |
-
-## Control flow
+## while
 
 ```jwc
-if (x > 0) { print("positive"); }
-else if (x == 0) { print("zero"); }
-else { print("negative"); }
-
+let i = 0;
 while (i < 10) {
-    if (i == 3) { continue; }
-    if (i == 8) { break; }
+    print(i);
     i = i + 1;
 }
-
-for item in items {
-    if (item == "stop") { break; }
-    print(item);
-}
-
-try {
-    riskyOp();
-} catch (e) {
-    return internalError(e.message);
-}
 ```
 
-`for VAR in EXPR { ... }` iterates over a JSON array (e.g. `select`
-results, `body()` payloads, literals like `"[1,2,3]"`). `break`,
-`continue`, and `return` work as expected.
+`break` exits the innermost loop; `continue` jumps to the next iteration.
 
-## Functions
+## for-in
+
+Iterates a JSON array:
 
 ```jwc
-function add(a: int, b: int): int {
-    return a + b;
-}
-
-async function fetchUser(id: uuid): User? {
-    return await getUser(id);
+let items = ["a", "b", "c"];
+for (item in items) {
+    print(item);
 }
 ```
 
-`async` / `await` parse cleanly — the runtime is currently synchronous, so
-`await` is a transparent pass-through, but the syntax is forward
-compatible with the upcoming async runtime.
+`break` / `continue` / `return` all work inside the body. The iterable is evaluated **once** at loop start; items round-trip through JSON.
+
+## try / catch
+
+```jwc
+try {
+    let user = first(select User from AppDb.User where User.id == @id);
+    return ok(user);
+} catch (e: DbError) {
+    return internalError({ error: "database problem" });
+} catch (e: ValidationError) {
+    return badRequest({ error: e.message });
+} catch (e) {
+    // catch-all
+    return internalError({ error: e.message });
+}
+```
+
+Known error kinds: `Error`, `DbError`, `HttpError`, `ValidationError`, `TimeoutError`. The catch binding (`e`) is a JSON object `{ type, message, causes }`. See [Error handler](../backend/error-handler).
+
+## Global error handler
+
+Top-level `errorHandler` catches anything an uncaught route throws:
+
+```jwc
+errorHandler (e) {
+    return internalError({ error: e.message, code: e.type });
+}
+```
+
+Only one handler per program.

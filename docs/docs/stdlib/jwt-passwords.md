@@ -1,0 +1,42 @@
+---
+sidebar_position: 4
+---
+
+# JWT & passwords
+
+## JWT (HS256)
+
+```jwc
+let token = jwt_sign(
+    json_stringify({ sub: user.id, role: "admin", exp: now_epoch() + 3600 }),
+    env("JWT_SECRET")
+);
+
+let claims = jwt_verify(token, env("JWT_SECRET"));
+if (claims == null) { return unauthorized(); }
+// claims is a JSON object — claims.sub / claims.role / claims.exp
+```
+
+| Built-in | Returns | Notes |
+|---|---|---|
+| `jwt_sign(payload_json, secret)` | `string` | HS256 (HMAC + SHA-256). Header is fixed `{"alg":"HS256","typ":"JWT"}`. |
+| `jwt_verify(token, secret)` | `any?` | Decoded claims, or `null` on bad signature / `exp` expired. |
+
+RS256 / ES256 + JWKS verification land with the OIDC sprint.
+
+## Passwords (Argon2id)
+
+```jwc
+let hash = hash_password(req.password);
+// store `hash` in the DB
+
+let ok = verify_password(req.password, stored_hash);
+if (!ok) { return unauthorized(); }
+```
+
+| Built-in | Returns | Notes |
+|---|---|---|
+| `hash_password(plaintext)` | `string` | Argon2id with default parameters (memory-hard) |
+| `verify_password(plaintext, hash)` | `bool` | constant-time |
+
+The hash includes the salt + parameters; never store the salt separately.

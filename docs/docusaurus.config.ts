@@ -27,9 +27,11 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
+          routeBasePath: '/',          // serve docs at site root, no /docs/ prefix
           editUrl:
             'https://github.com/Nodirbek-Abdulaxadov/jwc-lang/edit/main/docs/',
         },
+        blog: false,
         theme: {
           customCss: './src/css/custom.css',
         },
@@ -53,6 +55,11 @@ const config: Config = {
           label: 'Docs',
         },
         {
+          href: 'https://registry-jwc.1kb.uz/',
+          label: 'Registry',
+          position: 'right',
+        },
+        {
           href: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang',
           label: 'GitHub',
           position: 'right',
@@ -65,14 +72,17 @@ const config: Config = {
         {
           title: 'Learn',
           items: [
-            {label: 'Getting started', to: '/docs/getting-started'},
-            {label: 'Language tour', to: '/docs/language-tour'},
-            {label: 'Standard library', to: '/docs/stdlib'},
+            {label: 'Getting started', to: '/getting-started/install'},
+            {label: 'Language', to: '/language/syntax'},
+            {label: 'Data (SQL)', to: '/data/dbcontext'},
+            {label: 'Backend', to: '/backend/routes'},
+            {label: 'CLI reference', to: '/cli/overview'},
           ],
         },
         {
-          title: 'More',
+          title: 'Tools',
           items: [
+            {label: 'Registry', href: 'https://registry-jwc.1kb.uz/'},
             {label: 'GitHub', href: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang'},
             {label: 'Roadmap', href: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md'},
           ],

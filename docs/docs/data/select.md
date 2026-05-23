@@ -1,0 +1,90 @@
+---
+sidebar_position: 3
+---
+
+# select
+
+`select` is a language construct, not a string. The compiler validates column names, paramref types, and the entity it selects from.
+
+## Basic
+
+```jwc
+let users = select User from AppDb.User;
+```
+
+Returns a JSON array of objects. Empty list when no rows.
+
+## Single row
+
+```jwc
+let me = first(select User from AppDb.User where User.id == @uid);
+```
+
+`first(...)` collapses a list to its first element (or `null`). Forgetting it is so common that lint W004 flags single-row PK lookups that lack it.
+
+## where
+
+```jwc
+select User from AppDb.User where User.email == @email;
+select User from AppDb.User where User.age > @min and User.email like @pattern;
+select User from AppDb.User where User.id in (@a, @b, @c);
+select User from AppDb.User where User.age between @low and @high;
+select User from AppDb.User where User.deleted_at is null;
+```
+
+Supported operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `like`, `ilike`, `in (...)`, `between ... and ...`, `is null`, `is not null`. Combine with `and` / `or` and parentheses; `and` binds tighter than `or`.
+
+## order by / limit / offset
+
+```jwc
+select User from AppDb.User
+    orderby User.created_at desc
+    limit 20
+    offset @skip;
+```
+
+## Projection
+
+Subset of columns:
+
+```jwc
+let names = select User { id, name } from AppDb.User;
+```
+
+The compiler verifies `id` and `name` exist on `User`.
+
+## Aggregates
+
+```jwc
+let total      = select count(*) from AppDb.User;
+let max_age    = select max(User.age) from AppDb.User;
+let avg_score  = select avg(Post.score) from AppDb.Post where Post.published == true;
+```
+
+## group by + having
+
+```jwc
+let stats = select { user_id: Post.user_id, total: count(*) } from AppDb.Post
+    group by Post.user_id
+    having count(*) > 10;
+```
+
+## with — eager nav loading
+
+```jwc
+let users = select User with posts, profile from AppDb.User;
+```
+
+Each nav becomes a `json_agg(...)` subquery. Validated against the entity's declared navs.
+
+## Parameters
+
+`@name` references a bound variable from the surrounding scope:
+
+```jwc
+function findByEmail(email: string): User? {
+    return first(select User from AppDb.User where User.email == @email);
+}
+```
+
+Bindings are real parameter values, not string-interpolated SQL — there's no injection vector.
