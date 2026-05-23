@@ -331,7 +331,12 @@
   yoqiladi; worker'lar process lifetime davomida tirik.
 - Validator: `register_job_handler` ikkinchi argi haqiqiy function nomi ekanligini
   kompayl-vaqt tekshiradi.
-- **Qoldi:** retry policy, persistent backing (Redis/PG), priority queues.
+- ✅ Retry policy (Sprint 14): `Job.attempts` tracking, env `JWC_QUEUE_MAX_ATTEMPTS`
+  (default 3), `JWC_QUEUE_BACKOFF_MS` (default 1000) — exponential backoff
+  60s'da capped, max attempts'dan keyin drop + log. Worker thread sleep qilib
+  re-enqueue qiladi.
+- **Qoldi v2:** persistent backing (Redis/PG `_jwc_jobs` jadval), priority
+  queues, dead-letter queue.
 
 ### 8.2 LSP server (basic)
 - `cargo build --bin jwc-lsp` — stdio orqali tower-lsp ishlaydi.
@@ -404,13 +409,16 @@ Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
 da qoldirilgan typed-catch tafsilotini yopish. Phase 9 da qo'yilgan perf
 shiftini ham shu Phase'da o'lchab tasdiqlaymiz.
 
-### 10.1 Perf baseline (Phase 9.5 closure)
+### 10.1 Perf baseline (Phase 9.5 closure) ⏳ blocked-on-infra
 - `examples/bench.sh` + `bench.py` + JMeter run natijalarini ROADMAP'ga
   yozish: yangi async stack vs eski sync (v0.1.2) RPS/p99 jadvali.
 - `.NET` baseline (`examples/bench-cs/`) bilan kontroll solishtirma —
   bir xil endpoint, bir xil DB, bir xil yuk.
 - Maqsad: 40–60k RPS GET / 30–50k RPS POST (Phase 9.5 target) tasdig'i
   yoki yangi shiftga moslab raqamlarni yangilash.
+- **Blocked:** kerakli infratuzilma — Postgres (Docker), bombardier/JMeter
+  agent, .NET runtime — bu sessiyada mavjud emas. Bench setup fayllari
+  tayyor; raqamlar live-host muhitida olinishi kerak.
 
 ### 10.2 Tracing + OpenTelemetry
 - `tracing` crate bilan structured logs: request_id, route, status, latency.
@@ -494,20 +502,29 @@ hozir    →  Phase 10.1 — real benchmark natijalari (bench-cs/bench.py/jmeter
 
 ```
 src/
-  lexer.rs           422  tokenizer + template string + raw strings + comment skip
-  ast.rs             343  Program / Model / Route / Function / Stmt / Expr
-  parser.rs         3691  recursive-descent + validate_program (column checks)
-  runner.rs         5077  async tree-walking Vm + HTTP dispatch (async_recursion)
+  lexer.rs           441  tokenizer + template string + raw strings + comment skip
+  ast.rs             404  Program / Model / Route / Function / Stmt / Expr
+  parser.rs         4037  recursive-descent + validate_program (column + catch-type checks)
+  runner.rs         5414  async tree-walking Vm + classify_jwc_error + HTTP dispatch
   engine.rs          528  deadpool-postgres + tokio-postgres + prep cache + TTL cache
   server.rs          380  axum + tokio::spawn + WebSocket + metrics
   sql.rs             315  Postgres DDL generator
   migrate.rs         443  migrate new / up / down (advisory lock)
-  project.rs         356  jwcproj parser + dotenv loader + source walker
+  schema_diff.rs    1020  entity ↔ .up.sql diff for migrate new
+  project.rs         634  jwcproj parser + dotenv loader + source walker + import resolver
   diag.rs             31  byte offset → (line, col)
-  lint.rs            257  unused fn (W001) / unused middleware (W002)
+  lint.rs            272  unused fn (W001) / unused middleware (W002)
   queue.rs           380  in-process job queue + worker pool
-  native_build.rs   2062  AST → Rust source (async tokio AOT path)
-  main.rs            513  CLI subcommands + embedded launcher
+  native_build.rs   2494  AST → Rust source (async tokio AOT path)
+  cache.rs           147  in-memory TTL cache (cache_set/get/del/clear)
+  jwt.rs             115  HS256 sign/verify
+  password.rs         55  Argon2id hash/verify
+  email.rs           183  lettre + rustls SMTP transport
+  pkg_cache.rs       121  path/git package fetch cache
+  lockfile.rs        152  jwcproj lockfile read/write
+  error_report.rs     40  CLI error chain pretty-printer
+  main.rs            585  CLI subcommands + embedded launcher
+  bin/jwc_lsp.rs     429  tower-lsp server (diagnostics + hover)
 ```
 
-Jami: ~14.8k qator Rust.
+Jami: ~18.2k qator Rust.

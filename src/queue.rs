@@ -31,11 +31,17 @@ use crate::ast::Program;
 
 /// A single queued job. The payload is opaque to the queue — handlers parse
 /// it themselves (typically via `json_parse(payload)`).
+///
+/// `attempts` counts failed handler invocations so the worker can apply the
+/// retry policy (`JWC_QUEUE_MAX_ATTEMPTS` / `JWC_QUEUE_BACKOFF_MS`) before
+/// dropping the job. A fresh job starts at `0`; a re-enqueue after failure
+/// bumps the counter.
 #[derive(Debug, Clone)]
 pub struct Job {
     pub name: String,
     pub payload: String,
     pub enqueued_at: Instant,
+    pub attempts: u32,
 }
 
 /// Shared queue state. Wrapped in `Mutex` and paired with a `Condvar` so
@@ -160,7 +166,36 @@ pub fn enqueue(name: &str, payload: &str) {
         name: name.to_string(),
         payload: payload.to_string(),
         enqueued_at: Instant::now(),
+        attempts: 0,
     };
+    let st = state();
+    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    q.push(job);
+    st.cv.notify_one();
+}
+
+/// Maximum number of times a job may be attempted before it is dropped.
+/// `JWC_QUEUE_MAX_ATTEMPTS=0` disables retry — one attempt only.
+fn max_attempts_from_env() -> u32 {
+    std::env::var("JWC_QUEUE_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(3)
+}
+
+/// Base backoff in milliseconds before re-enqueueing a failed job. The
+/// effective delay is `base * 2^(attempts-1)` (exponential, capped at 60s).
+fn base_backoff_from_env() -> u64 {
+    std::env::var("JWC_QUEUE_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(1000)
+}
+
+/// Re-push a failed job onto the queue with `attempts` bumped. Wakes a
+/// worker. Used by the worker loop after a backoff sleep.
+fn requeue_after_failure(mut job: Job) {
+    job.attempts = job.attempts.saturating_add(1);
     let st = state();
     let mut q = st.queue.lock().expect("queue mutex poisoned");
     q.push(job);
@@ -265,15 +300,33 @@ fn worker_loop(worker_id: usize) {
         // lifetime. Holding `Arc<Program>` keeps the program alive for the
         // duration of the call; `as_ref()` hands the runner a borrow whose
         // lifetime is bounded by this local `program`.
-        if let Err(e) = rt.block_on(crate::runner::run_handler(
+        let result = rt.block_on(crate::runner::run_handler(
             program.as_ref(),
             &handler_name,
             job.payload.clone(),
-        )) {
-            eprintln!(
-                "[jwc-queue worker {worker_id}] job '{}' handler '{}' failed: {:#}",
-                job.name, handler_name, e
-            );
+        ));
+        if let Err(e) = result {
+            let max = max_attempts_from_env();
+            let next_attempt = job.attempts.saturating_add(1);
+            if next_attempt >= max {
+                eprintln!(
+                    "[jwc-queue worker {worker_id}] job '{}' handler '{}' failed (attempt {}/{}); dropping: {:#}",
+                    job.name, handler_name, next_attempt, max, e
+                );
+            } else {
+                let base = base_backoff_from_env();
+                // Exponential backoff capped at 60s. attempts is 0-indexed
+                // before bump — 1st failure waits `base`, 2nd waits `base*2`,
+                // 3rd waits `base*4`, etc.
+                let factor = 1u64.checked_shl(job.attempts).unwrap_or(u64::MAX);
+                let delay_ms = base.saturating_mul(factor).min(60_000);
+                eprintln!(
+                    "[jwc-queue worker {worker_id}] job '{}' handler '{}' failed (attempt {}/{}); retrying in {}ms: {:#}",
+                    job.name, handler_name, next_attempt, max, delay_ms, e
+                );
+                thread::sleep(std::time::Duration::from_millis(delay_ms));
+                requeue_after_failure(job);
+            }
         }
     }
 }
@@ -309,6 +362,55 @@ mod tests {
         assert_eq!(job.name, "send_welcome_email");
         assert_eq!(job.payload, "{\"user_id\":42}");
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn fresh_job_starts_at_attempt_zero() {
+        let _g = lock();
+        reset_for_tests();
+
+        enqueue("any_job", "payload");
+        let st = state();
+        let mut q = st.queue.lock().unwrap();
+        let job = q.pop().expect("expected a pending job");
+        assert_eq!(job.attempts, 0, "fresh enqueue must start at 0 attempts");
+    }
+
+    #[test]
+    fn requeue_after_failure_bumps_attempts_and_pushes_back() {
+        let _g = lock();
+        reset_for_tests();
+
+        let job = Job {
+            name: "retry-me".to_string(),
+            payload: "x".to_string(),
+            enqueued_at: Instant::now(),
+            attempts: 2,
+        };
+        requeue_after_failure(job);
+
+        assert_eq!(pending_count(), 1);
+        let st = state();
+        let mut q = st.queue.lock().unwrap();
+        let popped = q.pop().expect("expected the re-pushed job");
+        assert_eq!(popped.attempts, 3, "attempts must be bumped on requeue");
+    }
+
+    #[test]
+    fn max_attempts_env_override() {
+        let _g = lock();
+        // Sanity-check: env vars override the defaults via the helpers.
+        // Cleared by the next test that doesn't set them — the helpers
+        // re-read each invocation, so leaks across tests don't compound.
+        std::env::set_var("JWC_QUEUE_MAX_ATTEMPTS", "7");
+        std::env::set_var("JWC_QUEUE_BACKOFF_MS", "250");
+        assert_eq!(max_attempts_from_env(), 7);
+        assert_eq!(base_backoff_from_env(), 250);
+        std::env::remove_var("JWC_QUEUE_MAX_ATTEMPTS");
+        std::env::remove_var("JWC_QUEUE_BACKOFF_MS");
+        // After removal, defaults take over.
+        assert_eq!(max_attempts_from_env(), 3);
+        assert_eq!(base_backoff_from_env(), 1000);
     }
 
     #[test]
