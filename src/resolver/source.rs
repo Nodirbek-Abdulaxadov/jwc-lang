@@ -54,7 +54,7 @@ pub fn resolve_registry_url(manifest: &JwcProject) -> Option<String> {
             }
         }
     }
-    Some("https://jwc-registry.1kb.uz/".to_string())
+    Some("https://registry-jwc.1kb.uz/".to_string())
 }
 
 /// Build a Source for a single dep spec.
