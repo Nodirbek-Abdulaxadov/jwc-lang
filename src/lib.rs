@@ -39,3 +39,4 @@ pub mod schema_diff;
 pub mod sema;
 pub mod server;
 pub mod sql;
+pub mod swagger;

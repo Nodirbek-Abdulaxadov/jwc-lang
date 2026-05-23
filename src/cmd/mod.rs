@@ -9,3 +9,4 @@ pub mod pkg;
 pub mod publish;
 pub mod run;
 pub mod serve;
+pub mod swagger;

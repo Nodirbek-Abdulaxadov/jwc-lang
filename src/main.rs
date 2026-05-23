@@ -127,6 +127,14 @@ enum Command {
     /// Reads `~/.jwc/credentials.json` (set via `jwc login`). Picks the
     /// version from `pkgVersion` (preferred) or `version` in the manifest.
     Publish,
+    /// Generate `openapi.json` (OpenAPI 3.1) from the project's routes,
+    /// classes, and entities. Drop the file alongside your repo or pipe
+    /// to stdout for CI tooling.
+    Swagger {
+        /// Dump JSON to stdout instead of writing `openapi.json`.
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        stdout: bool,
+    },
     /// Start a real HTTP server for a JWC project
     Serve {
         /// Project directory or jwcproj.json (defaults to current dir)
@@ -308,6 +316,7 @@ fn real_main() -> Result<()> {
         }
         Command::Login { token, registry } => cmd::publish::login(&token, registry.as_deref())?,
         Command::Publish => rt.block_on(cmd::publish::publish())?,
+        Command::Swagger { stdout } => cmd::swagger::run(stdout)?,
         Command::Fmt { path, check } => cmd::fmt::run(path, check)?,
         Command::Serve {
             path,
