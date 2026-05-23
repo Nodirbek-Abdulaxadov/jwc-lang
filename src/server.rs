@@ -278,15 +278,23 @@ async fn handle_http_fallback(
     state.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
 
     let response: Response = match result {
-        Ok(Ok((status, body))) => {
+        Ok(Ok((status, body, content_type))) => {
             state.metrics.completed.fetch_add(1, Ordering::Relaxed);
             if state.request_logging {
                 eprintln!("[JWC] {} {} -> {}", method, uri.path(), status);
             }
             let mut resp = Response::new(body.into());
             *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
-            resp.headers_mut()
-                .insert("content-type", "application/json".parse().unwrap());
+            // `html(...)` / future `text(...)` declare an explicit content-type
+            // via the runtime envelope; everything else falls back to JSON for
+            // backward compatibility with handlers that just `return obj`.
+            let ct = content_type.as_deref().unwrap_or("application/json");
+            if let Ok(value) = ct.parse() {
+                resp.headers_mut().insert("content-type", value);
+            } else {
+                resp.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+            }
             resp
         }
         Ok(Err(e)) => {

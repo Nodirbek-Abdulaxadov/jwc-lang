@@ -41,6 +41,7 @@ pub const BUILTINS: &[&str] = &[
     // HTTP response helpers.
     "json",
     "text",
+    "html",
     "ok",
     "created",
     "not_found",
@@ -69,6 +70,18 @@ pub const BUILTINS: &[&str] = &[
     // Process env / type coercion (sync, no IO).
     "env",
     "int",
+    // Time & identifiers (sync, no IO).
+    "now",
+    "uuid",
+    // Process-wide in-memory cache (sync, no IO).
+    "cache_get",
+    "cache_set",
+    "cache_del",
+    "cache_clear",
+    // Raw SQL escape hatch — only meaningful when the program declares a
+    // dbcontext. Returns the first column of the first row as text for
+    // SELECT-shaped queries; rowcount as int for INSERT / UPDATE / DELETE.
+    "raw_sql",
 ];
 
 /// Built-ins that codegen handles itself (not via `jwc_b_<name>` dispatch).

@@ -240,7 +240,8 @@ pub async fn run_main(program: &Program) -> Result<RunMainResult> {
 
 /// Dispatch a single HTTP request to the matching route and return (status_code, body).
 /// Convenience wrapper around `run_request_with_headers` without headers. Kept
-/// public so test code can keep its concise call shape.
+/// public so test code can keep its concise call shape. Discards the response
+/// content-type — use `run_request_with_headers` directly if you need it.
 #[allow(dead_code)]
 pub async fn run_request(
     program: &Program,
@@ -248,7 +249,9 @@ pub async fn run_request(
     path: &str,
     body: Option<String>,
 ) -> Result<(u16, String)> {
-    run_request_with_headers(program, method, path, body, HashMap::new()).await
+    let (status, body, _ct) =
+        run_request_with_headers(program, method, path, body, HashMap::new()).await?;
+    Ok((status, body))
 }
 
 /// Run a WebSocket route handler. The caller provides two channels that
@@ -308,13 +311,17 @@ pub async fn run_ws_request(
 }
 
 /// Same as `run_request` but with request headers accessible via `header(name)`.
+/// The third tuple element is the response `content-type` declared by the
+/// handler (via `html(...)`, `text(...)`, etc.) — `None` means "no override,
+/// the transport should pick a sensible default" (today the HTTP server
+/// defaults to `application/json` to preserve the historical behaviour).
 pub async fn run_request_with_headers(
     program: &Program,
     method: &str,
     path: &str,
     body: Option<String>,
     headers: HashMap<String, String>,
-) -> Result<(u16, String)> {
+) -> Result<(u16, String, Option<String>)> {
     let mut vm = Vm::new(program);
     vm.request_body = body;
     vm.current_headers = Some(headers);
@@ -1753,6 +1760,25 @@ impl<'a> Vm<'a> {
                     });
                 }
 
+                // `html(body)` ships `body` verbatim to the wire under
+                // `content-type: text/html; charset=utf-8`. The two sentinel
+                // keys (`__jwc_content_type__`, `__jwc_body__`) are recognised
+                // and stripped by `dispatch_route`, which forwards the raw
+                // body bytes and the declared content-type to the transport.
+                if name.eq_ignore_ascii_case("html") {
+                    if args.len() != 1 {
+                        bail!("html(body) expects exactly 1 arg");
+                    }
+                    let val = self.eval_expr(&args[0], vars).await?;
+                    let body = val.as_string();
+                    let envelope = json!({
+                        "status": 200,
+                        "__jwc_content_type__": "text/html; charset=utf-8",
+                        "__jwc_body__": body,
+                    });
+                    return Ok(Value::Str(envelope.to_string()));
+                }
+
                 if name.eq_ignore_ascii_case("created") {
                     if args.len() != 1 {
                         bail!("created(val) expects exactly 1 arg");
@@ -1999,7 +2025,11 @@ impl<'a> Vm<'a> {
 
     /// Dispatch a single HTTP request directly (used by the real HTTP server).
     /// Returns (http_status_code, response_body).
-    pub async fn dispatch_route(&mut self, method: &str, path: &str) -> Result<(u16, String)> {
+    pub async fn dispatch_route(
+        &mut self,
+        method: &str,
+        path: &str,
+    ) -> Result<(u16, String, Option<String>)> {
         // Split `?query` off the path for route matching; keep the query for
         // `query_param(name)` lookups inside the handler.
         let (clean_path, query_params) = split_path_and_query(path);
@@ -2025,6 +2055,7 @@ impl<'a> Vm<'a> {
                 format!(
                     "{{\"status\":404,\"error\":\"Not Found\",\"method\":\"{method}\",\"path\":\"{clean_path}\"}}"
                 ),
+                None,
             ));
         };
 
@@ -2107,7 +2138,13 @@ impl<'a> Vm<'a> {
 
         // Derive HTTP status from a "status" field in JSON, default 200.
         // Then strip the internal "status" field before sending to client.
-        let (status, clean_body) =
+        //
+        // Built-ins like `html(...)` / `text(...)` mark their output with two
+        // sentinel keys — `__jwc_content_type__` and `__jwc_body__` — that
+        // travel inside the same JSON envelope so the existing status-field
+        // strip pass still applies. Both keys are removed here and the raw
+        // body string is returned as-is (no JSON re-encoding).
+        let (status, clean_body, content_type) =
             if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&body) {
                 let code = doc
                     .get("status")
@@ -2115,21 +2152,30 @@ impl<'a> Vm<'a> {
                     .and_then(|s| u16::try_from(s).ok())
                     .filter(|s| *s >= 100 && *s < 600)
                     .unwrap_or(200);
-                // Strip the "status" key from the response body
+                let mut ct: Option<String> = None;
+                let mut raw_body: Option<String> = None;
                 if let Some(obj) = doc.as_object_mut() {
                     obj.remove("status");
+                    if let Some(JsonValue::String(s)) = obj.remove("__jwc_content_type__") {
+                        ct = Some(s);
+                    }
+                    if let Some(JsonValue::String(s)) = obj.remove("__jwc_body__") {
+                        raw_body = Some(s);
+                    }
                 }
                 let body_out = if code == 204 {
                     String::new()
+                } else if let Some(raw) = raw_body {
+                    raw
                 } else {
                     doc.to_string()
                 };
-                (code, body_out)
+                (code, body_out, ct)
             } else {
-                (200, body)
+                (200, body, None)
             };
 
-        Ok((status, clean_body))
+        Ok((status, clean_body, content_type))
     }
 
     #[async_recursion]
@@ -5535,7 +5581,7 @@ mod tests {
 
         let mut headers = HashMap::new();
         headers.insert("authorization".into(), "Bearer xyz".into());
-        let (status_ok, body_ok) =
+        let (status_ok, body_ok, _ct) =
             run_request_with_headers(&program, "GET", "/secret", None, headers)
                 .await
                 .unwrap();

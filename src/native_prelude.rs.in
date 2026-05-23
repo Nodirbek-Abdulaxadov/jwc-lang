@@ -835,6 +835,10 @@ fn jwc_b_text(v: V) -> V {
     make_response(200, body_string(v), "text/plain; charset=utf-8")
 }
 
+fn jwc_b_html(v: V) -> V {
+    make_response(200, body_string(v), "text/html; charset=utf-8")
+}
+
 fn jwc_b_json(v: V) -> V {
     let body = jwc_to_json(&v);
     make_response(200, body, "application/json")
@@ -1168,4 +1172,116 @@ async fn jwc_b_fetch_json(url: V) -> V {
         V::Str(s) => jwc_from_json(&s).unwrap_or_else(|_| V::Str(s)),
         other => other,
     }
+}
+
+// --- time / identifiers ------------------------------------------------------
+
+fn jwc_b_uuid() -> V {
+    // RFC 4122 v4 — random, includes proper version/variant bits.
+    V::Str(uuid::Uuid::new_v4().to_string())
+}
+
+fn jwc_b_now() -> V {
+    // ISO-8601 / RFC 3339 UTC, second precision — matches the interpreter's
+    // `current_utc_iso8601()`. Postgres accepts this as timestamptz on insert.
+    let dt: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
+    V::Str(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
+// --- process-wide in-memory cache (TTL-keyed, std-only) ---------------------
+//
+// Mirrors `jwc::cache` from the interpreter: single global Mutex<HashMap>,
+// lazy TTL eviction on read. Fine for single-process / single-replica
+// deployments; behind multiple replicas use a shared Redis cache instead.
+
+mod jwc_cache_store {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    pub struct Entry {
+        pub value: String,
+        /// `None` means "never expires".
+        pub expires_at: Option<Instant>,
+    }
+
+    pub fn store() -> &'static Mutex<HashMap<String, Entry>> {
+        static STORE: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+}
+
+fn jwc_b_cache_get(key: V) -> V {
+    use std::time::Instant;
+    let k = match key {
+        V::Str(s) => s,
+        _ => return V::Null,
+    };
+    let mut guard = jwc_cache_store::store().lock().expect("cache mutex poisoned");
+    let expired = match guard.get(&k) {
+        Some(entry) => match entry.expires_at {
+            Some(deadline) => Instant::now() >= deadline,
+            None => false,
+        },
+        None => return V::Null,
+    };
+    if expired {
+        guard.remove(&k);
+        return V::Null;
+    }
+    guard
+        .get(&k)
+        .map(|e| V::Str(e.value.clone()))
+        .unwrap_or(V::Null)
+}
+
+fn jwc_b_cache_set(key: V, value: V, ttl_secs: V) -> V {
+    use std::time::{Duration, Instant};
+    let k = match key {
+        V::Str(s) => s,
+        _ => return V::Null,
+    };
+    let v = match value {
+        V::Str(s) => s,
+        V::Int(n) => n.to_string(),
+        V::Float(n) => n.to_string(),
+        V::Bool(b) => b.to_string(),
+        V::Null => String::new(),
+        other => jwc_to_json(&other),
+    };
+    let ttl = jwc_to_int(&ttl_secs).unwrap_or(0).max(0) as u64;
+    let expires_at = if ttl == 0 {
+        None
+    } else {
+        Instant::now().checked_add(Duration::from_secs(ttl))
+    };
+    let mut guard = jwc_cache_store::store().lock().expect("cache mutex poisoned");
+    guard.insert(
+        k,
+        jwc_cache_store::Entry {
+            value: v,
+            expires_at,
+        },
+    );
+    V::Null
+}
+
+fn jwc_b_cache_del(key: V) -> V {
+    let k = match key {
+        V::Str(s) => s,
+        _ => return V::Null,
+    };
+    jwc_cache_store::store()
+        .lock()
+        .expect("cache mutex poisoned")
+        .remove(&k);
+    V::Null
+}
+
+fn jwc_b_cache_clear() -> V {
+    jwc_cache_store::store()
+        .lock()
+        .expect("cache mutex poisoned")
+        .clear();
+    V::Null
 }
