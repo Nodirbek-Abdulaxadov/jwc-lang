@@ -107,6 +107,22 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         watch: bool,
     },
+    /// Normalise whitespace in `.jwc` source files.
+    ///
+    /// v1 is a line-based formatter (tabs → 4 spaces, strip trailing
+    /// whitespace, collapse runs of 3+ blank lines, single trailing
+    /// newline). A token-stream-aware AST → source renderer is tracked in
+    /// ROADMAP Phase 3.3.
+    Fmt {
+        /// File or directory to format. Defaults to the current directory;
+        /// directories are walked recursively, skipping `.jwc-build`,
+        /// `target`, `node_modules`, and `.git`.
+        path: Option<PathBuf>,
+        /// Do not write changes — exit non-zero if any file would be
+        /// rewritten. Suitable for CI.
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -404,6 +420,43 @@ fn real_main() -> Result<()> {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             cmd::pkg::tree(&root)?;
+        }
+        Command::Fmt { path, check } => {
+            let target = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let files = jwc::fmt::collect_jwc_files(&target)
+                .with_context(|| format!("Failed to enumerate .jwc files under {}", target.display()))?;
+            if files.is_empty() {
+                eprintln!("No .jwc files found under {}", target.display());
+                return Ok(());
+            }
+            let mut changed: Vec<PathBuf> = Vec::new();
+            for file in &files {
+                let outcome = jwc::fmt::format_file(file, check)
+                    .with_context(|| format!("Failed to format {}", file.display()))?;
+                if matches!(outcome, jwc::fmt::FormatOutcome::Changed) {
+                    changed.push(file.clone());
+                }
+            }
+            if check {
+                if !changed.is_empty() {
+                    eprintln!(
+                        "jwc fmt --check: {} file(s) would be rewritten:",
+                        changed.len()
+                    );
+                    for f in &changed {
+                        eprintln!("  {}", f.display());
+                    }
+                    std::process::exit(1);
+                } else {
+                    println!("jwc fmt --check: {} file(s) already formatted", files.len());
+                }
+            } else {
+                println!(
+                    "jwc fmt: rewrote {}/{} file(s)",
+                    changed.len(),
+                    files.len()
+                );
+            }
         }
         Command::Serve {
             path,

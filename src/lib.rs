@@ -11,6 +11,7 @@ pub mod diag;
 pub mod email;
 pub mod engine;
 pub mod error_report;
+pub mod fmt;
 pub mod jwt;
 pub mod lexer;
 pub mod lint;

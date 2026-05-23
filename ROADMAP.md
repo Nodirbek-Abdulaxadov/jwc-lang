@@ -180,7 +180,11 @@
 - ✅ `jwc lint` — `lint.rs::lint_program`: unused function (W001) va unused middleware (W002).
 - ✅ `jwc migrate down` (Phase 0.3 dan).
 - ✅ `jwc serve --watch` — `notify` crate file watcher; parent process child `jwc serve` ni kuzatadi va `.jwc` o‘zgarsa qayta ishga tushiradi.
-- ⬜ `jwc fmt` — formatlash. AST → source qayta chiqaruvi. Comment preservation muammosi.
+- ⏳ `jwc fmt` ✅ v1 (line-based) — `src/fmt.rs`: tabs → 4 spaces, strip
+  trailing whitespace, collapse runs of 3+ blank lines, single trailing
+  newline. `--check` rejim CI uchun (non-zero exit'da diff). Idempotent.
+  Qoldi v2: AST → source qayta chiqaruvi + comment preservation
+  (token-stream attach).
 - ⬜ `jwc add <pkg>` — paket qo‘shish (3.4 ga bog‘liq).
 
 ### 3.4 Package sistemasi ✅ shipped (path + git source; registry client deferred)
@@ -506,7 +510,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 2 | Type system finishing | ⏳ qisman | uuid/datetime/decimal/json/bigint ✅ (Phase 2.1). `byte[]` + explicit koersiyalar + sema pass — deferred. |
 | 3 | LSP power | ⬜ deferred | go-to-definition, autocomplete, semantic tokens, route/middleware hover. |
 | 4 | Diagnostics polish | ⏳ qisman | W003 empty function body ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. E001 codes + missing-`first` heuristic — deferred. |
-| 5 | `jwc fmt` | ⬜ deferred | AST → source renderer + comment preservation — alohida sessiya. |
+| 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
 | 6 | SQL completeness | ⬜ deferred | `group by` / `having` + insert/update/delete payload field-check + DB schema drift — alohida sessiya. |
 | 7 | Code health refactor | ⬜ deferred | runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |
 | 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅ + `tests/native_emit.rs` smoke tests ✅. Golden test harness (run vs build diff) — deferred. |
