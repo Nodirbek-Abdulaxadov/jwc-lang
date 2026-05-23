@@ -172,13 +172,14 @@ for an end-to-end demo with middleware, prefixed mounts, and visibility errors.
 
 ## What you can't do (yet)
 
-- Async runtime — the interpreter is sync; HTTP is async via
-  `spawn_blocking`. Real cooperative concurrency lands with the
-  upcoming async rewrite.
 - Multi-driver dbcontext — Postgres only today (Redis/Clickhouse/SQLite
   are on the roadmap).
-- LLVM AOT compile — `jwc build` bundles the runtime; native code
-  generation is the long-term Phase 4 goal.
+- LLVM IR backend — `jwc build --native` already produces an async
+  tokio binary via Rust codegen + cargo, but the LLVM IR path (faster
+  cold start, smaller artifacts, cross-target matrix) is still
+  deferred. See ROADMAP Phase 4.1 / 10.6.
+- Typed `catch` dispatch — `catch (e: ErrorType)` parses but currently
+  matches all errors; per-type branching lands in Phase 10.5.
 - Public registry — path and git sources work today;
   `jwc-registry.1kb.uz` HTTP registry server is the next deliverable
   (`jwc publish` / `jwc login` follow).

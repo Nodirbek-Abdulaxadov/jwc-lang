@@ -10,9 +10,12 @@ Rust compiler/interpreter (`jwc`), the language server (`jwc-lsp`), a VS Code
 extension, and example projects under `examples/`.
 
 `.jwc` source is read end-to-end at process start (no separate IR file); the
-runtime is an interpreter, not an AOT compiler. `jwc build` (alias
-`jwc bundle`) only bundles the runtime + a launcher — native compilation is a
-Phase 4 roadmap item.
+default runtime is an interpreter. `jwc build` (alias `jwc bundle`) without
+flags still does launcher + runtime bundling. `jwc build --native` is the
+real AOT path: `src/native_build.rs` emits Rust source from the AST, shells
+out to `cargo` and produces a standalone tokio binary. The LLVM IR backend
+is still deferred (Phase 4.1/4.2), so `--native` is currently the Rust
+codegen path only.
 
 ## Build / run commands
 
@@ -95,31 +98,36 @@ for `gen-sql`).
 - `runner.rs` — the interpreter `Vm`. Everything user code can do
   (built-ins, control flow, route dispatch glue, validation, JSON coercion)
   is implemented here. New built-in function? Add it inside the `match` in
-  `Vm::call_function` / `Vm::call_builtin`.
+  `Vm::call_function` / `Vm::call_builtin`. The Vm is now **async**: the
+  recursive evaluator methods carry `#[async_recursion]`, so
+  `eval_expr` / `exec_block` / `call_function` are all `async fn` and must
+  be `.await`-ed.
 - `engine.rs` — the singleton DB layer (`ENGINE: OnceLock<JwcEngine>`).
-  Wraps an r2d2 pool (TLS or NoTls depending on `JWC_DB_TLS`), a prepared
-  statement cache, and an optional TTL result cache. Tests reset the
-  `public` schema between runs but **do not** reset `ENGINE`; design new DB
-  code so it tolerates being called against a fresh schema on the same pool.
+  Wraps a `deadpool-postgres` async pool backed by `tokio-postgres` (TLS via
+  `tokio-postgres-rustls` when `JWC_DB_TLS` is set), a prepared statement
+  cache, and an optional TTL result cache. Same `OnceLock<JwcEngine>`
+  singleton — tests reset the `public` schema between runs but **do not**
+  reset `ENGINE`; design new DB code so it tolerates being called against a
+  fresh schema on the same pool.
 
-### Sync interpreter, async HTTP
+### Async stack: Vm, server, DB, native AOT
 
 This is the single most important architectural fact:
 
-- `runner.rs` is fully synchronous. `Vm::eval_expr` recurses on the same
-  thread; SQL calls block on `engine`'s pooled connections.
-- `server.rs` is built on `axum` + `tokio`. Every request is dispatched via
-  `tokio::task::spawn_blocking` so the sync interpreter can run without
-  blocking the reactor. WebSocket frames cross between the async socket and
-  the blocking handler thread through two `tokio::sync::mpsc` channels
-  stored in a thread-local (see `WS_HANDLE` in `runner.rs`).
-- `async function` / `await` parse (Phase 2 forward-compat) but execute
-  synchronously today. Do not assume future-style suspension semantics.
-
-When adding a new HTTP-facing built-in (e.g. another `header(...)` style
-function), put the runtime impl in `runner.rs` and wire the request data
-through the existing `RouteContext` plumbing in `server.rs` — don't open a
-second channel.
+- `runner.rs` is fully async (`#[async_recursion]` on the recursive
+  evaluator methods). `Vm::eval_expr` is an `async fn`; SQL calls await on
+  the `deadpool-postgres` pool.
+- `server.rs` is built on axum + tokio. Every request is a `tokio::spawn`'d
+  task — no more `spawn_blocking`. WebSocket frame I/O is direct async I/O
+  via `tokio::io::{AsyncReadExt, AsyncWriteExt}` against a
+  `tokio::task_local!` `Arc<Mutex<TcpStream>>` (no mpsc bridge thread).
+- `async function` / `await` are real now (Phase 9). Suspending across an
+  `.await` yields to the scheduler — concurrent requests no longer
+  serialise on a worker thread.
+- When adding a new HTTP-facing async builtin, put the impl in
+  `runner.rs::call_builtin`, mark it async, and remember to also add it to
+  the BUILTINS list in `src/native_build.rs` so the native AOT codegen
+  accepts it (otherwise `jwc build --native` will reject the unknown call).
 
 ### Migrations
 
@@ -130,8 +138,12 @@ concurrent processes serialise without deadlocking. The CLI honours
 `DATABASE_URL` / `JWC_DATABASE_URL` and the same `JWC_DB_TLS*` flags as the
 runtime pool — keep that contract when extending the migrate command.
 
-`schema_diff.rs` is the start of the auto-migration generator; it's not yet
-wired into `migrate new`.
+`schema_diff.rs` is wired into `migrate new`: `create_migration` reads the
+latest `.up.sql` snapshot from `migrations/`, parses it back into entity
+snapshots, diffs it against the current program's entities, and emits only
+the resulting `ALTER` / `CREATE TABLE` statements (or `-- no schema changes`
+if the diff is empty). Don't re-emit the full schema from a generator —
+extend `schema_diff::compute_diff` / `diff_to_sql` instead.
 
 ### Project layout
 
@@ -165,6 +177,6 @@ the same change.
 
 `ROADMAP.md` is the source of truth for what counts as "done" vs.
 "partial" vs. "deferred". Before adding a feature that overlaps a Phase
-item, re-read the relevant section — several apparent gaps (real async,
-typed `catch`, schema-diff migrations) are intentional deferrals with
-documented reasons, not oversights.
+item, re-read the relevant section — several apparent gaps (typed `catch`
+dispatch, LLVM IR backend, cross-target native builds) are intentional
+deferrals with documented reasons, not oversights.

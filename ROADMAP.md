@@ -20,6 +20,7 @@
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
 | Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp + WebSocket) |
 | Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
+| Phase 10 — Observability + streaming + SSE | ⬜ Planned (tracing/OTel, stream `select`, `route SSE`, typed-catch dispatch, native cross-target) |
 
 ---
 
@@ -47,25 +48,30 @@
 
 ---
 
-## Phase 1 — MVP Core `current`
+## Phase 1 — MVP Core ✅ done
 
 **Maqsad:** Interpreter rejimida API + Postgres CRUD’ni yakuniy darajaga keltirish.
 
-### 1.1 HTTP Server ✅
-- `server.rs` — `tiny_http` + worker pool (`JWC_SERVER_WORKERS`), bounded `sync_channel` queue, optional metrics.
+> v0.1.x tarixiy holat. 1.1 dagi `tiny_http` va 1.2 dagi `r2d2_postgres` —
+> Phase 9 da axum + tokio + `deadpool-postgres`'ga ko'chirilgan.
+
+### 1.1 HTTP Server ✅ → Phase 9 da yangilangan
+- `server.rs` (v0.1.x) — `tiny_http` + worker pool (`JWC_SERVER_WORKERS`), bounded `sync_channel` queue, optional metrics.
 - `serve()` til ichidan chaqiriladi: `main()` → `serve(8080)` → CLI orqali `server::serve` ishga tushadi.
 - Per-request body 4xx/5xx error chain to‘liq log qilinadi.
+- **Joriy holat:** axum + tokio, har request `tokio::spawn`. Phase 9.3'ga qarang.
 
-### 1.2 DB Runtime Layer ✅
-- `engine.rs` — `r2d2_postgres` pool, query-shape SQL cache, optional result cache (`JWC_QUERY_CACHE_TTL_SECS`).
+### 1.2 DB Runtime Layer ✅ → Phase 9 da yangilangan
+- `engine.rs` (v0.1.x) — `r2d2_postgres` pool, query-shape SQL cache, optional result cache (`JWC_QUERY_CACHE_TTL_SECS`).
 - Native AST nodelari mavjud: `DbSelect / DbInsert / DbUpdate / DbDelete`, `new Entity()`, `var.field`, `var.field = value`.
 - Phase 0.1 legacy hack’lar tozalandi.
+- **Joriy holat:** `deadpool-postgres` + `tokio-postgres`, async checkout. Phase 9.2'ga qarang.
 
-### 1.3 Type System (very basic) ⏳ partial
+### 1.3 Type System (very basic) ✅ → Phase 2.1 da yakunlangan
 - Hozir tan olinadigan primitive’lar runtime’da: `string`, `int`, `double`, `bool`.
-- Avtomatik koersiya: `int → string`, `string → int` (parse bo‘lsa), `int ↔ double`. Bu noaniqlik manbai — `decimal/uuid/datetime/json` typelar runtime’da string sifatida o‘tadi.
+- Avtomatik koersiya: `int → string`, `string → int` (parse bo‘lsa), `int ↔ double`.
 - Typed param + return + model JSON validatsiyasi mavjud (`runner.rs::check_typed_value`).
-- **Qoldi:** `uuid`, `datetime`, `decimal`, `json`, `bigint` — birinchi sinf runtime typelar bo‘lishi kerak.
+- **Joriy holat:** `uuid`, `datetime`, `decimal`, `json`, `bigint` Phase 2.1 da birinchi-sinf typelar bo'ldi.
 
 ### 1.4 Query string + path params ✅
 - `query_param(name)` va `query_param(name, default)` built-inlari `runner.rs` ga qo‘shildi.
@@ -120,7 +126,7 @@
 ### 2.3 `try / catch` ✅
 - Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.
 - Catch var bound: `{"message": "...", "causes": [...]}` JSON sifatida.
-- `catch_type` AST'da saqlanadi, hozircha barcha xatolarni ushlaydi (typed dispatch — Phase 3 da).
+- `catch_type` AST'da saqlanadi, hozircha barcha xatolarni ushlaydi (typed dispatch — Phase 10.5 da).
 
 ### 2.4 Middleware ✅
 - Top-level `middleware Name { ... }` deklaratsiyasi.
@@ -148,7 +154,7 @@
 
 ---
 
-## Phase 3 — Developer Experience `~6-12 oy`
+## Phase 3 — Developer Experience ⏳ partial
 
 **Maqsad:** JWC bilan yozish — Node yoki Go bilan yozishdek tezroq bo‘lsin.
 
@@ -199,7 +205,7 @@
 
 ---
 
-## Phase 4 — Real native compiler `~12-24 oy`
+## Phase 4 — Real native compiler ⏳ partial
 
 **Maqsad:** Interpreter’ni siqib chiqarish, real native binary chiqarish.
 
@@ -234,11 +240,11 @@
 ### 4.4 Zero-cost abstractions ⬜ deferred
 - Entity field access → struct field offset.
 - Route handler → inlined function, virtual dispatch yo‘q.
-- LLVM backend (4.2) tugamasidan oldin ma’nosi yo‘q.
+- LLVM IR (4.1) tugamasidan oldin ma’nosi yo‘q.
 
 ---
 
-## Phase 5 — Ecosystem `~24+ oy`
+## Phase 5 — Ecosystem ⏳ partial
 
 **Maqsad:** JWC ni global backend tiliga aylantirish.
 
@@ -262,7 +268,7 @@
 
 ---
 
-## Phase 6 — DX Polish `now` (microblog feedback'idan)
+## Phase 6 — DX Polish ✅ done (microblog feedback'idan)
 
 **Maqsad:** Real backend yozish jarayonida til "DSL'dan" "kundalik tilga" aylanishi uchun aniqlangan to'siqlarni tozalash.
 
@@ -296,6 +302,24 @@
 - `e` JSON sifatida bound: `{ "message": "...", "causes": [...] }`.
 - Handler `return` qiymati response body bo'ladi; status JSON ichidagi `"status"`'dan olinadi (default 200, lekin `internalError(...)` 500 beradi).
 
+---
+
+## Phase 7 — Standard helpers ✅
+
+- `length(x)` — char count for strings, element count for JSON arrays,
+  key count for JSON objects, 0 for null.
+- String ops: `lower`, `upper`, `trim`, `replace`, `contains`, `starts_with`,
+  `ends_with`, `split` (returns JSON array string).
+- Array ops: `first(xs)`, `last(xs)`, plus `contains` and `length`.
+- `for VAR in EXPR { ... }` — iterate a JSON array. `break` / `continue` /
+  `return` all work. `EXPR` is evaluated once, items round-trip through
+  `json_to_value`.
+- `json_parse(s)` / `json_stringify(v)` — explicit conversion between
+  JSON-string carriers and structured Value shapes.
+- `in` is now a real keyword (reserved by `where ... in (...)` and `for ... in ...`).
+
+---
+
 ## Phase 8 — Background jobs + LSP ✅
 
 ### 8.1 In-process job queue
@@ -313,6 +337,8 @@
 - `cargo build --bin jwc-lsp` — stdio orqali tower-lsp ishlaydi.
 - Diagnostics + hover ishlaydi (yuqorida 3.1'ga qarang).
 - **Qoldi:** go-to-definition, autocomplete, route/middleware hover, semantic tokens.
+
+---
 
 ## Phase 9 — Async runtime + perf ceiling ✅ done
 
@@ -361,7 +387,7 @@ Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
   (full)`, `tokio-postgres`, `deadpool-postgres`, `async-recursion`,
   `reqwest (rustls)` qo'shildi.
 
-### 9.5 Maqsadli raqamlar (verify pending)
+### 9.5 Maqsadli raqamlar (verify pending) — Phase 10 da yopiladi
 - GET (oddiy SELECT) c=100: **40–60k RPS**, p99 < 10ms.
 - POST: **30–50k RPS**.
 - c=500+ Linux'da real ravishda yelka tortishi mumkin (Windows loopback alohida holat).
@@ -372,32 +398,79 @@ Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
 
 ---
 
-## Phase 7 — Standard helpers ✅
+## Phase 10 — Observability + streaming + SSE ⬜ planned
 
-- `length(x)` — char count for strings, element count for JSON arrays,
-  key count for JSON objects, 0 for null.
-- String ops: `lower`, `upper`, `trim`, `replace`, `contains`, `starts_with`,
-  `ends_with`, `split` (returns JSON array string).
-- Array ops: `first(xs)`, `last(xs)`, plus `contains` and `length`.
-- `for VAR in EXPR { ... }` — iterate a JSON array. `break` / `continue` /
-  `return` all work. `EXPR` is evaluated once, items round-trip through
-  `json_to_value`.
-- `json_parse(s)` / `json_stringify(v)` — explicit conversion between
-  JSON-string carriers and structured Value shapes.
-- `in` is now a real keyword (reserved by `where ... in (...)` and `for ... in ...`).
+**Maqsad:** Production-ready obzor: tracing, real-time stream, va Phase 2.3
+da qoldirilgan typed-catch tafsilotini yopish. Phase 9 da qo'yilgan perf
+shiftini ham shu Phase'da o'lchab tasdiqlaymiz.
+
+### 10.1 Perf baseline (Phase 9.5 closure)
+- `examples/bench.sh` + `bench.py` + JMeter run natijalarini ROADMAP'ga
+  yozish: yangi async stack vs eski sync (v0.1.2) RPS/p99 jadvali.
+- `.NET` baseline (`examples/bench-cs/`) bilan kontroll solishtirma —
+  bir xil endpoint, bir xil DB, bir xil yuk.
+- Maqsad: 40–60k RPS GET / 30–50k RPS POST (Phase 9.5 target) tasdig'i
+  yoki yangi shiftga moslab raqamlarni yangilash.
+
+### 10.2 Tracing + OpenTelemetry
+- `tracing` crate bilan structured logs: request_id, route, status, latency.
+- OTLP exporter — Jaeger / Tempo / Honeycomb'ga to'g'ridan-to'g'ri.
+- Built-in: `trace_span(name)` / `trace_event(name, attrs)` til ichida.
+- Env: `JWC_OTEL_ENDPOINT`, `JWC_OTEL_SERVICE_NAME`, sample rate.
+- HTTP middleware'iga otomatik `traceparent` header propagation.
+
+### 10.3 Stream-based `select` (katta result setlar)
+- `for row in stream select Post from db.Posts where ...` — `tokio-postgres`
+  `query_raw` orqali async iterator, butun resultni xotirada to'plamasdan.
+- `break` / `early return` — server-side cursor close.
+- JSON streaming response: `return ndjson(stream)` — chunked transfer.
+
+### 10.4 Server-Sent Events
+- `route SSE "/feed"` syntaxsi — `route WS` ga parallel.
+- Built-in: `sse_send(event_name, data)`, `sse_close()`.
+- Avtomatik `Content-Type: text/event-stream`, `keep-alive`, `Last-Event-ID`.
+- Subscriber registry: `sse_broadcast(topic, payload)` — pub/sub uchun
+  in-process channel.
+
+### 10.5 Typed-catch dispatch (Phase 2.3 davomi)
+- `catch (e: DbError)` / `catch (e: ValidationError)` — error type'ga
+  qarab branch.
+- Built-in error class hierarchy: `Error`, `DbError`, `HttpError`,
+  `ValidationError`, `TimeoutError`.
+- `try { ... } catch (e: DbError) { ... } catch (e) { ... }` — birinchi
+  mos tip ushlaydi.
+- Compile-time: noma'lum error type aniqlanadi (`closest_match`).
+
+### 10.6 Native cross-target (Phase 4.2 davomi)
+- `jwc build --native --target x86_64-unknown-linux-musl` — static binary.
+- `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` matrix.
+- Generatsiya qilingan `Cargo.toml` `--target` ni hisobga olib o'zgaradi
+  (`reqwest` features, TLS backend tanlovi).
+- CI'ga release matrix qo'shish (release.yml allaqachon `v*` tag'da ishlaydi).
+
+### 10.7 Schema diff `migrate new` ga to'liq ulash
+- `schema_diff.rs` joriy entity'lar va oldingi `.up.sql` o'rtasidagi farqdan
+  faqat `ALTER TABLE` / yangi `CREATE TABLE` chiqaradi.
+- Diff bo'lmasa "no schema changes" — bo'sh migration yaratilmasin.
+- `--force` flag — diff bo'lmasa ham bo'sh migration yaratish (manual SQL
+  uchun).
+
+---
 
 ## Priority Timeline
 
 Phase 0–2, 3.4 (path/git), 6–9 tugallandi. Keyingi ish ustuvorligi:
 
 ```
-hozir    →  Phase 9.5 — real benchmark natijalari (bench-cs/bench.py/jmeter)
-1-2 oy   →  Phase 3.1+ — LSP go-to-definition, autocomplete, semantic tokens
-2-4 oy   →  Phase 3.3 — `jwc fmt` (AST → source, comment preservation)
-4-8 oy   →  Phase 3.5 — `jwc-registry.1kb.uz` registry server (alohida repo)
-4-8 oy   →  Phase 4.2 — native codegen kengaytmasi (cross-target, LLVM IR)
+hozir    →  Phase 10.1 — real benchmark natijalari (bench-cs/bench.py/jmeter)
+1-2 oy   →  Phase 10.2 — tracing + OTel exporter
+2-3 oy   →  Phase 10.5 — typed-catch dispatch (Phase 2.3 yopiladi)
+3-4 oy   →  Phase 10.3/10.4 — stream `select` + SSE routes
+4-6 oy   →  Phase 3.1+ — LSP go-to-definition, autocomplete, semantic tokens
+6-8 oy   →  Phase 3.3 + 10.6 — `jwc fmt` + native cross-target build matrix
+6-8 oy   →  Phase 3.5 — `jwc-registry.1kb.uz` registry server (alohida repo)
 8-12 oy  →  Phase 3.4 v1.1 — `jwc publish` / `jwc login` (registry server ishga tushgandan keyin)
-12+ oy   →  Phase 5 — wasm target, Redis-backed cache, S3, SSE
+12+ oy   →  Phase 4.1 (LLVM IR) + Phase 5 (wasm, Redis-backed cache, S3)
 ```
 
 ---
