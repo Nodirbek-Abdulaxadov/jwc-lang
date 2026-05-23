@@ -31,7 +31,7 @@ pub fn format_source(src: &str) -> String {
         .split('\n')
         .map(|line| {
             let expanded = line.replace('\t', "    ");
-            expanded.trim_end_matches(|c: char| c == ' ' || c == '\r').to_string()
+            expanded.trim_end_matches([' ', '\r']).to_string()
         })
         .collect();
 
@@ -76,8 +76,7 @@ pub fn collect_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let meta = fs::metadata(&path)
-            .with_context(|| format!("stat: {}", path.display()))?;
+        let meta = fs::metadata(&path).with_context(|| format!("stat: {}", path.display()))?;
         if meta.is_file() {
             if path.extension().and_then(|e| e.to_str()) == Some("jwc") {
                 out.push(path);
@@ -87,9 +86,7 @@ pub fn collect_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {
         if !meta.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(&path)
-            .with_context(|| format!("read_dir: {}", path.display()))?
-        {
+        for entry in fs::read_dir(&path).with_context(|| format!("read_dir: {}", path.display()))? {
             let entry = entry?;
             let p = entry.path();
             if p.is_dir() {
@@ -120,15 +117,13 @@ pub enum FormatOutcome {
 /// is left untouched and the return value tells the caller whether it was
 /// canonical. On `check=false` the rewritten content is written back.
 pub fn format_file(path: &Path, check: bool) -> Result<FormatOutcome> {
-    let src = fs::read_to_string(path)
-        .with_context(|| format!("read: {}", path.display()))?;
+    let src = fs::read_to_string(path).with_context(|| format!("read: {}", path.display()))?;
     let formatted = format_source(&src);
     if formatted == src {
         return Ok(FormatOutcome::Unchanged);
     }
     if !check {
-        fs::write(path, &formatted)
-            .with_context(|| format!("write: {}", path.display()))?;
+        fs::write(path, &formatted).with_context(|| format!("write: {}", path.display()))?;
     }
     Ok(FormatOutcome::Changed)
 }

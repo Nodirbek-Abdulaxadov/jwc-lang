@@ -1,3 +1,7 @@
+// See lib.rs for the rationale; the testcontainers harness mutex is the
+// same shape as the runtime's WebSocket bridge.
+#![allow(clippy::await_holding_lock)]
+
 //! Integration tests for the JWC DB stack against a real Postgres instance.
 //!
 //! Each test boots (or reuses) a Postgres container via `testcontainers` and

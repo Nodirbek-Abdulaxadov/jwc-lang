@@ -397,7 +397,7 @@ fn extract_quoted_idents(s: &str) -> Vec<String> {
 /// Replay `ALTER TABLE` statements (the kind this module emits) onto the
 /// running table set so cumulative state matches the latest migration's
 /// "as-if applied" view.
-fn apply_alter_statements(sql: &str, tables: &mut Vec<TableSnapshot>) {
+fn apply_alter_statements(sql: &str, tables: &mut [TableSnapshot]) {
     // ALTER TABLE "t" ADD COLUMN "c" type [NOT NULL];
     let add_re = Regex::new(
         r#"(?is)ALTER\s+TABLE\s+"([A-Za-z_][A-Za-z0-9_]*)"\s+ADD\s+COLUMN\s+"([A-Za-z_][A-Za-z0-9_]*)"\s+([^;]+?)\s*;"#,

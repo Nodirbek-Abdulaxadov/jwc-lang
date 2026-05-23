@@ -341,7 +341,7 @@ async fn handle_ws(
     // Writer loop: vm-output queue → WS frames.
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx_from_vm.recv().await {
-            if ws_sink.send(Message::Text(msg.into())).await.is_err() {
+            if ws_sink.send(Message::Text(msg)).await.is_err() {
                 break;
             }
         }

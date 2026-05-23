@@ -76,7 +76,7 @@ pub fn ensure_resolved(manifest: &JwcProject, project_root: &Path) -> Result<Res
             version: chosen_version.to_string(),
             source: src.lockfile_uri(),
             checksum: src.checksum(&src_path).unwrap_or_default(),
-            dependencies: trans_deps.iter().map(|(n, _)| format!("{}@*", n)).collect(),
+            dependencies: trans_deps.keys().map(|n| format!("{}@*", n)).collect(),
         };
 
         // Detect version conflicts at insert. ResolvedPackage stores a
@@ -101,7 +101,7 @@ pub fn ensure_resolved(manifest: &JwcProject, project_root: &Path) -> Result<Res
             source: src.lockfile_uri(),
             source_path: src_path,
             checksum: locked.checksum.clone(),
-            direct_dependencies: trans_deps.iter().map(|(n, _)| n.clone()).collect(),
+            direct_dependencies: trans_deps.keys().cloned().collect(),
         };
         graph.packages.insert(name.clone(), resolved);
         graph.locked.package.push(locked);

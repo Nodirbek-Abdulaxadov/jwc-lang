@@ -422,9 +422,11 @@ fn real_main() -> Result<()> {
             cmd::pkg::tree(&root)?;
         }
         Command::Fmt { path, check } => {
-            let target = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
-            let files = jwc::fmt::collect_jwc_files(&target)
-                .with_context(|| format!("Failed to enumerate .jwc files under {}", target.display()))?;
+            let target =
+                path.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let files = jwc::fmt::collect_jwc_files(&target).with_context(|| {
+                format!("Failed to enumerate .jwc files under {}", target.display())
+            })?;
             if files.is_empty() {
                 eprintln!("No .jwc files found under {}", target.display());
                 return Ok(());
@@ -451,11 +453,7 @@ fn real_main() -> Result<()> {
                     println!("jwc fmt --check: {} file(s) already formatted", files.len());
                 }
             } else {
-                println!(
-                    "jwc fmt: rewrote {}/{} file(s)",
-                    changed.len(),
-                    files.len()
-                );
+                println!("jwc fmt: rewrote {}/{} file(s)", changed.len(), files.len());
             }
         }
         Command::Serve {
@@ -535,7 +533,7 @@ fn run_serve_with_watch(root: &PathBuf, port: u16, request_logging: bool) -> Res
             ) {
                 continue;
             }
-            if event.paths.iter().any(is_jwc_path) {
+            if event.paths.iter().any(|p| is_jwc_path(p)) {
                 break;
             }
         }
@@ -550,14 +548,14 @@ fn run_serve_with_watch(root: &PathBuf, port: u16, request_logging: bool) -> Res
     }
 }
 
-fn is_jwc_path(p: &PathBuf) -> bool {
+fn is_jwc_path(p: &std::path::Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("jwc"))
         .unwrap_or(false)
 }
 
-fn read_source(path: &PathBuf) -> Result<String> {
+fn read_source(path: &std::path::Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
 }
 
@@ -587,7 +585,7 @@ exec "$SELF_DIR/jwc-runtime" run "$ROOT_DIR" "$@"
 }
 
 fn build_project_native_artifact(
-    root: &PathBuf,
+    root: &std::path::Path,
     manifest_name: &str,
     release: bool,
 ) -> Result<PathBuf> {
@@ -615,7 +613,7 @@ fn build_project_native_artifact(
             let _ = std::fs::remove_file(&root_meta);
         }
 
-        return Ok(out_path);
+        Ok(out_path)
     }
 
     #[cfg(not(windows))]

@@ -164,10 +164,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
 /// Walk the statement tree and record `(entity, first, where_clause)` for
 /// every `DbSelect` expression seen inside any expression form. Used by
 /// the W004 missing-`first` heuristic.
-fn collect_select_sites(
-    stmts: &[Stmt],
-    out: &mut Vec<(String, bool, Option<WhereExpr>)>,
-) {
+fn collect_select_sites(stmts: &[Stmt], out: &mut Vec<(String, bool, Option<WhereExpr>)>) {
     for stmt in stmts {
         match stmt {
             Stmt::Let { value, .. }
@@ -176,7 +173,11 @@ fn collect_select_sites(
             | Stmt::Print(value)
             | Stmt::Expr(value) => collect_select_sites_expr(value, out),
             Stmt::Return(Some(value)) => collect_select_sites_expr(value, out),
-            Stmt::If { cond, then_body, else_body } => {
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 collect_select_sites_expr(cond, out);
                 collect_select_sites(then_body, out);
                 if let Some(b) = else_body {
@@ -187,7 +188,9 @@ fn collect_select_sites(
                 collect_select_sites_expr(cond, out);
                 collect_select_sites(body, out);
             }
-            Stmt::Try { body, catch_body, .. } => {
+            Stmt::Try {
+                body, catch_body, ..
+            } => {
                 collect_select_sites(body, out);
                 collect_select_sites(catch_body, out);
             }
@@ -201,12 +204,14 @@ fn collect_select_sites(
     }
 }
 
-fn collect_select_sites_expr(
-    expr: &Expr,
-    out: &mut Vec<(String, bool, Option<WhereExpr>)>,
-) {
+fn collect_select_sites_expr(expr: &Expr, out: &mut Vec<(String, bool, Option<WhereExpr>)>) {
     match expr {
-        Expr::DbSelect { entity, where_clause, first, .. } => {
+        Expr::DbSelect {
+            entity,
+            where_clause,
+            first,
+            ..
+        } => {
             out.push((
                 entity.clone(),
                 *first,
@@ -453,7 +458,9 @@ mod tests {
         validate_program(&program).unwrap();
         let warnings = lint_program(&program);
         assert!(
-            warnings.iter().any(|w| w.code == "W004" && w.message.contains("first")),
+            warnings
+                .iter()
+                .any(|w| w.code == "W004" && w.message.contains("first")),
             "expected W004, got: {warnings:?}"
         );
     }

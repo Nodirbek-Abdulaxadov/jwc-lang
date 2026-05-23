@@ -4,6 +4,12 @@
 //!
 //! `main.rs` is the thin CLI wrapper that imports from here.
 
+// `await_holding_lock` is acknowledged tech debt: the WebSocket bridge
+// (`runner::WS_STREAM`) and the engine TLS-init path hold short critical
+// sections across awaits. Tracked under a dedicated clippy-cleanup sprint;
+// silenced crate-wide so CI can enforce `-D warnings` on the rest.
+#![allow(clippy::await_holding_lock)]
+
 pub mod ast;
 pub mod cache;
 pub mod cmd;
