@@ -1,6 +1,6 @@
-use jwc::{cmd, error_report, parser, project, runner, server};
+use jwc::{cmd, error_report, project, runner, server};
 
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand};
@@ -213,58 +213,7 @@ fn real_main() -> Result<()> {
         Command::Run {
             path,
             request_logging,
-        } => {
-            let target = path.unwrap_or(std::env::current_dir()?);
-
-            if target.is_dir() {
-                let root = project::find_project_root(&target)?;
-                project::load_dotenv(&root);
-                let loaded = project::load_project_from_root(&root)?;
-                loaded.manifest.ensure_runnable()?;
-                let _ = cmd::build::project_native_artifact(&root, &loaded.manifest.name, false)?;
-                let result = rt.block_on(runner::run_main(&loaded.program))?;
-                if !result.output.is_empty() {
-                    print!("{}", result.output);
-                }
-                if let Some(port) = result.serve_port {
-                    server::serve(&loaded.program, port, request_logging)?;
-                }
-            } else if target
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.eq_ignore_ascii_case(project::PROJECT_FILE))
-                .unwrap_or(false)
-            {
-                let root = target
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid project file path"))?
-                    .to_path_buf();
-                project::load_dotenv(&root);
-                let loaded = project::load_project_from_root(&root)?;
-                loaded.manifest.ensure_runnable()?;
-                let _ = cmd::build::project_native_artifact(&root, &loaded.manifest.name, false)?;
-                let result = rt.block_on(runner::run_main(&loaded.program))?;
-                if !result.output.is_empty() {
-                    print!("{}", result.output);
-                }
-                if let Some(port) = result.serve_port {
-                    server::serve(&loaded.program, port, request_logging)?;
-                }
-            } else {
-                let source = read_source(&target)?;
-                let program = parser::parse_program(&source)
-                    .with_context(|| format!("Failed to parse {}", target.display()))?;
-                parser::validate_program(&program)
-                    .with_context(|| format!("Validation failed for {}", target.display()))?;
-                let result = rt.block_on(runner::run_main(&program))?;
-                if !result.output.is_empty() {
-                    print!("{}", result.output);
-                }
-                if let Some(port) = result.serve_port {
-                    server::serve(&program, port, request_logging)?;
-                }
-            }
-        }
+        } => cmd::run::run(&rt, path, request_logging)?,
         Command::Test => cmd::check::test()?,
         Command::Lint {
             json,
@@ -346,102 +295,10 @@ fn real_main() -> Result<()> {
             port,
             request_logging,
             watch,
-        } => {
-            let target = path.clone().unwrap_or(std::env::current_dir()?);
-            let root = if target.is_dir() {
-                project::find_project_root(&target)?
-            } else {
-                target
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid project path"))?
-                    .to_path_buf()
-            };
-
-            if watch {
-                run_serve_with_watch(&root, port, request_logging)?;
-            } else {
-                project::load_dotenv(&root);
-                let loaded = project::load_project_from_root(&root)?;
-                loaded.manifest.ensure_runnable()?;
-                server::serve(&loaded.program, port, request_logging)?;
-            }
-        }
+        } => cmd::serve::run(path, port, request_logging, watch)?,
     }
 
     Ok(())
-}
-
-fn run_serve_with_watch(root: &PathBuf, port: u16, request_logging: bool) -> Result<()> {
-    use notify::{event::EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-    use std::process::Command as SysCommand;
-    use std::sync::mpsc;
-    use std::time::Duration;
-
-    let exe = std::env::current_exe()?;
-    let (tx, rx) = mpsc::channel::<notify::Event>();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
-        if let Ok(event) = res {
-            let _ = tx.send(event);
-        }
-    })?;
-    watcher.watch(root.as_path(), RecursiveMode::Recursive)?;
-
-    println!("[watch] Watching {} for .jwc changes", root.display());
-
-    loop {
-        let mut cmd = SysCommand::new(&exe);
-        cmd.arg("serve")
-            .arg("--port")
-            .arg(port.to_string())
-            .arg(root);
-        if request_logging {
-            cmd.arg("--request-logging");
-        }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| "watch: failed to spawn child")?;
-        println!("[watch] Server started (pid {})", child.id());
-
-        // Drain any backlog so the first event after spawn isn't a stale one.
-        while rx.try_recv().is_ok() {}
-
-        // Wait until a .jwc change arrives.
-        loop {
-            let Ok(event) = rx.recv() else {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(());
-            };
-            if !matches!(
-                event.kind,
-                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-            ) {
-                continue;
-            }
-            if event.paths.iter().any(|p| is_jwc_path(p)) {
-                break;
-            }
-        }
-
-        println!("[watch] Change detected, restarting server...");
-        let _ = child.kill();
-        let _ = child.wait();
-
-        // Debounce: drain rapid-fire follow-up events for ~250 ms.
-        std::thread::sleep(Duration::from_millis(250));
-        while rx.try_recv().is_ok() {}
-    }
-}
-
-fn is_jwc_path(p: &std::path::Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("jwc"))
-        .unwrap_or(false)
-}
-
-fn read_source(path: &std::path::Path) -> Result<String> {
-    fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
 }
 
 fn try_run_embedded_app(rt: &tokio::runtime::Runtime) -> Result<bool> {
