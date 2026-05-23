@@ -456,60 +456,10 @@ const BUILD_DIR_NAME: &str = ".jwc-build";
 /// Built-in JWC functions emitted as inlined helpers in the generated Rust
 /// prelude. Calls to anything outside this set or the user's own functions
 /// produce an "unsupported" error at codegen.
-pub const BUILTINS: &[&str] = &[
-    "length",
-    "lower",
-    "upper",
-    "trim",
-    "contains",
-    "starts_with",
-    "ends_with",
-    "replace",
-    "split",
-    "first",
-    "last",
-    "json_parse",
-    "json_stringify",
-    // HTTP request inspection — only meaningful inside a route body.
-    "path_param",
-    "query_param",
-    "body",
-    "header",
-    // HTTP response helpers.
-    "json",
-    "text",
-    "ok",
-    "created",
-    "not_found",
-    "no_content",
-    "unauthorized",
-    "forbidden",
-    "internal_error",
-    "status_code",
-    // camelCase aliases the interpreter exposes; normalized in builtin_fn_name.
-    "notFound",
-    "noContent",
-    "internalError",
-    "statusCode",
-    "badRequest",
-    "bad_request",
-    // DB.
-    "setConnectionString",
-    // WebSocket — only valid inside a `route WS "/path" { ... }` body.
-    "ws_send",
-    "ws_recv",
-    "ws_close",
-    // Async I/O built-ins (real tokio after the async migration).
-    "sleep_ms",
-    "http_get",
-    "fetch_json",
-    // Process env / type coercion (sync, no IO).
-    "env",
-    "int",
-];
-
-/// Built-ins that codegen handles itself (not via `jwc_b_<name>` dispatch).
-pub const SPECIAL_BUILTINS: &[&str] = &["serve"];
+// Built-in name lists now live in `src/builtins.rs` so the lint pass,
+// validator, and any future tooling can share the same source of truth
+// without depending on this codegen-heavy module.
+pub use crate::builtins::{BUILTINS, SPECIAL_BUILTINS};
 
 /// Codegen-time metadata for a DB-bound entity. Captures the column list and
 /// each column's Postgres-target type so INSERT param boxing can pick the

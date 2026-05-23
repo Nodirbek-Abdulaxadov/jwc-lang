@@ -163,9 +163,9 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
     // user function (interpreter looks user-defs first) so the built-in
     // becomes silently unreachable; readers expecting `json(...)` /
     // `length(...)` / etc. behaviour get a confusing surprise.
-    let builtins: HashSet<&str> = crate::native_build::BUILTINS
+    let builtins: HashSet<&str> = crate::builtins::BUILTINS
         .iter()
-        .chain(crate::native_build::SPECIAL_BUILTINS.iter())
+        .chain(crate::builtins::SPECIAL_BUILTINS.iter())
         .copied()
         .collect();
     for function in &program.functions {

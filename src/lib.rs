@@ -11,6 +11,7 @@
 #![allow(clippy::await_holding_lock)]
 
 pub mod ast;
+pub mod builtins;
 pub mod cache;
 pub mod cmd;
 pub mod diag;
