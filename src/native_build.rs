@@ -456,7 +456,7 @@ const BUILD_DIR_NAME: &str = ".jwc-build";
 /// Built-in JWC functions emitted as inlined helpers in the generated Rust
 /// prelude. Calls to anything outside this set or the user's own functions
 /// produce an "unsupported" error at codegen.
-const BUILTINS: &[&str] = &[
+pub const BUILTINS: &[&str] = &[
     "length",
     "lower",
     "upper",
@@ -509,7 +509,7 @@ const BUILTINS: &[&str] = &[
 ];
 
 /// Built-ins that codegen handles itself (not via `jwc_b_<name>` dispatch).
-const SPECIAL_BUILTINS: &[&str] = &["serve"];
+pub const SPECIAL_BUILTINS: &[&str] = &["serve"];
 
 /// Codegen-time metadata for a DB-bound entity. Captures the column list and
 /// each column's Postgres-target type so INSERT param boxing can pick the

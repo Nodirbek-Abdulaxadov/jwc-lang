@@ -158,6 +158,28 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
             });
         }
     }
+
+    // W005 — user function shadows a built-in name. Calls resolve to the
+    // user function (interpreter looks user-defs first) so the built-in
+    // becomes silently unreachable; readers expecting `json(...)` /
+    // `length(...)` / etc. behaviour get a confusing surprise.
+    let builtins: HashSet<&str> = crate::native_build::BUILTINS
+        .iter()
+        .chain(crate::native_build::SPECIAL_BUILTINS.iter())
+        .copied()
+        .collect();
+    for function in &program.functions {
+        if builtins.contains(function.name.as_str()) {
+            warnings.push(LintWarning {
+                code: "W005",
+                message: format!(
+                    "function '{}' shadows a built-in — calls resolve to the user-defined version, hiding the built-in",
+                    function.name
+                ),
+            });
+        }
+    }
+
     warnings
 }
 
@@ -390,6 +412,38 @@ fn collect_calls_where(wc: &WhereExpr, out: &mut std::collections::HashSet<Strin
 mod tests {
     use super::*;
     use crate::parser::{parse_program, validate_program};
+
+    #[test]
+    fn function_shadowing_builtin_is_w005() {
+        let src = r#"
+            function json(v) { return v; }
+            function main() { json("hi"); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code == "W005" && w.message.contains("json")),
+            "expected W005 for shadowed built-in 'json', got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn non_shadowing_function_does_not_trigger_w005() {
+        let src = r#"
+            function format_user(u) { return u; }
+            function main() { format_user("x"); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            !warnings.iter().any(|w| w.code == "W005"),
+            "non-shadowing function should not be W005, got: {warnings:?}"
+        );
+    }
 
     #[test]
     fn unused_function_is_reported() {
