@@ -26,6 +26,7 @@ pub mod lint;
 pub mod lockfile;
 pub mod migrate;
 pub mod native_build;
+pub mod native_ir;
 pub mod parser;
 pub mod password;
 pub mod pkg_cache;
