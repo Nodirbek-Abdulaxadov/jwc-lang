@@ -4,7 +4,7 @@ sidebar_position: 4
 
 # CI/CD walkthrough
 
-End-to-end deploy pipeline using a real JWC app — [`jwc-shortener`](https://github.com/Nodirbek-Abdulaxadov/jwc-shortener), live at [link-jwc.1kb.uz](https://link-jwc.1kb.uz/).
+End-to-end deploy pipeline using a real JWC app — [`jwc-shortener`](https://github.com/Nodirbek-Abdulaxadov/jwc-shortener), live at [1kb.uz](https://1kb.uz/).
 
 ```
 git push App-repo:main
@@ -204,8 +204,8 @@ kubectl logs   -n jwc deploy/jwc-shortener --tail=50
 kubectl get application jwc-shortener -n argocd
 
 # End-to-end
-curl https://link-jwc.1kb.uz/healthz
-curl -X POST https://link-jwc.1kb.uz/api/links \
+curl https://1kb.uz/healthz
+curl -X POST https://1kb.uz/api/links \
     -H 'content-type: application/json' \
     -d '{"url":"https://example.com"}'
 ```
