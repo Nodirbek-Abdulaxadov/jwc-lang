@@ -529,7 +529,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 9-10 | Registry server | ⬜ blocked-on-infra | Alohida repo `jwc-registry.1kb.uz` kerak; bu sessiyada bajarib bo'lmaydi. |
 | 11 | Publish & login | ⬜ blocked | Registry server ishga tushgandan keyin. |
 | 12-13 | Native cross-target | ⬜ deferred | `--target` matrix + LLVM IR skeleton. |
-| 14 | Queue robustness | ✅ qisman | Retry policy + exponential backoff ✅ (this session). Persistent backing + priority + DLQ — deferred. |
+| 14 | Queue robustness | ✅ qisman | Retry policy + exponential backoff ✅. `enqueue_urgent` 2-tier priority (front-of-queue + FIFO within urgent block) ✅. Persistent backing (Postgres `_jwc_jobs`) + n-level priority + DLQ — deferred. |
 | 15-18 | Phase 5 ecosystem | ⬜ deferred | WASM, Redis cache, S3, SSE — Phase 10 davomida. |
 | 19+ | Long-term | ⬜ | IR + zero-cost abstractions + self-hosting. |
 
