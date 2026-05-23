@@ -115,6 +115,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -167,6 +168,23 @@ impl LanguageServer for Backend {
             },
         };
         self.analyze_and_publish(uri, text, None).await;
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> LspResult<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let text = match self.documents.read().await.get(&uri).cloned() {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let symbols = collect_document_symbols(&text, &uri);
+        if symbols.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(DocumentSymbolResponse::Flat(symbols)))
+        }
     }
 
     async fn hover(&self, params: HoverParams) -> LspResult<Option<Hover>> {
@@ -335,6 +353,89 @@ fn hover_summary(program: &Program, name: &str) -> Option<String> {
     None
 }
 
+/// Regex-scan `source` for top-level declarations the editor's outline
+/// view should surface. Returns a flat `Vec<SymbolInformation>` matching
+/// `DocumentSymbolResponse::Flat`.
+///
+/// Intentionally regex-based rather than AST-based: the AST doesn't carry
+/// source positions per declaration today, and the outline only needs
+/// "first line of the declaration" granularity. A token-stream-aware
+/// upgrade is tracked alongside the LSP power sprint (Sprint 3).
+fn collect_document_symbols(source: &str, uri: &Url) -> Vec<SymbolInformation> {
+    // Each pattern captures the symbol name (or path, for routes) and the
+    // SymbolKind to report. Anchored at the start of the line because JWC
+    // top-level forms don't get indented.
+    let patterns: &[(&str, SymbolKind)] = &[
+        (
+            r#"^\s*entity\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+            SymbolKind::CLASS,
+        ),
+        (
+            r#"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+            SymbolKind::STRUCT,
+        ),
+        (
+            r#"^\s*(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+            SymbolKind::FUNCTION,
+        ),
+        (
+            r#"^\s*middleware\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+            SymbolKind::INTERFACE,
+        ),
+        (
+            r#"^\s*dbcontext\s+([A-Za-z_][A-Za-z0-9_]*)"#,
+            SymbolKind::NAMESPACE,
+        ),
+        (
+            r#"^\s*route\s+(?:GET|POST|PUT|DELETE|PATCH|WS)\s+"([^"]+)""#,
+            SymbolKind::METHOD,
+        ),
+    ];
+
+    let regexes: Vec<(Regex, SymbolKind)> = patterns
+        .iter()
+        .filter_map(|(p, k)| Regex::new(p).ok().map(|r| (r, *k)))
+        .collect();
+
+    let mut out: Vec<SymbolInformation> = Vec::new();
+    for (line_idx, line) in source.lines().enumerate() {
+        for (re, kind) in &regexes {
+            let Some(caps) = re.captures(line) else {
+                continue;
+            };
+            let Some(name_match) = caps.get(1) else {
+                continue;
+            };
+            let start_col = name_match.start() as u32;
+            let end_col = name_match.end() as u32;
+            let range = Range {
+                start: Position {
+                    line: line_idx as u32,
+                    character: start_col,
+                },
+                end: Position {
+                    line: line_idx as u32,
+                    character: end_col,
+                },
+            };
+            #[allow(deprecated)]
+            out.push(SymbolInformation {
+                name: name_match.as_str().to_string(),
+                kind: *kind,
+                tags: None,
+                deprecated: None,
+                location: Location {
+                    uri: uri.clone(),
+                    range,
+                },
+                container_name: None,
+            });
+            break; // First match per line wins.
+        }
+    }
+    out
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let stdin = tokio::io::stdin();
@@ -352,6 +453,46 @@ mod tests {
         let r = extract_line_col("Unexpected token at line 3, col 7").unwrap();
         assert_eq!(r.start.line, 2);
         assert_eq!(r.start.character, 6);
+    }
+
+    #[test]
+    fn collects_top_level_symbols_in_source_order() {
+        let src = "\
+dbcontext AppDb { driver = \"postgres\"; }
+entity User { id: int pk; name: string; }
+class UserCreateDto { name: string; }
+function getUser(id: int): User { return null; }
+middleware AuthMw { return 1; }
+route GET \"/users\" { return json(\"ok\"); }
+route POST \"/users\" -> getUser;
+async function doStuff() { return null; }
+";
+        let uri = Url::parse("file:///tmp/x.jwc").unwrap();
+        let syms = collect_document_symbols(src, &uri);
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "AppDb",
+                "User",
+                "UserCreateDto",
+                "getUser",
+                "AuthMw",
+                "/users",
+                "/users",
+                "doStuff",
+            ]
+        );
+        // Same URI propagated on every entry.
+        for sym in &syms {
+            assert_eq!(sym.location.uri, uri);
+        }
+        // Line numbers ascend monotonically.
+        let lines: Vec<u32> = syms.iter().map(|s| s.location.range.start.line).collect();
+        assert!(
+            lines.windows(2).all(|w| w[0] <= w[1]),
+            "symbol lines not monotonic: {lines:?}"
+        );
     }
 
     #[test]
