@@ -110,6 +110,23 @@ enum Command {
     Remove { pkg: String },
     /// Print the resolved dependency tree.
     Tree,
+    /// Store a registry API key in `~/.jwc/credentials.json`.
+    ///
+    /// Generate the key at <https://registry-jwc.1kb.uz/#/keys> after
+    /// signing in with Google. Required by `jwc publish`.
+    Login {
+        /// API key (`jwc_...`) issued by the registry.
+        #[arg(long)]
+        token: String,
+        /// Override the registry base URL (default: registry-jwc.1kb.uz).
+        #[arg(long)]
+        registry: Option<String>,
+    },
+    /// Pack the current project (type=pkg) and upload to the registry.
+    ///
+    /// Reads `~/.jwc/credentials.json` (set via `jwc login`). Picks the
+    /// version from `pkgVersion` (preferred) or `version` in the manifest.
+    Publish,
     /// Start a real HTTP server for a JWC project
     Serve {
         /// Project directory or jwcproj.json (defaults to current dir)
@@ -289,6 +306,8 @@ fn real_main() -> Result<()> {
             let root = project::find_project_root(&cwd)?;
             cmd::pkg::tree(&root)?;
         }
+        Command::Login { token, registry } => cmd::publish::login(&token, registry.as_deref())?,
+        Command::Publish => rt.block_on(cmd::publish::publish())?,
         Command::Fmt { path, check } => cmd::fmt::run(path, check)?,
         Command::Serve {
             path,

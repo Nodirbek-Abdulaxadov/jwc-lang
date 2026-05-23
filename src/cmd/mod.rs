@@ -6,5 +6,6 @@ pub mod fmt;
 pub mod lint;
 pub mod migrate;
 pub mod pkg;
+pub mod publish;
 pub mod run;
 pub mod serve;
