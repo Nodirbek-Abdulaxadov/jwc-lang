@@ -510,10 +510,10 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 1 | Verify & Hygiene | ✅ qisman | rustfmt + clippy + CI gate ✅, CONTRIBUTING.md ✅, code map refresh ✅. 10.1 perf bench ⏳ blocked-on-infra. |
 | 2 | Type system finishing | ⏳ qisman | uuid/datetime/decimal/json/bigint ✅ (Phase 2.1). `byte[]` + explicit koersiyalar + sema pass — deferred. |
 | 3 | LSP power | ⬜ deferred | go-to-definition, autocomplete, semantic tokens, route/middleware hover. |
-| 4 | Diagnostics polish | ⏳ qisman | W003 empty function body ✅, W004 missing-`first` heuristic ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. E001 numbered codes catalog — deferred. |
+| 4 | Diagnostics polish | ⏳ qisman | W003 empty function body ✅, W004 missing-`first` heuristic ✅, W005 builtin shadow ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. E001 numbered codes catalog — deferred. |
 | 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
 | 6 | SQL completeness | ⬜ deferred | `group by` / `having` + insert/update/delete payload field-check + DB schema drift — alohida sessiya. |
-| 7 | Code health refactor | ⬜ deferred | runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |
+| 7 | Code health refactor | ⏳ qisman | `cmd/pkg.rs` extracted (Add/Install/Update/Remove/Tree). runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |
 | 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅ + `tests/native_emit.rs` smoke tests ✅. Golden test harness (run vs build diff) — deferred. |
 | 9-10 | Registry server | ⬜ blocked-on-infra | Alohida repo `jwc-registry.1kb.uz` kerak; bu sessiyada bajarib bo'lmaydi. |
 | 11 | Publish & login | ⬜ blocked | Registry server ishga tushgandan keyin. |
