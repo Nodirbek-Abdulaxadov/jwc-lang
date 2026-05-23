@@ -286,6 +286,10 @@ fn build_ok_response(program: &Program, handler_fn: Option<&FunctionDecl>) -> Va
 }
 
 fn has_validate_body(stmts: &[Stmt]) -> bool {
+    // clippy 1.95+ would rewrite the `if walk(body) { return true; }` arms
+    // below as match guards, but that loses the early-return clarity and
+    // would still need the same fallthrough on `false`. Suppress per-function.
+    #![allow(clippy::collapsible_match)]
     fn walk(stmts: &[Stmt]) -> bool {
         for s in stmts {
             match s {
