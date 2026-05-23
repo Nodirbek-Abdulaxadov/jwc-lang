@@ -32,7 +32,13 @@ enum Command {
     /// Validate current project sources (searches jwcproj.json upward)
     Test,
     /// Run lint checks (validation + dead-code warnings) on the current project
-    Lint,
+    Lint {
+        /// Emit warnings as one JSON array on stdout instead of human-readable
+        /// lines. Each entry: {"code": "WNNN", "message": "..."}. Useful for
+        /// editor / CI integration.
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        json: bool,
+    },
     /// Bundle the project: copies JWC runtime + launcher into bin/{debug,release}.
     ///
     /// Pass --native to produce a real AOT-compiled binary via the embedded Rust
@@ -254,12 +260,18 @@ fn real_main() -> Result<()> {
                 loaded.source_files.len()
             );
         }
-        Command::Lint => {
+        Command::Lint { json } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;
             let loaded = project::load_project_from_root(&root)?;
             let warnings = lint::lint_program(&loaded.program);
-            if warnings.is_empty() {
+            if json {
+                let payload: Vec<serde_json::Value> = warnings
+                    .iter()
+                    .map(|w| serde_json::json!({ "code": w.code, "message": w.message }))
+                    .collect();
+                println!("{}", serde_json::Value::Array(payload));
+            } else if warnings.is_empty() {
                 println!(
                     "No lint warnings for project '{}' ({} source files).",
                     loaded.manifest.name,
