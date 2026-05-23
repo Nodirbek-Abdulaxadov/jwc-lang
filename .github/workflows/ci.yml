@@ -29,4 +29,4 @@ jobs:
         run: cargo build --workspace --all-targets
 
       - name: Cargo test (no DB)
-        run: cargo test --lib --test typed_catch --test imports --test native_emit
+        run: cargo test --lib --test typed_catch --test imports --test native_emit --test examples_parse
