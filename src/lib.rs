@@ -17,6 +17,7 @@ pub mod cmd;
 pub mod diag;
 pub mod email;
 pub mod engine;
+pub mod error_codes;
 pub mod error_report;
 pub mod fmt;
 pub mod jwt;

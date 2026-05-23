@@ -182,8 +182,10 @@
   route inline body / middleware. Branchli body (if/while/try) exempt
   chunki return faqat shu branchda ishlaydi. (W005 builtin-shadow uchun
   band qilingan.)
-- ⬜ Qoldi: `error[E001]` numbered diagnostic codelar tizimi (catalog +
-  parser bail messages refactor).
+- ⏳ Sprint 4: numbered diagnostic codes — catalog ✅ (`src/error_codes.rs`
+  W001..W006, E001..E010 + lookup + monotonic-order tests). Wiring the
+  E-codes into `parser.rs::validate_program` `bail!` sites is the next
+  step.
 
 ### 3.3 CLI ⏳ qisman
 - ✅ `jwc lint` — `lint.rs::lint_program`: unused function (W001) va unused middleware (W002).
@@ -518,7 +520,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 1 | Verify & Hygiene | ✅ qisman | rustfmt + clippy + CI gate ✅, CONTRIBUTING.md ✅, code map refresh ✅. 10.1 perf bench ⏳ blocked-on-infra. |
 | 2 | Type system finishing | ⏳ qisman | uuid/datetime/decimal/json/bigint ✅ (Phase 2.1). `byte[]` + explicit koersiyalar + sema pass — deferred. |
 | 3 | LSP power | ⬜ deferred | go-to-definition, autocomplete, semantic tokens, route/middleware hover. |
-| 4 | Diagnostics polish | ⏳ qisman | W003 empty body, W004 missing-`first`, W005 builtin-shadow, W006 unreachable-after-return ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. E001 numbered codes catalog — deferred. |
+| 4 | Diagnostics polish | ⏳ qisman | W003 empty body, W004 missing-`first`, W005 builtin-shadow, W006 unreachable-after-return ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. Numbered-code catalog `src/error_codes.rs` ✅ (W001..W006, E001..E010 stub). Bail-site wiring — qoldi. |
 | 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
 | 6 | SQL completeness | ⏳ qisman | `group by` + `having` ✅ (AST + parser + runner SQL + validator + 5 tests). Insert/update/delete payload field-check + DB schema drift — qoldi. |
 | 7 | Code health refactor | ⏳ qisman | `cmd/pkg.rs` extracted (Add/Install/Update/Remove/Tree) ✅. `builtins.rs` extracted (BUILTINS/SPECIAL_BUILTINS — shared by lint + native) ✅. runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |
