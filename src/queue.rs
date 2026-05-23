@@ -48,12 +48,26 @@ pub struct Job {
     pub is_urgent: bool,
 }
 
+/// A job that exhausted its retry budget. The `last_error` field records
+/// what the final attempt failed with so operators can inspect the DLQ
+/// (dead-letter queue) and reason about what went wrong before deciding
+/// whether to re-enqueue, fix the handler, or accept the loss.
+#[derive(Debug, Clone)]
+pub struct FailedJob {
+    pub job: Job,
+    pub last_error: String,
+}
+
 /// Shared queue state. Wrapped in `Mutex` and paired with a `Condvar` so
 /// workers can block-wait when the queue is empty.
 #[derive(Default)]
 pub struct Queue {
     pending: VecDeque<Job>,
     handlers: HashMap<String, String>,
+    /// Jobs that exhausted `JWC_QUEUE_MAX_ATTEMPTS` retries. Bounded only
+    /// by `JWC_QUEUE_DLQ_MAX` to keep a long-running process from
+    /// accumulating unbounded error log. Oldest entries are evicted first.
+    dlq: VecDeque<FailedJob>,
 }
 
 impl Queue {
@@ -114,6 +128,28 @@ impl Queue {
     /// unit tests below both call this.
     pub fn pop(&mut self) -> Option<Job> {
         self.pending.pop_front()
+    }
+
+    /// Append a permanently-failed job to the dead-letter queue. Evicts
+    /// the oldest entry first when `JWC_QUEUE_DLQ_MAX` (default 1024) is
+    /// reached so a long-running process doesn't grow without bound.
+    pub fn push_dlq(&mut self, failed: FailedJob, max: usize) {
+        while self.dlq.len() >= max {
+            self.dlq.pop_front();
+        }
+        self.dlq.push_back(failed);
+    }
+
+    /// How many permanently-failed jobs are currently held in the DLQ.
+    pub fn dlq_len(&self) -> usize {
+        self.dlq.len()
+    }
+
+    /// Remove every entry from the DLQ and return them, oldest first.
+    /// Used by the JWC `dlq_drain()` built-in so user code can persist
+    /// or re-enqueue failed jobs explicitly.
+    pub fn dlq_drain(&mut self) -> Vec<FailedJob> {
+        self.dlq.drain(..).collect()
     }
 }
 
@@ -238,6 +274,17 @@ fn base_backoff_from_env() -> u64 {
         .unwrap_or(1000)
 }
 
+/// Maximum entries kept in the dead-letter queue before oldest are
+/// evicted. `JWC_QUEUE_DLQ_MAX=0` disables eviction entirely (use with
+/// care — long-running processes can accumulate unbounded memory).
+fn dlq_max_from_env() -> usize {
+    std::env::var("JWC_QUEUE_DLQ_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1024)
+        .max(1) // a max of 0 would push-then-immediately-evict; treat as unbounded
+}
+
 /// Re-push a failed job onto the queue with `attempts` bumped. Wakes a
 /// worker. Used by the worker loop after a backoff sleep.
 fn requeue_after_failure(mut job: Job) {
@@ -261,6 +308,36 @@ pub fn pending_count() -> usize {
     let st = state();
     let q = st.queue.lock().expect("queue mutex poisoned");
     q.len()
+}
+
+/// Snapshot of dead-letter queue depth. Exposed to JWC via `dlq_count()`.
+pub fn dlq_count() -> usize {
+    let st = state();
+    let q = st.queue.lock().expect("queue mutex poisoned");
+    q.dlq_len()
+}
+
+/// Remove every entry from the DLQ and return them. Exposed to JWC via
+/// `dlq_drain()` which serialises the returned entries to a JSON array.
+pub fn dlq_drain() -> Vec<FailedJob> {
+    let st = state();
+    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    q.dlq_drain()
+}
+
+/// Move a permanently-failed job onto the DLQ. Called from the worker
+/// loop when retry attempts are exhausted; exposed as `pub` so tests
+/// (and future durable backends) can populate it directly.
+pub fn record_failed(job: Job, error: &str) {
+    let st = state();
+    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    q.push_dlq(
+        FailedJob {
+            job,
+            last_error: error.to_string(),
+        },
+        dlq_max_from_env(),
+    );
 }
 
 /// Test helper: clear queue + handlers + program slot. Workers are NOT
@@ -352,10 +429,14 @@ fn worker_loop(worker_id: usize) {
             let max = max_attempts_from_env();
             let next_attempt = job.attempts.saturating_add(1);
             if next_attempt >= max {
+                let err_msg = format!("{e:#}");
                 eprintln!(
-                    "[jwc-queue worker {worker_id}] job '{}' handler '{}' failed (attempt {}/{}); dropping: {:#}",
-                    job.name, handler_name, next_attempt, max, e
+                    "[jwc-queue worker {worker_id}] job '{}' handler '{}' failed (attempt {}/{}); moving to DLQ: {}",
+                    job.name, handler_name, next_attempt, max, err_msg
                 );
+                let mut final_job = job.clone();
+                final_job.attempts = next_attempt;
+                record_failed(final_job, &err_msg);
             } else {
                 let base = base_backoff_from_env();
                 // Exponential backoff capped at 60s. attempts is 0-indexed
@@ -455,6 +536,57 @@ mod tests {
         // After removal, defaults take over.
         assert_eq!(max_attempts_from_env(), 3);
         assert_eq!(base_backoff_from_env(), 1000);
+    }
+
+    #[test]
+    fn record_failed_pushes_to_dlq_and_drain_returns_oldest_first() {
+        let _g = lock();
+        reset_for_tests();
+
+        for i in 0..3 {
+            let job = Job {
+                name: format!("send_email_{i}"),
+                payload: format!("payload-{i}"),
+                enqueued_at: Instant::now(),
+                attempts: 3,
+                is_urgent: false,
+            };
+            record_failed(job, &format!("smtp timeout {i}"));
+        }
+        assert_eq!(dlq_count(), 3);
+
+        let drained = dlq_drain();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(drained[0].job.name, "send_email_0");
+        assert_eq!(drained[2].job.name, "send_email_2");
+        assert_eq!(drained[1].last_error, "smtp timeout 1");
+        // Drain empties the DLQ.
+        assert_eq!(dlq_count(), 0);
+    }
+
+    #[test]
+    fn dlq_evicts_oldest_when_max_reached() {
+        let _g = lock();
+        reset_for_tests();
+
+        std::env::set_var("JWC_QUEUE_DLQ_MAX", "2");
+        for i in 0..4 {
+            let job = Job {
+                name: format!("j{i}"),
+                payload: String::new(),
+                enqueued_at: Instant::now(),
+                attempts: 1,
+                is_urgent: false,
+            };
+            record_failed(job, "boom");
+        }
+        std::env::remove_var("JWC_QUEUE_DLQ_MAX");
+
+        let kept = dlq_drain();
+        assert_eq!(kept.len(), 2);
+        // Oldest two were evicted; last two survived.
+        assert_eq!(kept[0].job.name, "j2");
+        assert_eq!(kept[1].job.name, "j3");
     }
 
     #[test]

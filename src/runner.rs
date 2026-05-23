@@ -1537,6 +1537,14 @@ impl<'a> Vm<'a> {
                     return self.eval_job_count_call(args, vars).await;
                 }
 
+                if name.eq_ignore_ascii_case("dlq_count") {
+                    return self.eval_dlq_count_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("dlq_drain") {
+                    return self.eval_dlq_drain_call(args, vars).await;
+                }
+
                 if name.eq_ignore_ascii_case("unauthorized") {
                     return Ok(Value::Str(
                         r#"{"status":401,"error":"Unauthorized"}"#.to_string(),
@@ -2855,6 +2863,44 @@ impl<'a> Vm<'a> {
             bail!("job_count() expects no args");
         }
         Ok(Value::Int(crate::queue::pending_count() as i64))
+    }
+
+    async fn eval_dlq_count_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("dlq_count() expects no args");
+        }
+        Ok(Value::Int(crate::queue::dlq_count() as i64))
+    }
+
+    /// Drain every permanently-failed job from the queue's dead-letter
+    /// queue and return them as a JSON array. Each entry is
+    /// `{name, payload, attempts, last_error}`. After this returns the
+    /// DLQ is empty, so user code must persist anything it wants to keep.
+    async fn eval_dlq_drain_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("dlq_drain() expects no args");
+        }
+        let entries = crate::queue::dlq_drain();
+        let arr: Vec<JsonValue> = entries
+            .into_iter()
+            .map(|f| {
+                serde_json::json!({
+                    "name": f.job.name,
+                    "payload": f.job.payload,
+                    "attempts": f.job.attempts,
+                    "last_error": f.last_error,
+                })
+            })
+            .collect();
+        Ok(Value::Str(JsonValue::Array(arr).to_string()))
     }
 
     async fn eval_header_call(
