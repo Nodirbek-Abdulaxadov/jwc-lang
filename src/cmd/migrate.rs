@@ -25,6 +25,25 @@ pub async fn up(root: &Path, database_url: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// List every migration file in `migrations/` (offline — no DB query).
+pub fn list(root: &Path) -> Result<()> {
+    let files = migrate::list_migrations(root)?;
+    if files.is_empty() {
+        println!(
+            "No migrations found under {}",
+            root.join("migrations").display()
+        );
+        return Ok(());
+    }
+    println!("Migrations ({}):", files.len());
+    for file in &files {
+        if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
+            println!("  {name}");
+        }
+    }
+    Ok(())
+}
+
 /// Roll back the most recent `steps` applied migrations. `steps == 0` is
 /// a no-op (matches the CLI's behaviour before extraction).
 pub async fn down(root: &Path, database_url: Option<String>, steps: usize) -> Result<()> {

@@ -81,6 +81,32 @@ pub fn create_migration(root: &Path, name: &str) -> Result<CreatedMigration> {
     Ok(CreatedMigration { up_path, down_path })
 }
 
+/// Enumerate every `*.up.sql` file in the project's `migrations/` dir
+/// in chronological order (sorted by file name; the timestamp prefix
+/// guarantees this matches creation order).
+///
+/// Offline by design — does not touch the database. Pair with
+/// `read_applied_migrations` from a future `migrate status` if you also
+/// want the "applied vs pending" split.
+pub fn list_migrations(root: &Path) -> Result<Vec<PathBuf>> {
+    let migrations_dir = root.join("migrations");
+    if !migrations_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&migrations_dir)
+        .with_context(|| format!("Failed to read {}", migrations_dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".up.sql"))
+                .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
 pub async fn apply_pending_migrations(
     root: &Path,
     database_url: Option<String>,

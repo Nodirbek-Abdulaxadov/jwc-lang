@@ -161,6 +161,9 @@ enum MigrateCommand {
         #[arg(long)]
         database_url: Option<String>,
     },
+    /// List every migration file in the project's `migrations/` dir
+    /// (chronological order). Offline — does not touch the database.
+    List,
 }
 
 fn main() {
@@ -429,6 +432,7 @@ fn real_main() -> Result<()> {
                     steps,
                     database_url,
                 } => rt.block_on(cmd::migrate::down(&root, database_url, steps))?,
+                MigrateCommand::List => cmd::migrate::list(&root)?,
             }
         }
         Command::Add {
