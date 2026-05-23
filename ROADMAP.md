@@ -509,7 +509,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 5 | `jwc fmt` | ⬜ deferred | AST → source renderer + comment preservation — alohida sessiya. |
 | 6 | SQL completeness | ⬜ deferred | `group by` / `having` + insert/update/delete payload field-check + DB schema drift — alohida sessiya. |
 | 7 | Code health refactor | ⬜ deferred | runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |
-| 8 | Native vs interpreter parity | ⬜ deferred | Golden test harness; `--emit-rust-source` flag. |
+| 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅ + `tests/native_emit.rs` smoke tests ✅. Golden test harness (run vs build diff) — deferred. |
 | 9-10 | Registry server | ⬜ blocked-on-infra | Alohida repo `jwc-registry.1kb.uz` kerak; bu sessiyada bajarib bo'lmaydi. |
 | 11 | Publish & login | ⬜ blocked | Registry server ishga tushgandan keyin. |
 | 12-13 | Native cross-target | ⬜ deferred | `--target` matrix + LLVM IR skeleton. |
