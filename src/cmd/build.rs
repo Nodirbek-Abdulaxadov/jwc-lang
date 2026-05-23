@@ -18,6 +18,49 @@ use anyhow::{bail, Context, Result};
 
 use crate::{native_build, project};
 
+/// Whitelist of Rust target triples accepted by `jwc build --native
+/// --target <triple>` in v1. Keeping this list small lets us only claim
+/// support for targets we actually exercise in CI / by hand. Anything
+/// outside is rejected up-front with a "known targets" hint, rather
+/// than letting cargo fail later with a less actionable error. Passing
+/// through arbitrary triples is deferred behind a future
+/// `--target-passthrough` flag.
+pub const KNOWN_TARGETS: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-unknown-linux-gnu",
+];
+
+/// Pre-flight validation for `--target` flag. Pulled out so the unit
+/// tests can hit it without scaffolding a project on disk. Returns
+/// `Ok(())` when the combination is acceptable; otherwise an error
+/// that the CLI surfaces verbatim.
+///
+/// Rules:
+///   * `--target` requires `--native` (the bundled-launcher path can't
+///     cross-compile — there's no cargo invocation to forward the flag
+///     to).
+///   * The triple must be on [`KNOWN_TARGETS`]. Unknown triples bail
+///     with a list of accepted values.
+pub fn validate_target(target: Option<&str>, native: bool) -> Result<()> {
+    let Some(t) = target else {
+        return Ok(());
+    };
+    if !native {
+        bail!("`--target` requires `--native`");
+    }
+    if !KNOWN_TARGETS.contains(&t) {
+        let known = KNOWN_TARGETS.join(", ");
+        bail!(
+            "unsupported target '{t}'. Known targets: {known}. \
+             Pass through the toolchain with `--target-passthrough` (deferred)."
+        );
+    }
+    Ok(())
+}
+
 /// Dispatch the Build command. `target` is the optional Rust target
 /// triple (`--target x86_64-unknown-linux-musl`, ...).
 pub fn run(
@@ -26,18 +69,16 @@ pub fn run(
     emit_rust_source: bool,
     target: Option<String>,
 ) -> Result<()> {
+    if emit_rust_source && !native {
+        bail!("--emit-rust-source requires --native");
+    }
+    validate_target(target.as_deref(), native)?;
+
     let cwd = std::env::current_dir()?;
     let root = project::find_project_root(&cwd)?;
     let loaded = project::load_project_from_root(&root)?;
     loaded.manifest.ensure_runnable()?;
     let profile = if release { "release" } else { "debug" };
-
-    if emit_rust_source && !native {
-        bail!("--emit-rust-source requires --native");
-    }
-    if target.is_some() && !native {
-        bail!("--target requires --native");
-    }
 
     if native {
         let app_name = sanitize_app_name(&loaded.manifest.name);

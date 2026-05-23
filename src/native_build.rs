@@ -622,6 +622,13 @@ pub fn compile(
 /// `None` keeps the host behaviour. The host's installed rustup toolchain
 /// must already provide the target; if cargo can't find the target it
 /// bails with cargo's own error.
+///
+/// We don't try to install missing targets ourselves. The caller is
+/// expected to have run `rustup target add <triple>` (and, for the
+/// `x86_64-unknown-linux-musl` triple, to have the musl C toolchain on
+/// PATH) before invoking this. v1 only changes the cargo invocation, not
+/// the generated Cargo.toml — see `render_cargo_toml` for the TODO on
+/// per-target feature toggling (rustls vs native-tls).
 pub fn compile_with_target(
     program: &Program,
     root: &Path,
@@ -2692,6 +2699,14 @@ fn render_cargo_toml(app_name: &str, needs_db: bool, needs_http_client: bool) ->
     // reqwest is always included because the prelude contains the http_get /
     // fetch_json helpers unconditionally — gating them by feature would require
     // splitting the prelude. `needs_http_client` is kept for future use.
+    //
+    // TODO(phase-10.6): the manifest is currently target-agnostic. Future
+    // iterations may want to toggle reqwest's TLS backend per target
+    // (e.g. `rustls-tls` for musl/static builds, `native-tls` for the
+    // host glibc target) and possibly switch `panic = "abort"` on for
+    // size-sensitive cross builds. Keep this single shared manifest as
+    // long as the matrix is small — multiplying it per target is an
+    // anti-feature.
     let _ = needs_http_client;
     let mut deps = String::new();
     deps.push_str("tokio = { version = \"1\", features = [\"full\"] }\n");

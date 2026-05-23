@@ -388,7 +388,208 @@ pub fn validate_program(program: &Program) -> Result<()> {
             .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
     }
 
+    // Compile-time mutation-field check: every `var.field = ...`, `insert var`,
+    // `update var`, `delete var` where `var` is locally bound to `new Entity()`
+    // must reference a field that actually exists on that entity, and (for
+    // DB writes) the target table must match the bound entity.
+    //
+    // Lives at the bottom of `validate_program` on purpose — earlier passes
+    // (dbcontext / table existence / WHERE column checks) get to fire first.
+    let entity_fields_for_mutations: HashMap<String, Vec<String>> = program
+        .models
+        .iter()
+        .filter(|m| m.kind == ModelKind::Entity)
+        .map(|m| {
+            (
+                m.name.to_lowercase(),
+                m.fields.iter().map(|f| f.name.to_lowercase()).collect(),
+            )
+        })
+        .collect();
+
+    for function in &program.functions {
+        let mut bindings: EntityBindings = HashMap::new();
+        check_mutation_fields_in_stmts(&function.body, &mut bindings, &entity_fields_for_mutations)
+            .map_err(|err| anyhow!("Function '{}': {err}", function.name))?;
+    }
+    for route in &program.routes {
+        if route.handler.is_some() {
+            continue;
+        }
+        let label = format!("Route {} {}", route.method.to_ascii_uppercase(), route.path);
+        let mut bindings: EntityBindings = HashMap::new();
+        check_mutation_fields_in_stmts(&route.body, &mut bindings, &entity_fields_for_mutations)
+            .map_err(|err| anyhow!("{label}: {err}"))?;
+    }
+    for mw in &program.middlewares {
+        let mut bindings: EntityBindings = HashMap::new();
+        check_mutation_fields_in_stmts(&mw.body, &mut bindings, &entity_fields_for_mutations)
+            .map_err(|err| anyhow!("Middleware '{}': {err}", mw.name))?;
+    }
+    if let Some(handler) = &program.error_handler {
+        let mut bindings: EntityBindings = HashMap::new();
+        check_mutation_fields_in_stmts(&handler.body, &mut bindings, &entity_fields_for_mutations)
+            .map_err(|err| anyhow!("errorHandler: {err}"))?;
+    }
+
     Ok(())
+}
+
+/// Map of locally-bound variable name (lowercased) -> entity name (original
+/// case, as written in source). Tracks `let v = new Entity();` bindings within
+/// a function/route/middleware body so we can spot bogus `v.field = ...`
+/// writes and mismatched `insert v into ctx.Table;` at compile time.
+type EntityBindings = HashMap<String, String>;
+
+fn check_mutation_fields_in_stmts(
+    stmts: &[Stmt],
+    bindings: &mut EntityBindings,
+    entity_fields: &HashMap<String, Vec<String>>,
+) -> Result<()> {
+    for stmt in stmts {
+        check_mutation_fields_in_stmt(stmt, bindings, entity_fields)?;
+    }
+    Ok(())
+}
+
+fn check_mutation_fields_in_stmt(
+    stmt: &Stmt,
+    bindings: &mut EntityBindings,
+    entity_fields: &HashMap<String, Vec<String>>,
+) -> Result<()> {
+    match stmt {
+        Stmt::Let { name, value } | Stmt::Assign { name, value } => {
+            let key = name.to_lowercase();
+            if let Expr::NewEntity { entity } = value {
+                bindings.insert(key, entity.clone());
+            } else {
+                // Re-assigning to something other than `new Entity()` drops
+                // the previous binding — we can no longer prove the var still
+                // refers to that entity.
+                bindings.remove(&key);
+            }
+            Ok(())
+        }
+        Stmt::FieldAssign { var, field, .. } => {
+            if let Some(entity) = bindings.get(&var.to_lowercase()) {
+                if let Some(fields) = entity_fields.get(&entity.to_lowercase()) {
+                    let needle = field.to_lowercase();
+                    if !fields.iter().any(|f| f == &needle) {
+                        bail!(
+                            "Unknown column '{}' on entity '{}'",
+                            field,
+                            entity
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        Stmt::DbInsert {
+            var, table, ..
+        }
+        | Stmt::DbUpdate {
+            var, table, ..
+        }
+        | Stmt::DbDelete {
+            var, table, ..
+        } => {
+            if let Some(entity) = bindings.get(&var.to_lowercase()) {
+                if !table_matches_entity(table, entity) {
+                    bail!(
+                        "variable '{}' is bound to entity '{}' but the target table is '{}'",
+                        var,
+                        entity,
+                        table
+                    );
+                }
+            }
+            Ok(())
+        }
+        Stmt::DbDeleteWhere { .. }
+        | Stmt::Print(_)
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::ValidateBody { .. } => Ok(()),
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            let snapshot = bindings.clone();
+            let mut then_state = snapshot.clone();
+            check_mutation_fields_in_stmts(then_body, &mut then_state, entity_fields)?;
+            let end_state = if let Some(eb) = else_body {
+                let mut else_state = snapshot.clone();
+                check_mutation_fields_in_stmts(eb, &mut else_state, entity_fields)?;
+                intersect_bindings(&then_state, &else_state)
+            } else {
+                // Else may not execute — keep only bindings that survived the
+                // then-branch unchanged from before the if.
+                intersect_bindings(&then_state, &snapshot)
+            };
+            *bindings = end_state;
+            Ok(())
+        }
+        Stmt::While { body, .. } => {
+            let snapshot = bindings.clone();
+            let mut body_state = snapshot.clone();
+            check_mutation_fields_in_stmts(body, &mut body_state, entity_fields)?;
+            // Loop body may not run; keep only bindings that match the
+            // pre-loop state.
+            *bindings = intersect_bindings(&body_state, &snapshot);
+            Ok(())
+        }
+        Stmt::ForIn { var, body, .. } => {
+            let snapshot = bindings.clone();
+            let mut body_state = snapshot.clone();
+            // Loop variable shadowing: clear any prior binding for it before
+            // walking the body so an inner `v.field = ...` doesn't reuse an
+            // outer entity assumption.
+            body_state.remove(&var.to_lowercase());
+            check_mutation_fields_in_stmts(body, &mut body_state, entity_fields)?;
+            body_state.remove(&var.to_lowercase());
+            *bindings = intersect_bindings(&body_state, &snapshot);
+            Ok(())
+        }
+        Stmt::Try {
+            body,
+            catch_body,
+            catch_var,
+            ..
+        } => {
+            let snapshot = bindings.clone();
+            let mut try_state = snapshot.clone();
+            check_mutation_fields_in_stmts(body, &mut try_state, entity_fields)?;
+            let mut catch_state = snapshot.clone();
+            catch_state.remove(&catch_var.to_lowercase());
+            check_mutation_fields_in_stmts(catch_body, &mut catch_state, entity_fields)?;
+            catch_state.remove(&catch_var.to_lowercase());
+            *bindings = intersect_bindings(&try_state, &catch_state);
+            Ok(())
+        }
+        Stmt::Transaction { body } => {
+            check_mutation_fields_in_stmts(body, bindings, entity_fields)
+        }
+    }
+}
+
+/// Intersect two binding maps: keep an entry only if both sides agree on the
+/// same entity name (case-insensitive). Drops disagreements rather than
+/// false-positiving downstream — we'd rather under-report than complain about
+/// a field that's legitimate on one branch's bound entity.
+fn intersect_bindings(a: &EntityBindings, b: &EntityBindings) -> EntityBindings {
+    let mut out = HashMap::with_capacity(a.len().min(b.len()));
+    for (k, va) in a {
+        if let Some(vb) = b.get(k) {
+            if va.eq_ignore_ascii_case(vb) {
+                out.insert(k.clone(), va.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Strip nullable / `Optional<T>` wrappers down to a plain model name. Returns
