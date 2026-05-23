@@ -505,7 +505,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 1 | Verify & Hygiene | ✅ qisman | rustfmt + clippy + CI gate ✅, CONTRIBUTING.md ✅, code map refresh ✅. 10.1 perf bench ⏳ blocked-on-infra. |
 | 2 | Type system finishing | ⏳ qisman | uuid/datetime/decimal/json/bigint ✅ (Phase 2.1). `byte[]` + explicit koersiyalar + sema pass — deferred. |
 | 3 | LSP power | ⬜ deferred | go-to-definition, autocomplete, semantic tokens, route/middleware hover. |
-| 4 | Diagnostics polish | ⏳ qisman | W003 empty function body ✅. Typed-catch closest-match ✅ (Phase 10.5). E001 codes + missing-`first` heuristic — deferred. |
+| 4 | Diagnostics polish | ⏳ qisman | W003 empty function body ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. E001 codes + missing-`first` heuristic — deferred. |
 | 5 | `jwc fmt` | ⬜ deferred | AST → source renderer + comment preservation — alohida sessiya. |
 | 6 | SQL completeness | ⬜ deferred | `group by` / `having` + insert/update/delete payload field-check + DB schema drift — alohida sessiya. |
 | 7 | Code health refactor | ⬜ deferred | runner.rs / parser.rs modul ajratish — review-friendly bir nechta PR'larga bo'linishi kerak. |
