@@ -815,11 +815,23 @@ fn jwc_b_body() -> V {
 // --- response helpers --------------------------------------------------------
 
 fn make_response(status: u16, body: String, content_type: &str) -> V {
+    make_response_with_headers(status, body, content_type, BTreeMap::new())
+}
+
+fn make_response_with_headers(
+    status: u16,
+    body: String,
+    content_type: &str,
+    headers: BTreeMap<String, V>,
+) -> V {
     let mut m = BTreeMap::new();
     m.insert(HTTP_RESPONSE_MARKER.to_string(), V::Bool(true));
     m.insert("status".to_string(), V::Int(status as i64));
     m.insert("body".to_string(), V::Str(body));
     m.insert("content_type".to_string(), V::Str(content_type.to_string()));
+    if !headers.is_empty() {
+        m.insert("headers".to_string(), V::Object(headers));
+    }
     V::Object(m)
 }
 
@@ -900,8 +912,23 @@ fn jwc_b_internal_error(v: V) -> V {
     make_response(500, body, "text/plain; charset=utf-8")
 }
 
-fn jwc_b_status_code(v: V, code: V) -> V {
+fn jwc_b_status_code(code: V, v: V) -> V {
+    // JWC source order is `statusCode(code, body_or_headers)`. For 3xx
+    // statuses, an Object body is interpreted as HTTP headers — that's
+    // what makes `statusCode(302, { Location: url })` actually emit a
+    // browser-followed redirect. For every other status the Object is
+    // serialised as a JSON body.
     let status = jwc_to_int(&code).unwrap_or(200) as u16;
+    let is_redirect = (300..400).contains(&status);
+    if is_redirect {
+        if let V::Object(m) = v {
+            let body = String::new();
+            // `text/html` because we may emit a minimal `<a href=...>` body
+            // someday; for now the body stays empty and the browser follows
+            // the Location header.
+            return make_response_with_headers(status, body, "text/html; charset=utf-8", m);
+        }
+    }
     let body = body_string(v.clone());
     let ct = match &v {
         V::Str(_) => "text/plain; charset=utf-8",
@@ -910,7 +937,7 @@ fn jwc_b_status_code(v: V, code: V) -> V {
     make_response(status, body, ct)
 }
 
-fn jwc_to_response(v: V) -> (u16, String, String) {
+fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
     if let V::Object(ref m) = v {
         if matches!(m.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) {
             let status = m.get("status").and_then(jwc_to_int).unwrap_or(200) as u16;
@@ -923,13 +950,20 @@ fn jwc_to_response(v: V) -> (u16, String, String) {
                 Some(V::Str(s)) => s.clone(),
                 _ => "text/plain; charset=utf-8".to_string(),
             };
-            return (status, body, ct);
+            let headers: Vec<(String, String)> = match m.get("headers") {
+                Some(V::Object(hm)) => hm
+                    .iter()
+                    .map(|(k, v)| (k.clone(), body_string(v.clone())))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            return (status, body, ct, headers);
         }
     }
     match v {
-        V::Str(s) => (200, s, "text/plain; charset=utf-8".to_string()),
-        V::Null => (200, String::new(), "text/plain; charset=utf-8".to_string()),
-        other => (200, jwc_to_json(&other), "application/json".to_string()),
+        V::Str(s) => (200, s, "text/plain; charset=utf-8".to_string(), Vec::new()),
+        V::Null => (200, String::new(), "text/plain; charset=utf-8".to_string(), Vec::new()),
+        other => (200, jwc_to_json(&other), "application/json".to_string(), Vec::new()),
     }
 }
 
@@ -1105,13 +1139,20 @@ async fn handle_axum_request(
         .scope(req, async move { handler().await })
         .await;
 
-    let (status, body_str, ct) = jwc_to_response(result_v);
+    let (status, body_str, ct, extra_headers) = jwc_to_response(result_v);
     let status_code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK);
-    axum::response::Response::builder()
+    let mut builder = axum::response::Response::builder()
         .status(status_code)
-        .header("content-type", ct.as_str())
-        .body(body_str.into())
-        .unwrap()
+        .header("content-type", ct.as_str());
+    for (k, v) in extra_headers {
+        // Drop pairs whose name or value contain characters axum would
+        // refuse — silently, because user code rarely has the context to
+        // recover and we'd rather emit the redirect than 500.
+        if !k.is_empty() && k.bytes().all(|b| b.is_ascii() && b != b'\n' && b != b'\r') {
+            builder = builder.header(k, v);
+        }
+    }
+    builder.body(body_str.into()).unwrap()
 }
 
 fn url_decode(s: &str) -> String {
