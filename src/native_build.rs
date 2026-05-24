@@ -2100,8 +2100,30 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 out.push(')');
                 return;
             }
+            if name == "raw_sql" {
+                // Variadic in JWC (`raw_sql(sql)` / `raw_sql(sql, params_json)`).
+                // The prelude impl is async with a fixed 2-arg signature.
+                // Default-pad the missing JSON params array to "[]".
+                out.push_str("jwc_b_raw_sql(");
+                match args.as_slice() {
+                    [a] => {
+                        emit_expr(out, a, ctx);
+                        out.push_str(", V::Str(\"[]\".to_string())");
+                    }
+                    [a, b] => {
+                        emit_expr(out, a, ctx);
+                        out.push_str(", ");
+                        emit_expr(out, b, ctx);
+                    }
+                    _ => out.push_str("V::Null, V::Str(\"[]\".to_string())"),
+                }
+                out.push_str(").await");
+                return;
+            }
             let is_user = ctx.funcs.contains(name);
             // Async builtins implemented in the prelude as `async fn jwc_b_*`.
+            // `raw_sql` is also async but goes through its own variadic codegen
+            // branch above, so it doesn't need to be listed here.
             let is_async_builtin = matches!(
                 name.as_str(),
                 "sleep_ms"
@@ -2715,6 +2737,11 @@ fn render_cargo_toml(app_name: &str, needs_db: bool, needs_http_client: bool) ->
     deps.push_str(
         "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"json\"] }\n",
     );
+    // `uuid()` and `now()` are always-on built-ins; ship the supporting
+    // crates unconditionally. Combined wire weight is ~50 KB stripped, far
+    // below the noise floor of axum + reqwest + tokio.
+    deps.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
+    deps.push_str("chrono = { version = \"0.4\", default-features = false, features = [\"clock\", \"std\"] }\n");
     if needs_db {
         deps.push_str("tokio-postgres = \"0.7\"\n");
         deps.push_str("deadpool-postgres = \"0.14\"\n");

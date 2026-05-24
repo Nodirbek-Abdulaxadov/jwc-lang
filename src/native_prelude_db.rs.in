@@ -271,3 +271,70 @@ async fn jwc_db_eager_load(
         }
     }
 }
+
+// --- raw_sql -----------------------------------------------------------------
+//
+// Escape hatch for SQL the typed query builder doesn't cover (json_agg,
+// window functions, ad-hoc analytics). Mirrors the interpreter:
+//   * SELECT / WITH → return the first column of the first row as text
+//     (or V::Null if no rows). Useful for `SELECT COUNT(*)`, `SELECT json_agg(...)::text`.
+//   * Anything else → run as `execute` and return the affected rowcount as int.
+//
+// `params_json` is a JSON-encoded array of values bound positionally as $1, $2,
+// .... It's variadic in JWC source (1 or 2 args); the codegen pads the missing
+// param to `V::Str("[]")`.
+
+async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
+    let sql_s = match sql {
+        V::Str(s) => s,
+        _ => return V::Null,
+    };
+
+    let raw = match params_json {
+        V::Str(s) => s,
+        V::Null => "[]".to_string(),
+        _ => "[]".to_string(),
+    };
+    let params: Vec<V> = match jwc_from_json(&raw) {
+        Ok(V::Array(a)) => a,
+        _ => Vec::new(),
+    };
+    let boxed: DbParams = params
+        .into_iter()
+        .map(|p| match p {
+            V::Int(_) => jwc_param_int(p),
+            V::Float(_) => jwc_param_float(p),
+            V::Bool(_) => jwc_param_bool(p),
+            _ => jwc_param_str(p),
+        })
+        .collect();
+
+    let lowered = sql_s.trim_start().to_ascii_lowercase();
+    if lowered.starts_with("select") || lowered.starts_with("with") {
+        let rows = jwc_db_query(&sql_s, boxed).await;
+        let Some(first) = rows.into_iter().next() else {
+            return V::Null;
+        };
+        let V::Object(m) = first else {
+            return V::Null;
+        };
+        // First-column-as-text: the only deterministic column ordering we have
+        // is insertion order in the BTreeMap (alphabetic). Callers that care
+        // about ordering should `SELECT col AS a` to force alphabetic ordering,
+        // or use a single-column projection.
+        let Some((_, v)) = m.into_iter().next() else {
+            return V::Null;
+        };
+        match v {
+            V::Str(s) => V::Str(s),
+            V::Int(n) => V::Str(n.to_string()),
+            V::Float(n) => V::Str(n.to_string()),
+            V::Bool(b) => V::Str(b.to_string()),
+            V::Null => V::Null,
+            other => V::Str(jwc_to_json(&other)),
+        }
+    } else {
+        let affected = jwc_db_exec(&sql_s, boxed).await;
+        V::Int(affected as i64)
+    }
+}
