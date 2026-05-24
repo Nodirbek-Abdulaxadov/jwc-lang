@@ -481,20 +481,44 @@ struct EntityField {
 
 /// Coarse-grained Postgres type bucket. JWC types collapse onto these because
 /// the codegen only needs to pick a `jwc_param_*` boxing helper, not emit DDL.
-#[derive(Clone, Copy)]
+///
+/// Integer widths are distinguished because tokio-postgres' `ToSql` impls are
+/// width-specific: `i32` only binds to `INT2`/`INT4`, `i64` only to `INT8`.
+/// Boxing the wrong width raises `WrongType { postgres: Int4, rust: "i64" }`
+/// at execute time (the exact panic the AOT path used to hit on every
+/// `int` column).
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PgKind {
-    Int,   // int / int2 / int4 / int8 / bigint
-    Float, // double / decimal / float / real
+    Smallint, // int2 / smallint -> i16
+    Int,      // int / int4 / integer -> i32
+    Bigint,   // int8 / bigint -> i64
+    Float,    // double / decimal / float / real
     Bool,
-    Str, // string / varchar / text / uuid / datetime — all carried as text
+    /// datetime / timestamp / timestamptz / date — carried as text by the VM
+    /// but bound through a `$N::timestamptz` placeholder so Postgres casts the
+    /// TEXT value to the column's actual temporal type. Plain `$N` binding
+    /// trips `error serializing parameter N` because tokio-postgres' ToSql
+    /// impl for `String` reports `WrongType { postgres: Timestamptz, rust: "&str" }`.
+    Timestamp,
+    Str, // string / varchar / text / uuid — all carried as text
 }
 
 fn pg_kind_for(type_name: &str) -> PgKind {
     let t = type_name.to_lowercase();
     match t.as_str() {
-        "int" | "int2" | "int4" | "int8" | "smallint" | "bigint" | "integer" => PgKind::Int,
+        "int2" | "smallint" => PgKind::Smallint,
+        "int" | "int4" | "integer" => PgKind::Int,
+        "int8" | "bigint" => PgKind::Bigint,
         "double" | "decimal" | "float" | "float4" | "float8" | "real" | "numeric" => PgKind::Float,
         "bool" | "boolean" => PgKind::Bool,
+        // Temporal types — every JWC `datetime` lowers to `timestamptz`; we
+        // keep the older `timestamp`/`date` aliases for hand-written entities.
+        "datetime"
+        | "timestamp"
+        | "timestamptz"
+        | "date"
+        | "timestamp with time zone"
+        | "timestamp without time zone" => PgKind::Timestamp,
         _ => PgKind::Str,
     }
 }
@@ -1605,10 +1629,26 @@ fn emit_validate_body(
 
 fn helper_for_kind(k: PgKind) -> &'static str {
     match k {
+        PgKind::Smallint => "jwc_param_smallint",
         PgKind::Int => "jwc_param_int",
+        PgKind::Bigint => "jwc_param_bigint",
         PgKind::Float => "jwc_param_float",
         PgKind::Bool => "jwc_param_bool",
-        PgKind::Str => "jwc_param_str",
+        // Timestamp values travel as text — Postgres does the cast via the
+        // `$N::timestamptz` placeholder emitted by `placeholder_for`.
+        PgKind::Timestamp | PgKind::Str => "jwc_param_str",
+    }
+}
+
+/// SQL placeholder for parameter `idx` (1-based). For column kinds that
+/// can't be bound directly via tokio-postgres' typed `ToSql` impls
+/// (currently only `Timestamp`), we tack on a Postgres explicit cast so
+/// the TEXT-bound value is converted to the column's actual type at
+/// execute time.
+fn placeholder_for(idx: usize, k: PgKind) -> String {
+    match k {
+        PgKind::Timestamp => format!("${}::timestamptz", idx),
+        _ => format!("${}", idx),
     }
 }
 
@@ -1652,11 +1692,11 @@ fn emit_db_insert(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
         sql.push_str(&format!("\"{}\"", f.name));
     }
     sql.push_str(") VALUES (");
-    for i in 0..cols.len() {
+    for (i, f) in cols.iter().enumerate() {
         if i > 0 {
             sql.push_str(", ");
         }
-        sql.push_str(&format!("${}", i + 1));
+        sql.push_str(&placeholder_for(i + 1, f.pg));
     }
     sql.push(')');
 
@@ -1719,14 +1759,22 @@ fn emit_db_update(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
         if i > 0 {
             sql.push_str(", ");
         }
-        sql.push_str(&format!("\"{}\" = ${}", f.name, i + 1));
+        sql.push_str(&format!(
+            "\"{}\" = {}",
+            f.name,
+            placeholder_for(i + 1, f.pg),
+        ));
     }
     sql.push_str(" WHERE ");
     for (i, p) in pks.iter().enumerate() {
         if i > 0 {
             sql.push_str(" AND ");
         }
-        sql.push_str(&format!("\"{}\" = ${}", p.name, set_cols.len() + i + 1));
+        sql.push_str(&format!(
+            "\"{}\" = {}",
+            p.name,
+            placeholder_for(set_cols.len() + i + 1, p.pg),
+        ));
     }
 
     out.push_str(pad);
@@ -2379,7 +2427,9 @@ fn emit_db_select(
             Expr::Int(n) => sql.push_str(&format!(" LIMIT {}", n)),
             _ => {
                 let n = wb.params.len() + 1;
-                wb.params.push((PgKind::Int, l));
+                // Postgres binds LIMIT / OFFSET as bigint — emit an i64 helper
+                // so the boxed param matches the prepared statement type.
+                wb.params.push((PgKind::Bigint, l));
                 sql.push_str(&format!(" LIMIT ${}", n));
             }
         }
@@ -2389,7 +2439,7 @@ fn emit_db_select(
             Expr::Int(n) => sql.push_str(&format!(" OFFSET {}", n)),
             _ => {
                 let n = wb.params.len() + 1;
-                wb.params.push((PgKind::Int, o));
+                wb.params.push((PgKind::Bigint, o));
                 sql.push_str(&format!(" OFFSET ${}", n));
             }
         }
@@ -2412,14 +2462,22 @@ fn emit_db_select(
     // the target table and grouping client-side. One round-trip per relation
     // (N+1 collapsed to N+R, where R = number of `with` clauses).
     for plan in &plans {
-        let pk_is_int = matches!(plan.parent_pk.pg, PgKind::Int);
+        let pk_kind_token = match plan.parent_pk.pg {
+            PgKind::Smallint => "JwcPkKind::Smallint",
+            PgKind::Int => "JwcPkKind::Int",
+            PgKind::Bigint => "JwcPkKind::Bigint",
+            // Float / Bool / Timestamp PKs are not currently supported as
+            // join keys — fall back to text so the IN-clause still binds
+            // something serialisable instead of panicking with WrongType.
+            PgKind::Float | PgKind::Bool | PgKind::Timestamp | PgKind::Str => "JwcPkKind::Str",
+        };
         let one_to_one = matches!(plan.nav.kind, crate::ast::NavigationKind::OneToOne);
         out.push_str(&format!(
-            " jwc_db_eager_load(&mut __rows, \"{pk}\", \"{tgt}\", \"{fk}\", {is_int}, \"{nav}\", {oto}).await;",
+            " jwc_db_eager_load(&mut __rows, \"{pk}\", \"{tgt}\", \"{fk}\", {pk_kind}, \"{nav}\", {oto}).await;",
             pk = plan.parent_pk.name,
             tgt = plan.target.table,
             fk = plan.nav.target_field,
-            is_int = pk_is_int,
+            pk_kind = pk_kind_token,
             nav = plan.nav.name,
             oto = one_to_one,
         ));
