@@ -798,6 +798,14 @@ fn jwc_b_header(name: V) -> V {
     })
 }
 
+fn jwc_b_request_path() -> V {
+    with_current_request(|req| V::Str(req.path.clone()))
+}
+
+fn jwc_b_request_method() -> V {
+    with_current_request(|req| V::Str(req.method.clone()))
+}
+
 fn jwc_b_body() -> V {
     with_current_request(|req| {
         if req.body.is_empty() {

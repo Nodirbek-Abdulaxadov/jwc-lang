@@ -367,6 +367,14 @@ struct Vm<'a> {
     current_query_params: Option<HashMap<String, String>>,
     /// Request headers (lower-cased keys) for `header(name)` look-ups.
     current_headers: Option<HashMap<String, String>>,
+    /// HTTP method of the current request (`GET`, `POST`, ...). Read via
+    /// `request_method()`. Set by `dispatch_route` for the lifetime of the
+    /// request, restored on exit.
+    current_method: Option<String>,
+    /// Path of the current request, query string stripped (`/api/links`,
+    /// `/abc1234`). Read via `request_path()`. Set/restored alongside
+    /// `current_method` so middlewares can log a meaningful endpoint.
+    current_request_path: Option<String>,
     /// Per-request key-value bag written by `setContext` and read by `context`.
     request_context: HashMap<String, Value>,
     output: String,
@@ -456,6 +464,8 @@ impl<'a> Vm<'a> {
             current_path_params: None,
             current_query_params: None,
             current_headers: None,
+            current_method: None,
+            current_request_path: None,
             request_context: HashMap::new(),
             output: String::new(),
             depth: 0,
@@ -1463,6 +1473,28 @@ impl<'a> Vm<'a> {
                     return self.eval_query_param_call(args, vars).await;
                 }
 
+                if name.eq_ignore_ascii_case("request_path") {
+                    if !args.is_empty() {
+                        bail!("request_path() expects no args");
+                    }
+                    return Ok(self
+                        .current_request_path
+                        .clone()
+                        .map(Value::Str)
+                        .unwrap_or(Value::Null));
+                }
+
+                if name.eq_ignore_ascii_case("request_method") {
+                    if !args.is_empty() {
+                        bail!("request_method() expects no args");
+                    }
+                    return Ok(self
+                        .current_method
+                        .clone()
+                        .map(Value::Str)
+                        .unwrap_or(Value::Null));
+                }
+
                 if name.eq_ignore_ascii_case("header") {
                     return self.eval_header_call(args, vars).await;
                 }
@@ -2070,9 +2102,13 @@ impl<'a> Vm<'a> {
 
         let previous = self.current_path_params.take();
         let previous_query = self.current_query_params.take();
+        let previous_method = self.current_method.take();
+        let previous_request_path = self.current_request_path.take();
         let previous_dirty = std::mem::take(&mut self.dirty_fields);
         self.current_path_params = Some(found_params);
         self.current_query_params = Some(query_params);
+        self.current_method = Some(method.to_string());
+        self.current_request_path = Some(clean_path.to_string());
         self.current_namespace_stack.push(route_namespace);
 
         // Run middlewares first; if any returns a value, short-circuit
@@ -2123,6 +2159,8 @@ impl<'a> Vm<'a> {
                 } else {
                     self.current_path_params = previous;
                     self.current_query_params = previous_query;
+                    self.current_method = previous_method;
+                    self.current_request_path = previous_request_path;
                     self.dirty_fields = previous_dirty;
                     self.current_namespace_stack.pop();
                     return Err(e);
@@ -2131,6 +2169,8 @@ impl<'a> Vm<'a> {
         };
         self.current_path_params = previous;
         self.current_query_params = previous_query;
+        self.current_method = previous_method;
+        self.current_request_path = previous_request_path;
         self.dirty_fields = previous_dirty;
         self.current_namespace_stack.pop();
 

@@ -38,6 +38,8 @@ pub const BUILTINS: &[&str] = &[
     "query_param",
     "body",
     "header",
+    "request_path",
+    "request_method",
     // HTTP response helpers.
     "json",
     "text",
