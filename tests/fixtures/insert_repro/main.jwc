@@ -1,0 +1,23 @@
+// Minimal repro for the native AOT INSERT codegen bug — full ApiCall shape.
+
+dbcontext AppDb : Postgres;
+
+entity ApiCall of AppDb {
+    id         bigint pk autoincrement;
+    path       varchar(200);
+    method     varchar(8);
+    status     int;
+    latency_ms int;
+    ts         datetime;
+}
+
+function main() {
+    setConnectionString();
+    let row = new ApiCall();
+    row.path = "/healthz";
+    row.method = "GET";
+    row.status = 200;
+    row.latency_ms = 0;
+    row.ts = now();
+    insert row into AppDb.ApiCall;
+}

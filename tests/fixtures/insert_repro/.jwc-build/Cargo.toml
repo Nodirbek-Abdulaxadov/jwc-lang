@@ -1,0 +1,26 @@
+[package]
+name = "insert_repro"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "insert_repro"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+axum = { version = "0.7", features = ["http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+deadpool-postgres = "0.14"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# panic = abort would disable catch_unwind needed by try/catch and transaction.

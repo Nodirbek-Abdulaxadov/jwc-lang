@@ -1634,22 +1634,27 @@ fn helper_for_kind(k: PgKind) -> &'static str {
         PgKind::Bigint => "jwc_param_bigint",
         PgKind::Float => "jwc_param_float",
         PgKind::Bool => "jwc_param_bool",
-        // Timestamp values travel as text — Postgres does the cast via the
-        // `$N::timestamptz` placeholder emitted by `placeholder_for`.
-        PgKind::Timestamp | PgKind::Str => "jwc_param_str",
+        // Timestamp values arrive as RFC 3339 strings; the helper parses
+        // them into `chrono::DateTime<Utc>` so tokio-postgres binds the
+        // value against TIMESTAMPTZ natively. A bare `$N::timestamptz`
+        // SQL cast does NOT fix this — Postgres still infers `$N` as
+        // timestamptz from the cast, so the client-side type check rejects
+        // the String bind before the cast ever runs.
+        PgKind::Timestamp => "jwc_param_timestamp",
+        PgKind::Str => "jwc_param_str",
     }
 }
 
-/// SQL placeholder for parameter `idx` (1-based). For column kinds that
-/// can't be bound directly via tokio-postgres' typed `ToSql` impls
-/// (currently only `Timestamp`), we tack on a Postgres explicit cast so
-/// the TEXT-bound value is converted to the column's actual type at
-/// execute time.
-fn placeholder_for(idx: usize, k: PgKind) -> String {
-    match k {
-        PgKind::Timestamp => format!("${}::timestamptz", idx),
-        _ => format!("${}", idx),
-    }
+/// SQL placeholder for parameter `idx` (1-based).
+///
+/// Used to emit `${idx}::timestamptz` for Timestamp columns on the theory
+/// the cast would coerce a TEXT bind. It doesn't — `prepare_cached` still
+/// reports `$idx` as `timestamptz` (Postgres infers the parameter type
+/// from the cast target), so tokio-postgres rejected the String bind
+/// client-side before the cast ever ran. The real fix lives in
+/// `jwc_param_timestamp`, which boxes a real `chrono::DateTime<Utc>`.
+fn placeholder_for(idx: usize, _k: PgKind) -> String {
+    format!("${}", idx)
 }
 
 fn pk_fields(meta: &EntityMeta) -> Vec<&EntityField> {
@@ -2801,7 +2806,13 @@ fn render_cargo_toml(app_name: &str, needs_db: bool, needs_http_client: bool) ->
     deps.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
     deps.push_str("chrono = { version = \"0.4\", default-features = false, features = [\"clock\", \"std\"] }\n");
     if needs_db {
-        deps.push_str("tokio-postgres = \"0.7\"\n");
+        // `with-chrono-0_4` plugs `chrono::DateTime` into tokio-postgres'
+        // ToSql/FromSql so `jwc_param_timestamp` can bind directly to
+        // `TIMESTAMPTZ` columns. Without the feature, the generated code
+        // fails to compile with `the trait bound DateTime<Utc>: ToSql is
+        // not satisfied`, and the only workaround (binding String + a
+        // `$N::timestamptz` cast) trips a client-side WrongType check.
+        deps.push_str("tokio-postgres = { version = \"0.7\", features = [\"with-chrono-0_4\"] }\n");
         deps.push_str("deadpool-postgres = \"0.14\"\n");
     }
     format!(

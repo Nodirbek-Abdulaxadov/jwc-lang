@@ -142,6 +142,29 @@ fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
                 .flatten()
                 .map(V::Str)
                 .unwrap_or(V::Null),
+            // Temporal columns: surface as RFC 3339 / ISO-8601 strings so
+            // user code can pass the value to `now()` comparisons or hand
+            // it back through `json(...)` without losing precision. The
+            // ToSql side (jwc_param_timestamp) parses these formats back
+            // when the value travels in the other direction.
+            Type::TIMESTAMPTZ => row
+                .try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(i)
+                .ok()
+                .flatten()
+                .map(|dt| V::Str(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+                .unwrap_or(V::Null),
+            Type::TIMESTAMP => row
+                .try_get::<_, Option<chrono::NaiveDateTime>>(i)
+                .ok()
+                .flatten()
+                .map(|dt| V::Str(dt.format("%Y-%m-%dT%H:%M:%S").to_string()))
+                .unwrap_or(V::Null),
+            Type::DATE => row
+                .try_get::<_, Option<chrono::NaiveDate>>(i)
+                .ok()
+                .flatten()
+                .map(|d| V::Str(d.format("%Y-%m-%d").to_string()))
+                .unwrap_or(V::Null),
             _ => V::Null,
         };
         m.insert(name, v);
@@ -150,16 +173,32 @@ fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
 }
 
 // --- typed-param helpers used by codegen --------------------------------------
+//
+// tokio-postgres' `ToSql` impls are width-specific: `i16` only binds to
+// `INT2`, `i32` only to `INT2 / INT4`, `i64` only to `INT8`. Binding the
+// wrong width raises `WrongType { postgres: Int4, rust: "i64" }` at execute
+// time. The codegen picks the helper that matches the declared column type
+// (see `PgKind` in `native_build.rs`); this file only has to box correctly.
+
+fn jwc_param_smallint(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    match v {
+        V::Null => Box::new(None::<i16>),
+        other => Box::new(jwc_to_int(&other).unwrap_or(0) as i16),
+    }
+}
 
 fn jwc_param_int(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
     match v {
-        V::Null => Box::new(None::<i64>),
-        other => Box::new(jwc_to_int(&other).unwrap_or(0)),
+        V::Null => Box::new(None::<i32>),
+        other => Box::new(jwc_to_int(&other).unwrap_or(0) as i32),
     }
 }
 
 fn jwc_param_bigint(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
-    jwc_param_int(v)
+    match v {
+        V::Null => Box::new(None::<i64>),
+        other => Box::new(jwc_to_int(&other).unwrap_or(0)),
+    }
 }
 
 fn jwc_param_float(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
@@ -177,6 +216,42 @@ fn jwc_param_str(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
         V::Null => Box::new(None::<String>),
         V::Str(s) => Box::new(s),
         other => Box::new(other.to_string()),
+    }
+}
+
+/// Bind a JWC value into a Postgres temporal column (`timestamptz` /
+/// `timestamp` / `date`). JWC carries datetimes as RFC 3339 strings, but
+/// tokio-postgres' `String` ToSql impl only accepts text-like Postgres
+/// types — sending one to `timestamptz` raises
+/// `WrongType { postgres: Timestamptz, rust: "alloc::string::String" }`.
+/// We parse the RFC 3339 / ISO 8601 / date-only string into a real
+/// `chrono::DateTime<Utc>` so the with-chrono-0_4 ToSql impl binds it
+/// against `TIMESTAMPTZ` natively. Empty / unparseable input falls back
+/// to a NULL bind rather than panicking mid-INSERT.
+fn jwc_param_timestamp(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    fn parse(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Some(dt.with_timezone(&chrono::Utc));
+        }
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+            let dt = d.and_hms_opt(0, 0, 0)?;
+            return Some(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                dt,
+                chrono::Utc,
+            ));
+        }
+        None
+    }
+    match v {
+        V::Null => Box::new(None::<chrono::DateTime<chrono::Utc>>),
+        V::Str(s) => match parse(&s) {
+            Some(dt) => Box::new(dt),
+            None => Box::new(None::<chrono::DateTime<chrono::Utc>>),
+        },
+        other => match parse(&other.to_string()) {
+            Some(dt) => Box::new(dt),
+            None => Box::new(None::<chrono::DateTime<chrono::Utc>>),
+        },
     }
 }
 
@@ -204,12 +279,24 @@ fn jwc_v_to_key(v: &V) -> String {
     }
 }
 
+// Boxing kind passed to `jwc_db_eager_load` so the IN-clause parameters
+// match the FK column's actual Postgres width (i16/i32/i64). The plain bool
+// `pk_is_int` flag this used to carry collapsed all integer widths onto i32
+// and would re-trigger the INT4/INT8 mismatch bug for `bigint` FKs.
+#[derive(Clone, Copy)]
+enum JwcPkKind {
+    Smallint,
+    Int,
+    Bigint,
+    Str,
+}
+
 async fn jwc_db_eager_load(
     parents: &mut Vec<V>,
     parent_pk: &str,
     target_table: &str,
     fk_col: &str,
-    pk_is_int: bool,
+    pk_kind: JwcPkKind,
     nav_name: &str,
     one_to_one: bool,
 ) {
@@ -242,10 +329,11 @@ async fn jwc_db_eager_load(
         fk_col,
         placeholders.join(", "),
     );
-    let params: DbParams = if pk_is_int {
-        keys.into_iter().map(jwc_param_int).collect()
-    } else {
-        keys.into_iter().map(jwc_param_str).collect()
+    let params: DbParams = match pk_kind {
+        JwcPkKind::Smallint => keys.into_iter().map(jwc_param_smallint).collect(),
+        JwcPkKind::Int => keys.into_iter().map(jwc_param_int).collect(),
+        JwcPkKind::Bigint => keys.into_iter().map(jwc_param_bigint).collect(),
+        JwcPkKind::Str => keys.into_iter().map(jwc_param_str).collect(),
     };
     let children = jwc_db_query(&sql, params).await;
     let mut by_fk: BTreeMap<String, Vec<V>> = BTreeMap::new();
@@ -299,10 +387,20 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
         Ok(V::Array(a)) => a,
         _ => Vec::new(),
     };
+    // raw_sql doesn't know the prepared statement's parameter types up
+    // front, so pick the narrowest integer width the value still fits in.
+    // Mirrors `runner::value_to_sql_param` so the AOT and interpreter paths
+    // agree on which `INT2`/`INT4`/`INT8` column a JWC int will bind to.
     let boxed: DbParams = params
         .into_iter()
         .map(|p| match p {
-            V::Int(_) => jwc_param_int(p),
+            V::Int(n) => {
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&n) {
+                    Box::new(n as i32) as Box<dyn tokio_postgres::types::ToSql + Sync + Send>
+                } else {
+                    Box::new(n)
+                }
+            }
             V::Float(_) => jwc_param_float(p),
             V::Bool(_) => jwc_param_bool(p),
             _ => jwc_param_str(p),
