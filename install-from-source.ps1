@@ -67,7 +67,7 @@ try {
             $stale = "$dst.old-$(Get-Random)"
             Move-Item -LiteralPath $dst -Destination $stale -Force
             Copy-Item -Force $sourcePath $dst
-            Write-Host "(replaced an in-use $name; old binary parked at $stale — safe to delete)"
+            Write-Host "(replaced an in-use $name; old binary parked at $stale -- safe to delete)"
         }
         Write-Host "Installed: $dst"
     }
@@ -80,7 +80,7 @@ try {
     if (Test-Path $lspSrc) {
         Install-Binary 'jwc-lsp.exe' $lspSrc
     } else {
-        Write-Host "(jwc-lsp.exe not found next to $exeSrc — skipping LSP install)"
+        Write-Host "(jwc-lsp.exe not found next to $exeSrc -- skipping LSP install)"
     }
 
     # Add installDir to USER PATH if missing

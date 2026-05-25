@@ -106,20 +106,50 @@ pub fn list_versions(base_url: &str, name: &str) -> Result<Vec<Version>> {
 /// registry returns one in a `X-Checksum-Sha256` header), and extract it
 /// into `dest`. The directory is created if missing.
 pub fn download_and_extract(base_url: &str, name: &str, version: &str, dest: &Path) -> Result<()> {
-    let url = format!(
-        "{}/api/v1/crates/{}/{}/download",
-        base_url.trim_end_matches('/'),
-        name,
-        version
-    );
-    let mut req = http().get(&url);
-    if let Some(tok) = auth_token(base_url) {
-        req = req.header("Authorization", format!("Bearer {}", tok));
-    }
-    let mut resp = req.send().with_context(|| format!("GET {} failed", url))?;
-    if !resp.status().is_success() {
-        bail!("Registry returned HTTP {} for {}", resp.status(), url);
-    }
+    let base = base_url.trim_end_matches('/');
+    let urls = [
+        format!("{}/api/v1/pkg/{}/{}/download", base, name, version),
+        format!("{}/api/v1/crates/{}/{}/download", base, name, version),
+    ];
+
+    let (url, mut resp) = {
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut chosen: Option<(String, reqwest::blocking::Response)> = None;
+        for url in urls {
+            let mut req = http().get(&url);
+            if let Some(tok) = auth_token(base_url) {
+                req = req.header("Authorization", format!("Bearer {}", tok));
+            }
+            match req.send().with_context(|| format!("GET {} failed", url)) {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        chosen = Some((url, resp));
+                        break;
+                    }
+                    if resp.status().as_u16() == 404 {
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "Registry returned HTTP {} for {}",
+                        resp.status(),
+                        url
+                    ));
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        match chosen {
+            Some(v) => v,
+            None => {
+                if let Some(e) = last_err {
+                    return Err(e);
+                }
+                bail!(
+                    "Registry returned HTTP 404 for both /api/v1/pkg and /api/v1/crates download endpoints"
+                )
+            }
+        }
+    };
 
     let expected_checksum = resp
         .headers()
