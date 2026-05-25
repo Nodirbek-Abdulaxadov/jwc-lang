@@ -20,7 +20,7 @@ struct RegistryVersionsResponse {
 
 #[derive(Debug, Deserialize)]
 struct RegistryVersion {
-    #[serde(rename = "num")]
+    #[serde(alias = "num")]
     version: String,
     #[serde(default)]
     yanked: bool,
@@ -51,19 +51,47 @@ fn auth_token(base_url: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+fn get_versions_response(base_url: &str, name: &str) -> Result<RegistryVersionsResponse> {
+    let base = base_url.trim_end_matches('/');
+    let urls = [
+        format!("{}/api/v1/pkg/{}", base, name),
+        format!("{}/api/v1/crates/{}", base, name),
+    ];
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for url in urls {
+        let mut req = http().get(&url);
+        if let Some(tok) = auth_token(base_url) {
+            req = req.header("Authorization", format!("Bearer {}", tok));
+        }
+        match req.send().with_context(|| format!("GET {} failed", url)) {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    return resp.json().with_context(|| {
+                        format!("Failed to parse registry response from {}", url)
+                    });
+                }
+                if resp.status().as_u16() == 404 {
+                    continue;
+                }
+                return Err(anyhow!(
+                    "Registry returned HTTP {} for {}",
+                    resp.status(),
+                    url
+                ));
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    if let Some(e) = last_err {
+        Err(e)
+    } else {
+        bail!("Registry returned HTTP 404 for both /api/v1/pkg and /api/v1/crates endpoints")
+    }
+}
 pub fn list_versions(base_url: &str, name: &str) -> Result<Vec<Version>> {
-    let url = format!("{}/api/v1/crates/{}", base_url.trim_end_matches('/'), name);
-    let mut req = http().get(&url);
-    if let Some(tok) = auth_token(base_url) {
-        req = req.header("Authorization", format!("Bearer {}", tok));
-    }
-    let resp = req.send().with_context(|| format!("GET {} failed", url))?;
-    if !resp.status().is_success() {
-        bail!("Registry returned HTTP {} for {}", resp.status(), url);
-    }
-    let body: RegistryVersionsResponse = resp
-        .json()
-        .with_context(|| format!("Failed to parse registry response from {}", url))?;
+    let body = get_versions_response(base_url, name)?;
     let mut versions: Vec<Version> = body
         .versions
         .into_iter()
@@ -153,4 +181,23 @@ pub fn ping(base_url: &str) -> Result<()> {
         return Err(anyhow!("Registry ping failed: HTTP {}", resp.status()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_versions_with_version_field() {
+        let body = r#"{"versions":[{"version":"1.2.3","yanked":false}]}"#;
+        let parsed: RegistryVersionsResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.versions[0].version, "1.2.3");
+    }
+
+    #[test]
+    fn parses_versions_with_legacy_num_field() {
+        let body = r#"{"versions":[{"num":"2.0.0","yanked":false}]}"#;
+        let parsed: RegistryVersionsResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.versions[0].version, "2.0.0");
+    }
 }
