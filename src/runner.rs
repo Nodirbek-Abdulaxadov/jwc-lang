@@ -1918,10 +1918,7 @@ impl<'a> Vm<'a> {
                     let status = match self.eval_expr(&args[0], vars).await? {
                         Value::Int(n) if (100..600).contains(&n) => n as u16,
                         Value::Int(n) => bail!("statusCode: invalid status {n}"),
-                        other => bail!(
-                            "statusCode: code must be int, got {}",
-                            other.type_name()
-                        ),
+                        other => bail!("statusCode: code must be int, got {}", other.type_name()),
                     };
                     let is_redirect = (300..400).contains(&status);
                     let body_val = if let Some(arg) = args.get(1) {
@@ -1931,8 +1928,7 @@ impl<'a> Vm<'a> {
                     };
                     if is_redirect {
                         if let Some(Value::Str(s)) = &body_val {
-                            if let Ok(JsonValue::Object(map)) =
-                                serde_json::from_str::<JsonValue>(s)
+                            if let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(s)
                             {
                                 let envelope = json!({
                                     "status": status,
