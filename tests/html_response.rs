@@ -25,7 +25,7 @@ async fn html_builtin_returns_body_with_html_content_type() {
         }
     "#;
     let program = parse(src);
-    let (status, body, content_type) =
+    let (status, body, content_type, _headers) =
         runner::run_request_with_headers(&program, "GET", "/", None, HashMap::new())
             .await
             .expect("request should succeed");
@@ -52,7 +52,7 @@ async fn html_builtin_accepts_string_function_result() {
         route GET "/page" { return html(page()); }
     "#;
     let program = parse(src);
-    let (status, body, content_type) =
+    let (status, body, content_type, _headers) =
         runner::run_request_with_headers(&program, "GET", "/page", None, HashMap::new())
             .await
             .expect("request should succeed");
@@ -79,7 +79,7 @@ async fn json_builtin_still_omits_content_type_so_server_defaults_to_json() {
         }
     "#;
     let program = parse(src);
-    let (status, body, content_type) =
+    let (status, body, content_type, _headers) =
         runner::run_request_with_headers(&program, "GET", "/healthz", None, HashMap::new())
             .await
             .expect("request should succeed");
