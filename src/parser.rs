@@ -2622,7 +2622,14 @@ impl<'a> Parser<'a> {
         let then_body = self.parse_block()?;
         let else_body = if self.current.kind == TokenKind::Keyword(Keyword::Else) {
             self.bump()?;
-            Some(self.parse_block()?)
+            // `else if (...) { ... }` desugars to `else { if (...) { ... } }`
+            // so chains of else-if branches parse without curly braces in
+            // between.
+            if self.current.kind == TokenKind::Keyword(Keyword::If) {
+                Some(vec![self.parse_if_stmt()?])
+            } else {
+                Some(self.parse_block()?)
+            }
         } else {
             None
         };

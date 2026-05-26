@@ -249,7 +249,7 @@ pub async fn run_request(
     path: &str,
     body: Option<String>,
 ) -> Result<(u16, String)> {
-    let (status, body, _ct) =
+    let (status, body, _ct, _headers) =
         run_request_with_headers(program, method, path, body, HashMap::new()).await?;
     Ok((status, body))
 }
@@ -321,7 +321,7 @@ pub async fn run_request_with_headers(
     path: &str,
     body: Option<String>,
     headers: HashMap<String, String>,
-) -> Result<(u16, String, Option<String>)> {
+) -> Result<(u16, String, Option<String>, Vec<(String, String)>)> {
     let mut vm = Vm::new(program);
     vm.request_body = body;
     vm.current_headers = Some(headers);
@@ -908,13 +908,62 @@ impl<'a> Vm<'a> {
         stmts: &[Stmt],
         vars: &mut HashMap<String, Value>,
     ) -> Result<Flow> {
+        // Block-scoped `let`: variables declared inside this block are
+        // visible only until it ends. We remember each new binding (and the
+        // outer value it shadows, if any) and restore the outer state when
+        // the block exits — including on early Flow exits and errors. This
+        // also lets a loop body re-`let` the same name each iteration
+        // without tripping the duplicate-variable check in `Stmt::Let`.
+        let mut block_locals: HashMap<String, (Option<Value>, Option<HashSet<String>>)> =
+            HashMap::new();
+        let mut pending_err: Option<anyhow::Error> = None;
+        let mut return_flow = Flow::Continue;
         for stmt in stmts {
-            let flow = self.exec_stmt(stmt, vars).await?;
-            if !matches!(flow, Flow::Continue) {
-                return Ok(flow);
+            if let Stmt::Let { name, .. } = stmt {
+                let key = name.to_lowercase();
+                if block_locals.contains_key(&key) {
+                    pending_err = Some(anyhow!("Duplicate variable declaration: {name}"));
+                    break;
+                }
+                let prior_val = vars.remove(&key);
+                let prior_dirty = self.dirty_fields.remove(&key);
+                block_locals.insert(key, (prior_val, prior_dirty));
+            }
+            match self.exec_stmt(stmt, vars).await {
+                Ok(flow) => {
+                    if !matches!(flow, Flow::Continue) {
+                        return_flow = flow;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    pending_err = Some(e);
+                    break;
+                }
             }
         }
-        Ok(Flow::Continue)
+        for (key, (prior_val, prior_dirty)) in block_locals.drain() {
+            match prior_val {
+                Some(v) => {
+                    vars.insert(key.clone(), v);
+                }
+                None => {
+                    vars.remove(&key);
+                }
+            }
+            match prior_dirty {
+                Some(d) => {
+                    self.dirty_fields.insert(key, d);
+                }
+                None => {
+                    self.dirty_fields.remove(&key);
+                }
+            }
+        }
+        if let Some(e) = pending_err {
+            return Err(e);
+        }
+        Ok(return_flow)
     }
 
     #[async_recursion]
@@ -1853,6 +1902,62 @@ impl<'a> Vm<'a> {
                         r#"{{"status":500,"error":"{escaped}"}}"#
                     )));
                 }
+
+                // `statusCode(code, body_or_headers?)` — set the HTTP status
+                // for the response. For 3xx with an object 2nd arg, the
+                // object's fields become response headers (so
+                // `statusCode(302, { Location: url })` produces a real
+                // browser-followed redirect). For other statuses the 2nd arg
+                // is rendered as the response body.
+                if name.eq_ignore_ascii_case("statusCode")
+                    || name.eq_ignore_ascii_case("status_code")
+                {
+                    if args.is_empty() || args.len() > 2 {
+                        bail!("statusCode(code, body_or_headers?) expects 1 or 2 args");
+                    }
+                    let status = match self.eval_expr(&args[0], vars).await? {
+                        Value::Int(n) if (100..600).contains(&n) => n as u16,
+                        Value::Int(n) => bail!("statusCode: invalid status {n}"),
+                        other => bail!(
+                            "statusCode: code must be int, got {}",
+                            other.type_name()
+                        ),
+                    };
+                    let is_redirect = (300..400).contains(&status);
+                    let body_val = if let Some(arg) = args.get(1) {
+                        Some(self.eval_expr(arg, vars).await?)
+                    } else {
+                        None
+                    };
+                    if is_redirect {
+                        if let Some(Value::Str(s)) = &body_val {
+                            if let Ok(JsonValue::Object(map)) =
+                                serde_json::from_str::<JsonValue>(s)
+                            {
+                                let envelope = json!({
+                                    "status": status,
+                                    "__jwc_headers__": JsonValue::Object(map),
+                                    "__jwc_content_type__": "text/html; charset=utf-8",
+                                    "__jwc_body__": "",
+                                });
+                                return Ok(Value::Str(envelope.to_string()));
+                            }
+                        }
+                    }
+                    let body_str = body_val.map(|v| v.as_string()).unwrap_or_default();
+                    if let Ok(mut doc) = serde_json::from_str::<JsonValue>(&body_str) {
+                        if let Some(obj) = doc.as_object_mut() {
+                            obj.insert("status".into(), json!(status));
+                            return Ok(Value::Str(doc.to_string()));
+                        }
+                    }
+                    let envelope = json!({
+                        "status": status,
+                        "__jwc_content_type__": "text/plain; charset=utf-8",
+                        "__jwc_body__": body_str,
+                    });
+                    return Ok(Value::Str(envelope.to_string()));
+                }
                 // ──────────────────────────────────────────────────────────
 
                 let mut values = Vec::with_capacity(args.len());
@@ -2061,7 +2166,7 @@ impl<'a> Vm<'a> {
         &mut self,
         method: &str,
         path: &str,
-    ) -> Result<(u16, String, Option<String>)> {
+    ) -> Result<(u16, String, Option<String>, Vec<(String, String)>)> {
         // Split `?query` off the path for route matching; keep the query for
         // `query_param(name)` lookups inside the handler.
         let (clean_path, query_params) = split_path_and_query(path);
@@ -2088,6 +2193,7 @@ impl<'a> Vm<'a> {
                     "{{\"status\":404,\"error\":\"Not Found\",\"method\":\"{method}\",\"path\":\"{clean_path}\"}}"
                 ),
                 None,
+                Vec::new(),
             ));
         };
 
@@ -2184,7 +2290,7 @@ impl<'a> Vm<'a> {
         // travel inside the same JSON envelope so the existing status-field
         // strip pass still applies. Both keys are removed here and the raw
         // body string is returned as-is (no JSON re-encoding).
-        let (status, clean_body, content_type) =
+        let (status, clean_body, content_type, extra_headers) =
             if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&body) {
                 let code = doc
                     .get("status")
@@ -2194,6 +2300,7 @@ impl<'a> Vm<'a> {
                     .unwrap_or(200);
                 let mut ct: Option<String> = None;
                 let mut raw_body: Option<String> = None;
+                let mut headers: Vec<(String, String)> = Vec::new();
                 if let Some(obj) = doc.as_object_mut() {
                     obj.remove("status");
                     if let Some(JsonValue::String(s)) = obj.remove("__jwc_content_type__") {
@@ -2201,6 +2308,15 @@ impl<'a> Vm<'a> {
                     }
                     if let Some(JsonValue::String(s)) = obj.remove("__jwc_body__") {
                         raw_body = Some(s);
+                    }
+                    if let Some(JsonValue::Object(hmap)) = obj.remove("__jwc_headers__") {
+                        for (k, v) in hmap {
+                            let val = match v {
+                                JsonValue::String(s) => s,
+                                other => other.to_string(),
+                            };
+                            headers.push((k, val));
+                        }
                     }
                 }
                 let body_out = if code == 204 {
@@ -2210,12 +2326,12 @@ impl<'a> Vm<'a> {
                 } else {
                     doc.to_string()
                 };
-                (code, body_out, ct)
+                (code, body_out, ct, headers)
             } else {
-                (200, body, None)
+                (200, body, None, Vec::new())
             };
 
-        Ok((status, clean_body, content_type))
+        Ok((status, clean_body, content_type, extra_headers))
     }
 
     #[async_recursion]
@@ -5621,7 +5737,7 @@ mod tests {
 
         let mut headers = HashMap::new();
         headers.insert("authorization".into(), "Bearer xyz".into());
-        let (status_ok, body_ok, _ct) =
+        let (status_ok, body_ok, _ct, _headers) =
             run_request_with_headers(&program, "GET", "/secret", None, headers)
                 .await
                 .unwrap();

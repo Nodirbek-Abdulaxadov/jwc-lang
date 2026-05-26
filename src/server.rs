@@ -278,7 +278,7 @@ async fn handle_http_fallback(
     state.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
 
     let response: Response = match result {
-        Ok(Ok((status, body, content_type))) => {
+        Ok(Ok((status, body, content_type, extra_headers))) => {
             state.metrics.completed.fetch_add(1, Ordering::Relaxed);
             if state.request_logging {
                 eprintln!("[JWC] {} {} -> {}", method, uri.path(), status);
@@ -294,6 +294,18 @@ async fn handle_http_fallback(
             } else {
                 resp.headers_mut()
                     .insert("content-type", "application/json".parse().unwrap());
+            }
+            // Extra headers declared by the handler (e.g.
+            // `statusCode(302, { Location: url })` produces a `Location`
+            // entry). Skip names/values that don't parse as valid HTTP
+            // header bits rather than failing the whole response.
+            for (name, value) in extra_headers {
+                if let (Ok(name), Ok(value)) = (
+                    name.parse::<axum::http::HeaderName>(),
+                    value.parse::<axum::http::HeaderValue>(),
+                ) {
+                    resp.headers_mut().insert(name, value);
+                }
             }
             resp
         }
