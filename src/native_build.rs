@@ -1133,7 +1133,17 @@ fn handler_arg_exprs(handler: &str, ctx: &CodegenCtx) -> String {
 }
 
 fn middleware_fn_name(name: &str) -> String {
-    format!("mw_{name}")
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("mw_{safe}")
 }
 
 fn emit_middleware_fn(out: &mut String, mw: &crate::ast::MiddlewareDecl, ctx: &CodegenCtx) {
@@ -1225,9 +1235,19 @@ fn emit_user_fn(out: &mut String, func: &FunctionDecl, ctx: &CodegenCtx) {
 }
 
 fn user_fn_name(name: &str) -> String {
-    // Dome-namespaced functions arrive as `Dome.fn`; sanitize the dot so the
-    // emitted Rust identifier is valid.
-    let safe = name.replace('.', "_");
+    // Namespaced functions arrive as `Dome.fn` and package-qualified ones can
+    // include `-` from `kebab-case` package names. Map any non-ident char to
+    // `_` so the emitted Rust identifier is always valid.
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     format!("user_{safe}")
 }
 
