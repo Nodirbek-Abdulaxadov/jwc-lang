@@ -25,7 +25,7 @@ use axum::{
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::ast::{Program, RouteProtocol};
 use crate::engine;
@@ -99,11 +99,43 @@ fn parse_metrics_interval_secs() -> u64 {
         .unwrap_or(10)
 }
 
+fn parse_shutdown_timeout_secs() -> u64 {
+    std::env::var("JWC_SHUTDOWN_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(5)
+}
+
+/// Resolves when Ctrl+C (SIGINT) is received. Logs the drain notice, signals
+/// open WebSocket handlers to send a `1001 Going Away` close, and arms a
+/// watchdog that force-exits if inflight requests don't drain within
+/// `JWC_SHUTDOWN_TIMEOUT` (default 5s). Handed to axum's
+/// `with_graceful_shutdown`, which stops accepting new connections and waits
+/// for inflight requests to complete.
+async fn shutdown_signal(metrics: Arc<ServerMetrics>, ws_shutdown: watch::Sender<bool>) {
+    if tokio::signal::ctrl_c().await.is_err() {
+        return;
+    }
+    let n = metrics.in_flight.load(Ordering::Relaxed);
+    eprintln!("Shutdown signal received, draining {n} inflight requests...");
+    // Tell open WS writer loops to emit a 1001 close frame and wind down.
+    let _ = ws_shutdown.send(true);
+    let timeout = parse_shutdown_timeout_secs();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(timeout)).await;
+        eprintln!("Graceful shutdown timed out after {timeout}s; forcing exit.");
+        std::process::exit(0);
+    });
+}
+
 #[derive(Clone)]
 struct AppState {
     program: Arc<Program>,
     request_logging: bool,
     metrics: Arc<ServerMetrics>,
+    /// Flips to `true` on shutdown so WS writer loops send a `1001` close.
+    ws_shutdown: watch::Receiver<bool>,
 }
 
 pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> {
@@ -124,10 +156,13 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
         .build()
         .map_err(|e| anyhow!("Failed to build tokio runtime: {e}"))?;
 
+    let (ws_shutdown_tx, ws_shutdown_rx) = watch::channel(false);
+
     let state = AppState {
         program: Arc::clone(&shared_program),
         request_logging,
         metrics: Arc::clone(&metrics),
+        ws_shutdown: ws_shutdown_rx,
     };
 
     if parse_metrics_enabled() {
@@ -176,6 +211,7 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
             .await
             .map_err(|e| anyhow!("Failed to bind to {addr}: {e}"))?;
         axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal(Arc::clone(&metrics), ws_shutdown_tx))
             .await
             .map_err(|e| anyhow!("axum serve error: {e}"))?;
         Ok::<_, anyhow::Error>(())
@@ -358,11 +394,32 @@ async fn handle_ws(
         }
     });
 
-    // Writer loop: vm-output queue → WS frames.
+    // Writer loop: vm-output queue → WS frames. Also watches the server-wide
+    // shutdown signal so an in-progress connection is closed with `1001 Going
+    // Away` instead of being dropped mid-stream.
+    let mut ws_shutdown = state.ws_shutdown.clone();
     let writer = tokio::spawn(async move {
-        while let Some(msg) = rx_from_vm.recv().await {
-            if ws_sink.send(Message::Text(msg)).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                msg = rx_from_vm.recv() => match msg {
+                    Some(msg) => {
+                        if ws_sink.send(Message::Text(msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                changed = ws_shutdown.changed() => {
+                    if changed.is_err() || *ws_shutdown.borrow() {
+                        let _ = ws_sink
+                            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                                code: 1001,
+                                reason: "server shutting down".into(),
+                            })))
+                            .await;
+                        break;
+                    }
+                }
             }
         }
         let _ = ws_sink.close().await;

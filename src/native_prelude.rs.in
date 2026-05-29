@@ -1139,10 +1139,34 @@ impl HttpServer {
             }
         };
         eprintln!("[jwc] listening on http://{}", addr);
-        if let Err(e) = axum::serve(listener, app).await {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(jwc_shutdown_signal())
+            .await
+        {
             eprintln!("[jwc] server error: {}", e);
         }
     }
+}
+
+/// Resolves on Ctrl+C (SIGINT). Logs the drain notice and arms a watchdog that
+/// force-exits if inflight requests don't drain within `JWC_SHUTDOWN_TIMEOUT`
+/// (default 5s). Handed to axum's `with_graceful_shutdown`, which stops
+/// accepting new connections and waits for inflight requests to finish.
+async fn jwc_shutdown_signal() {
+    if tokio::signal::ctrl_c().await.is_err() {
+        return;
+    }
+    eprintln!("Shutdown signal received, draining inflight requests...");
+    let timeout: u64 = std::env::var("JWC_SHUTDOWN_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(5);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(timeout)).await;
+        eprintln!("Graceful shutdown timed out after {}s; forcing exit.", timeout);
+        std::process::exit(0);
+    });
 }
 
 async fn handle_axum_request(
