@@ -405,6 +405,11 @@ impl<'a> NameResolver<'a> {
                     self.rewrite_expr(v, caller_ns);
                 }
             }
+            Expr::ArrayLit(items) => {
+                for item in items {
+                    self.rewrite_expr(item, caller_ns);
+                }
+            }
             Expr::DbSelect {
                 where_clause,
                 limit,
@@ -556,6 +561,7 @@ fn program_uses_http_client(program: &Program) -> bool {
             | Expr::And(a, b)
             | Expr::Or(a, b) => walk_expr(a) || walk_expr(b),
             Expr::ObjectLit(pairs) => pairs.iter().any(|(_, v)| walk_expr(v)),
+            Expr::ArrayLit(items) => items.iter().any(walk_expr),
             Expr::DbSelect {
                 where_clause,
                 limit,
@@ -848,6 +854,12 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
         Expr::ObjectLit(pairs) => {
             for (_, v) in pairs {
                 check_expr(v, funcs, builtins)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayLit(items) => {
+            for item in items {
+                check_expr(item, funcs, builtins)?;
             }
             Ok(())
         }
@@ -2090,6 +2102,16 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 out.push_str(");");
             }
             out.push_str(" V::Object(__o) }");
+        }
+        Expr::ArrayLit(items) => {
+            out.push_str("V::Array(vec![");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                emit_expr(out, item, ctx);
+            }
+            out.push_str("])");
         }
         Expr::Add(a, b) => emit_binop(out, "jwc_add", a, b, ctx),
         Expr::Sub(a, b) => emit_binop(out, "jwc_sub", a, b, ctx),

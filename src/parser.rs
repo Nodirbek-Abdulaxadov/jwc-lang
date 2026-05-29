@@ -739,6 +739,12 @@ fn check_typed_field_access_in_expr(
             }
             Ok(())
         }
+        Expr::ArrayLit(items) => {
+            for item in items {
+                check_typed_field_access_in_expr(item, locals, model_fields)?;
+            }
+            Ok(())
+        }
         Expr::DbSelect {
             where_clause,
             limit,
@@ -895,6 +901,12 @@ fn check_with_relations_in_expr(
         Expr::Call { args, .. } => {
             for a in args {
                 check_with_relations_in_expr(a, entity_navigations)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayLit(items) => {
+            for item in items {
+                check_with_relations_in_expr(item, entity_navigations)?;
             }
             Ok(())
         }
@@ -1394,6 +1406,18 @@ fn validate_expr(
             db_tables,
             entity_fields_by_table,
         ),
+        Expr::ArrayLit(items) => {
+            for item in items {
+                validate_expr(
+                    item,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -3014,8 +3038,30 @@ impl<'a> Parser<'a> {
                 Ok(expr)
             }
             TokenKind::Symbol('{') => self.parse_object_literal(),
+            TokenKind::Symbol('[') => self.parse_array_literal(),
             _ => Err(self.error_here("expected expression")),
         }
+    }
+
+    /// Parse an array literal: `[ expr [, expr]* [,]? ]`. The empty form `[]`
+    /// is valid; a trailing comma is allowed. Elements may be heterogeneous.
+    fn parse_array_literal(&mut self) -> Result<Expr> {
+        self.expect_symbol('[')?;
+        let mut items: Vec<Expr> = Vec::new();
+        if !self.check_symbol(']') {
+            loop {
+                items.push(self.parse_expr()?);
+                if !self.check_symbol(',') {
+                    break;
+                }
+                self.expect_symbol(',')?;
+                if self.check_symbol(']') {
+                    break;
+                }
+            }
+        }
+        self.expect_symbol(']')?;
+        Ok(Expr::ArrayLit(items))
     }
 
     /// Parse an expression-position object literal: `{ key: expr [, key: expr]* }`.

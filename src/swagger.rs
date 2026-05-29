@@ -533,6 +533,11 @@ fn walk_expr<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
                 walk_expr(v, f);
             }
         }
+        Expr::ArrayLit(items) => {
+            for item in items {
+                walk_expr(item, f);
+            }
+        }
         _ => {}
     }
 }

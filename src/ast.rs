@@ -444,6 +444,10 @@ pub enum Expr {
     /// `{ key: value, key2: value2 }` — JSON object literal. Each value is
     /// evaluated and the result is serialised as a JSON string Value.
     ObjectLit(Vec<(String, Expr)>),
+    /// `[expr, expr, ...]` — array literal. Elements may be heterogeneous
+    /// (`[1, "two", true]`); a trailing comma and the empty form `[]` are both
+    /// valid. Evaluates to `Value::Array` in the interpreter.
+    ArrayLit(Vec<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),

@@ -1132,26 +1132,33 @@ impl<'a> Vm<'a> {
             }
             Stmt::ForIn { var, iter, body } => {
                 let iter_val = self.eval_expr(iter, vars).await?;
-                let raw = match iter_val {
-                    Value::Str(s) => s,
+                // Three iterable shapes:
+                //   * Value::Array — iterate the elements directly.
+                //   * Value::Str holding a JSON array — parse then iterate
+                //     (DB selects / body() return arrays this way).
+                //   * Value::Null — zero iterations.
+                let items: Vec<Value> = match iter_val {
+                    Value::Array(items) => items,
+                    Value::Str(s) => {
+                        let parsed: JsonValue = serde_json::from_str(&s)
+                            .map_err(|_| anyhow!("for-in: iter is not valid JSON"))?;
+                        let arr = parsed
+                            .as_array()
+                            .ok_or_else(|| anyhow!("for-in: iter is not a JSON array"))?;
+                        arr.iter().map(json_to_value).collect()
+                    }
                     Value::Null => return Ok(Flow::Continue),
                     other => bail!(
-                        "for-in: iter must be a JSON array string, got {}",
+                        "for-in: iter must be an array, got {}",
                         other.type_name()
                     ),
                 };
-                let parsed: JsonValue = serde_json::from_str(&raw)
-                    .map_err(|_| anyhow!("for-in: iter is not valid JSON"))?;
-                let items = parsed
-                    .as_array()
-                    .ok_or_else(|| anyhow!("for-in: iter is not a JSON array"))?
-                    .clone();
                 let key = var.to_lowercase();
                 let prior = vars.get(&key).cloned();
                 let prior_dirty = self.dirty_fields.remove(&key);
                 let mut early_return: Option<Option<Value>> = None;
-                for item in items.iter() {
-                    vars.insert(key.clone(), json_to_value(item));
+                for item in items.into_iter() {
+                    vars.insert(key.clone(), item);
                     match self.exec_block(body, vars).await? {
                         Flow::Continue | Flow::ContinueLoop => continue,
                         Flow::Break => break,
@@ -1839,6 +1846,8 @@ impl<'a> Vm<'a> {
                     // Reuse it instead of cloning the (often-large) buffer.
                     return Ok(match val {
                         Value::Str(_) => val,
+                        // Arrays serialize to a JSON array string.
+                        Value::Array(_) => Value::Str(value_to_json(&val).to_string()),
                         other => Value::Str(other.as_string()),
                     });
                 }
@@ -1982,6 +1991,13 @@ impl<'a> Vm<'a> {
                     obj.insert(key.clone(), value_to_json_smart(&value));
                 }
                 Ok(Value::Str(serde_json::Value::Object(obj).to_string()))
+            }
+            Expr::ArrayLit(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    out.push(self.eval_expr(item, vars).await?);
+                }
+                Ok(Value::Array(out))
             }
             Expr::Add(left, right) => {
                 let left = self.eval_expr(left, vars).await?;
@@ -2804,6 +2820,9 @@ fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync + Send> {
         Value::Float(n) => Box::new(*n),
         Value::Bool(b) => Box::new(*b),
         Value::Null | Value::Void => Box::new(Option::<String>::None),
+        // No native array param type yet — bind the JSON text. The DB column is
+        // expected to be json/jsonb/text; richer array binding lands later.
+        Value::Array(_) => string_to_sql_param(&value_to_json(val).to_string()),
     }
 }
 
@@ -2815,6 +2834,7 @@ fn value_to_cache_fragment(val: &Value) -> String {
         Value::Bool(b) => format!("bool:{b}"),
         Value::Null => "null".to_string(),
         Value::Void => "void".to_string(),
+        Value::Array(_) => format!("arr:{}", value_to_json(val)),
     }
 }
 
@@ -3227,7 +3247,10 @@ fn json_to_value(value: &JsonValue) -> Value {
             }
         }
         JsonValue::String(s) => Value::Str(s.clone()),
-        JsonValue::Array(_) | JsonValue::Object(_) => Value::Str(value.to_string()),
+        // JSON arrays map to the in-language array Value (recursively); JSON
+        // objects stay carried as their JSON string (no object Value variant).
+        JsonValue::Array(items) => Value::Array(items.iter().map(json_to_value).collect()),
+        JsonValue::Object(_) => Value::Str(value.to_string()),
     }
 }
 
@@ -3256,6 +3279,10 @@ fn value_to_json(value: &Value) -> JsonValue {
         Value::Str(v) => json!(v),
         Value::Bool(v) => json!(v),
         Value::Null | Value::Void => JsonValue::Null,
+        // Arrays serialize to a JSON array; each element goes through the same
+        // smart serializer so a `Value::Str` carrying nested JSON embeds raw
+        // rather than double-encoded.
+        Value::Array(items) => JsonValue::Array(items.iter().map(value_to_json_smart).collect()),
     }
 }
 
@@ -3639,6 +3666,9 @@ enum Value {
     Bool(bool),
     Null,
     Void,
+    /// In-language array literal (`[1, "two", true]`). Elements may be
+    /// heterogeneous. Renders as compact JSON via `as_string()`.
+    Array(Vec<Value>),
 }
 
 impl Value {
@@ -3650,6 +3680,9 @@ impl Value {
             Value::Bool(v) => v.to_string(),
             Value::Null => "null".to_string(),
             Value::Void => String::new(),
+            // Arrays render as compact JSON (`[1,"two",true]`), reusing the
+            // serde_json serializer over a Value→JsonValue conversion.
+            Value::Array(_) => value_to_json(self).to_string(),
         }
     }
 
@@ -3661,6 +3694,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Null => "null",
             Value::Void => "void",
+            Value::Array(_) => "array",
         }
     }
 }

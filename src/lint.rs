@@ -386,6 +386,11 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
                 collect_calls_expr(v, out);
             }
         }
+        Expr::ArrayLit(items) => {
+            for item in items {
+                collect_calls_expr(item, out);
+            }
+        }
         Expr::Add(a, b)
         | Expr::Sub(a, b)
         | Expr::Mul(a, b)
