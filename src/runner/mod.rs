@@ -1895,6 +1895,21 @@ impl<'a> Vm<'a> {
                     return Ok(Value::Str(val));
                 }
 
+                // ── `int(v)` — coerce to integer (mirrors native jwc_b_int) ──
+                if name.eq_ignore_ascii_case("int") {
+                    if args.len() != 1 {
+                        bail!("int(v) expects exactly 1 arg");
+                    }
+                    let n = match self.eval_expr(&args[0], vars).await? {
+                        Value::Int(n) => n,
+                        Value::Float(f) => f as i64,
+                        Value::Str(s) => s.parse::<i64>().unwrap_or(0),
+                        Value::Bool(b) => i64::from(b),
+                        _ => 0,
+                    };
+                    return Ok(Value::Int(n));
+                }
+
                 // ── `setConnectionString(...)` — pin DATABASE_URL for this process.
                 //
                 // Three legal forms:

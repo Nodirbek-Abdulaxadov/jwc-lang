@@ -1,0 +1,48 @@
+// hash-demo — demonstrates v0.4.0 hash builtins (sha256/sha1/md5/hmac_sha256)
+// and the argon2id password helpers. Works under both `jwc run` and
+// `jwc build --native`.
+//
+//   jwc run examples/hash-demo
+//   curl "http://localhost:8080/digest?text=hello"
+//   curl "http://localhost:8080/hmac?key=Jefe&msg=hi"
+//   curl "http://localhost:8080/password?pw=hunter2"
+
+const HMAC_DEMO_KEY = "demo-secret";
+
+// GET /digest?text=... — sha256/sha1/md5 of the query text.
+route GET "/digest" {
+    let text = query_param("text", "");
+    return json({
+        input: text,
+        sha256: sha256(text),
+        sha1: sha1(text),
+        md5: md5(text)
+    });
+}
+
+// GET /hmac?key=...&msg=... — HMAC-SHA256 (falls back to a fixed demo key).
+route GET "/hmac" {
+    let key = query_param("key", HMAC_DEMO_KEY);
+    let msg = query_param("msg", "");
+    return json({ key: key, msg: msg, hmac_sha256: hmac_sha256(key, msg) });
+}
+
+// GET /password?pw=... — argon2id round-trip: hash, then verify right/wrong.
+route GET "/password" {
+    let pw = query_param("pw", "hunter2");
+    let stored = hash_password(pw);
+    return json({
+        hash: stored,
+        verify_correct: verify_password(pw, stored),
+        verify_wrong: verify_password(pw + "x", stored)
+    });
+}
+
+function main() {
+    let port_env = env("PORT");
+    let port = 8080;
+    if (port_env != "") {
+        port = int(port_env);
+    }
+    serve(port);
+}

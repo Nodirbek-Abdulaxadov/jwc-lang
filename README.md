@@ -474,14 +474,34 @@ for p in xs {
 
 let parsed = json_parse("{\"a\":1}");
 let back   = json_stringify({ a: 1 });
+
+// Array literals + builders (v0.4.0)
+let nums = [1, 2, 3];               // also [] and [1, "two", true]
+let squares = [];
+for i in range(0, 5) {              // range(n) / range(start, end) / range(start, end, step)
+    push(squares, i * i);           // push / append, in place
+}
+print(join(squares, ","));          // "0,1,4,9,16" — O(n)
 ```
 
-- `for VAR in EXPR { ... }` iterates a JSON array. `EXPR` can be a `select`
-  result, a `body()` payload, a literal `"[ ... ]"` — anything that parses
-  into a JSON array. `break` / `continue` / `return` all work inside.
-- `contains` works on substrings, JSON-array elements, and JSON-object keys.
+- `for VAR in EXPR { ... }` iterates an array — an array literal, a `select`
+  result, a `body()` payload, or any JSON-array string. `break` / `continue` /
+  `return` all work inside.
+- `contains` works on substrings, array elements, and JSON-object keys.
 - `json_parse` lifts a JSON string into the runtime's untagged Value;
   `json_stringify` does the reverse.
+
+### Hashing (v0.4.0)
+
+```jwc
+sha256("hello")    // "2cf24dba…9824"   (also sha1, md5)
+hmac_sha256("key", "msg")              // lowercase hex HMAC-SHA256
+let h = hash_password("hunter2");      // argon2id PHC string
+verify_password("hunter2", h)          // true
+```
+
+See [`docs/builtins.md`](docs/builtins.md) for the complete built-in reference
+(with native-AOT support per built-in).
 
 ## HTTP Client
 
