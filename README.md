@@ -422,6 +422,33 @@ let secs = unix_timestamp();
 let u = select User from db.Users where User.username == @req.username first;
 ```
 
+## Response types & custom MIME
+
+```jwc
+route GET "/users"      { return json({ items: users }); }   // application/json
+route GET "/page"       { return html("<h1>hi</h1>"); }      // text/html; charset=utf-8
+route GET "/robots.txt" { return text("User-agent: *"); }    // text/plain; charset=utf-8
+route GET "/export.csv" { return response(csv_body, "text/csv"); }  // text/csv; charset=utf-8
+```
+
+- `response(body, mime)` (alias `raw(body, mime)`) ships `body` verbatim under
+  the given Content-Type. Text-ish types (`text/*`) get `; charset=utf-8`
+  appended automatically; other types (`image/png`, `application/pdf`, …) pass
+  through unchanged. The body is sent as-is — no JSON encoding.
+
+**`json()` fast-path semantics (important):**
+
+- `json(value)` serialises objects/arrays/numbers/bools to JSON.
+- When passed a **string**, `json()` is a *passthrough* — it does **not**
+  re-parse or re-encode it. `json("{\"a\":1}")` sends `{"a":1}` with an
+  `application/json` Content-Type, exactly as given. This is the hot path:
+  DB selects already return JSON text, so `return json(db_result)` avoids a
+  needless parse/re-serialise round-trip — ideal for cached JSON fragments.
+- ⚠️ Because strings pass through untouched, an **invalid** JSON string is
+  *also* forwarded verbatim (`json("not json")` → body `not json`,
+  Content-Type `application/json`). Validate untrusted strings before
+  wrapping them, or build an object/array and let `json()` encode it.
+
 ## Strings, arrays, iteration
 
 ```jwc

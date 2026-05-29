@@ -889,6 +889,31 @@ fn jwc_b_text(v: V) -> V {
     make_response(200, body_string(v), "text/plain; charset=utf-8")
 }
 
+/// Append `; charset=utf-8` to text-ish MIME types that don't already declare a
+/// charset; binary/other types pass through verbatim. Mirrors the interpreter's
+/// `normalize_content_type` so both runtimes emit identical headers.
+fn jwc_normalize_content_type(mime: &str) -> String {
+    if mime.to_ascii_lowercase().contains("charset") {
+        mime.to_string()
+    } else if mime.starts_with("text/") {
+        format!("{}; charset=utf-8", mime)
+    } else {
+        mime.to_string()
+    }
+}
+
+fn jwc_b_response(body: V, mime: V) -> V {
+    let m = match mime {
+        V::Str(s) => s,
+        other => panic!("response() mime must be a string, got {:?}", other),
+    };
+    make_response(200, body_string(body), &jwc_normalize_content_type(&m))
+}
+
+fn jwc_b_raw(body: V, mime: V) -> V {
+    jwc_b_response(body, mime)
+}
+
 fn jwc_b_html(v: V) -> V {
     make_response(200, body_string(v), "text/html; charset=utf-8")
 }

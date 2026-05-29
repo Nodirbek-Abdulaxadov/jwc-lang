@@ -77,6 +77,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef { name: "json", aliases: &[], min_args: 1, max_args: Some(1), native: true },
     BuiltinDef { name: "text", aliases: &[], min_args: 1, max_args: Some(1), native: true },
     BuiltinDef { name: "html", aliases: &[], min_args: 1, max_args: Some(1), native: true },
+    BuiltinDef { name: "response", aliases: &["raw"], min_args: 2, max_args: Some(2), native: true },
     BuiltinDef { name: "ok", aliases: &[], min_args: 0, max_args: Some(1), native: true },
     BuiltinDef { name: "created", aliases: &[], min_args: 1, max_args: Some(1), native: true },
     BuiltinDef { name: "not_found", aliases: &[], min_args: 0, max_args: Some(0), native: true },

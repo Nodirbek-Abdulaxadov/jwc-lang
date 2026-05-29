@@ -1965,23 +1965,40 @@ impl<'a> Vm<'a> {
                     });
                 }
 
-                // `html(body)` ships `body` verbatim to the wire under
-                // `content-type: text/html; charset=utf-8`. The two sentinel
-                // keys (`__jwc_content_type__`, `__jwc_body__`) are recognised
-                // and stripped by `dispatch_route`, which forwards the raw
-                // body bytes and the declared content-type to the transport.
+                // `text(body)` / `html(body)` ship `body` verbatim to the wire
+                // under `text/plain` / `text/html` (charset appended). The two
+                // sentinel keys (`__jwc_content_type__`, `__jwc_body__`) are
+                // recognised and stripped by `dispatch_route`, which forwards
+                // the raw body bytes and declared content-type to the transport.
+                if name.eq_ignore_ascii_case("text") {
+                    if args.len() != 1 {
+                        bail!("text(body) expects exactly 1 arg");
+                    }
+                    let body = self.eval_expr(&args[0], vars).await?.as_string();
+                    return Ok(content_type_response(body, "text/plain"));
+                }
                 if name.eq_ignore_ascii_case("html") {
                     if args.len() != 1 {
                         bail!("html(body) expects exactly 1 arg");
                     }
-                    let val = self.eval_expr(&args[0], vars).await?;
-                    let body = val.as_string();
-                    let envelope = json!({
-                        "status": 200,
-                        "__jwc_content_type__": "text/html; charset=utf-8",
-                        "__jwc_body__": body,
-                    });
-                    return Ok(Value::Str(envelope.to_string()));
+                    let body = self.eval_expr(&args[0], vars).await?.as_string();
+                    return Ok(content_type_response(body, "text/html"));
+                }
+                // `response(body, mime)` / `raw(body, mime)` — custom MIME
+                // escape hatch. text-ish types get `; charset=utf-8` appended.
+                if name.eq_ignore_ascii_case("response") || name.eq_ignore_ascii_case("raw") {
+                    if args.len() != 2 {
+                        bail!("response(body, mime) expects exactly 2 args");
+                    }
+                    let body = self.eval_expr(&args[0], vars).await?.as_string();
+                    let mime = match self.eval_expr(&args[1], vars).await? {
+                        Value::Str(s) => s,
+                        other => bail!(
+                            "response(body, mime): mime must be string, got {}",
+                            other.type_name()
+                        ),
+                    };
+                    return Ok(content_type_response(body, &mime));
                 }
 
                 if name.eq_ignore_ascii_case("created") {
@@ -3825,6 +3842,31 @@ fn format_float(value: f64) -> String {
     } else {
         s
     }
+}
+
+/// Append `; charset=utf-8` to text-ish MIME types that don't already declare a
+/// charset; binary/other types pass through verbatim. Mirrors the native
+/// `jwc_normalize_content_type` helper so both runtimes set identical headers.
+fn normalize_content_type(mime: &str) -> String {
+    if mime.to_ascii_lowercase().contains("charset") {
+        mime.to_string()
+    } else if mime.starts_with("text/") {
+        format!("{mime}; charset=utf-8")
+    } else {
+        mime.to_string()
+    }
+}
+
+/// Build a 200 HTTP response envelope carrying a raw body under an explicit
+/// Content-Type. Shared by `response`/`raw`/`text`/`html`. The two sentinel
+/// keys are recognised and stripped by `dispatch_route`.
+fn content_type_response(body: String, mime: &str) -> Value {
+    let envelope = json!({
+        "status": 200,
+        "__jwc_content_type__": normalize_content_type(mime),
+        "__jwc_body__": body,
+    });
+    Value::Str(envelope.to_string())
 }
 
 #[cfg(test)]
