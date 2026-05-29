@@ -2022,17 +2022,46 @@ impl<'a> Vm<'a> {
                     return Ok(Value::Str(result));
                 }
 
-                if name.eq_ignore_ascii_case("notFound") {
+                // `ok(value?)` — explicit 200 response. Mirrors `created`:
+                // an object body gets `status: 200` baked in, anything else is
+                // wrapped as `{ "status": 200, "data": <value> }`.
+                if name.eq_ignore_ascii_case("ok") {
+                    let s = if let Some(arg) = args.first() {
+                        self.eval_expr(arg, vars).await?.as_string()
+                    } else {
+                        return Ok(Value::Str(r#"{"status":200}"#.to_string()));
+                    };
+                    let result = if let Ok(mut doc) =
+                        serde_json::from_str::<serde_json::Value>(&s)
+                    {
+                        match doc.as_object_mut() {
+                            Some(obj) => {
+                                obj.insert("status".into(), json!(200));
+                                doc.to_string()
+                            }
+                            None => format!(r#"{{"status":200,"data":{s}}}"#),
+                        }
+                    } else {
+                        format!(r#"{{"status":200,"data":{s:?}}}"#)
+                    };
+                    return Ok(Value::Str(result));
+                }
+
+                if name.eq_ignore_ascii_case("notFound") || name.eq_ignore_ascii_case("not_found")
+                {
                     return Ok(Value::Str(
                         r#"{"status":404,"error":"Not Found"}"#.to_string(),
                     ));
                 }
 
-                if name.eq_ignore_ascii_case("noContent") {
+                if name.eq_ignore_ascii_case("noContent") || name.eq_ignore_ascii_case("no_content")
+                {
                     return Ok(Value::Str(r#"{"status":204}"#.to_string()));
                 }
 
-                if name.eq_ignore_ascii_case("internalError") {
+                if name.eq_ignore_ascii_case("internalError")
+                    || name.eq_ignore_ascii_case("internal_error")
+                {
                     let msg = if let Some(arg) = args.first() {
                         self.eval_expr(arg, vars).await?.as_string()
                     } else {
@@ -2041,6 +2070,20 @@ impl<'a> Vm<'a> {
                     let escaped = msg.replace('"', "\\\"");
                     return Ok(Value::Str(format!(
                         r#"{{"status":500,"error":"{escaped}"}}"#
+                    )));
+                }
+
+                if name.eq_ignore_ascii_case("badRequest")
+                    || name.eq_ignore_ascii_case("bad_request")
+                {
+                    let msg = if let Some(arg) = args.first() {
+                        self.eval_expr(arg, vars).await?.as_string()
+                    } else {
+                        "Bad Request".to_string()
+                    };
+                    let escaped = msg.replace('"', "\\\"");
+                    return Ok(Value::Str(format!(
+                        r#"{{"status":400,"error":"{escaped}"}}"#
                     )));
                 }
 

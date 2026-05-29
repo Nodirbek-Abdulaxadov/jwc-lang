@@ -56,6 +56,64 @@ const CASES: &[Case] = &[
         expected_output: "5\n",
         expected_emit_contains: &["jwc_print(", "fn add"],
     },
+    // ── v0.4.0 builtins ──────────────────────────────────────────────────
+    Case {
+        name: "array_literal_join",
+        source: r#"
+            function main() {
+                let xs = [1, 2, 3];
+                print(join(xs, "-"));
+            }
+        "#,
+        expected_output: "1-2-3\n",
+        expected_emit_contains: &["vec!", "jwc_b_join("],
+    },
+    Case {
+        name: "range_push_join",
+        source: r#"
+            function main() {
+                let xs = [];
+                for i in range(0, 4) {
+                    push(xs, i * i);
+                }
+                print(join(xs, ","));
+            }
+        "#,
+        expected_output: "0,1,4,9\n",
+        expected_emit_contains: &["jwc_b_range(", "jwc_push(", "jwc_b_join("],
+    },
+    Case {
+        name: "sha256",
+        source: r#"
+            function main() {
+                print(sha256("hello"));
+            }
+        "#,
+        expected_output: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n",
+        expected_emit_contains: &["jwc_b_sha256("],
+    },
+    Case {
+        name: "hmac_sha256",
+        source: r#"
+            function main() {
+                print(hmac_sha256("Jefe", "what do ya want for nothing?"));
+            }
+        "#,
+        expected_output: "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843\n",
+        expected_emit_contains: &["jwc_b_hmac_sha256("],
+    },
+    Case {
+        name: "module_const",
+        source: r#"
+            const PI = 3;
+            const TAU = PI * 2;
+            function main() {
+                print(TAU);
+            }
+        "#,
+        expected_output: "6\n",
+        expected_emit_contains: &["fn jwc_const_pi", "fn jwc_const_tau", "jwc_const_tau()"],
+    },
 ];
 
 #[tokio::test]
