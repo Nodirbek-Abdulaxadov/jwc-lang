@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 
 use crate::ast::{
-    AggregateKind, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
+    AggregateKind, ConstDecl, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
     FieldReference, FunctionDecl, MiddlewareDecl, ModelDecl, ModelKind, NavigationField,
     NavigationKind, OnDeleteAction, Program, RouteDecl, RouteProtocol, SortDir, Stmt, TypeSpec,
     TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
@@ -432,7 +432,177 @@ pub fn validate_program(program: &Program) -> Result<()> {
             .map_err(|err| anyhow!("errorHandler: {err}"))?;
     }
 
+    validate_consts(program)?;
+
     Ok(())
+}
+
+/// Enforce the module-level `const` invariants: no duplicates, every value is
+/// a constant expression (literals / other consts / arithmetic / comparison /
+/// logical ops / unary `-`/`!` / array & object literals), and no circular
+/// references (including self-reference like `const X = X + 1`).
+fn validate_consts(program: &Program) -> Result<()> {
+    // Declared const names, lowercased. Duplicate detection runs alongside.
+    let mut const_names: HashSet<String> = HashSet::new();
+    for c in &program.consts {
+        let key = c.name.to_lowercase();
+        if !const_names.insert(key) {
+            bail!("duplicate const declaration: {}", c.name);
+        }
+    }
+
+    // (a) Every const value must be a constant expression.
+    for c in &program.consts {
+        validate_const_expr(&c.expr, &const_names).map_err(|err| {
+            anyhow!(
+                "const '{}' must be a constant expression ({err})",
+                c.name
+            )
+        })?;
+    }
+
+    // (b) Cycle / self-reference detection over the const dependency graph.
+    let mut deps: HashMap<String, Vec<String>> = HashMap::new();
+    for c in &program.consts {
+        let mut refs = const_expr_var_refs(&c.expr);
+        refs.retain(|n| const_names.contains(n));
+        deps.insert(c.name.to_lowercase(), refs);
+    }
+    // DFS coloring: 0 = unvisited, 1 = visiting (on stack), 2 = done.
+    let mut color: HashMap<String, u8> = HashMap::new();
+    for c in &program.consts {
+        let key = c.name.to_lowercase();
+        if color.get(&key).copied().unwrap_or(0) == 0
+            && const_has_cycle(&key, &deps, &mut color)
+        {
+            bail!("circular const reference involving '{}'", c.name);
+        }
+    }
+
+    Ok(())
+}
+
+/// Recursively verify `expr` is a constant expression. `const_names` holds the
+/// lowercased names of all declared consts; a `Var` is allowed only when it
+/// names one of them. Returns a short description of the offending construct on
+/// failure (the caller prefixes it with the const name).
+fn validate_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<()> {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => Ok(()),
+        Expr::Var(name) => {
+            if const_names.contains(&name.to_lowercase()) {
+                Ok(())
+            } else {
+                bail!("const expression may only reference other consts, not '{name}'")
+            }
+        }
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Eq(a, b)
+        | Expr::Neq(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Lte(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Gte(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b) => {
+            validate_const_expr(a, const_names)?;
+            validate_const_expr(b, const_names)
+        }
+        Expr::Neg(inner) | Expr::Not(inner) => validate_const_expr(inner, const_names),
+        Expr::ArrayLit(items) => {
+            for item in items {
+                validate_const_expr(item, const_names)?;
+            }
+            Ok(())
+        }
+        Expr::ObjectLit(pairs) => {
+            for (_, value) in pairs {
+                validate_const_expr(value, const_names)?;
+            }
+            Ok(())
+        }
+        Expr::Call { .. }
+        | Expr::DbSelect { .. }
+        | Expr::DbCount { .. }
+        | Expr::DbAggregate { .. }
+        | Expr::FieldGet { .. }
+        | Expr::NewEntity { .. }
+        | Expr::Await(_) => {
+            bail!("function calls / DB queries / field access are not allowed")
+        }
+    }
+}
+
+/// Collect the lowercased names of every `Expr::Var` referenced inside `expr`,
+/// recursing through the const-allowed expression shapes. Used to build the
+/// const dependency graph for cycle detection.
+fn const_expr_var_refs(expr: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_const_var_refs(expr, &mut out);
+    out
+}
+
+fn collect_const_var_refs(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Var(name) => out.push(name.to_lowercase()),
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Eq(a, b)
+        | Expr::Neq(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Lte(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Gte(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b) => {
+            collect_const_var_refs(a, out);
+            collect_const_var_refs(b, out);
+        }
+        Expr::Neg(inner) | Expr::Not(inner) => collect_const_var_refs(inner, out),
+        Expr::ArrayLit(items) => {
+            for item in items {
+                collect_const_var_refs(item, out);
+            }
+        }
+        Expr::ObjectLit(pairs) => {
+            for (_, value) in pairs {
+                collect_const_var_refs(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// DFS over the const dependency graph; returns true if a cycle is reachable
+/// from `node`. `color` records 1 = on the current stack, 2 = fully explored.
+fn const_has_cycle(
+    node: &str,
+    deps: &HashMap<String, Vec<String>>,
+    color: &mut HashMap<String, u8>,
+) -> bool {
+    color.insert(node.to_string(), 1);
+    if let Some(children) = deps.get(node) {
+        for child in children {
+            match color.get(child).copied().unwrap_or(0) {
+                1 => return true,
+                0 => {
+                    if const_has_cycle(child, deps, color) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    color.insert(node.to_string(), 2);
+    false
 }
 
 /// Map of locally-bound variable name (lowercased) -> entity name (original
@@ -1856,6 +2026,14 @@ impl<'a> Parser<'a> {
                     fn_decl.visibility = visibility_from(next_pub);
                     program.functions.push(fn_decl);
                 }
+                TokenKind::Keyword(Keyword::Const) => {
+                    if pending_vis.is_some() {
+                        return Err(self.error_here("visibility modifier is not valid on const"));
+                    }
+                    pending_vis = None;
+                    let decl = self.parse_const_decl()?;
+                    program.consts.push(decl);
+                }
                 TokenKind::Keyword(Keyword::Dome) => {
                     pending_vis = None;
                     self.parse_dome_decl(&mut program, next_pub)?;
@@ -1886,7 +2064,7 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     return Err(self.error_here(
-                        "expected import, namespace, mount, group, public, private, dbcontext, entity/class, route, function, middleware, errorHandler, or dome",
+                        "expected import, namespace, mount, group, public, private, dbcontext, entity/class, route, function, const, middleware, errorHandler, or dome",
                     ));
                 }
             }
@@ -1918,6 +2096,18 @@ impl<'a> Parser<'a> {
             driver,
             namespace: Vec::new(),
         })
+    }
+
+    /// `const NAME = <expr>;` — a module-level immutable binding. Consts have
+    /// no visibility modifier; the constant-expression restriction is enforced
+    /// in `validate_program`, not here.
+    fn parse_const_decl(&mut self) -> Result<ConstDecl> {
+        self.bump()?; // consume `const`
+        let name = self.expect_ident("expected const name after 'const'")?;
+        self.expect_symbol('=')?;
+        let expr = self.parse_expr()?;
+        self.expect_symbol(';')?;
+        Ok(ConstDecl { name, expr })
     }
 
     fn skip_braced_block(&mut self) -> Result<()> {
@@ -3612,6 +3802,40 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(entities.len(), 1);
         assert_eq!(entities[0].context_name.as_deref(), Some("AppDb"));
+        validate_program(&program).unwrap();
+    }
+
+    #[test]
+    fn const_self_reference_is_circular_error() {
+        let src = r#"
+            const X = X + 1;
+        "#;
+
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("circular"), "got: {err}");
+    }
+
+    #[test]
+    fn const_with_call_is_non_const_error() {
+        let src = r#"
+            const Y = db_query("q");
+        "#;
+
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("constant expression"), "got: {err}");
+    }
+
+    #[test]
+    fn const_referenced_in_main_validates() {
+        let src = r#"
+            const PI = 3;
+            function main() { print(PI); }
+        "#;
+
+        let program = parse_program(src).unwrap();
+        assert_eq!(program.consts.len(), 1);
         validate_program(&program).unwrap();
     }
 

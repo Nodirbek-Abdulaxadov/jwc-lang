@@ -16,6 +16,19 @@ pub struct Program {
     /// may be mounted multiple times at different prefixes (e.g. `/api/foo`
     /// and `/public/foo`) — each mount produces its own active route set.
     pub mounts: Vec<MountDecl>,
+    /// Module-level `const NAME = <expr>;` declarations. Evaluated once and
+    /// frozen; inside route/function bodies a const name resolves like a
+    /// read-only variable (locals shadow consts).
+    pub consts: Vec<ConstDecl>,
+}
+
+/// `const NAME = <expr>;` — a module-level immutable binding. The expression
+/// must be a constant expression (literals, other consts, arithmetic /
+/// comparison / logical ops, unary `-`/`!`, array/object literals).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstDecl {
+    pub name: String,
+    pub expr: Expr,
 }
 
 /// Visibility marker for top-level declarations. Default is `Private` —

@@ -494,6 +494,7 @@ pub fn merge_program(combined: &mut Program, incoming: Program) -> Result<()> {
     combined.middlewares.extend(incoming.middlewares);
     combined.imports.extend(incoming.imports);
     combined.mounts.extend(incoming.mounts);
+    combined.consts.extend(incoming.consts);
     if let Some(eh) = incoming.error_handler {
         if combined.error_handler.is_some() {
             bail!("only one errorHandler is allowed across all project files");

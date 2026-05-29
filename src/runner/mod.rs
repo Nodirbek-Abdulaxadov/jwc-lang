@@ -6,9 +6,9 @@ use serde_json::{json, Value as JsonValue};
 use tokio_postgres::types::ToSql;
 
 use crate::ast::{
-    AggregateKind, DbOrderBy, ErrorHandlerDecl, Expr, FunctionDecl, ImportDecl, MiddlewareDecl,
-    ModelDecl, ModelKind, MountDecl, NavigationKind, Program, RouteDecl, RouteProtocol, SortDir,
-    Stmt, TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
+    AggregateKind, ConstDecl, DbOrderBy, ErrorHandlerDecl, Expr, FunctionDecl, ImportDecl,
+    MiddlewareDecl, ModelDecl, ModelKind, MountDecl, NavigationKind, Program, RouteDecl,
+    RouteProtocol, SortDir, Stmt, TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
 };
 
 mod builtins;
@@ -233,6 +233,7 @@ pub struct RunMainResult {
 
 pub async fn run_main(program: &Program) -> Result<RunMainResult> {
     let mut vm = Vm::new(program);
+    vm.init_consts().await?;
     let _ = vm.call_function("main", Vec::new()).await?;
     Ok(RunMainResult {
         output: vm.output,
@@ -273,6 +274,7 @@ pub async fn run_ws_request(
     // (a library WS route mounted at "/foo" is only reachable through the
     // expanded copy, not the unprefixed library declaration).
     let mut vm = Vm::new(program);
+    vm.init_consts().await?;
     let route = vm
         .routes
         .iter()
@@ -325,6 +327,7 @@ pub async fn run_request_with_headers(
     headers: HashMap<String, String>,
 ) -> Result<(u16, String, Option<String>, Vec<(String, String)>)> {
     let mut vm = Vm::new(program);
+    vm.init_consts().await?;
     vm.request_body = body;
     vm.current_headers = Some(headers);
     vm.dispatch_route(method, path).await
@@ -336,9 +339,53 @@ pub async fn run_request_with_headers(
 /// is discarded — handlers communicate via side effects (db, cache, email).
 pub async fn run_handler(program: &Program, function_name: &str, payload: String) -> Result<()> {
     let mut vm = Vm::new(program);
+    vm.init_consts().await?;
     vm.call_function(function_name, vec![Value::Str(payload)])
         .await?;
     Ok(())
+}
+
+/// Collect every `Expr::Var` name appearing in `expr` (recursing through all
+/// child expressions). Used by `init_consts` to evaluate consts in dependency
+/// order. Total over the `Expr` enum.
+fn const_var_refs(expr: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_var_refs(expr, &mut out);
+    out
+}
+
+fn collect_var_refs(expr: &Expr, out: &mut Vec<String>) {
+    match expr {
+        Expr::Var(name) => out.push(name.clone()),
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Eq(a, b)
+        | Expr::Neq(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Lte(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Gte(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b) => {
+            collect_var_refs(a, out);
+            collect_var_refs(b, out);
+        }
+        Expr::Neg(inner) | Expr::Not(inner) | Expr::Await(inner) => collect_var_refs(inner, out),
+        Expr::ArrayLit(items) => {
+            for item in items {
+                collect_var_refs(item, out);
+            }
+        }
+        Expr::ObjectLit(pairs) => {
+            for (_, value) in pairs {
+                collect_var_refs(value, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 struct Vm<'a> {
@@ -385,6 +432,12 @@ struct Vm<'a> {
     request_body: Option<String>,
     /// Set when `serve(port)` is called from main()
     serve_requested: Option<u16>,
+    /// Module-level const declarations (borrowed from the program), evaluated
+    /// lazily into `consts` by `init_consts`.
+    const_decls: Vec<&'a ConstDecl>,
+    /// Evaluated const values keyed by lowercased const name. Frozen after
+    /// `init_consts`; read-only at every `Var` site (locals shadow consts).
+    consts: HashMap<String, Value>,
 }
 
 impl<'a> Vm<'a> {
@@ -473,7 +526,39 @@ impl<'a> Vm<'a> {
             depth: 0,
             request_body: None,
             serve_requested: None,
+            const_decls: program.consts.iter().collect(),
+            consts: HashMap::new(),
         }
+    }
+
+    /// Evaluate module-level consts once at startup into `self.consts`.
+    /// `validate_program` already guarantees the dependency graph is acyclic
+    /// and that every `Var` ref names another const, so a fixpoint that defers
+    /// a const until its const-deps are ready always terminates.
+    async fn init_consts(&mut self) -> Result<()> {
+        let mut remaining: Vec<&'a ConstDecl> = self.const_decls.clone();
+        let mut empty_vars: HashMap<String, Value> = HashMap::new();
+        while !remaining.is_empty() {
+            let mut progressed = false;
+            let mut still = Vec::new();
+            for decl in remaining {
+                let deps_ready = const_var_refs(&decl.expr)
+                    .iter()
+                    .all(|d| self.consts.contains_key(&d.to_lowercase()));
+                if deps_ready {
+                    let v = self.eval_expr(&decl.expr, &mut empty_vars).await?;
+                    self.consts.insert(decl.name.to_lowercase(), v);
+                    progressed = true;
+                } else {
+                    still.push(decl);
+                }
+            }
+            if !progressed {
+                bail!("circular or unresolved const reference");
+            }
+            remaining = still;
+        }
+        Ok(())
     }
 
     /// Resolve a function name to a registered FunctionDecl using the
@@ -1297,13 +1382,20 @@ impl<'a> Vm<'a> {
             Expr::Str(v) => Ok(Value::Str(v.clone())),
             Expr::Bool(v) => Ok(Value::Bool(*v)),
             Expr::Null => Ok(Value::Null),
-            Expr::Var(name) => vars.get(&name.to_lowercase()).cloned().ok_or_else(|| {
-                let suggestion = closest_match(name, vars.keys());
-                match suggestion {
-                    Some(s) => anyhow!("Undefined variable: {name}. Did you mean '{s}'?"),
-                    None => anyhow!("Undefined variable: {name}"),
+            Expr::Var(name) => {
+                let key = name.to_lowercase();
+                if let Some(v) = vars.get(&key) {
+                    Ok(v.clone())
+                } else if let Some(v) = self.consts.get(&key) {
+                    Ok(v.clone())
+                } else {
+                    let suggestion = closest_match(name, vars.keys());
+                    match suggestion {
+                        Some(s) => Err(anyhow!("Undefined variable: {name}. Did you mean '{s}'?")),
+                        None => Err(anyhow!("Undefined variable: {name}")),
+                    }
                 }
-            }),
+            }
             Expr::NewEntity { entity: _ } => Ok(Value::Str("{}".to_string())),
             Expr::FieldGet { var, field } => {
                 let obj_val = vars
@@ -3754,6 +3846,31 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "Hello JWC\n7\n");
+    }
+
+    #[tokio::test]
+    async fn module_const_is_visible_in_main() {
+        let src = r#"
+            const GREETING = "hi";
+            function main() { print(GREETING); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
+        assert_eq!(out.output, "hi\n");
+    }
+
+    #[tokio::test]
+    async fn const_can_reference_other_const() {
+        let src = r#"
+            const A = 2;
+            const B = A * 10;
+            function main() { print(B); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).await.unwrap();
+        assert_eq!(out.output, "20\n");
     }
 
     #[tokio::test]

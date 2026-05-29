@@ -37,8 +37,8 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::ast::{
-    AggregateKind, Expr, FunctionDecl, ImportDecl, ModelKind, MountDecl, NavigationField, Program,
-    RouteDecl, Stmt,
+    AggregateKind, ConstDecl, Expr, FunctionDecl, ImportDecl, ModelKind, MountDecl,
+    NavigationField, Program, RouteDecl, Stmt,
 };
 
 /// Compute the FQN form a decl will be emitted under in generated Rust:
@@ -243,6 +243,9 @@ fn flatten_namespaces(program: &Program) -> Program {
     }
 
     out.error_handler = program.error_handler.clone();
+    // Module-level consts carry over verbatim — they are namespace-agnostic and
+    // already validated to be pure constant expressions.
+    out.consts = program.consts.clone();
     // imports / mounts were consumed by this pass — drop them.
     out
 }
@@ -1113,13 +1116,26 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
         .iter()
         .map(|f| (f.name.clone(), f))
         .collect();
+    let const_names: HashSet<String> = program
+        .consts
+        .iter()
+        .map(|c| c.name.to_lowercase())
+        .collect();
     let ctx = CodegenCtx {
         funcs: &known_funcs,
         entities: &entities,
         fn_decls: &fn_decls,
+        consts: &const_names,
         has_error_handler: program.error_handler.is_some(),
         closure_depth: std::cell::Cell::new(0),
     };
+
+    // Module-level consts become zero-arg functions. A const that references
+    // another const emits a call to that const's function (see emit_expr's
+    // Var arm), so declaration order does not matter for the emitted Rust.
+    for c in &program.consts {
+        emit_const_fn(&mut out, c, &ctx);
+    }
 
     for func in &program.functions {
         emit_user_fn(&mut out, func, &ctx);
@@ -1178,6 +1194,9 @@ struct CodegenCtx<'a> {
     /// `-> handler` codegen to pull declared parameter names so we can bind
     /// path/query params positionally.
     fn_decls: &'a HashMap<String, &'a FunctionDecl>,
+    /// Lowercased names of all module-level consts. A `Var` matching one emits
+    /// a call to its `jwc_const_*` function instead of a local binding clone.
+    consts: &'a HashSet<String>,
     has_error_handler: bool,
     /// Number of nested catch_unwind closures we're currently emitting into.
     /// `return X;` inside any closure (try/transaction body) must park the
@@ -2202,8 +2221,14 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
         }
         Expr::Null => out.push_str("V::Null"),
         Expr::Var(name) => {
-            out.push_str(&sanitize_ident(name));
-            out.push_str(".clone()");
+            if ctx.consts.contains(&name.to_lowercase()) {
+                out.push_str("jwc_const_");
+                out.push_str(&sanitize_ident(&name.to_lowercase()));
+                out.push_str("()");
+            } else {
+                out.push_str(&sanitize_ident(name));
+                out.push_str(".clone()");
+            }
         }
         Expr::FieldGet { var, field } => {
             out.push_str("jwc_get_field(&");
@@ -2852,6 +2877,17 @@ fn push_str_escaped(out: &mut String, s: &str) {
             c => out.push(c),
         }
     }
+}
+
+/// Emit a module-level const as a zero-arg function returning its value.
+/// Const bodies are pure (enforced by `validate_program`), so calling the
+/// function at each use site is equivalent to inlining the literal.
+fn emit_const_fn(out: &mut String, c: &ConstDecl, ctx: &CodegenCtx) {
+    out.push_str("fn jwc_const_");
+    out.push_str(&sanitize_ident(&c.name.to_lowercase()));
+    out.push_str("() -> V {\n    ");
+    emit_expr(out, &c.expr, ctx);
+    out.push_str("\n}\n");
 }
 
 fn sanitize_ident(name: &str) -> String {
