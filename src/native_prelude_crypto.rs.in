@@ -1,0 +1,90 @@
+// --- crypto built-ins (gated by needs_crypto) --------------------------------
+// Concatenated into the generated standalone binary, so this operates on the
+// emitted `V` enum (not `crate::`). Imports are aliased to avoid any clash with
+// names already brought in by the always-on prelude; aliased trait imports
+// still bring `.update()` / `.finalize()` into scope.
+use hmac::{Hmac as JwcHmac, Mac as JwcMac};
+use sha2::{Digest as JwcDigest, Sha256 as JwcSha256};
+use sha1::Sha1 as JwcSha1;
+use md5::Md5 as JwcMd5;
+use argon2::password_hash::{
+    rand_core::OsRng as JwcOsRng, PasswordHasher as JwcPwHasher,
+    PasswordVerifier as JwcPwVerifier, SaltString as JwcSaltString,
+};
+use argon2::{Argon2 as JwcArgon2, PasswordHash as JwcPasswordHash};
+
+fn jwc_hash_to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+fn jwc_b_sha256(v: V) -> V {
+    match v {
+        V::Str(s) => {
+            let mut h = JwcSha256::new();
+            h.update(s.as_bytes());
+            V::Str(jwc_hash_to_hex(&h.finalize()))
+        }
+        other => panic!("sha256() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_sha1(v: V) -> V {
+    match v {
+        V::Str(s) => {
+            let mut h = JwcSha1::new();
+            h.update(s.as_bytes());
+            V::Str(jwc_hash_to_hex(&h.finalize()))
+        }
+        other => panic!("sha1() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_md5(v: V) -> V {
+    match v {
+        V::Str(s) => {
+            let mut h = JwcMd5::new();
+            h.update(s.as_bytes());
+            V::Str(jwc_hash_to_hex(&h.finalize()))
+        }
+        other => panic!("md5() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_hmac_sha256(key: V, msg: V) -> V {
+    match (key, msg) {
+        (V::Str(k), V::Str(m)) => {
+            type H = JwcHmac<JwcSha256>;
+            let mut mac = H::new_from_slice(k.as_bytes()).expect("HMAC accepts any key length");
+            mac.update(m.as_bytes());
+            V::Str(jwc_hash_to_hex(&mac.finalize().into_bytes()))
+        }
+        (a, b) => panic!("hmac_sha256() expects two strings, got {:?} / {:?}", a, b),
+    }
+}
+
+fn jwc_b_hash_password(v: V) -> V {
+    match v {
+        V::Str(pwd) => {
+            let salt = JwcSaltString::generate(&mut JwcOsRng);
+            match JwcArgon2::default().hash_password(pwd.as_bytes(), &salt) {
+                Ok(h) => V::Str(h.to_string()),
+                Err(e) => panic!("hash_password failed: {}", e),
+            }
+        }
+        other => panic!("hash_password() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_verify_password(pwd: V, stored: V) -> V {
+    match (pwd, stored) {
+        (V::Str(p), V::Str(h)) => match JwcPasswordHash::new(&h) {
+            Ok(parsed) => V::Bool(JwcArgon2::default().verify_password(p.as_bytes(), &parsed).is_ok()),
+            Err(e) => panic!("verify_password: malformed stored hash: {}", e),
+        },
+        (a, b) => panic!("verify_password() expects two strings, got {:?} / {:?}", a, b),
+    }
+}

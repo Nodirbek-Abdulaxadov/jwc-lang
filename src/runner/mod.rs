@@ -1733,6 +1733,18 @@ impl<'a> Vm<'a> {
                 if name.eq_ignore_ascii_case("json_stringify") {
                     return self.eval_json_stringify_call(args, vars).await;
                 }
+                if name.eq_ignore_ascii_case("sha256") {
+                    return self.eval_sha256_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("sha1") {
+                    return self.eval_sha1_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("md5") {
+                    return self.eval_md5_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("hmac_sha256") {
+                    return self.eval_hmac_sha256_call(args, vars).await;
+                }
 
                 if name.eq_ignore_ascii_case("now") {
                     if !args.is_empty() {

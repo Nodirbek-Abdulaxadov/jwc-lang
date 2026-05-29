@@ -1093,6 +1093,70 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(joined))
     }
 
+    pub(super) async fn eval_sha256_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("sha256(s) expects exactly 1 arg");
+        }
+        let s = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            other => bail!("sha256(s): s must be string, got {}", other.type_name()),
+        };
+        Ok(Value::Str(crate::hash::sha256_hex(&s)))
+    }
+
+    pub(super) async fn eval_sha1_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("sha1(s) expects exactly 1 arg");
+        }
+        let s = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            other => bail!("sha1(s): s must be string, got {}", other.type_name()),
+        };
+        Ok(Value::Str(crate::hash::sha1_hex(&s)))
+    }
+
+    pub(super) async fn eval_md5_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("md5(s) expects exactly 1 arg");
+        }
+        let s = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            other => bail!("md5(s): s must be string, got {}", other.type_name()),
+        };
+        Ok(Value::Str(crate::hash::md5_hex(&s)))
+    }
+
+    pub(super) async fn eval_hmac_sha256_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("hmac_sha256(key, msg) expects exactly 2 args");
+        }
+        let key = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            other => bail!("hmac_sha256: key must be string, got {}", other.type_name()),
+        };
+        let msg = match self.eval_expr(&args[1], vars).await? {
+            Value::Str(s) => s,
+            other => bail!("hmac_sha256: msg must be string, got {}", other.type_name()),
+        };
+        Ok(Value::Str(crate::hash::hmac_sha256_hex(&key, &msg)))
+    }
+
     pub(super) async fn eval_json_parse_call(
         &mut self,
         args: &[Expr],

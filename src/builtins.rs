@@ -121,6 +121,11 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef { name: "range", aliases: &[], min_args: 1, max_args: Some(3), native: true },
     BuiltinDef { name: "push", aliases: &["append"], min_args: 2, max_args: Some(2), native: true },
     BuiltinDef { name: "join", aliases: &[], min_args: 2, max_args: Some(2), native: true },
+    // ── Hash / crypto (native) ───────────────────────────────────────────
+    BuiltinDef { name: "sha256", aliases: &[], min_args: 1, max_args: Some(1), native: true },
+    BuiltinDef { name: "sha1", aliases: &[], min_args: 1, max_args: Some(1), native: true },
+    BuiltinDef { name: "md5", aliases: &[], min_args: 1, max_args: Some(1), native: true },
+    BuiltinDef { name: "hmac_sha256", aliases: &[], min_args: 2, max_args: Some(2), native: true },
 
     // ── Interpreter-only built-ins (native: false) ───────────────────────
     // Dispatched by the interpreter's `Expr::Call` arm but NOT accepted by
@@ -134,8 +139,8 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef { name: "http_post", aliases: &[], min_args: 1, max_args: Some(2), native: false },
     BuiltinDef { name: "jwt_sign", aliases: &[], min_args: 1, max_args: Some(2), native: false },
     BuiltinDef { name: "jwt_verify", aliases: &[], min_args: 1, max_args: Some(2), native: false },
-    BuiltinDef { name: "hash_password", aliases: &[], min_args: 1, max_args: Some(1), native: false },
-    BuiltinDef { name: "verify_password", aliases: &[], min_args: 2, max_args: Some(2), native: false },
+    BuiltinDef { name: "hash_password", aliases: &[], min_args: 1, max_args: Some(1), native: true },
+    BuiltinDef { name: "verify_password", aliases: &[], min_args: 2, max_args: Some(2), native: true },
     BuiltinDef { name: "send_email", aliases: &[], min_args: 1, max_args: None, native: false },
     BuiltinDef { name: "register_job_handler", aliases: &[], min_args: 2, max_args: Some(2), native: false },
     BuiltinDef { name: "enqueue", aliases: &[], min_args: 1, max_args: None, native: false },
