@@ -811,6 +811,7 @@ impl<'a> Vm<'a> {
             bail!("length(x) expects exactly 1 arg");
         }
         match self.eval_expr(&args[0], vars).await? {
+            Value::Array(a) => Ok(Value::Int(a.len() as i64)),
             Value::Str(s) => {
                 if let Ok(parsed) = serde_json::from_str::<JsonValue>(&s) {
                     if let Some(arr) = parsed.as_array() {
@@ -888,6 +889,7 @@ impl<'a> Vm<'a> {
 
         match haystack {
             Value::Null => Ok(Value::Bool(false)),
+            Value::Array(items) => Ok(Value::Bool(items.iter().any(|v| *v == needle))),
             Value::Str(s) => {
                 if let Ok(parsed) = serde_json::from_str::<JsonValue>(&s) {
                     if let Some(arr) = parsed.as_array() {
@@ -974,6 +976,10 @@ impl<'a> Vm<'a> {
             bail!("{name}(xs) expects exactly 1 arg");
         }
         let raw = match self.eval_expr(&args[0], vars).await? {
+            Value::Array(a) => {
+                let elem = if first { a.first() } else { a.last() };
+                return Ok(elem.cloned().unwrap_or(Value::Null));
+            }
             Value::Str(s) => s,
             Value::Null => return Ok(Value::Null),
             other => bail!(
@@ -988,6 +994,103 @@ impl<'a> Vm<'a> {
             .ok_or_else(|| anyhow!("{name}: xs is not a JSON array"))?;
         let elem = if first { arr.first() } else { arr.last() };
         Ok(elem.map(json_to_value).unwrap_or(Value::Null))
+    }
+
+    /// `range(n)` → `[0, …, n-1]`; `range(start, end)`; `range(start, end, step)`.
+    /// Step must be positive (mirrors native `(start..end).step_by(step)`).
+    pub(super) async fn eval_range_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.is_empty() || args.len() > 3 {
+            bail!("range(n) / range(start, end) / range(start, end, step) expects 1-3 args");
+        }
+        let mut nums = Vec::with_capacity(args.len());
+        for a in args {
+            match self.eval_expr(a, vars).await? {
+                Value::Int(n) => nums.push(n),
+                other => bail!("range: args must be int, got {}", other.type_name()),
+            }
+        }
+        let (start, end, step) = match nums.as_slice() {
+            [n] => (0i64, *n, 1i64),
+            [s, e] => (*s, *e, 1i64),
+            [s, e, st] => (*s, *e, *st),
+            _ => unreachable!(),
+        };
+        if step <= 0 {
+            bail!("range: step must be positive, got {step}");
+        }
+        let mut out = Vec::new();
+        let mut i = start;
+        while i < end {
+            out.push(Value::Int(i));
+            i += step;
+        }
+        Ok(Value::Array(out))
+    }
+
+    /// `push(arr, x)` / `append(arr, x)` — append `x` to the array bound to the
+    /// first argument (which must be a variable), mutating it in place, and
+    /// return the resulting array.
+    pub(super) async fn eval_push_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("push(arr, x) expects exactly 2 args");
+        }
+        let elem = self.eval_expr(&args[1], vars).await?;
+        let var_name = match &args[0] {
+            Expr::Var(n) => n.to_lowercase(),
+            _ => bail!("push(arr, x): first arg must be an array variable"),
+        };
+        let current = vars
+            .get(&var_name)
+            .cloned()
+            .ok_or_else(|| anyhow!("push: undefined variable"))?;
+        let mut items = match current {
+            Value::Array(items) => items,
+            Value::Null => Vec::new(),
+            other => bail!("push: first arg must be an array, got {}", other.type_name()),
+        };
+        items.push(elem);
+        let result = Value::Array(items);
+        vars.insert(var_name, result.clone());
+        Ok(result)
+    }
+
+    /// `join(arr, sep)` — stringify each element and concatenate with `sep`. O(n).
+    pub(super) async fn eval_join_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("join(arr, sep) expects exactly 2 args");
+        }
+        let arr = self.eval_expr(&args[0], vars).await?;
+        let sep = match self.eval_expr(&args[1], vars).await? {
+            Value::Str(s) => s,
+            other => bail!("join: sep must be string, got {}", other.type_name()),
+        };
+        let items: Vec<Value> = match arr {
+            Value::Array(items) => items,
+            Value::Null => Vec::new(),
+            Value::Str(s) => match serde_json::from_str::<JsonValue>(&s) {
+                Ok(JsonValue::Array(a)) => a.iter().map(json_to_value).collect(),
+                _ => bail!("join: first arg must be an array"),
+            },
+            other => bail!("join: first arg must be an array, got {}", other.type_name()),
+        };
+        let joined = items
+            .iter()
+            .map(|v| v.as_string())
+            .collect::<Vec<_>>()
+            .join(&sep);
+        Ok(Value::Str(joined))
     }
 
     pub(super) async fn eval_json_parse_call(

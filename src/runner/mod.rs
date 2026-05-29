@@ -1718,6 +1718,15 @@ impl<'a> Vm<'a> {
                 if name.eq_ignore_ascii_case("last") {
                     return self.eval_first_or_last_call(args, vars, false).await;
                 }
+                if name.eq_ignore_ascii_case("range") {
+                    return self.eval_range_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("push") || name.eq_ignore_ascii_case("append") {
+                    return self.eval_push_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("join") {
+                    return self.eval_join_call(args, vars).await;
+                }
                 if name.eq_ignore_ascii_case("json_parse") {
                     return self.eval_json_parse_call(args, vars).await;
                 }

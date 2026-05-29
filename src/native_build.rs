@@ -2216,6 +2216,54 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 out.push_str(").await");
                 return;
             }
+            if name == "range" {
+                // Variadic in JWC (`range(n)` / `range(start, end)` /
+                // `range(start, end, step)`); pad to the prelude's fixed
+                // (start, end, step) signature.
+                out.push_str("jwc_b_range(");
+                match args.as_slice() {
+                    [n] => {
+                        out.push_str("V::Int(0), ");
+                        emit_expr(out, n, ctx);
+                        out.push_str(", V::Int(1)");
+                    }
+                    [s, e] => {
+                        emit_expr(out, s, ctx);
+                        out.push_str(", ");
+                        emit_expr(out, e, ctx);
+                        out.push_str(", V::Int(1)");
+                    }
+                    [s, e, st] => {
+                        emit_expr(out, s, ctx);
+                        out.push_str(", ");
+                        emit_expr(out, e, ctx);
+                        out.push_str(", ");
+                        emit_expr(out, st, ctx);
+                    }
+                    _ => out.push_str("V::Int(0), V::Int(0), V::Int(1)"),
+                }
+                out.push(')');
+                return;
+            }
+            if name == "push" || name == "append" {
+                // Mutating: append to the array variable in place, then yield
+                // the array. Requires the first arg to be a plain variable.
+                match args.as_slice() {
+                    [Expr::Var(v), elem] => {
+                        out.push_str("{ jwc_push(&mut ");
+                        out.push_str(&sanitize_ident(v));
+                        out.push_str(", ");
+                        emit_expr(out, elem, ctx);
+                        out.push_str("); ");
+                        out.push_str(&sanitize_ident(v));
+                        out.push_str(".clone() }");
+                    }
+                    _ => out.push_str(
+                        "compile_error!(\"push(arr, x): first arg must be an array variable\")",
+                    ),
+                }
+                return;
+            }
             let is_user = ctx.funcs.contains(name);
             // Async builtins implemented in the prelude as `async fn jwc_b_*`.
             // `raw_sql` is also async but goes through its own variadic codegen

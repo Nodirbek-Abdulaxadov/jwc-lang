@@ -117,6 +117,10 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef { name: "cache_clear", aliases: &[], min_args: 0, max_args: Some(0), native: true },
     // ── Raw SQL escape hatch (native) ────────────────────────────────────
     BuiltinDef { name: "raw_sql", aliases: &[], min_args: 1, max_args: None, native: true },
+    // ── Array helpers (native) ───────────────────────────────────────────
+    BuiltinDef { name: "range", aliases: &[], min_args: 1, max_args: Some(3), native: true },
+    BuiltinDef { name: "push", aliases: &["append"], min_args: 2, max_args: Some(2), native: true },
+    BuiltinDef { name: "join", aliases: &[], min_args: 2, max_args: Some(2), native: true },
 
     // ── Interpreter-only built-ins (native: false) ───────────────────────
     // Dispatched by the interpreter's `Expr::Call` arm but NOT accepted by

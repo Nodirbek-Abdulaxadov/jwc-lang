@@ -654,6 +654,40 @@ fn jwc_b_last(v: V) -> V {
     }
 }
 
+fn jwc_b_range(start: V, end: V, step: V) -> V {
+    let s = jwc_to_int(&start).unwrap_or(0);
+    let e = jwc_to_int(&end).unwrap_or(0);
+    let st = jwc_to_int(&step).unwrap_or(1);
+    if st <= 0 {
+        panic!("range() step must be positive, got {}", st);
+    }
+    let mut out = Vec::new();
+    let mut i = s;
+    while i < e {
+        out.push(V::Int(i));
+        i += st;
+    }
+    V::Array(out)
+}
+
+fn jwc_push(arr: &mut V, elem: V) {
+    match arr {
+        V::Array(items) => items.push(elem),
+        V::Null => *arr = V::Array(vec![elem]),
+        other => panic!("push() first arg must be an array, got {:?}", other),
+    }
+}
+
+fn jwc_b_join(arr: V, sep: V) -> V {
+    let sep = match sep {
+        V::Str(s) => s,
+        other => panic!("join() sep must be a string, got {:?}", other),
+    };
+    let items = jwc_to_array(arr);
+    let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+    V::Str(parts.join(&sep))
+}
+
 fn jwc_b_json_parse(v: V) -> V {
     match v {
         V::Str(s) => match jwc_from_json(&s) {
