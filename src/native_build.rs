@@ -456,10 +456,12 @@ const BUILD_DIR_NAME: &str = ".jwc-build";
 /// Built-in JWC functions emitted as inlined helpers in the generated Rust
 /// prelude. Calls to anything outside this set or the user's own functions
 /// produce an "unsupported" error at codegen.
-// Built-in name lists now live in `src/builtins.rs` so the lint pass,
+// Built-in metadata now lives in `src/builtins.rs` so the lint pass,
 // validator, and any future tooling can share the same source of truth
-// without depending on this codegen-heavy module.
-pub use crate::builtins::{BUILTINS, SPECIAL_BUILTINS};
+// without depending on this codegen-heavy module. The native AOT whitelist
+// is `native_builtin_names()` (name + aliases of every `native: true` def)
+// combined with `SPECIAL_BUILTINS`.
+pub use crate::builtins::{native_builtin_names, SPECIAL_BUILTINS};
 
 /// Codegen-time metadata for a DB-bound entity. Captures the column list and
 /// each column's Postgres-target type so INSERT param boxing can pick the
@@ -737,10 +739,9 @@ fn reject_unsupported(program: &Program) -> Result<()> {
         .map(|f| f.name.clone())
         .chain(program.middlewares.iter().map(|m| m.name.clone()))
         .collect();
-    let builtins: HashSet<&str> = BUILTINS
-        .iter()
-        .chain(SPECIAL_BUILTINS.iter())
-        .copied()
+    let builtins: HashSet<&str> = native_builtin_names()
+        .into_iter()
+        .chain(SPECIAL_BUILTINS.iter().copied())
         .collect();
 
     for func in &program.functions {
@@ -858,7 +859,7 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             if name != "print" && !funcs.contains(name) && !builtins.contains(name.as_str()) {
                 bail!(unsupported(&format!(
                     "call to `{name}(...)` — unknown function. Define it or use one of the built-ins: {}, serve",
-                    BUILTINS.join(", ")
+                    native_builtin_names().join(", ")
                 )));
             }
             for a in args {
