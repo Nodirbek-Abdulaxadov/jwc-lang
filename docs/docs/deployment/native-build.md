@@ -64,4 +64,6 @@ The native pipeline is partial. These constructs are interpreter-only today (cle
 - `cache_*` family
 - Some queue primitives
 
+As of v0.4.0, `hash_password` / `verify_password` are accepted by `jwc build --native` (previously interpreter-only). Graceful shutdown — `serve(port)` draining in-flight requests on Ctrl+C — also works in native builds.
+
 Roadmap [Phase 4 + Sprint 13](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md) tracks the closing list.

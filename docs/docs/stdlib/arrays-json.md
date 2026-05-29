@@ -14,8 +14,21 @@ JSON is the native data shape — arrays and objects are first-class. There's no
 | `first(xs)` | `any` | element 0, or `null` if empty |
 | `last(xs)` | `any` | last element, or `null` if empty |
 | `contains(xs, x)` | `bool` | strict equality |
+| `range(n)` / `range(start, end)` / `range(start, end, step)` | `int[]` | `[0..n-1]`, `[start..end-1]`, or stepped; step must be positive |
+| `push(arr, x)` / `append(arr, x)` | `any[]` | appends `x` to the array variable in place (first arg must be a variable); returns the array |
+| `join(arr, sep)` | `string` | stringifies each element and concatenates with `sep`; O(n) |
 | `json_parse(s)` | `any` | parses a JSON string into a structured value |
 | `json_stringify(v)` | `string` | inverse |
+
+## Array literals
+
+```jwc
+let nums  = [1, 2, 3];
+let empty = [];
+let mixed = [1, "two", true];   // heterogeneous elements are fine
+```
+
+An array literal evaluates to a real array value, iterable with `for ... in`.
 
 ## Object literals
 
@@ -41,6 +54,16 @@ for (n in nums) {
 ```
 
 `for ... in` accepts both arrays and JSON-array-strings (auto-parsed). `break` / `continue` / `return` all work.
+
+## Building arrays
+
+```jwc
+let squares = [];
+for (n in range(5)) {           // 0, 1, 2, 3, 4
+    push(squares, n * n);       // mutates `squares` in place
+}
+let csv = join(squares, ",");   // "0,1,4,9,16"
+```
 
 ## When to reach for `json`
 

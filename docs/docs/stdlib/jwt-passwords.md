@@ -40,3 +40,19 @@ if (!ok) { return unauthorized(); }
 | `verify_password(plaintext, hash)` | `bool` | constant-time |
 
 The hash includes the salt + parameters; never store the salt separately.
+
+## Hashing & HMAC
+
+New in v0.4.0. These return raw digests — for password storage prefer `hash_password` above.
+
+```jwc
+let digest = sha256("hello");                       // lowercase hex
+let sig    = hmac_sha256(env("API_SECRET"), body);  // lowercase hex
+```
+
+| Built-in | Returns | Notes |
+|---|---|---|
+| `sha256(s)` | `string` | lowercase hex digest |
+| `sha1(s)` | `string` | lowercase hex digest |
+| `md5(s)` | `string` | lowercase hex digest |
+| `hmac_sha256(key, msg)` | `string` | lowercase hex HMAC-SHA256 |

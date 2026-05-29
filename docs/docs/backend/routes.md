@@ -65,6 +65,8 @@ The third form is shorthand for `let typed: CreateUserRequest = body();` — the
 | Built-in | Status | Body |
 |---|---|---|
 | `text(s)` | 200 | plain text |
+| `html(s)` | 200 | HTML — `text/html` |
+| `response(body, mime)` / `raw(body, mime)` | 200 | raw body under a custom Content-Type; `text/*` gets `; charset=utf-8` |
 | `json(v)` | 200 | JSON-serialised value |
 | `ok(v)` | 200 | JSON |
 | `created(v)` | 201 | JSON |
@@ -84,7 +86,7 @@ camelCase and snake_case aliases both work (`notFound` ≡ `not_found`).
 let auth = header("authorization");   // null if missing
 ```
 
-There's no setter for response headers in v1 — `content-type` is implied by the builder you choose.
+There's no general setter for response headers in v1 — `content-type` is implied by the builder you choose. For a custom Content-Type, use `response(body, mime)` / `raw(body, mime)`, which ship the body verbatim (e.g. `return response(csv, "text/csv");`). `text/*` MIME types get `; charset=utf-8` appended automatically; others (e.g. `image/png`) pass through unchanged.
 
 ## WebSocket routes
 

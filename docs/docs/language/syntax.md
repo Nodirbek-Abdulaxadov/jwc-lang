@@ -23,7 +23,16 @@ let typed: int = 7;       // explicit type (compile-time check)
 count = count + 1;        // re-assignable
 ```
 
-`let` is the only declaration keyword. There is no `const`.
+`let` is for re-assignable variables. For read-only values use `const` (see below).
+
+### Module-level `const`
+
+```jwc
+const PI  = 3.14159;       // top-level, read-only, frozen
+const TAU = PI * 2;        // a const may reference another const
+```
+
+Declared at the top level with `const NAME = expr;`. The value is read-only and visible everywhere — inside routes, functions, middlewares, and `main`. The right-hand side must be a **constant expression**: only literals, operators, array/object literals, and references to other consts. No function calls, DB access, field access, or `await`. The compiler rejects non-const expressions, undeclared names, duplicate names, and circular references (e.g. `const X = X + 1;`).
 
 ## String literals
 
@@ -32,6 +41,7 @@ let plain  = "hello";
 let escaped = "line\nbreak";
 let raw    = r"^[^@]+@[^@]+\.[^@]+$";  // raw — no escape processing
 let templ  = "user " + name + " has " + count + " items";
+let xs     = [1, 2, 3];                 // array literal
 ```
 
 Concatenation is `+`. There's no template-literal interpolation today; use `+` or `json({...})`.
