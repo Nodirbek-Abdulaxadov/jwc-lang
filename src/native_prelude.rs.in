@@ -14,6 +14,15 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use rustc_hash::FxHashMap;
+
+/// Hot-path `V::Object` payload. `FxHashMap` (fxhash, no DoS resistance —
+/// fine for AOT'd source-literal keys) buys O(1) lookup and ~3× faster
+/// hashing vs `siphash`. Insertion order is intentionally not preserved
+/// here; `jwc_write_json` sorts keys at serialization time so output stays
+/// deterministic, and `raw_sql` picks the alphabetically-first column.
+type JwcObj = FxHashMap<String, V>;
+
 /// Load a `.env` from the current working directory or the binary's directory.
 /// Mirrors `project::load_dotenv` so a standalone native binary picks up the
 /// same env layout the `jwc run`/`jwc serve` CLI does.
@@ -80,7 +89,7 @@ enum V {
     Float(f64),
     Str(String),
     Array(Vec<V>),
-    Object(BTreeMap<String, V>),
+    Object(JwcObj),
 }
 
 impl fmt::Display for V {
@@ -194,7 +203,7 @@ fn jwc_catch_type_matches(catch_type: Option<&str>, kind: &str) -> bool {
 // Builds the V passed to `errorHandler (e)` and `try {} catch (e)`.
 fn jwc_error_value(msg: String) -> V {
     let kind = jwc_classify_error(&msg).to_string();
-    let mut m = BTreeMap::new();
+    let mut m: JwcObj = JwcObj::default();
     m.insert("type".to_string(), V::Str(kind));
     m.insert("message".to_string(), V::Str(msg));
     m.insert("causes".to_string(), V::Array(Vec::new()));
@@ -375,12 +384,16 @@ fn jwc_write_json(v: &V, out: &mut String) {
             out.push(']');
         }
         V::Object(map) => {
+            // FxHashMap has no insertion order — sort keys so JSON output
+            // is deterministic (and matches the previous BTreeMap behavior).
             out.push('{');
-            for (i, (k, val)) in map.iter().enumerate() {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            for (i, k) in keys.into_iter().enumerate() {
                 if i > 0 { out.push(','); }
                 jwc_write_json_string(k, out);
                 out.push(':');
-                jwc_write_json(val, out);
+                jwc_write_json(&map[k], out);
             }
             out.push('}');
         }
@@ -542,7 +555,7 @@ impl<'a> JsonParser<'a> {
 
     fn parse_object(&mut self) -> Result<V, String> {
         self.expect(b'{')?;
-        let mut out = BTreeMap::new();
+        let mut out: JwcObj = JwcObj::default();
         self.skip_ws();
         if self.peek() == Some(b'}') { self.pos += 1; return Ok(V::Object(out)); }
         loop {
@@ -857,16 +870,16 @@ fn jwc_b_body() -> V {
 // --- response helpers --------------------------------------------------------
 
 fn make_response(status: u16, body: String, content_type: &str) -> V {
-    make_response_with_headers(status, body, content_type, BTreeMap::new())
+    make_response_with_headers(status, body, content_type, JwcObj::default())
 }
 
 fn make_response_with_headers(
     status: u16,
     body: String,
     content_type: &str,
-    headers: BTreeMap<String, V>,
+    headers: JwcObj,
 ) -> V {
-    let mut m = BTreeMap::new();
+    let mut m: JwcObj = JwcObj::default();
     m.insert(HTTP_RESPONSE_MARKER.to_string(), V::Bool(true));
     m.insert("status".to_string(), V::Int(status as i64));
     m.insert("body".to_string(), V::Str(body));

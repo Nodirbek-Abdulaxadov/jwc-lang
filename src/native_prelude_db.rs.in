@@ -95,7 +95,7 @@ async fn jwc_db_exec(sql: &str, params: DbParams) -> u64 {
 
 fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
     use tokio_postgres::types::Type;
-    let mut m = BTreeMap::new();
+    let mut m: JwcObj = JwcObj::default();
     for (i, col) in row.columns().iter().enumerate() {
         let name = col.name().to_string();
         let ty = col.type_();
@@ -413,14 +413,18 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
         let Some(first) = rows.into_iter().next() else {
             return V::Null;
         };
-        let V::Object(m) = first else {
+        let V::Object(mut m) = first else {
             return V::Null;
         };
-        // First-column-as-text: the only deterministic column ordering we have
-        // is insertion order in the BTreeMap (alphabetic). Callers that care
-        // about ordering should `SELECT col AS a` to force alphabetic ordering,
-        // or use a single-column projection.
-        let Some((_, v)) = m.into_iter().next() else {
+        // First-column-as-text: V::Object now stores rows in an FxHashMap
+        // (no insertion order), so explicitly pick the alphabetically-first
+        // column to preserve the previous BTreeMap-driven behavior.
+        // Callers that care about ordering should `SELECT col AS a` to force
+        // alphabetic ordering, or use a single-column projection.
+        let Some(first_key) = m.keys().min().cloned() else {
+            return V::Null;
+        };
+        let Some(v) = m.remove(&first_key) else {
             return V::Null;
         };
         match v {

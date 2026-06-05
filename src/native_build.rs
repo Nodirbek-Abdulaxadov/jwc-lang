@@ -1725,7 +1725,7 @@ fn emit_validate_body(
     out.push_str(&inner);
     out.push_str("let __body = jwc_b_body();\n");
     out.push_str(&inner);
-    out.push_str("let mut __errors: BTreeMap<String, V> = BTreeMap::new();\n");
+    out.push_str("let mut __errors: JwcObj = JwcObj::default();\n");
     for field in fields {
         let fname = field.name.replace('"', "\\\"");
         out.push_str(&inner);
@@ -1781,7 +1781,7 @@ fn emit_validate_body(
     out.push_str("if !__errors.is_empty() {\n");
     let inner2 = format!("{inner}    ");
     out.push_str(&inner2);
-    out.push_str("let mut __payload = BTreeMap::new();\n");
+    out.push_str("let mut __payload: JwcObj = JwcObj::default();\n");
     out.push_str(&inner2);
     out.push_str("__payload.insert(\"status\".to_string(), V::Int(400));\n");
     out.push_str(&inner2);
@@ -2238,10 +2238,10 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             out.push_str("\")");
         }
         Expr::NewEntity { .. } => {
-            out.push_str("V::Object(std::collections::BTreeMap::new())");
+            out.push_str("V::Object(JwcObj::default())");
         }
         Expr::ObjectLit(pairs) => {
-            out.push_str("{ let mut __o = std::collections::BTreeMap::<String, V>::new();");
+            out.push_str("{ let mut __o: JwcObj = JwcObj::default();");
             for (k, v) in pairs {
                 out.push_str(" __o.insert(\"");
                 push_str_escaped(out, k);
@@ -3061,6 +3061,9 @@ fn render_cargo_toml(
     // below the noise floor of axum + reqwest + tokio.
     deps.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
     deps.push_str("chrono = { version = \"0.4\", default-features = false, features = [\"clock\", \"std\"] }\n");
+    // Hot-path V::Object payload is an FxHashMap (Phase A1 of PERF_PLAN.md):
+    // O(1) lookup + fxhash, replacing BTreeMap's O(log n) + node alloc cost.
+    deps.push_str("rustc-hash = \"2\"\n");
     if needs_db {
         // `with-chrono-0_4` plugs `chrono::DateTime` into tokio-postgres'
         // ToSql/FromSql so `jwc_param_timestamp` can bind directly to
