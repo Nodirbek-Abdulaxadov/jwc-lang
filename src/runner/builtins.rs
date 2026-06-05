@@ -889,7 +889,7 @@ impl<'a> Vm<'a> {
 
         match haystack {
             Value::Null => Ok(Value::Bool(false)),
-            Value::Array(items) => Ok(Value::Bool(items.iter().any(|v| *v == needle))),
+            Value::Array(items) => Ok(Value::Bool(items.contains(&needle))),
             Value::Str(s) => {
                 if let Ok(parsed) = serde_json::from_str::<JsonValue>(&s) {
                     if let Some(arr) = parsed.as_array() {

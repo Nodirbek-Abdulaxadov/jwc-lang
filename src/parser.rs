@@ -586,11 +586,7 @@ fn const_has_cycle(
         for child in children {
             match color.get(child).copied().unwrap_or(0) {
                 1 => return true,
-                0 => {
-                    if const_has_cycle(child, deps, color) {
-                        return true;
-                    }
-                }
+                0 if const_has_cycle(child, deps, color) => return true,
                 _ => {}
             }
         }
