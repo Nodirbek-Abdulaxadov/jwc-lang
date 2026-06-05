@@ -11,11 +11,24 @@
     clippy::all
 )]
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+
+/// Phase A3 of PERF_PLAN.md: `V::Str` payload is `Cow<'static, str>` so
+/// codegen can emit `Cow::Borrowed(&'static str)` for source literals
+/// (zero per-request allocation), while dynamic strings still flow through
+/// `Cow::Owned(String)`. Clone is a pointer copy for the borrowed case;
+/// `into_owned()` is the escape hatch when a `String` is genuinely needed.
+type JwcStr = Cow<'static, str>;
+
+#[inline]
+fn v_str(s: impl Into<JwcStr>) -> V {
+    V::Str(s.into())
+}
 
 /// Hot-path `V::Object` payload. `FxHashMap` (fxhash, no DoS resistance —
 /// fine for AOT'd source-literal keys) buys O(1) lookup and ~3× faster
@@ -103,7 +116,7 @@ enum V {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(String),
+    Str(JwcStr),
     Array(Arc<JwcArr>),
     Object(Arc<JwcObj>),
 }
@@ -218,10 +231,12 @@ fn jwc_catch_type_matches(catch_type: Option<&str>, kind: &str) -> bool {
 
 // Builds the V passed to `errorHandler (e)` and `try {} catch (e)`.
 fn jwc_error_value(msg: String) -> V {
-    let kind = jwc_classify_error(&msg).to_string();
+    let kind = jwc_classify_error(&msg);
     let mut m: JwcObj = JwcObj::default();
-    m.insert("type".to_string(), V::Str(kind));
-    m.insert("message".to_string(), V::Str(msg));
+    // `kind` is a `&'static str` (one of the known JWC error kinds), so wrap
+    // it as a borrowed Cow instead of allocating a String.
+    m.insert("type".to_string(), v_str(kind));
+    m.insert("message".to_string(), v_str(msg));
     m.insert("causes".to_string(), v_arr(Vec::new()));
     v_obj(m)
 }
@@ -244,8 +259,8 @@ fn jwc_add(a: V, b: V) -> V {
         (V::Float(x), V::Float(y)) => V::Float(x + y),
         (V::Int(x), V::Float(y)) => V::Float(x as f64 + y),
         (V::Float(x), V::Int(y)) => V::Float(x + y as f64),
-        (V::Str(x), b) => V::Str(format!("{}{}", x, b)),
-        (a, V::Str(y)) => V::Str(format!("{}{}", a, y)),
+        (V::Str(x), b) => v_str(format!("{}{}", x, b)),
+        (a, V::Str(y)) => v_str(format!("{}{}", a, y)),
         (a, b) => panic!("unsupported `+` between {:?} and {:?}", a, b),
     }
 }
@@ -472,7 +487,7 @@ impl<'a> JsonParser<'a> {
             Some(b'n') => self.parse_keyword(b"null", V::Null),
             Some(b't') => self.parse_keyword(b"true", V::Bool(true)),
             Some(b'f') => self.parse_keyword(b"false", V::Bool(false)),
-            Some(b'"') => self.parse_string().map(V::Str),
+            Some(b'"') => self.parse_string().map(v_str),
             Some(b'[') => self.parse_array(),
             Some(b'{') => self.parse_object(),
             Some(b) if b == b'-' || b.is_ascii_digit() => self.parse_number(),
@@ -605,30 +620,30 @@ fn jwc_b_length(v: V) -> V {
 
 fn jwc_b_lower(v: V) -> V {
     match v {
-        V::Str(s) => V::Str(s.to_lowercase()),
+        V::Str(s) => v_str(s.to_lowercase()),
         other => panic!("lower() expects a string, got {:?}", other),
     }
 }
 
 fn jwc_b_upper(v: V) -> V {
     match v {
-        V::Str(s) => V::Str(s.to_uppercase()),
+        V::Str(s) => v_str(s.to_uppercase()),
         other => panic!("upper() expects a string, got {:?}", other),
     }
 }
 
 fn jwc_b_trim(v: V) -> V {
     match v {
-        V::Str(s) => V::Str(s.trim().to_string()),
+        V::Str(s) => v_str(s.trim().to_string()),
         other => panic!("trim() expects a string, got {:?}", other),
     }
 }
 
 fn jwc_b_contains(haystack: V, needle: V) -> V {
     let result = match (&haystack, &needle) {
-        (V::Str(s), V::Str(p)) => s.contains(p.as_str()),
+        (V::Str(s), V::Str(p)) => s.contains(p.as_ref()),
         (V::Array(items), n) => items.iter().any(|item| jwc_eq(item, n)),
-        (V::Object(map), V::Str(k)) => map.contains_key(k),
+        (V::Object(map), V::Str(k)) => map.contains_key(k.as_ref()),
         _ => false,
     };
     V::Bool(result)
@@ -636,21 +651,21 @@ fn jwc_b_contains(haystack: V, needle: V) -> V {
 
 fn jwc_b_starts_with(s: V, p: V) -> V {
     match (s, p) {
-        (V::Str(a), V::Str(b)) => V::Bool(a.starts_with(b.as_str())),
+        (V::Str(a), V::Str(b)) => V::Bool(a.starts_with(b.as_ref())),
         (a, b) => panic!("starts_with() expects two strings, got {:?} / {:?}", a, b),
     }
 }
 
 fn jwc_b_ends_with(s: V, p: V) -> V {
     match (s, p) {
-        (V::Str(a), V::Str(b)) => V::Bool(a.ends_with(b.as_str())),
+        (V::Str(a), V::Str(b)) => V::Bool(a.ends_with(b.as_ref())),
         (a, b) => panic!("ends_with() expects two strings, got {:?} / {:?}", a, b),
     }
 }
 
 fn jwc_b_replace(s: V, old: V, new: V) -> V {
     match (s, old, new) {
-        (V::Str(a), V::Str(b), V::Str(c)) => V::Str(a.replace(b.as_str(), c.as_str())),
+        (V::Str(a), V::Str(b), V::Str(c)) => v_str(a.replace(b.as_ref(), c.as_ref())),
         (a, b, c) => panic!("replace() expects three strings, got {:?} / {:?} / {:?}", a, b, c),
     }
 }
@@ -658,7 +673,7 @@ fn jwc_b_replace(s: V, old: V, new: V) -> V {
 fn jwc_b_split(s: V, sep: V) -> V {
     match (s, sep) {
         (V::Str(a), V::Str(b)) => {
-            let parts: JwcArr = a.split(b.as_str()).map(|p| V::Str(p.to_string())).collect();
+            let parts: JwcArr = a.split(b.as_ref()).map(|p| v_str(p.to_string())).collect();
             v_arr(parts)
         }
         (a, b) => panic!("split() expects two strings, got {:?} / {:?}", a, b),
@@ -677,7 +692,7 @@ fn jwc_b_first(v: V) -> V {
                 owned.remove(0)
             }
         }
-        V::Str(s) => s.chars().next().map(|c| V::Str(c.to_string())).unwrap_or(V::Null),
+        V::Str(s) => s.chars().next().map(|c| v_str(c.to_string())).unwrap_or(V::Null),
         V::Null => V::Null,
         other => panic!("first() expects an array or string, got {:?}", other),
     }
@@ -686,7 +701,7 @@ fn jwc_b_first(v: V) -> V {
 fn jwc_b_last(v: V) -> V {
     match v {
         V::Array(a) => a.last().cloned().unwrap_or(V::Null),
-        V::Str(s) => s.chars().last().map(|c| V::Str(c.to_string())).unwrap_or(V::Null),
+        V::Str(s) => s.chars().last().map(|c| v_str(c.to_string())).unwrap_or(V::Null),
         V::Null => V::Null,
         other => panic!("last() expects an array or string, got {:?}", other),
     }
@@ -723,12 +738,12 @@ fn jwc_b_join(arr: V, sep: V) -> V {
     };
     let items = jwc_to_array(arr);
     let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
-    V::Str(parts.join(&sep))
+    v_str(parts.join(sep.as_ref()))
 }
 
 fn jwc_b_json_parse(v: V) -> V {
     match v {
-        V::Str(s) => match jwc_from_json(&s) {
+        V::Str(s) => match jwc_from_json(s.as_ref()) {
             Ok(parsed) => parsed,
             Err(e) => panic!("json_parse failed: {}", e),
         },
@@ -737,15 +752,15 @@ fn jwc_b_json_parse(v: V) -> V {
 }
 
 fn jwc_b_json_stringify(v: V) -> V {
-    V::Str(jwc_to_json(&v))
+    v_str(jwc_to_json(&v))
 }
 
 fn jwc_b_env(name: V) -> V {
     let n = match name {
         V::Str(s) => s,
-        _ => return V::Str(String::new()),
+        _ => return v_str(""),
     };
-    V::Str(std::env::var(&n).unwrap_or_default())
+    v_str(std::env::var(n.as_ref()).unwrap_or_default())
 }
 
 fn jwc_b_int(v: V) -> V {
@@ -755,6 +770,17 @@ fn jwc_b_int(v: V) -> V {
         V::Str(s) => V::Int(s.parse::<i64>().unwrap_or(0)),
         V::Bool(b) => V::Int(if b { 1 } else { 0 }),
         _ => V::Int(0),
+    }
+}
+
+/// Materialize the `&str` view of a `V::Str` payload. Used by helpers that
+/// need to pass the string to `HashMap::get` / `BTreeMap::get` keyed on
+/// `&str`, where Cow's deref doesn't fire automatically.
+#[inline]
+fn jwc_str_view(v: &V) -> Option<&str> {
+    match v {
+        V::Str(s) => Some(s.as_ref()),
+        _ => None,
     }
 }
 
@@ -836,7 +862,7 @@ fn with_current_request<F: FnOnce(&Request) -> V>(f: F) -> V {
 fn jwc_b_path_param(name: V) -> V {
     let k = match name { V::Str(s) => s, _ => return V::Null };
     with_current_request(|req| {
-        req.path_params.get(&k).cloned().map(V::Str).unwrap_or(V::Null)
+        req.path_params.get(k.as_ref()).cloned().map(v_str).unwrap_or(V::Null)
     })
 }
 
@@ -846,10 +872,10 @@ fn jwc_b_path_param(name: V) -> V {
 fn jwc_b_handler_arg(name: &str) -> V {
     with_current_request(|req| {
         if let Some(s) = req.path_params.get(name) {
-            return V::Str(s.clone());
+            return v_str(s.clone());
         }
         if let Some(s) = req.query.get(name) {
-            return V::Str(s.clone());
+            return v_str(s.clone());
         }
         V::Null
     })
@@ -858,23 +884,23 @@ fn jwc_b_handler_arg(name: &str) -> V {
 fn jwc_b_query_param(name: V, default: V) -> V {
     let k = match name { V::Str(s) => s, _ => return default };
     with_current_request(|req| {
-        req.query.get(&k).cloned().map(V::Str).unwrap_or_else(|| default.clone())
+        req.query.get(k.as_ref()).cloned().map(v_str).unwrap_or_else(|| default.clone())
     })
 }
 
 fn jwc_b_header(name: V) -> V {
     let k = match name { V::Str(s) => s.to_lowercase(), _ => return V::Null };
     with_current_request(|req| {
-        req.headers.get(&k).cloned().map(V::Str).unwrap_or(V::Null)
+        req.headers.get(&k).cloned().map(v_str).unwrap_or(V::Null)
     })
 }
 
 fn jwc_b_request_path() -> V {
-    with_current_request(|req| V::Str(req.path.clone()))
+    with_current_request(|req| v_str(req.path.clone()))
 }
 
 fn jwc_b_request_method() -> V {
-    with_current_request(|req| V::Str(req.method.clone()))
+    with_current_request(|req| v_str(req.method.clone()))
 }
 
 fn jwc_b_body() -> V {
@@ -886,7 +912,7 @@ fn jwc_b_body() -> V {
         // Auto-parse JSON bodies to match interpreter semantics.
         match jwc_from_json(&as_str) {
             Ok(parsed) => parsed,
-            Err(_) => V::Str(as_str),
+            Err(_) => v_str(as_str),
         }
     })
 }
@@ -906,8 +932,8 @@ fn make_response_with_headers(
     let mut m: JwcObj = JwcObj::default();
     m.insert(HTTP_RESPONSE_MARKER.to_string(), V::Bool(true));
     m.insert("status".to_string(), V::Int(status as i64));
-    m.insert("body".to_string(), V::Str(body));
-    m.insert("content_type".to_string(), V::Str(content_type.to_string()));
+    m.insert("body".to_string(), v_str(body));
+    m.insert("content_type".to_string(), v_str(content_type.to_string()));
     if !headers.is_empty() {
         m.insert("headers".to_string(), v_obj(headers));
     }
@@ -916,7 +942,7 @@ fn make_response_with_headers(
 
 fn body_string(v: V) -> String {
     match v {
-        V::Str(s) => s,
+        V::Str(s) => s.into_owned(),
         V::Null => String::new(),
         v => jwc_to_json(&v),
     }
@@ -944,7 +970,7 @@ fn jwc_b_response(body: V, mime: V) -> V {
         V::Str(s) => s,
         other => panic!("response() mime must be a string, got {:?}", other),
     };
-    make_response(200, body_string(body), &jwc_normalize_content_type(&m))
+    make_response(200, body_string(body), &jwc_normalize_content_type(m.as_ref()))
 }
 
 fn jwc_b_raw(body: V, mime: V) -> V {
@@ -1051,12 +1077,12 @@ fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
         if matches!(m.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) {
             let status = m.get("status").and_then(jwc_to_int).unwrap_or(200) as u16;
             let body = match m.get("body") {
-                Some(V::Str(s)) => s.clone(),
+                Some(V::Str(s)) => s.clone().into_owned(),
                 Some(other) => jwc_to_json(other),
                 None => String::new(),
             };
             let ct = match m.get("content_type") {
-                Some(V::Str(s)) => s.clone(),
+                Some(V::Str(s)) => s.clone().into_owned(),
                 _ => "text/plain; charset=utf-8".to_string(),
             };
             let headers: Vec<(String, String)> = match m.get("headers") {
@@ -1070,7 +1096,7 @@ fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
         }
     }
     match v {
-        V::Str(s) => (200, s, "text/plain; charset=utf-8".to_string(), Vec::new()),
+        V::Str(s) => (200, s.into_owned(), "text/plain; charset=utf-8".to_string(), Vec::new()),
         V::Null => (200, String::new(), "text/plain; charset=utf-8".to_string(), Vec::new()),
         other => (200, jwc_to_json(&other), "application/json".to_string(), Vec::new()),
     }
@@ -1329,21 +1355,21 @@ fn jwc_http_client() -> &'static reqwest::Client {
 async fn jwc_b_http_get(url: V) -> V {
     let u = match url {
         V::Str(s) => s,
-        other => return V::Str(format!("http_get: url must be a string, got {:?}", other)),
+        other => return v_str(format!("http_get: url must be a string, got {:?}", other)),
     };
-    match jwc_http_client().get(&u).send().await {
+    match jwc_http_client().get(u.as_ref()).send().await {
         Ok(resp) => match resp.text().await {
-            Ok(body) => V::Str(body),
-            Err(e) => V::Str(format!("http_get body read failed: {}", e)),
+            Ok(body) => v_str(body),
+            Err(e) => v_str(format!("http_get body read failed: {}", e)),
         },
-        Err(e) => V::Str(format!("http_get failed: {}", e)),
+        Err(e) => v_str(format!("http_get failed: {}", e)),
     }
 }
 
 async fn jwc_b_fetch_json(url: V) -> V {
     let body = jwc_b_http_get(url).await;
     match body {
-        V::Str(s) => jwc_from_json(&s).unwrap_or_else(|_| V::Str(s)),
+        V::Str(s) => jwc_from_json(s.as_ref()).unwrap_or_else(|_| V::Str(s)),
         other => other,
     }
 }
@@ -1352,14 +1378,14 @@ async fn jwc_b_fetch_json(url: V) -> V {
 
 fn jwc_b_uuid() -> V {
     // RFC 4122 v4 — random, includes proper version/variant bits.
-    V::Str(uuid::Uuid::new_v4().to_string())
+    v_str(uuid::Uuid::new_v4().to_string())
 }
 
 fn jwc_b_now() -> V {
     // ISO-8601 / RFC 3339 UTC, second precision — matches the interpreter's
     // `current_utc_iso8601()`. Postgres accepts this as timestamptz on insert.
     let dt: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
-    V::Str(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    v_str(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 // --- process-wide in-memory cache (TTL-keyed, std-only) ---------------------
@@ -1388,7 +1414,7 @@ mod jwc_cache_store {
 fn jwc_b_cache_get(key: V) -> V {
     use std::time::Instant;
     let k = match key {
-        V::Str(s) => s,
+        V::Str(s) => s.into_owned(),
         _ => return V::Null,
     };
     let mut guard = jwc_cache_store::store().lock().expect("cache mutex poisoned");
@@ -1405,18 +1431,18 @@ fn jwc_b_cache_get(key: V) -> V {
     }
     guard
         .get(&k)
-        .map(|e| V::Str(e.value.clone()))
+        .map(|e| v_str(e.value.clone()))
         .unwrap_or(V::Null)
 }
 
 fn jwc_b_cache_set(key: V, value: V, ttl_secs: V) -> V {
     use std::time::{Duration, Instant};
     let k = match key {
-        V::Str(s) => s,
+        V::Str(s) => s.into_owned(),
         _ => return V::Null,
     };
     let v = match value {
-        V::Str(s) => s,
+        V::Str(s) => s.into_owned(),
         V::Int(n) => n.to_string(),
         V::Float(n) => n.to_string(),
         V::Bool(b) => b.to_string(),
@@ -1442,7 +1468,7 @@ fn jwc_b_cache_set(key: V, value: V, ttl_secs: V) -> V {
 
 fn jwc_b_cache_del(key: V) -> V {
     let k = match key {
-        V::Str(s) => s,
+        V::Str(s) => s.into_owned(),
         _ => return V::Null,
     };
     jwc_cache_store::store()

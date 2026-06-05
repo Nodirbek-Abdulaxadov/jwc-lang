@@ -1738,31 +1738,31 @@ fn emit_validate_body(
             match rule {
                 crate::ast::ValidateRule::Required => {
                     out.push_str(&format!(
-                        "if matches!(__field, V::Null) {{ __errors.insert(\"{f}\".to_string(), V::Str(\"required\".to_string())); }}\n",
+                        "if matches!(__field, V::Null) {{ __errors.insert(\"{f}\".to_string(), v_str(\"required\")); }}\n",
                         f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::MinLength(n) => {
                     out.push_str(&format!(
-                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() < {n} {{ __errors.insert(\"{f}\".to_string(), V::Str(\"minLength {n}\".to_string())); }} }}\n",
+                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() < {n} {{ __errors.insert(\"{f}\".to_string(), v_str(\"minLength {n}\")); }} }}\n",
                         n = n, f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::MaxLength(n) => {
                     out.push_str(&format!(
-                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() > {n} {{ __errors.insert(\"{f}\".to_string(), V::Str(\"maxLength {n}\".to_string())); }} }}\n",
+                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() > {n} {{ __errors.insert(\"{f}\".to_string(), v_str(\"maxLength {n}\")); }} }}\n",
                         n = n, f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::Min(v) => {
                     out.push_str(&format!(
-                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n < {v}_f64 {{ __errors.insert(\"{f}\".to_string(), V::Str(\"min {v}\".to_string())); }} }} }}\n",
+                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n < {v}_f64 {{ __errors.insert(\"{f}\".to_string(), v_str(\"min {v}\")); }} }} }}\n",
                         v = v, f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::Max(v) => {
                     out.push_str(&format!(
-                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n > {v}_f64 {{ __errors.insert(\"{f}\".to_string(), V::Str(\"max {v}\".to_string())); }} }} }}\n",
+                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n > {v}_f64 {{ __errors.insert(\"{f}\".to_string(), v_str(\"max {v}\")); }} }} }}\n",
                         v = v, f = fname,
                     ));
                 }
@@ -1770,7 +1770,7 @@ fn emit_validate_body(
                     // No regex crate in the native prelude yet — skip with a
                     // best-effort non-empty string check. Document below.
                     out.push_str(&format!(
-                        "if !matches!(__field, V::Str(_)) {{ __errors.insert(\"{f}\".to_string(), V::Str(\"pattern\".to_string())); }}\n",
+                        "if !matches!(__field, V::Str(_)) {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern\")); }}\n",
                         f = fname,
                     ));
                 }
@@ -1786,7 +1786,7 @@ fn emit_validate_body(
     out.push_str("__payload.insert(\"status\".to_string(), V::Int(400));\n");
     out.push_str(&inner2);
     out.push_str(
-        "__payload.insert(\"error\".to_string(), V::Str(\"Validation failed\".to_string()));\n",
+        "__payload.insert(\"error\".to_string(), v_str(\"Validation failed\"));\n",
     );
     out.push_str(&inner2);
     out.push_str("__payload.insert(\"fields\".to_string(), v_obj(__errors));\n");
@@ -2210,9 +2210,12 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             out.push_str("_f64)");
         }
         Expr::Str(s) => {
-            out.push_str("V::Str(\"");
+            // Phase A3: source-literal strings live as `Cow::Borrowed(&'static str)`
+            // — zero per-request allocation, since the literal is baked into
+            // the binary's .rodata.
+            out.push_str("v_str(\"");
             push_str_escaped(out, s);
-            out.push_str("\".to_string())");
+            out.push_str("\")");
         }
         Expr::Bool(b) => {
             out.push_str("V::Bool(");
@@ -2352,14 +2355,14 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 match args.as_slice() {
                     [a] => {
                         emit_expr(out, a, ctx);
-                        out.push_str(", V::Str(\"[]\".to_string())");
+                        out.push_str(", v_str(\"[]\")");
                     }
                     [a, b] => {
                         emit_expr(out, a, ctx);
                         out.push_str(", ");
                         emit_expr(out, b, ctx);
                     }
-                    _ => out.push_str("V::Null, V::Str(\"[]\".to_string())"),
+                    _ => out.push_str("V::Null, v_str(\"[]\")"),
                 }
                 out.push_str(").await");
                 return;
