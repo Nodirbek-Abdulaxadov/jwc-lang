@@ -14,11 +14,20 @@ use argon2::password_hash::{
 use argon2::{Argon2 as JwcArgon2, PasswordHash as JwcPasswordHash};
 
 fn jwc_hash_to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
+    // Direct byte → hex without going through `format!("{:02x}", b)` per
+    // byte. The old version did one tiny `String` allocation per byte
+    // (32 per SHA-256, 20 per SHA-1, 16 per MD5) — hot enough on chained
+    // hashing benchmarks to dominate request time. This version is one
+    // pre-sized String plus two table lookups per input byte.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0x0f) as usize]);
     }
-    s
+    // SAFETY: every byte we pushed is from `HEX`, which is pure ASCII,
+    // so `out` is guaranteed to be valid UTF-8.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 fn jwc_b_sha256(v: V) -> V {
