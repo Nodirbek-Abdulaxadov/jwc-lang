@@ -1233,10 +1233,7 @@ impl<'a> Vm<'a> {
                         arr.iter().map(json_to_value).collect()
                     }
                     Value::Null => return Ok(Flow::Continue),
-                    other => bail!(
-                        "for-in: iter must be an array, got {}",
-                        other.type_name()
-                    ),
+                    other => bail!("for-in: iter must be an array, got {}", other.type_name()),
                 };
                 let key = var.to_lowercase();
                 let prior = vars.get(&key).cloned();
@@ -2046,8 +2043,7 @@ impl<'a> Vm<'a> {
                     } else {
                         return Ok(Value::Str(r#"{"status":200}"#.to_string()));
                     };
-                    let result = if let Ok(mut doc) =
-                        serde_json::from_str::<serde_json::Value>(&s)
+                    let result = if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&s)
                     {
                         match doc.as_object_mut() {
                             Some(obj) => {
@@ -2062,8 +2058,7 @@ impl<'a> Vm<'a> {
                     return Ok(Value::Str(result));
                 }
 
-                if name.eq_ignore_ascii_case("notFound") || name.eq_ignore_ascii_case("not_found")
-                {
+                if name.eq_ignore_ascii_case("notFound") || name.eq_ignore_ascii_case("not_found") {
                     return Ok(Value::Str(
                         r#"{"status":404,"error":"Not Found"}"#.to_string(),
                     ));

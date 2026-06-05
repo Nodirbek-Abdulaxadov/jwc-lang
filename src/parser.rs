@@ -453,12 +453,8 @@ fn validate_consts(program: &Program) -> Result<()> {
 
     // (a) Every const value must be a constant expression.
     for c in &program.consts {
-        validate_const_expr(&c.expr, &const_names).map_err(|err| {
-            anyhow!(
-                "const '{}' must be a constant expression ({err})",
-                c.name
-            )
-        })?;
+        validate_const_expr(&c.expr, &const_names)
+            .map_err(|err| anyhow!("const '{}' must be a constant expression ({err})", c.name))?;
     }
 
     // (b) Cycle / self-reference detection over the const dependency graph.
@@ -472,9 +468,7 @@ fn validate_consts(program: &Program) -> Result<()> {
     let mut color: HashMap<String, u8> = HashMap::new();
     for c in &program.consts {
         let key = c.name.to_lowercase();
-        if color.get(&key).copied().unwrap_or(0) == 0
-            && const_has_cycle(&key, &deps, &mut color)
-        {
+        if color.get(&key).copied().unwrap_or(0) == 0 && const_has_cycle(&key, &deps, &mut color) {
             bail!("circular const reference involving '{}'", c.name);
         }
     }

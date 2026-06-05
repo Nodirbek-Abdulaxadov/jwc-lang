@@ -1054,7 +1054,10 @@ impl<'a> Vm<'a> {
         let mut items = match current {
             Value::Array(items) => items,
             Value::Null => Vec::new(),
-            other => bail!("push: first arg must be an array, got {}", other.type_name()),
+            other => bail!(
+                "push: first arg must be an array, got {}",
+                other.type_name()
+            ),
         };
         items.push(elem);
         let result = Value::Array(items);
@@ -1083,7 +1086,10 @@ impl<'a> Vm<'a> {
                 Ok(JsonValue::Array(a)) => a.iter().map(json_to_value).collect(),
                 _ => bail!("join: first arg must be an array"),
             },
-            other => bail!("join: first arg must be an array, got {}", other.type_name()),
+            other => bail!(
+                "join: first arg must be an array, got {}",
+                other.type_name()
+            ),
         };
         let joined = items
             .iter()

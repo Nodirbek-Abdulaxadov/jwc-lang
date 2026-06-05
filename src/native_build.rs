@@ -1785,9 +1785,7 @@ fn emit_validate_body(
     out.push_str(&inner2);
     out.push_str("__payload.insert(\"status\".to_string(), V::Int(400));\n");
     out.push_str(&inner2);
-    out.push_str(
-        "__payload.insert(\"error\".to_string(), v_str(\"Validation failed\"));\n",
-    );
+    out.push_str("__payload.insert(\"error\".to_string(), v_str(\"Validation failed\"));\n");
     out.push_str(&inner2);
     out.push_str("__payload.insert(\"fields\".to_string(), v_obj(__errors));\n");
     out.push_str(&inner2);
