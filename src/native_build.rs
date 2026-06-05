@@ -3098,11 +3098,19 @@ path = "src/main.rs"
 [dependencies]
 {deps}
 [profile.release]
-opt-level = "z"
-lto = true
+# Phase A5 of PERF_PLAN.md. `opt-level = 3` (was "z") trades a slightly
+# bigger binary for actual loop / inline optimization — release builds
+# are perf-sensitive, not size-sensitive. `lto = "fat"` (was bare `true`,
+# which is already fat — written explicitly so future readers don't
+# downgrade to thin). `codegen-units = 1` keeps a single LLVM module
+# so the linker sees everything for inlining.
+# `panic = "abort"` is intentionally left off: the runtime relies on
+# `catch_unwind` to power `try {{}} catch {{}}` and `transaction {{}}` —
+# enabling abort would silently break both.
+opt-level = 3
+lto = "fat"
 codegen-units = 1
 strip = true
-# panic = abort would disable catch_unwind needed by try/catch and transaction.
 "#,
         name = app_name,
         deps = deps,
@@ -3122,6 +3130,27 @@ fn invoke_cargo(
     cmd.arg("build").current_dir(workspace);
     if release {
         cmd.arg("--release");
+        // Phase A5 of PERF_PLAN.md: build with `-C target-cpu=native` so
+        // LLVM emits instructions for the host's exact micro-architecture
+        // (AVX2 / BMI2 / etc. when available) — meaningful on hot integer
+        // and string paths. Restricted to release builds because:
+        //   * debug binaries are rebuilt constantly and target-cpu=native
+        //     defeats Cargo's incremental cache when machines differ;
+        //   * cross-target builds use an explicit `--target` and must
+        //     not be miscompiled for the *host* CPU.
+        if target.is_none() {
+            let existing = std::env::var("RUSTFLAGS").unwrap_or_default();
+            let flag = "-C target-cpu=native";
+            let combined = if existing.is_empty() {
+                flag.to_string()
+            } else if existing.contains("target-cpu") {
+                // Honour the user's override — don't double-set.
+                existing
+            } else {
+                format!("{} {}", existing, flag)
+            };
+            cmd.env("RUSTFLAGS", combined);
+        }
     }
     if let Some(t) = target {
         cmd.arg("--target").arg(t);

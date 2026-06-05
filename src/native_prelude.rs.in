@@ -176,6 +176,13 @@ fn jwc_take_return() -> Option<V> {
 
 // Classify an error message string into one of the well-known JWC error
 // kinds — mirrors `runner::classify_jwc_error` for the native AOT path.
+//
+// `#[cold]` (Phase A6 of PERF_PLAN.md): only reached when a route handler
+// has actually panicked, so we want LLVM to lay it out away from the hot
+// success path and avoid speculating into its `to_ascii_lowercase()` +
+// `contains()` chain when no error is in flight.
+#[cold]
+#[inline(never)]
 fn jwc_classify_error(msg: &str) -> &'static str {
     let lc = msg.to_ascii_lowercase();
     let has = |needles: &[&str]| -> bool { needles.iter().any(|n| lc.contains(n)) };
@@ -230,6 +237,7 @@ fn jwc_catch_type_matches(catch_type: Option<&str>, kind: &str) -> bool {
 }
 
 // Builds the V passed to `errorHandler (e)` and `try {} catch (e)`.
+#[cold]
 fn jwc_error_value(msg: String) -> V {
     let kind = jwc_classify_error(&msg);
     let mut m: JwcObj = JwcObj::default();
@@ -241,6 +249,8 @@ fn jwc_error_value(msg: String) -> V {
     v_obj(m)
 }
 
+#[cold]
+#[inline(never)]
 fn jwc_panic_payload_to_string(p: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<String>() {
         return s.clone();
@@ -388,7 +398,12 @@ fn jwc_to_array(v: V) -> JwcArr {
 // --- JSON --------------------------------------------------------------------
 
 fn jwc_to_json(v: &V) -> String {
-    let mut out = String::new();
+    // Phase A7 of PERF_PLAN.md: pre-size the buffer so the common
+    // route-response shape never round-trips through the
+    // 4 → 8 → 16 → 32 → 64 → 128 reallocation ladder. 256 bytes
+    // covers the vast majority of JWC route responses; larger ones
+    // still grow but skip the first few cliffs.
+    let mut out = String::with_capacity(256);
     jwc_write_json(v, &mut out);
     out
 }
@@ -432,6 +447,10 @@ fn jwc_write_json(v: &V, out: &mut String) {
 }
 
 fn jwc_write_json_string(s: &str, out: &mut String) {
+    // Phase A7: reserve `s.len() + 2` up front. In the no-escapes-needed
+    // path this is the exact size and we skip all reallocations; when
+    // escapes do appear we've still saved most of them.
+    out.reserve(s.len() + 2);
     out.push('"');
     for ch in s.chars() {
         match ch {
