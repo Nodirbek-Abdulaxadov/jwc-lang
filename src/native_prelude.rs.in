@@ -11,6 +11,17 @@
     clippy::all
 )]
 
+// Phase A4 of PERF_PLAN.md: drop the default Windows `HeapAlloc` /
+// `HeapFree` path — it's the single biggest source of allocator churn
+// on this target. `mimalloc` is a drop-in replacement (no API surface,
+// just `#[global_allocator]`) that wins ~30-50% on hot allocate /
+// free loops compared to the system allocator on Windows.
+// Linux / macOS keep the system allocator (glibc/jemalloc-on-darwin
+// are already competitive on this workload).
+#[cfg(windows)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
