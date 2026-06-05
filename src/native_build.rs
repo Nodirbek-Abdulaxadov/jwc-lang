@@ -1725,7 +1725,7 @@ fn emit_validate_body(
     out.push_str(&inner);
     out.push_str("let __body = jwc_b_body();\n");
     out.push_str(&inner);
-    out.push_str("let mut __errors: BTreeMap<String, V> = BTreeMap::new();\n");
+    out.push_str("let mut __errors: JwcObj = JwcObj::default();\n");
     for field in fields {
         let fname = field.name.replace('"', "\\\"");
         out.push_str(&inner);
@@ -1738,31 +1738,31 @@ fn emit_validate_body(
             match rule {
                 crate::ast::ValidateRule::Required => {
                     out.push_str(&format!(
-                        "if matches!(__field, V::Null) {{ __errors.insert(\"{f}\".to_string(), V::Str(\"required\".to_string())); }}\n",
+                        "if matches!(__field, V::Null) {{ __errors.insert(\"{f}\".to_string(), v_str(\"required\")); }}\n",
                         f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::MinLength(n) => {
                     out.push_str(&format!(
-                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() < {n} {{ __errors.insert(\"{f}\".to_string(), V::Str(\"minLength {n}\".to_string())); }} }}\n",
+                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() < {n} {{ __errors.insert(\"{f}\".to_string(), v_str(\"minLength {n}\")); }} }}\n",
                         n = n, f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::MaxLength(n) => {
                     out.push_str(&format!(
-                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() > {n} {{ __errors.insert(\"{f}\".to_string(), V::Str(\"maxLength {n}\".to_string())); }} }}\n",
+                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() > {n} {{ __errors.insert(\"{f}\".to_string(), v_str(\"maxLength {n}\")); }} }}\n",
                         n = n, f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::Min(v) => {
                     out.push_str(&format!(
-                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n < {v}_f64 {{ __errors.insert(\"{f}\".to_string(), V::Str(\"min {v}\".to_string())); }} }} }}\n",
+                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n < {v}_f64 {{ __errors.insert(\"{f}\".to_string(), v_str(\"min {v}\")); }} }} }}\n",
                         v = v, f = fname,
                     ));
                 }
                 crate::ast::ValidateRule::Max(v) => {
                     out.push_str(&format!(
-                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n > {v}_f64 {{ __errors.insert(\"{f}\".to_string(), V::Str(\"max {v}\".to_string())); }} }} }}\n",
+                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n > {v}_f64 {{ __errors.insert(\"{f}\".to_string(), v_str(\"max {v}\")); }} }} }}\n",
                         v = v, f = fname,
                     ));
                 }
@@ -1770,7 +1770,7 @@ fn emit_validate_body(
                     // No regex crate in the native prelude yet — skip with a
                     // best-effort non-empty string check. Document below.
                     out.push_str(&format!(
-                        "if !matches!(__field, V::Str(_)) {{ __errors.insert(\"{f}\".to_string(), V::Str(\"pattern\".to_string())); }}\n",
+                        "if !matches!(__field, V::Str(_)) {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern\")); }}\n",
                         f = fname,
                     ));
                 }
@@ -1781,20 +1781,20 @@ fn emit_validate_body(
     out.push_str("if !__errors.is_empty() {\n");
     let inner2 = format!("{inner}    ");
     out.push_str(&inner2);
-    out.push_str("let mut __payload = BTreeMap::new();\n");
+    out.push_str("let mut __payload: JwcObj = JwcObj::default();\n");
     out.push_str(&inner2);
     out.push_str("__payload.insert(\"status\".to_string(), V::Int(400));\n");
     out.push_str(&inner2);
     out.push_str(
-        "__payload.insert(\"error\".to_string(), V::Str(\"Validation failed\".to_string()));\n",
+        "__payload.insert(\"error\".to_string(), v_str(\"Validation failed\"));\n",
     );
     out.push_str(&inner2);
-    out.push_str("__payload.insert(\"fields\".to_string(), V::Object(__errors));\n");
+    out.push_str("__payload.insert(\"fields\".to_string(), v_obj(__errors));\n");
     out.push_str(&inner2);
     if ctx.in_closure() {
-        out.push_str("{ jwc_set_return(V::Object(__payload)); return V::Null; }\n");
+        out.push_str("{ jwc_set_return(v_obj(__payload)); return V::Null; }\n");
     } else {
-        out.push_str("return V::Object(__payload);\n");
+        out.push_str("return v_obj(__payload);\n");
     }
     out.push_str(&inner);
     out.push_str("}\n");
@@ -2210,9 +2210,12 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             out.push_str("_f64)");
         }
         Expr::Str(s) => {
-            out.push_str("V::Str(\"");
+            // Phase A3: source-literal strings live as `Cow::Borrowed(&'static str)`
+            // — zero per-request allocation, since the literal is baked into
+            // the binary's .rodata.
+            out.push_str("v_str(\"");
             push_str_escaped(out, s);
-            out.push_str("\".to_string())");
+            out.push_str("\")");
         }
         Expr::Bool(b) => {
             out.push_str("V::Bool(");
@@ -2238,10 +2241,10 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             out.push_str("\")");
         }
         Expr::NewEntity { .. } => {
-            out.push_str("V::Object(std::collections::BTreeMap::new())");
+            out.push_str("v_obj(JwcObj::default())");
         }
         Expr::ObjectLit(pairs) => {
-            out.push_str("{ let mut __o = std::collections::BTreeMap::<String, V>::new();");
+            out.push_str("{ let mut __o: JwcObj = JwcObj::default();");
             for (k, v) in pairs {
                 out.push_str(" __o.insert(\"");
                 push_str_escaped(out, k);
@@ -2249,10 +2252,10 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 emit_expr(out, v, ctx);
                 out.push_str(");");
             }
-            out.push_str(" V::Object(__o) }");
+            out.push_str(" v_obj(__o) }");
         }
         Expr::ArrayLit(items) => {
-            out.push_str("V::Array(vec![");
+            out.push_str("v_arr(vec![");
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
@@ -2352,14 +2355,14 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 match args.as_slice() {
                     [a] => {
                         emit_expr(out, a, ctx);
-                        out.push_str(", V::Str(\"[]\".to_string())");
+                        out.push_str(", v_str(\"[]\")");
                     }
                     [a, b] => {
                         emit_expr(out, a, ctx);
                         out.push_str(", ");
                         emit_expr(out, b, ctx);
                     }
-                    _ => out.push_str("V::Null, V::Str(\"[]\".to_string())"),
+                    _ => out.push_str("V::Null, v_str(\"[]\")"),
                 }
                 out.push_str(").await");
                 return;
@@ -2730,7 +2733,7 @@ fn emit_db_select(
     if first {
         out.push_str(" __rows.into_iter().next().unwrap_or(V::Null) }");
     } else {
-        out.push_str(" V::Array(__rows) }");
+        out.push_str(" v_arr(__rows) }");
     }
 }
 
@@ -3061,6 +3064,18 @@ fn render_cargo_toml(
     // below the noise floor of axum + reqwest + tokio.
     deps.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
     deps.push_str("chrono = { version = \"0.4\", default-features = false, features = [\"clock\", \"std\"] }\n");
+    // Hot-path V::Object payload is an FxHashMap (Phase A1 of PERF_PLAN.md):
+    // O(1) lookup + fxhash, replacing BTreeMap's O(log n) + node alloc cost.
+    deps.push_str("rustc-hash = \"2\"\n");
+    // Phase A4 (PERF_PLAN.md): global allocator. mimalloc on Windows
+    // sidesteps the notoriously slow `HeapAlloc` / `HeapFree` path that
+    // dominates Vec / String / HashMap churn on a Windows host; on Linux
+    // we fall back to the system allocator (glibc malloc is competitive
+    // for our workload, and jemalloc adds 100+ KB to every binary).
+    // The actual `#[global_allocator]` declaration lives in the prelude,
+    // gated on `#[cfg(windows)]`.
+    deps.push_str("[target.'cfg(windows)'.dependencies]\n");
+    deps.push_str("mimalloc = { version = \"0.1\", default-features = false }\n");
     if needs_db {
         // `with-chrono-0_4` plugs `chrono::DateTime` into tokio-postgres'
         // ToSql/FromSql so `jwc_param_timestamp` can bind directly to
@@ -3092,11 +3107,19 @@ path = "src/main.rs"
 [dependencies]
 {deps}
 [profile.release]
-opt-level = "z"
-lto = true
+# Phase A5 of PERF_PLAN.md. `opt-level = 3` (was "z") trades a slightly
+# bigger binary for actual loop / inline optimization — release builds
+# are perf-sensitive, not size-sensitive. `lto = "fat"` (was bare `true`,
+# which is already fat — written explicitly so future readers don't
+# downgrade to thin). `codegen-units = 1` keeps a single LLVM module
+# so the linker sees everything for inlining.
+# `panic = "abort"` is intentionally left off: the runtime relies on
+# `catch_unwind` to power `try {{}} catch {{}}` and `transaction {{}}` —
+# enabling abort would silently break both.
+opt-level = 3
+lto = "fat"
 codegen-units = 1
 strip = true
-# panic = abort would disable catch_unwind needed by try/catch and transaction.
 "#,
         name = app_name,
         deps = deps,
@@ -3116,6 +3139,27 @@ fn invoke_cargo(
     cmd.arg("build").current_dir(workspace);
     if release {
         cmd.arg("--release");
+        // Phase A5 of PERF_PLAN.md: build with `-C target-cpu=native` so
+        // LLVM emits instructions for the host's exact micro-architecture
+        // (AVX2 / BMI2 / etc. when available) — meaningful on hot integer
+        // and string paths. Restricted to release builds because:
+        //   * debug binaries are rebuilt constantly and target-cpu=native
+        //     defeats Cargo's incremental cache when machines differ;
+        //   * cross-target builds use an explicit `--target` and must
+        //     not be miscompiled for the *host* CPU.
+        if target.is_none() {
+            let existing = std::env::var("RUSTFLAGS").unwrap_or_default();
+            let flag = "-C target-cpu=native";
+            let combined = if existing.is_empty() {
+                flag.to_string()
+            } else if existing.contains("target-cpu") {
+                // Honour the user's override — don't double-set.
+                existing
+            } else {
+                format!("{} {}", existing, flag)
+            };
+            cmd.env("RUSTFLAGS", combined);
+        }
     }
     if let Some(t) = target {
         cmd.arg("--target").arg(t);

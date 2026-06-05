@@ -14,11 +14,20 @@ use argon2::password_hash::{
 use argon2::{Argon2 as JwcArgon2, PasswordHash as JwcPasswordHash};
 
 fn jwc_hash_to_hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
+    // Direct byte → hex without going through `format!("{:02x}", b)` per
+    // byte. The old version did one tiny `String` allocation per byte
+    // (32 per SHA-256, 20 per SHA-1, 16 per MD5) — hot enough on chained
+    // hashing benchmarks to dominate request time. This version is one
+    // pre-sized String plus two table lookups per input byte.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0x0f) as usize]);
     }
-    s
+    // SAFETY: every byte we pushed is from `HEX`, which is pure ASCII,
+    // so `out` is guaranteed to be valid UTF-8.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 fn jwc_b_sha256(v: V) -> V {
@@ -26,7 +35,7 @@ fn jwc_b_sha256(v: V) -> V {
         V::Str(s) => {
             let mut h = JwcSha256::new();
             h.update(s.as_bytes());
-            V::Str(jwc_hash_to_hex(&h.finalize()))
+            v_str(jwc_hash_to_hex(&h.finalize()))
         }
         other => panic!("sha256() expects a string, got {:?}", other),
     }
@@ -37,7 +46,7 @@ fn jwc_b_sha1(v: V) -> V {
         V::Str(s) => {
             let mut h = JwcSha1::new();
             h.update(s.as_bytes());
-            V::Str(jwc_hash_to_hex(&h.finalize()))
+            v_str(jwc_hash_to_hex(&h.finalize()))
         }
         other => panic!("sha1() expects a string, got {:?}", other),
     }
@@ -48,7 +57,7 @@ fn jwc_b_md5(v: V) -> V {
         V::Str(s) => {
             let mut h = JwcMd5::new();
             h.update(s.as_bytes());
-            V::Str(jwc_hash_to_hex(&h.finalize()))
+            v_str(jwc_hash_to_hex(&h.finalize()))
         }
         other => panic!("md5() expects a string, got {:?}", other),
     }
@@ -60,7 +69,7 @@ fn jwc_b_hmac_sha256(key: V, msg: V) -> V {
             type H = JwcHmac<JwcSha256>;
             let mut mac = H::new_from_slice(k.as_bytes()).expect("HMAC accepts any key length");
             mac.update(m.as_bytes());
-            V::Str(jwc_hash_to_hex(&mac.finalize().into_bytes()))
+            v_str(jwc_hash_to_hex(&mac.finalize().into_bytes()))
         }
         (a, b) => panic!("hmac_sha256() expects two strings, got {:?} / {:?}", a, b),
     }
@@ -71,7 +80,7 @@ fn jwc_b_hash_password(v: V) -> V {
         V::Str(pwd) => {
             let salt = JwcSaltString::generate(&mut JwcOsRng);
             match JwcArgon2::default().hash_password(pwd.as_bytes(), &salt) {
-                Ok(h) => V::Str(h.to_string()),
+                Ok(h) => v_str(h.to_string()),
                 Err(e) => panic!("hash_password failed: {}", e),
             }
         }
@@ -81,7 +90,7 @@ fn jwc_b_hash_password(v: V) -> V {
 
 fn jwc_b_verify_password(pwd: V, stored: V) -> V {
     match (pwd, stored) {
-        (V::Str(p), V::Str(h)) => match JwcPasswordHash::new(&h) {
+        (V::Str(p), V::Str(h)) => match JwcPasswordHash::new(h.as_ref()) {
             Ok(parsed) => V::Bool(JwcArgon2::default().verify_password(p.as_bytes(), &parsed).is_ok()),
             Err(e) => panic!("verify_password: malformed stored hash: {}", e),
         },

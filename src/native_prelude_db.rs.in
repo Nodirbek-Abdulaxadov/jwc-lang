@@ -95,7 +95,7 @@ async fn jwc_db_exec(sql: &str, params: DbParams) -> u64 {
 
 fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
     use tokio_postgres::types::Type;
-    let mut m = BTreeMap::new();
+    let mut m: JwcObj = JwcObj::default();
     for (i, col) in row.columns().iter().enumerate() {
         let name = col.name().to_string();
         let ty = col.type_();
@@ -140,7 +140,7 @@ fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
                 .try_get::<_, Option<String>>(i)
                 .ok()
                 .flatten()
-                .map(V::Str)
+                .map(v_str)
                 .unwrap_or(V::Null),
             // Temporal columns: surface as RFC 3339 / ISO-8601 strings so
             // user code can pass the value to `now()` comparisons or hand
@@ -151,25 +151,25 @@ fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
                 .try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(i)
                 .ok()
                 .flatten()
-                .map(|dt| V::Str(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
+                .map(|dt| v_str(dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)))
                 .unwrap_or(V::Null),
             Type::TIMESTAMP => row
                 .try_get::<_, Option<chrono::NaiveDateTime>>(i)
                 .ok()
                 .flatten()
-                .map(|dt| V::Str(dt.format("%Y-%m-%dT%H:%M:%S").to_string()))
+                .map(|dt| v_str(dt.format("%Y-%m-%dT%H:%M:%S").to_string()))
                 .unwrap_or(V::Null),
             Type::DATE => row
                 .try_get::<_, Option<chrono::NaiveDate>>(i)
                 .ok()
                 .flatten()
-                .map(|d| V::Str(d.format("%Y-%m-%d").to_string()))
+                .map(|d| v_str(d.format("%Y-%m-%d").to_string()))
                 .unwrap_or(V::Null),
             _ => V::Null,
         };
         m.insert(name, v);
     }
-    V::Object(m)
+    v_obj(m)
 }
 
 // --- typed-param helpers used by codegen --------------------------------------
@@ -214,7 +214,9 @@ fn jwc_param_float(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> 
 fn jwc_param_str(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
     match v {
         V::Null => Box::new(None::<String>),
-        V::Str(s) => Box::new(s),
+        // `Cow<'static, str>` doesn't impl `ToSql`; materialize a `String`
+        // (free when the Cow was already Owned; one alloc when Borrowed).
+        V::Str(s) => Box::new(s.into_owned()),
         other => Box::new(other.to_string()),
     }
 }
@@ -272,7 +274,7 @@ fn jwc_v_to_key(v: &V) -> String {
     match v {
         V::Int(n) => n.to_string(),
         V::Float(n) => n.to_string(),
-        V::Str(s) => s.clone(),
+        V::Str(s) => s.to_string(),
         V::Bool(b) => b.to_string(),
         V::Null => String::new(),
         V::Array(_) | V::Object(_) => jwc_to_json(v),
@@ -316,8 +318,8 @@ async fn jwc_db_eager_load(
     if keys.is_empty() {
         for p in parents.iter_mut() {
             if let V::Object(m) = p {
-                let val = if one_to_one { V::Null } else { V::Array(Vec::new()) };
-                m.insert(nav_name.to_string(), val);
+                let val = if one_to_one { V::Null } else { v_arr(Vec::new()) };
+                Arc::make_mut(m).insert(nav_name.to_string(), val);
             }
         }
         return;
@@ -353,9 +355,9 @@ async fn jwc_db_eager_load(
             let val = if one_to_one {
                 attached.into_iter().next().unwrap_or(V::Null)
             } else {
-                V::Array(attached)
+                v_arr(attached)
             };
-            m.insert(nav_name.to_string(), val);
+            Arc::make_mut(m).insert(nav_name.to_string(), val);
         }
     }
 }
@@ -373,18 +375,18 @@ async fn jwc_db_eager_load(
 // param to `V::Str("[]")`.
 
 async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
-    let sql_s = match sql {
-        V::Str(s) => s,
+    let sql_s: String = match sql {
+        V::Str(s) => s.into_owned(),
         _ => return V::Null,
     };
 
-    let raw = match params_json {
-        V::Str(s) => s,
+    let raw: String = match params_json {
+        V::Str(s) => s.into_owned(),
         V::Null => "[]".to_string(),
         _ => "[]".to_string(),
     };
     let params: Vec<V> = match jwc_from_json(&raw) {
-        Ok(V::Array(a)) => a,
+        Ok(V::Array(a)) => Arc::unwrap_or_clone(a),
         _ => Vec::new(),
     };
     // raw_sql doesn't know the prepared statement's parameter types up
@@ -416,20 +418,25 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
         let V::Object(m) = first else {
             return V::Null;
         };
-        // First-column-as-text: the only deterministic column ordering we have
-        // is insertion order in the BTreeMap (alphabetic). Callers that care
-        // about ordering should `SELECT col AS a` to force alphabetic ordering,
-        // or use a single-column projection.
-        let Some((_, v)) = m.into_iter().next() else {
+        // First-column-as-text: V::Object now stores rows in an FxHashMap
+        // (no insertion order), so explicitly pick the alphabetically-first
+        // column to preserve the previous BTreeMap-driven behavior.
+        // Callers that care about ordering should `SELECT col AS a` to force
+        // alphabetic ordering, or use a single-column projection.
+        let mut owned = Arc::unwrap_or_clone(m);
+        let Some(first_key) = owned.keys().min().cloned() else {
+            return V::Null;
+        };
+        let Some(v) = owned.remove(&first_key) else {
             return V::Null;
         };
         match v {
             V::Str(s) => V::Str(s),
-            V::Int(n) => V::Str(n.to_string()),
-            V::Float(n) => V::Str(n.to_string()),
-            V::Bool(b) => V::Str(b.to_string()),
+            V::Int(n) => v_str(n.to_string()),
+            V::Float(n) => v_str(n.to_string()),
+            V::Bool(b) => v_str(b.to_string()),
             V::Null => V::Null,
-            other => V::Str(jwc_to_json(&other)),
+            other => v_str(jwc_to_json(&other)),
         }
     } else {
         let affected = jwc_db_exec(&sql_s, boxed).await;

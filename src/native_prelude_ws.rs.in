@@ -205,8 +205,8 @@ tokio::task_local! {
 // --- built-ins exposed to JWC code ------------------------------------------
 
 async fn jwc_b_ws_send(msg: V) -> V {
-    let text = match msg {
-        V::Str(s) => s,
+    let text: String = match msg {
+        V::Str(s) => s.into_owned(),
         other => jwc_to_json(&other),
     };
     let arc = match WS_STREAM.try_with(|s| s.clone()) {
@@ -235,8 +235,8 @@ async fn jwc_b_ws_recv() -> V {
             Err(_) => return V::Null,
         };
         match frame {
-            WsFrame::Text(s) => return V::Str(s),
-            WsFrame::Binary(b) => return V::Str(String::from_utf8_lossy(&b).to_string()),
+            WsFrame::Text(s) => return v_str(s),
+            WsFrame::Binary(b) => return v_str(String::from_utf8_lossy(&b).to_string()),
             WsFrame::Ping(payload) => {
                 let mut s = arc.lock().await;
                 let _ = ws_write_frame(&mut *s, WS_OP_PONG, &payload).await;
