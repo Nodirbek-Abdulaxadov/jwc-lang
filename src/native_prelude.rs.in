@@ -13,6 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
@@ -22,6 +23,21 @@ use rustc_hash::FxHashMap;
 /// here; `jwc_write_json` sorts keys at serialization time so output stays
 /// deterministic, and `raw_sql` picks the alphabetically-first column.
 type JwcObj = FxHashMap<String, V>;
+type JwcArr = Vec<V>;
+
+/// Phase A2 of PERF_PLAN.md: array/object payloads live behind `Arc<…>`,
+/// so `Clone V` is a refcount bump instead of a deep copy of the whole
+/// subtree. Mutating sites use `Arc::make_mut` (copy-on-write); consuming
+/// sites use `Arc::unwrap_or_clone`.
+#[inline]
+fn v_arr(items: JwcArr) -> V {
+    V::Array(Arc::new(items))
+}
+
+#[inline]
+fn v_obj(m: JwcObj) -> V {
+    V::Object(Arc::new(m))
+}
 
 /// Load a `.env` from the current working directory or the binary's directory.
 /// Mirrors `project::load_dotenv` so a standalone native binary picks up the
@@ -88,8 +104,8 @@ enum V {
     Int(i64),
     Float(f64),
     Str(String),
-    Array(Vec<V>),
-    Object(JwcObj),
+    Array(Arc<JwcArr>),
+    Object(Arc<JwcObj>),
 }
 
 impl fmt::Display for V {
@@ -206,8 +222,8 @@ fn jwc_error_value(msg: String) -> V {
     let mut m: JwcObj = JwcObj::default();
     m.insert("type".to_string(), V::Str(kind));
     m.insert("message".to_string(), V::Str(msg));
-    m.insert("causes".to_string(), V::Array(Vec::new()));
-    V::Object(m)
+    m.insert("causes".to_string(), v_arr(Vec::new()));
+    v_obj(m)
 }
 
 fn jwc_panic_payload_to_string(p: Box<dyn std::any::Any + Send>) -> String {
@@ -334,19 +350,19 @@ fn jwc_get_field(v: &V, k: &str) -> V {
 
 fn jwc_set_field(v: &mut V, k: &str, value: V) {
     match v {
-        V::Object(m) => { m.insert(k.to_string(), value); }
+        V::Object(m) => { Arc::make_mut(m).insert(k.to_string(), value); }
         other => panic!("field assignment on non-object value: {:?}", other),
     }
 }
 
-fn jwc_to_array(v: V) -> Vec<V> {
+fn jwc_to_array(v: V) -> JwcArr {
     match v {
-        V::Array(a) => a,
+        V::Array(a) => Arc::unwrap_or_clone(a),
         V::Null => Vec::new(),
         V::Str(s) => {
             // Accept JSON-array strings to match interpreter semantics.
             match jwc_from_json(&s) {
-                Ok(V::Array(a)) => a,
+                Ok(V::Array(a)) => Arc::unwrap_or_clone(a),
                 _ => panic!("for-in expects an array, got string {:?}", s),
             }
         }
@@ -393,7 +409,7 @@ fn jwc_write_json(v: &V, out: &mut String) {
                 if i > 0 { out.push(','); }
                 jwc_write_json_string(k, out);
                 out.push(':');
-                jwc_write_json(&map[k], out);
+                jwc_write_json(map.get(k).expect("key from keys()"), out);
             }
             out.push('}');
         }
@@ -539,15 +555,15 @@ impl<'a> JsonParser<'a> {
 
     fn parse_array(&mut self) -> Result<V, String> {
         self.expect(b'[')?;
-        let mut out = Vec::new();
+        let mut out: JwcArr = Vec::new();
         self.skip_ws();
-        if self.peek() == Some(b']') { self.pos += 1; return Ok(V::Array(out)); }
+        if self.peek() == Some(b']') { self.pos += 1; return Ok(v_arr(out)); }
         loop {
             out.push(self.parse_value()?);
             self.skip_ws();
             match self.bump() {
                 Some(b',') => self.skip_ws(),
-                Some(b']') => return Ok(V::Array(out)),
+                Some(b']') => return Ok(v_arr(out)),
                 _ => return Err(format!("expected ',' or ']' at {}", self.pos)),
             }
         }
@@ -557,7 +573,7 @@ impl<'a> JsonParser<'a> {
         self.expect(b'{')?;
         let mut out: JwcObj = JwcObj::default();
         self.skip_ws();
-        if self.peek() == Some(b'}') { self.pos += 1; return Ok(V::Object(out)); }
+        if self.peek() == Some(b'}') { self.pos += 1; return Ok(v_obj(out)); }
         loop {
             self.skip_ws();
             let k = self.parse_string()?;
@@ -568,7 +584,7 @@ impl<'a> JsonParser<'a> {
             self.skip_ws();
             match self.bump() {
                 Some(b',') => continue,
-                Some(b'}') => return Ok(V::Object(out)),
+                Some(b'}') => return Ok(v_obj(out)),
                 _ => return Err(format!("expected ',' or '}}' at {}", self.pos)),
             }
         }
@@ -642,8 +658,8 @@ fn jwc_b_replace(s: V, old: V, new: V) -> V {
 fn jwc_b_split(s: V, sep: V) -> V {
     match (s, sep) {
         (V::Str(a), V::Str(b)) => {
-            let parts: Vec<V> = a.split(b.as_str()).map(|p| V::Str(p.to_string())).collect();
-            V::Array(parts)
+            let parts: JwcArr = a.split(b.as_str()).map(|p| V::Str(p.to_string())).collect();
+            v_arr(parts)
         }
         (a, b) => panic!("split() expects two strings, got {:?} / {:?}", a, b),
     }
@@ -651,7 +667,16 @@ fn jwc_b_split(s: V, sep: V) -> V {
 
 fn jwc_b_first(v: V) -> V {
     match v {
-        V::Array(mut a) => if a.is_empty() { V::Null } else { a.remove(0) },
+        V::Array(a) => {
+            if a.is_empty() {
+                V::Null
+            } else {
+                // Refcount == 1 (the only owner) → unwrap_or_clone returns
+                // the Vec by move; > 1 clones. Either way we can `remove(0)`.
+                let mut owned = Arc::unwrap_or_clone(a);
+                owned.remove(0)
+            }
+        }
         V::Str(s) => s.chars().next().map(|c| V::Str(c.to_string())).unwrap_or(V::Null),
         V::Null => V::Null,
         other => panic!("first() expects an array or string, got {:?}", other),
@@ -674,19 +699,19 @@ fn jwc_b_range(start: V, end: V, step: V) -> V {
     if st <= 0 {
         panic!("range() step must be positive, got {}", st);
     }
-    let mut out = Vec::new();
+    let mut out: JwcArr = Vec::new();
     let mut i = s;
     while i < e {
         out.push(V::Int(i));
         i += st;
     }
-    V::Array(out)
+    v_arr(out)
 }
 
 fn jwc_push(arr: &mut V, elem: V) {
     match arr {
-        V::Array(items) => items.push(elem),
-        V::Null => *arr = V::Array(vec![elem]),
+        V::Array(items) => Arc::make_mut(items).push(elem),
+        V::Null => *arr = v_arr(vec![elem]),
         other => panic!("push() first arg must be an array, got {:?}", other),
     }
 }
@@ -746,7 +771,6 @@ fn jwc_b_int(v: V) -> V {
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 
 /// Type of a generated route handler: an `async fn()` boxed/erased into a
@@ -885,9 +909,9 @@ fn make_response_with_headers(
     m.insert("body".to_string(), V::Str(body));
     m.insert("content_type".to_string(), V::Str(content_type.to_string()));
     if !headers.is_empty() {
-        m.insert("headers".to_string(), V::Object(headers));
+        m.insert("headers".to_string(), v_obj(headers));
     }
-    V::Object(m)
+    v_obj(m)
 }
 
 fn body_string(v: V) -> String {
@@ -1006,7 +1030,12 @@ fn jwc_b_status_code(code: V, v: V) -> V {
             // `text/html` because we may emit a minimal `<a href=...>` body
             // someday; for now the body stays empty and the browser follows
             // the Location header.
-            return make_response_with_headers(status, body, "text/html; charset=utf-8", m);
+            return make_response_with_headers(
+                status,
+                body,
+                "text/html; charset=utf-8",
+                Arc::unwrap_or_clone(m),
+            );
         }
     }
     let body = body_string(v.clone());

@@ -169,7 +169,7 @@ fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
         };
         m.insert(name, v);
     }
-    V::Object(m)
+    v_obj(m)
 }
 
 // --- typed-param helpers used by codegen --------------------------------------
@@ -316,8 +316,8 @@ async fn jwc_db_eager_load(
     if keys.is_empty() {
         for p in parents.iter_mut() {
             if let V::Object(m) = p {
-                let val = if one_to_one { V::Null } else { V::Array(Vec::new()) };
-                m.insert(nav_name.to_string(), val);
+                let val = if one_to_one { V::Null } else { v_arr(Vec::new()) };
+                Arc::make_mut(m).insert(nav_name.to_string(), val);
             }
         }
         return;
@@ -353,9 +353,9 @@ async fn jwc_db_eager_load(
             let val = if one_to_one {
                 attached.into_iter().next().unwrap_or(V::Null)
             } else {
-                V::Array(attached)
+                v_arr(attached)
             };
-            m.insert(nav_name.to_string(), val);
+            Arc::make_mut(m).insert(nav_name.to_string(), val);
         }
     }
 }
@@ -384,7 +384,7 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
         _ => "[]".to_string(),
     };
     let params: Vec<V> = match jwc_from_json(&raw) {
-        Ok(V::Array(a)) => a,
+        Ok(V::Array(a)) => Arc::unwrap_or_clone(a),
         _ => Vec::new(),
     };
     // raw_sql doesn't know the prepared statement's parameter types up
@@ -413,7 +413,7 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
         let Some(first) = rows.into_iter().next() else {
             return V::Null;
         };
-        let V::Object(mut m) = first else {
+        let V::Object(m) = first else {
             return V::Null;
         };
         // First-column-as-text: V::Object now stores rows in an FxHashMap
@@ -421,10 +421,11 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
         // column to preserve the previous BTreeMap-driven behavior.
         // Callers that care about ordering should `SELECT col AS a` to force
         // alphabetic ordering, or use a single-column projection.
-        let Some(first_key) = m.keys().min().cloned() else {
+        let mut owned = Arc::unwrap_or_clone(m);
+        let Some(first_key) = owned.keys().min().cloned() else {
             return V::Null;
         };
-        let Some(v) = m.remove(&first_key) else {
+        let Some(v) = owned.remove(&first_key) else {
             return V::Null;
         };
         match v {

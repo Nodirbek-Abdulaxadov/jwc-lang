@@ -1789,12 +1789,12 @@ fn emit_validate_body(
         "__payload.insert(\"error\".to_string(), V::Str(\"Validation failed\".to_string()));\n",
     );
     out.push_str(&inner2);
-    out.push_str("__payload.insert(\"fields\".to_string(), V::Object(__errors));\n");
+    out.push_str("__payload.insert(\"fields\".to_string(), v_obj(__errors));\n");
     out.push_str(&inner2);
     if ctx.in_closure() {
-        out.push_str("{ jwc_set_return(V::Object(__payload)); return V::Null; }\n");
+        out.push_str("{ jwc_set_return(v_obj(__payload)); return V::Null; }\n");
     } else {
-        out.push_str("return V::Object(__payload);\n");
+        out.push_str("return v_obj(__payload);\n");
     }
     out.push_str(&inner);
     out.push_str("}\n");
@@ -2238,7 +2238,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             out.push_str("\")");
         }
         Expr::NewEntity { .. } => {
-            out.push_str("V::Object(JwcObj::default())");
+            out.push_str("v_obj(JwcObj::default())");
         }
         Expr::ObjectLit(pairs) => {
             out.push_str("{ let mut __o: JwcObj = JwcObj::default();");
@@ -2249,10 +2249,10 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 emit_expr(out, v, ctx);
                 out.push_str(");");
             }
-            out.push_str(" V::Object(__o) }");
+            out.push_str(" v_obj(__o) }");
         }
         Expr::ArrayLit(items) => {
-            out.push_str("V::Array(vec![");
+            out.push_str("v_arr(vec![");
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
@@ -2730,7 +2730,7 @@ fn emit_db_select(
     if first {
         out.push_str(" __rows.into_iter().next().unwrap_or(V::Null) }");
     } else {
-        out.push_str(" V::Array(__rows) }");
+        out.push_str(" v_arr(__rows) }");
     }
 }
 
