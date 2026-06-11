@@ -83,10 +83,7 @@ async fn run_case(name: &str) -> Result<(), String> {
     let source = match fs::read_to_string(&jwc_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "SKIPPED [{name}]: cannot read {}: {e}",
-                jwc_path.display()
-            );
+            eprintln!("SKIPPED [{name}]: cannot read {}: {e}", jwc_path.display());
             return Ok(());
         }
     };
@@ -250,10 +247,7 @@ fn discovery_every_case_file_is_registered() {
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!(
-                "SKIPPED discovery: cannot read {}: {e}",
-                dir.display()
-            );
+            eprintln!("SKIPPED discovery: cannot read {}: {e}", dir.display());
             return;
         }
     };
@@ -261,17 +255,12 @@ fn discovery_every_case_file_is_registered() {
     let mut on_disk: Vec<String> = entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|ext| ext == "jwc"))
-        .filter_map(|p| {
-            p.file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
-        })
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
         .filter(|n| n.starts_with("case_"))
         .collect();
     on_disk.sort();
 
-    let mut registered: Vec<String> =
-        REGISTERED_CASES.iter().map(|s| (*s).to_string()).collect();
+    let mut registered: Vec<String> = REGISTERED_CASES.iter().map(|s| (*s).to_string()).collect();
     registered.sort();
 
     let missing_from_registry: Vec<&String> =
