@@ -1,0 +1,10 @@
+and-skipped
+or-skipped
+called
+and-took
+called
+or-took
+false
+true
+false
+false

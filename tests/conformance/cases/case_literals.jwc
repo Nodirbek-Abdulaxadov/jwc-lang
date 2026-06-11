@@ -1,0 +1,13 @@
+// Conformance: literal printing — int / float / string / bool / null.
+function main() {
+    print(42);
+    print(-7);
+    print(0);
+    print(3.14);
+    print(-0.5);
+    print("hello");
+    print("");
+    print(true);
+    print(false);
+    print(null);
+}

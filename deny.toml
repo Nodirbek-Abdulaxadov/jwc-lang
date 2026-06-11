@@ -1,0 +1,65 @@
+# cargo-deny configuration — see PRODUCTION_READINESS_PLAN.md, Phase 6.
+# Run locally with: cargo deny check
+
+[advisories]
+version = 2
+yanked = "deny"
+# Triaged ignores. Each entry MUST cite the advisory ID, the upstream dep
+# blocking the fix, and the impact rationale (dev-only vs. runtime).
+ignore = [
+    # TODO(security): hickory-proto 0.25.2 advisories — pulled exclusively
+    # through reqwest -> hickory-resolver, which is pinned to 0.25.x upstream.
+    # Cannot bump to 0.26.x without a reqwest release. Drop these ignores once
+    # reqwest publishes a version that adopts hickory-resolver 0.26+.
+    #   RUSTSEC-2026-0118: NSEC3 unbounded loop (no fix available)
+    #   RUSTSEC-2026-0119: O(n^2) name compression in encode path
+    "RUSTSEC-2026-0118",
+    "RUSTSEC-2026-0119",
+    # TODO(security): RUSTSEC-2026-0097 — rand 0.9.2 unsound when a custom
+    # logger calls into rand::rng(). JWC does not install a custom global
+    # logger, so the unsound path is not exercised. Drop once hickory-proto
+    # / postgres-protocol upgrade past rand 0.9.2.
+    "RUSTSEC-2026-0097",
+    # TODO(security): rustls-webpki 0.102.8 advisories below are
+    # dev-dependency-only — reached exclusively via testcontainers ->
+    # bollard -> rustls 0.22 -> rustls-webpki 0.102. No production code path
+    # uses bollard's TLS stack. Drop once testcontainers/bollard upgrades to
+    # rustls 0.23+ (which pulls rustls-webpki 0.103+).
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    # TODO(security): RUSTSEC-2025-0134 — rustls-pemfile 2.2.0 unmaintained.
+    # Reached only via bollard (dev). Drop once bollard updates.
+    "RUSTSEC-2025-0134",
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+    "CC0-1.0",
+]
+# `jwc` itself has no `license = ...` field yet (workspace-private until a
+# license decision lands). Treat the workspace root as a private crate so
+# cargo-deny does not flag it as unlicensed.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"

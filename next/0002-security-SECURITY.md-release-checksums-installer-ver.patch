@@ -1,0 +1,259 @@
+From 08cb61924e5301901ad94ecc1034a1926bd04ff0 Mon Sep 17 00:00:00 2001
+From: Nodirbek Abdulaxadov <nodirbek@users.noreply.github.com>
+Date: Wed, 10 Jun 2026 19:44:09 +0000
+Subject: [PATCH 2/3] security: SECURITY.md, release checksums, installer
+ verification, Dependabot
+
+Closes the quick-win items from PRODUCTION_READINESS_PLAN.md Phase 6:
+
+- SECURITY.md: private disclosure via GitHub advisories, 72h ack,
+  14d high-severity fix SLA, explicit scope
+- release.yml: every artifact now ships a sha256sum-compatible
+  .sha256 file (Linux: sha256sum; Windows: Get-FileHash), attached
+  to both CI artifacts and the GitHub Release
+- install.sh / install.ps1: download and verify the checksum before
+  extracting; warn-and-continue for pre-checksum releases so old
+  tags stay installable
+- .github/dependabot.yml: weekly updates for cargo, GitHub Actions,
+  and both npm trees (docs, vscode-extension), minor/patch grouped
+- Plan Phase 6 updated to reflect landed vs remaining items
+---
+ .github/dependabot.yml        | 34 ++++++++++++++++++++++++
+ .github/workflows/release.yml | 12 +++++++--
+ PRODUCTION_READINESS_PLAN.md  | 17 +++++++-----
+ SECURITY.md                   | 50 +++++++++++++++++++++++++++++++++++
+ install.ps1                   | 16 +++++++++++
+ install.sh                    | 16 +++++++++++
+ 6 files changed, 137 insertions(+), 8 deletions(-)
+ create mode 100644 .github/dependabot.yml
+ create mode 100644 SECURITY.md
+
+diff --git a/.github/dependabot.yml b/.github/dependabot.yml
+new file mode 100644
+index 0000000..1cfd945
+--- /dev/null
++++ b/.github/dependabot.yml
+@@ -0,0 +1,34 @@
++version: 2
++updates:
++  - package-ecosystem: cargo
++    directory: /
++    schedule:
++      interval: weekly
++      day: monday
++    groups:
++      cargo-minor-patch:
++        update-types: [minor, patch]
++
++  - package-ecosystem: github-actions
++    directory: /
++    schedule:
++      interval: weekly
++      day: monday
++
++  - package-ecosystem: npm
++    directory: /docs
++    schedule:
++      interval: weekly
++      day: monday
++    groups:
++      docs-npm:
++        update-types: [minor, patch]
++
++  - package-ecosystem: npm
++    directory: /vscode-extension
++    schedule:
++      interval: weekly
++      day: monday
++    groups:
++      vscode-npm:
++        update-types: [minor, patch]
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index b27ca48..f851a84 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -68,6 +68,7 @@ jobs:
+           cp README.md ROADMAP.md stage/
+           asset="jwc-${{ steps.ver.outputs.label }}-${{ matrix.short }}.tar.gz"
+           tar -czf "$asset" -C stage .
++          sha256sum "$asset" > "$asset.sha256"
+           echo "ASSET=$asset" >> "$GITHUB_ENV"
+ 
+       - name: Package (windows)
+@@ -80,19 +81,26 @@ jobs:
+           Copy-Item README.md, ROADMAP.md "$stage/"
+           $asset = "jwc-${{ steps.ver.outputs.label }}-${{ matrix.short }}.zip"
+           Compress-Archive -Path "$stage/*" -DestinationPath $asset -Force
++          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
++          # `sha256sum -c` compatible format: "<hash>  <filename>"
++          Set-Content -Path "$asset.sha256" -Value "$hash  $asset" -NoNewline -Encoding ascii
+           Add-Content -Path $env:GITHUB_ENV -Value "ASSET=$asset"
+ 
+       - name: Upload artifact (for manual runs / debugging)
+         uses: actions/upload-artifact@v4
+         with:
+           name: ${{ matrix.short }}
+-          path: ${{ env.ASSET }}
++          path: |
++            ${{ env.ASSET }}
++            ${{ env.ASSET }}.sha256
+ 
+       - name: Attach to GitHub Release
+         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+         uses: softprops/action-gh-release@v2
+         with:
+-          files: ${{ env.ASSET }}
++          files: |
++            ${{ env.ASSET }}
++            ${{ env.ASSET }}.sha256
+           fail_on_unmatched_files: true
+           generate_release_notes: true
+ 
+diff --git a/PRODUCTION_READINESS_PLAN.md b/PRODUCTION_READINESS_PLAN.md
+index 0da640d..e34eb68 100644
+--- a/PRODUCTION_READINESS_PLAN.md
++++ b/PRODUCTION_READINESS_PLAN.md
+@@ -190,10 +190,17 @@ on graceful restart, memory flat.
+ 
+ ## Phase 6 — Security program
+ 
+-- **[1.0-blocker] `SECURITY.md`** + private disclosure channel + committed
+-  patch SLA for the supported version line.
+-- **Dependency hygiene**: `cargo audit` + `cargo deny` in CI (already have
+-  fmt/clippy/test); Dependabot for Cargo and the docs/npm tree.
++- **[1.0-blocker] `SECURITY.md`** — ✅ landed (this PR): private disclosure
++  via GitHub advisories, 72h ack / 14d high-severity fix SLA, scope defined.
++- **Dependency hygiene** — ✅ partially landed: `cargo audit` + `cargo deny`
++  run in CI (`security.yml` + `deny.toml`, currently `continue-on-error`)
++  and Dependabot covers cargo, GitHub Actions, and both npm trees (this PR).
++  Remaining: triage the current advisory set, then flip both jobs to
++  blocking.
++- **Release integrity** — ✅ landed (this PR): release workflow publishes
++  `.sha256` checksums for every artifact; `install.sh` / `install.ps1`
++  verify them, warning (not failing) on pre-checksum releases. Remaining:
++  consider Sigstore/`cosign` signing post-1.0.
+ - **Threat-model pass** on: route parsing (path traversal in `{param}`),
+   header injection via `response()`, SSRF surface of `http_get`/`fetch_json`
+   (document; optional allowlist env), JWT (alg confusion already prevented —
+@@ -201,8 +208,6 @@ on graceful restart, memory flat.
+   interpolation path reaches SQL text).
+ - **Secrets**: never log connection strings; redact `JWC_SMTP_PASSWORD` and
+   friends from error chains and boot config output.
+-- **Install scripts**: publish sha256 checksums for release artifacts;
+-  install.sh verifies before extracting.
+ 
+ Exit criteria: external or community security review of the HTTP + DB
+ surface; all findings ≥ medium fixed.
+diff --git a/SECURITY.md b/SECURITY.md
+new file mode 100644
+index 0000000..f15ccfe
+--- /dev/null
++++ b/SECURITY.md
+@@ -0,0 +1,50 @@
++# Security Policy
++
++## Supported versions
++
++Security fixes land on `main` and ship in the next patch release of the
++latest minor line. Until v1.0, only the **latest released version** is
++supported — older 0.x releases do not receive backported fixes.
++
++| Version        | Supported |
++| -------------- | --------- |
++| latest release | ✅        |
++| older releases | ❌        |
++
++## Reporting a vulnerability
++
++**Please do not open a public issue for security problems.**
++
++Preferred channel: GitHub **private vulnerability reporting** —
++[Security → Report a vulnerability](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/security/advisories/new)
++on this repository.
++
++Include where possible: affected component (CLI, runtime/server, LSP,
++install scripts, VS Code extension), a minimal `.jwc` reproduction or
++request trace, the version (`jwc --version`), and impact assessment.
++
++## What to expect
++
++- **Acknowledgement** within 72 hours.
++- **Triage + severity assessment** within 7 days.
++- **Fix target**: high/critical issues within 14 days of triage; lower
++  severities in the next regular release.
++- Credit in the release notes and advisory, unless you ask otherwise.
++
++## Scope
++
++In scope: the `jwc` CLI and runtime (HTTP server, DB layer, job queue,
++builtins such as `jwt_*`, `hash_password`, `raw_sql`), `jwc-lsp`, the
++install/uninstall scripts, release artifacts, and the VS Code extension.
++
++Out of scope: vulnerabilities in applications *written in* JWC (report those
++to the application's authors), and issues requiring a malicious local user
++with write access to the project directory.
++
++## Hardening notes for users
++
++- Release archives ship with `.sha256` checksum files; `install.sh` /
++  `install.ps1` verify them automatically when present.
++- Never set `JWC_DB_TLS_INSECURE_SKIP_VERIFY=1` in production.
++- Dependency advisories are tracked in CI via `cargo audit` and
++  `cargo deny` (`.github/workflows/security.yml`).
+diff --git a/install.ps1 b/install.ps1
+index 0b03dc3..ad7c4fb 100644
+--- a/install.ps1
++++ b/install.ps1
+@@ -53,6 +53,22 @@ $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "jwc-install-$([g
+ try {
+     $archive = Join-Path $tmp $asset
+     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
++
++    # Verify the sha256 checksum when the release publishes one (releases
++    # after v0.4.1 do). Older releases lack the .sha256 asset — warn and go on.
++    try {
++        $sumFile = Join-Path $tmp "$asset.sha256"
++        Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile $sumFile
++        $expected = ((Get-Content $sumFile -Raw).Trim() -split '\s+')[0].ToLower()
++        $actual   = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
++        if ($expected -ne $actual) {
++            Write-Error "Checksum mismatch for ${asset}: expected $expected, got $actual. Aborting."
++        }
++        Write-Host 'sha256 checksum OK.'
++    } catch [System.Net.WebException], [Microsoft.PowerShell.Commands.HttpResponseException] {
++        Write-Warning "$asset.sha256 not published for $Version — skipping verification."
++    }
++
+     Expand-Archive -Path $archive -DestinationPath $tmp -Force
+ 
+     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+diff --git a/install.sh b/install.sh
+index 8f6aaf9..d890421 100644
+--- a/install.sh
++++ b/install.sh
+@@ -55,6 +55,22 @@ tmp="$(mktemp -d)"
+ trap 'rm -rf "${tmp}"' EXIT
+ 
+ curl -fL "${url}" -o "${tmp}/${asset}"
++
++# Verify the sha256 checksum when the release publishes one (releases after
++# v0.4.1 do). Older releases lack the .sha256 asset — warn and continue.
++if curl -fsSL "${url}.sha256" -o "${tmp}/${asset}.sha256" 2>/dev/null; then
++    echo "Verifying sha256 checksum..."
++    if command -v sha256sum >/dev/null 2>&1; then
++        (cd "${tmp}" && sha256sum -c "${asset}.sha256")
++    elif command -v shasum >/dev/null 2>&1; then
++        (cd "${tmp}" && shasum -a 256 -c "${asset}.sha256")
++    else
++        echo "WARNING: no sha256sum/shasum on PATH — skipping verification." >&2
++    fi
++else
++    echo "WARNING: ${asset}.sha256 not published for ${version} — skipping verification." >&2
++fi
++
+ tar -xzf "${tmp}/${asset}" -C "${tmp}"
+ 
+ mkdir -p "${INSTALL_DIR}"
+-- 
+2.43.0
+

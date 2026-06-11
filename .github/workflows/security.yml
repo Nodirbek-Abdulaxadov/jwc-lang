@@ -1,0 +1,54 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/security.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+  schedule:
+    # Weekly run so new advisories surface even without commits.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    # Blocking. The triaged advisory set is documented in deny.toml; the
+    # `--ignore` flags below MUST stay in sync with deny.toml's
+    # [advisories].ignore list. When an upstream patch lands, drop the ID
+    # from BOTH places.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0118 \
+            --ignore RUSTSEC-2026-0119 \
+            --ignore RUSTSEC-2026-0097 \
+            --ignore RUSTSEC-2026-0049 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104 \
+            --ignore RUSTSEC-2025-0134
+
+  deny:
+    name: cargo deny (licenses, bans, advisories)
+    runs-on: ubuntu-latest
+    # Blocking. Triaged advisory/license set is in deny.toml.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

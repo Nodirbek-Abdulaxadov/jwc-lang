@@ -1,0 +1,30 @@
+// Conformance: regular and recursive functions.
+function add(a: int, b: int): int {
+    return a + b;
+}
+
+function fib(n: int): int {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+function factorial(n: int): int {
+    if (n <= 1) {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+function greet(name: string): string {
+    return "Hello, " + name;
+}
+
+function main() {
+    print(add(2, 3));
+    print(add(-4, 10));
+    print(fib(10));
+    print(factorial(6));
+    print(greet("conformance"));
+}

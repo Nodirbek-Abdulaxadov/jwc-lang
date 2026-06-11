@@ -1,0 +1,23 @@
+// Conformance: array literals + push + range + join.
+function main() {
+    let xs = [1, 2, 3];
+    print(length(xs));
+    print(first(xs));
+    print(last(xs));
+    push(xs, 4);
+    push(xs, 5);
+    print(join(xs, ","));
+    print(xs);
+
+    let squares = [];
+    for i in range(0, 5) {
+        push(squares, i * i);
+    }
+    print(join(squares, "-"));
+
+    let empty = [];
+    print(length(empty));
+
+    let mixed = ["a", 1, true];
+    print(mixed);
+}

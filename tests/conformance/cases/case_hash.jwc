@@ -1,0 +1,6 @@
+// Conformance: sha256 returns lowercase hex.
+function main() {
+    print(sha256("hello"));
+    print(sha256(""));
+    print(sha256("The quick brown fox jumps over the lazy dog"));
+}

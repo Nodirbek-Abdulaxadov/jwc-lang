@@ -1,0 +1,24 @@
+// Conformance: for-in over range, with break/continue.
+function main() {
+    for i in range(3) {
+        print(i);
+    }
+    for i in range(1, 6, 2) {
+        print(i);
+    }
+    let total = 0;
+    for i in range(0, 10) {
+        if (i == 7) {
+            break;
+        }
+        if (i % 2 == 1) {
+            continue;
+        }
+        total = total + i;
+    }
+    print(total);
+    let xs = [10, 20, 30];
+    for x in xs {
+        print(x);
+    }
+}

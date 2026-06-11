@@ -1,0 +1,30 @@
+// Conformance: pin the current behavior — JWC `int` is a 64-bit signed
+// integer (i64). Operations stay in i64 with no implicit promotion to a
+// big-integer type. We deliberately do NOT exercise an actual overflow:
+// the interpreter today uses `a + b` / `a * b` without `checked_*`, so a
+// real overflow would panic in debug builds (matches Rust default). This
+// case documents the safe boundary; once `--release` / `wrapping_*` /
+// `checked_*` policy is decided, add follow-up cases here.
+function main() {
+    // i64 max and min, printed via the standard formatter.
+    print(9223372036854775807);
+    print(-9223372036854775807);
+
+    // Large multiplications that stay within i64.
+    print(1000000 * 1000000);
+    print(1000000000 * 9);
+
+    // Negative arithmetic.
+    print(-5 * 3);
+    print(-5 * -3);
+
+    // Mixed-sign modulo follows truncated division (matches Rust `%`).
+    print(7 % 3);
+    print(-7 % 3);
+    print(7 % -3);
+
+    // Integer division truncates toward zero.
+    print(7 / 2);
+    print(-7 / 2);
+    print(-7 / -2);
+}

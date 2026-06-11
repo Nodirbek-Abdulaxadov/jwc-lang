@@ -1,0 +1,20 @@
+// Conformance: json_parse + json_stringify round-trip.
+function main() {
+    let parsed = json_parse("{\"name\":\"jwc\",\"version\":4,\"fast\":true}");
+    print(parsed.name);
+    print(parsed.version);
+    print(parsed.fast);
+
+    let arr = json_parse("[10,20,30]");
+    print(length(arr));
+    print(first(arr));
+    print(last(arr));
+
+    print(json_stringify([1, 2, 3]));
+    print(json_stringify("plain"));
+    print(json_stringify(42));
+    print(json_stringify(true));
+
+    let obj = { name: "jwc", tags: ["fast", "typed"] };
+    print(json_stringify(obj));
+}

@@ -1,0 +1,163 @@
+From 48c3c73cede2741d66352ac81ebc504e9199eb88 Mon Sep 17 00:00:00 2001
+From: Nodirbek Abdulaxadov <nodirbek@users.noreply.github.com>
+Date: Wed, 10 Jun 2026 19:53:29 +0000
+Subject: [PATCH 3/3] docs(plan): fold jwc-shortener production findings into
+ the plan
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+First production app (jwc-shortener, live at 1kb.uz) validated the
+deploy story and surfaced concrete gaps. Added a findings→phase map
+section and folded each into its phase:
+
+- Phase 2: lint warnings in the default build path (unused RateLimit
+  middleware shipped unnoticed, leaving an endpoint unthrottled)
+- Phase 3: typed UniqueViolation catch (slug PK collision = generic
+  500 today); substring/take builtin gaps
+- Phase 4: [1.0-blocker] atomic 'update ... set col = col + 1' —
+  whole-row read-modify-write loses hit counts under concurrency
+- Phase 5: response-phase middleware (latency/status unobservable),
+  trusted-proxy client_ip(), /readyz motivated by DB-blind healthz
+- Phase 8: official Docker image + musl static builds (glibc
+  mismatch pain), migrate-as-init-container k8s guide
+- Next sprint: file findings as dogfooding-labelled issues
+---
+ PRODUCTION_READINESS_PLAN.md | 81 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 78 insertions(+), 3 deletions(-)
+
+diff --git a/PRODUCTION_READINESS_PLAN.md b/PRODUCTION_READINESS_PLAN.md
+index e34eb68..7192a1c 100644
+--- a/PRODUCTION_READINESS_PLAN.md
++++ b/PRODUCTION_READINESS_PLAN.md
+@@ -24,6 +24,30 @@ A team can:
+ 
+ ---
+ 
++## Production dogfooding — findings from `jwc-shortener` (June 2026)
++
++The first production JWC app —
++[`jwc-shortener`](https://github.com/Nodirbek-Abdulaxadov/jwc-shortener),
++live at 1kb.uz (native AOT image, k8s + ArgoCD, migrations via init
++container) — validates the deploy story end-to-end and surfaced concrete
++gaps. Each is folded into its phase below; the map:
++
++| Finding in production | Plan item |
++|---|---|
++| Whole-row `update` after a read lost-updates the `hits` counter under concurrency | Phase 4 — atomic `update ... set` |
++| PK collision (short slug) surfaces as a generic 500 — can't catch unique-violation distinctly | Phase 3 — typed `catch` |
++| No `substring`/`take` builtin → `split(s, "")` loop workaround | Phase 3 — builtin gaps |
++| Middleware can't see the response → `latency_ms` always 0, status hardcoded | Phase 5 — response-phase middleware |
++| Hand-rolled `/healthz` has no DB check — probes stay green during a DB outage | Phase 5 — built-in `/readyz` |
++| Per-process rate limit + spoofable `x-forwarded-for` behind Cloudflare | Phase 5 — trusted-proxy `client_ip()` |
++| Declared-but-unused middleware left an endpoint unthrottled, no warning in the build path | Phase 2 — lint enforcement |
++| Dockerfile curls a release tarball; glibc 2.36→2.40 mismatch broke older bases | Phase 8 — official image + musl builds |
++
++This is the feedback loop working as intended — keep shipping real apps and
++folding findings back here.
++
++---
++
+ ## Phase 0 — Specification & compatibility contract
+ 
+ > You cannot stabilize what is defined only by the implementation.
+@@ -106,6 +130,12 @@ the struct path beating today's 13.0k RPS.
+ - **`unwrap()` budget**: 340 `.unwrap()` calls in `src/` today. Policy:
+   forbidden outside tests except with a `// INVARIANT:` comment;
+   enforce via clippy lint config in CI.
++- **Lint that actually gates.** jwc-shortener shipped with a declared-but-
++  unused `RateLimit` middleware — leaving its write endpoint unthrottled in
++  production — and nothing in the build path said a word, because `jwc lint`
++  is a separate opt-in command. Encode this as a lint fixture test, surface
++  high-signal warnings (unused middleware, unused function) in `jwc build` /
++  `jwc test` output by default, and add `--deny-warnings` for CI use.
+ - **Fuzzing**: `cargo-fuzz` targets for lexer + parser (untrusted `.jwc`
+   input must never panic the CLI or LSP). Run in nightly CI.
+ 
+@@ -118,8 +148,16 @@ panics; every parse/validate error shows file:line:col.
+ 
+ - **[1.0-blocker] Real typed `catch`.** Today `catch (e: DbError)` parses but
+   matches everything (documented in README). Implement first-class error
+-  types: builtin hierarchy (`DbError`, `HttpError`, `ValidationError`,
+-  `JwtError`) + user-declared `error Name { fields }`.
++  types: builtin hierarchy (`DbError` with `UniqueViolation` etc.,
++  `HttpError`, `ValidationError`, `JwtError`) + user-declared
++  `error Name { fields }`. Production motivation: jwc-shortener cannot
++  distinguish a slug PK collision from any other DB failure — the correct
++  retry-on-conflict pattern is unwritable today; every collision is a
++  user-facing 500.
++- **Builtin gaps from production use**: `substring(s, start, len)` /
++  `take(s, n)` (today: a `split(s, "")` for-loop), `client_ip()` (see
++  Phase 5 trusted-proxy work), and a reviewed pass over `docs/builtins.md`
++  for similar everyday holes before the surface freezes at 1.0.
+ - **Static type checker (gradual).** Function signatures already carry types;
+   add a check pass: declared return type vs. actual returns, call-site arity
+   + argument types, entity field types in expressions. Unannotated code stays
+@@ -146,6 +184,14 @@ default with `--no-typecheck` escape hatch for one transition release.
+   rejection is documented — add savepoint support or a clear compile error;
+   test rollback under panic, mid-statement DB disconnect, and pool
+   exhaustion.
++- **[1.0-blocker] Atomic partial updates.** The only update form today is
++  whole-row `update x in Db.Table` after a read — a read-modify-write that
++  silently loses writes under concurrency (observed live: jwc-shortener's
++  `hits` counter undercounts on parallel redirects; the workaround is
++  `raw_sql`). Add `update Link set hits = hits + 1 where Link.code == @c;`
++  — column expressions compile to a single SQL `UPDATE`, validated against
++  entity fields like `where`/`orderby` already are. Document the
++  read-modify-write hazard on the whole-row form.
+ - **Connection pool resilience**: retry-with-backoff on transient errors,
+   health-check query option, pool metrics (in-use/idle/wait time) exposed via
+   the existing `JWC_SERVER_METRICS`.
+@@ -178,8 +224,22 @@ poisoned pool, no stuck transactions, clean 503s.
+ - **Observability**: structured JSON logs (`JWC_LOG_FORMAT=json`), request
+   IDs propagated to logs + error handler, Prometheus `/metrics` endpoint
+   (latency histograms, pool stats, queue depth), optional OTLP traces.
++- **Response-phase middleware (`after` hooks).** Middleware today runs only
++  before the handler — it cannot observe status or duration. jwc-shortener
++  hand-rolls a metrics table with `latency_ms` hardcoded to 0 and
++  `status` hardcoded to 200 because nothing better is expressible. Add
++  `after { ... }` blocks (or a second middleware phase) exposing
++  `response_status()` / `response_duration_ms()` — and note that the
++  built-in `/metrics` endpoint below removes the need for hand-rolled
++  request-logging tables entirely.
++- **Trusted-proxy client IP.** `header("x-forwarded-for")` is spoofable and
++  wrong behind Cloudflare (`CF-Connecting-IP`). Add a `client_ip()` builtin
++  driven by `JWC_TRUSTED_PROXIES` / `JWC_REAL_IP_HEADER` config, so
++  rate-limit and audit code stops re-deriving this per app.
+ - **Health endpoints**: `/healthz` (process) and `/readyz` (DB reachable),
+-  built-in, documented for load balancers.
++  built-in, documented for load balancers. Validated need: the hand-rolled
++  `/healthz` in jwc-shortener has no DB check, so k8s probes stay green
++  through a database outage.
+ - **Config validation at boot**: fail fast with a table of every JWC_* env
+   var, its parsed value, and its source.
+ 
+@@ -252,6 +312,13 @@ Linux + Windows, per-release CI regression gate active.
+   (generated from code, replacing hand-maintained `docs/builtins.md`),
+   deployment guides (Docker, systemd, k8s) — a `jwc`-official Dockerfile +
+   example compose with Postgres.
++- **Official Docker image + musl static builds.** jwc-shortener's Dockerfile
++  curls a release tarball and pins `rust:1.90-slim` purely to match the
++  build host's glibc (2.36 vs 2.40 broke older bases). Publish
++  `ghcr.io/.../jwc:<version>` (builder + slim runtime variants) and a
++  `x86_64-unknown-linux-musl` static binary so app Dockerfiles stop caring
++  about glibc at all. Document the proven migrate-as-init-container k8s
++  pattern in the deployment guide.
+ - **`jwc fmt`** (formatter exists at `src/fmt.rs` — finish + document) and
+   **`jwc upgrade`** (codemod for deprecations).
+ - **LSP parity**: go-to-definition, rename, completion for entity fields and
+@@ -310,3 +377,11 @@ the unified value model ships.
+ 4. Cheap, high-signal wins shipped alongside this plan: `cargo audit` +
+    `cargo deny` in CI (see `.github/workflows/security.yml`), Postgres `/db`
+    endpoint added to the benchmark repo, benchmark link in README.
++5. File the jwc-shortener findings as `dogfooding`-labelled issues so they
++   don't live only in this document: atomic `update ... set` (Phase 4),
++   typed `UniqueViolation` catch (Phase 3), `substring`/`take` +
++   `client_ip()` builtins (Phase 3/5), response-phase middleware (Phase 5),
++   lint warnings in the default build path (Phase 2), official Docker
++   image + musl build (Phase 8). The two smallest — `substring` builtin and
++   the unused-middleware lint fixture — are good first issues to close
++   within this sprint.
+-- 
+2.43.0
+
