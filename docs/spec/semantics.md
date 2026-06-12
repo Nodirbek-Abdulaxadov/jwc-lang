@@ -120,11 +120,66 @@ semantics for code that uses field access.
   `{param}` placeholders matching one path segment.
 - Handler return values are JSON-encoded via the same JSON serializer as
   `json_stringify`.
-- Middleware runs **before** the handler today; response-phase
-  middleware (Phase 5) will add `after { ... }` blocks.
+- Middleware runs **before** the handler by default. Response-phase
+  middleware lives inside `after { ... }` blocks (see §7.1).
 - `response(status, body)` allows manual override of both the HTTP
   status code and the body; further mutation after `response()` is a
   runtime error.
+
+### 7.1 Response-phase middleware (`after { ... }`)
+
+A middleware declaration may declare one optional `after { ... }` block
+in addition to its main body. The main body is the *request phase* and
+runs before the handler; the `after` block is the *response phase* and
+runs after the handler has produced a status + body.
+
+**Dispatch order**
+
+- Request-phase middleware bodies run **in declaration order** — the
+  first declared `middleware` runs first, then the next, etc., before
+  the route handler executes.
+- After the handler returns (or errors), response-phase `after` blocks
+  run **in reverse declaration order** — the last middleware's `after`
+  runs first, walking outward. This mirrors the conventional onion
+  model (the middleware that started last finishes first).
+
+**What is visible inside `after`**
+
+- `response_status()` — the HTTP status the handler emitted, including
+  values set by an explicit `response(status, body)` call. Always
+  non-null inside an `after` block.
+- `response_duration_ms()` — milliseconds since the dispatcher first
+  saw the request. Monotonically non-decreasing within a single
+  request.
+- `request_id()` — the same per-request id visible in the request
+  phase, so log lines from `after` blocks correlate to the handler.
+- All other request inspection builtins (`header()`, `body()`,
+  `client_ip()`) — same values they had during the handler.
+
+**Error handling**
+
+- An exception raised inside an `after` block does **not** alter the
+  response that already reached the client buffer in a streamed
+  response. For a buffered response, an `after` block that raises is
+  treated like any other handler error: the configured error handler
+  runs and the original status/body is replaced with the error
+  envelope.
+- A failing `after` block does NOT skip the remaining `after` blocks —
+  each block is invoked independently and exceptions are isolated to
+  the offending block. Log lines from earlier (in reverse-order terms,
+  inner) blocks still flush.
+- `response()` inside an `after` block is rejected with the same
+  "response already sent" runtime error that double-`response()` raises
+  from the handler, so observers cannot retroactively change the wire
+  status.
+
+**When `after` does not run**
+
+- The connection drops or times out before the handler returns — the
+  `JWC_REQUEST_TIMEOUT` watchdog short-circuits to a 504 envelope and
+  no `after` blocks fire for that request. This is intentional: the
+  upstream client has already given up, and running response-phase
+  logging on an aborted task would race the watchdog.
 
 ## 8. Background jobs
 
