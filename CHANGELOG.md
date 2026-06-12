@@ -3,6 +3,24 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **W3C `traceparent` propagation.** When an upstream service sends
+  a well-formed `traceparent: 00-<32-hex>-<16-hex>-<flags>` header,
+  the server reuses the trace-id as `request_id()` instead of
+  generating a local one. Distributed tracing across hops just
+  works: a Tempo / Jaeger / Honeycomb query for the trace-id
+  surfaces every JWC service it passed through. Malformed
+  traceparents fall back to the local counter id (never refuse a
+  request over a broken upstream header).
+- **Native AOT codegen for response-phase `after { ... }` blocks.**
+  Each middleware with an after-body now emits a separate
+  `mw_<name>_after()` fn alongside `mw_<name>()`; the route
+  dispatcher calls them in reverse middleware order after the
+  handler. Interpreter shipped in v0.4.3; this slice closes the
+  follow-up.
+
 ## [0.4.3] — Phase 1/2/4/5 1.0-blockers, dogfooding bundle
 
 Twenty-six commits land together as a single release because each is

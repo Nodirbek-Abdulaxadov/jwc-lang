@@ -479,7 +479,6 @@ static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Generate a 16-hex-char request id of the form `<wall_secs_hex><counter_hex>`.
 /// Reused by both the access log and the runner-side `request_id()`
 /// builtin so a single request shows the same id in every log line.
-/// Trace-W3C `traceparent`/`tracestate` propagation is the follow-up.
 fn next_request_id() -> String {
     let wall = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -487,6 +486,29 @@ fn next_request_id() -> String {
         .unwrap_or(0);
     let n = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{:08x}{:08x}", wall as u32, n as u32)
+}
+
+/// Parse a W3C `traceparent` header (`00-<trace-id-32-hex>-<span-id-16-hex>-<flags>`)
+/// and return the trace-id. Validation is minimal: format shape +
+/// hex-only on the trace-id slot. Anything malformed falls back to
+/// generating a local id — never refuse a request over a broken
+/// upstream tracing header.
+fn extract_traceparent_trace_id(value: &str) -> Option<String> {
+    let mut parts = value.split('-');
+    let version = parts.next()?;
+    let trace_id = parts.next()?;
+    let _span_id = parts.next()?;
+    let _flags = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if version.len() != 2 || trace_id.len() != 32 {
+        return None;
+    }
+    if !trace_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(trace_id.to_string())
 }
 
 fn readyz_db_failure(detail: String) -> Response {
@@ -611,11 +633,17 @@ async fn handle_http_fallback(
     };
 
     // Stamp a request id BEFORE dispatching so middleware / handler /
-    // errorHandler all read the same value via `request_id()`. The id
-    // is also sent back as `x-request-id` on every response, mirroring
-    // the convention nginx / Cloudflare use, so callers can correlate
-    // their client-side log with the server's logs.
-    let request_id = next_request_id();
+    // errorHandler all read the same value via `request_id()`. Honour
+    // an inbound W3C `traceparent` header — if the upstream service
+    // already started a trace, reuse its `trace-id` so distributed
+    // tracing dashboards (Tempo, Jaeger, Honeycomb) can correlate
+    // hops without manual stitching. Fall back to the local
+    // counter id when no traceparent is present.
+    let request_id = headers
+        .get("traceparent")
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_traceparent_trace_id)
+        .unwrap_or_else(next_request_id);
     let program = Arc::clone(&state.program);
     let req_id_for_runner = request_id.clone();
     let result = tokio::spawn(async move {
@@ -904,6 +932,36 @@ mod tests {
         if let Some(v) = prev.1 {
             std::env::set_var("JWC_DATABASE_URL", v);
         }
+    }
+
+    #[test]
+    fn traceparent_extracts_trace_id_from_well_formed_header() {
+        let trace = "0af7651916cd43dd8448eb211c80319c";
+        let header = format!("00-{trace}-b7ad6b7169203331-01");
+        assert_eq!(
+            extract_traceparent_trace_id(&header).as_deref(),
+            Some(trace)
+        );
+    }
+
+    #[test]
+    fn traceparent_rejects_wrong_section_count() {
+        assert!(extract_traceparent_trace_id("00-aaaa-bbbb").is_none());
+        assert!(extract_traceparent_trace_id("00-aaaa-bbbb-01-extra").is_none());
+    }
+
+    #[test]
+    fn traceparent_rejects_non_hex_trace_id() {
+        // Letter 'z' isn't hex — must fall back to local id generation.
+        let bad = "00-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-b7ad6b7169203331-01";
+        assert!(extract_traceparent_trace_id(bad).is_none());
+    }
+
+    #[test]
+    fn traceparent_rejects_wrong_trace_id_length() {
+        // 31 chars instead of 32 — header is malformed, ignore.
+        let short = "00-0af7651916cd43dd8448eb211c8031-b7ad6b7169203331-01";
+        assert!(extract_traceparent_trace_id(short).is_none());
     }
 
     #[test]
