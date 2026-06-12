@@ -80,6 +80,54 @@ spec:
               service: { name: my-api, port: { number: 80 } }
 ```
 
+## Probes, observability, and trusted proxies
+
+The bundled server registers `/healthz` (liveness — always 200) and
+`/readyz` (readiness — round-trips a `SELECT 1` against the DB pool
+when `JWC_DATABASE_URL` is set, returning 503 if unreachable) by
+default. Wire them in like this:
+
+```yaml
+spec:
+  containers:
+    - name: app
+      image: ghcr.io/me/my-api:main-<sha>
+      livenessProbe:
+        httpGet: { path: /healthz, port: 8080 }
+        initialDelaySeconds: 3
+        periodSeconds: 10
+      readinessProbe:
+        httpGet: { path: /readyz, port: 8080 }
+        initialDelaySeconds: 5
+        periodSeconds: 5
+      env:
+        # Behind an ingress that overwrites X-Forwarded-For,
+        # tell client_ip() to peel off internal hops:
+        - { name: JWC_REAL_IP_HEADER,  value: x-forwarded-for }
+        - { name: JWC_TRUSTED_PROXIES, value: "10.,127.0.0.1,::1" }
+        # Structured JSON logs for Loki / Datadog / CloudWatch:
+        - { name: JWC_LOG_FORMAT, value: json }
+        # k8s rolling deploys send SIGTERM; default 5s is usually
+        # enough but bump if your handlers can run longer:
+        - { name: JWC_SHUTDOWN_TIMEOUT, value: "30" }
+```
+
+Scrape Prometheus metrics from `/metrics`:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata: { name: my-api, namespace: my-api }
+spec:
+  selector: { matchLabels: { app: my-api } }
+  endpoints: [ { port: http, path: /metrics, interval: 15s } ]
+```
+
+Useful metrics out of the box: `jwc_http_requests_total`,
+`jwc_http_in_flight`, `jwc_http_request_latency_avg_seconds`,
+`jwc_http_request_latency_max_seconds`, `jwc_queue_pending`,
+`jwc_queue_dlq`.
+
 ## Replica safety
 
 - **Stateless JWC apps** scale horizontally — `replicas: N` is fine.
