@@ -1,6 +1,6 @@
 [package]
 name = "jwc"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 # Workspace-private until a license decision lands (see deny.toml [licenses]
 # `private = { ignore = true }`). Set to false explicitly so cargo-deny v2

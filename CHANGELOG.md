@@ -3,6 +3,62 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] — Spec scaffold, SemVer policy, release hardening
+
+Docs + supply-chain release. No language-level behaviour change; user
+`.jwc` source compiles without modification. Closes the Phase 0 and the
+remaining Phase 6 quick-wins from `PRODUCTION_READINESS_PLAN.md`.
+
+### Added
+- **`docs/spec/`** — language specification scaffold. `grammar.ebnf`
+  covers the top-level grammar (declarations, statements, expressions,
+  routes, SQL `select`) with `TODO` markers on incomplete productions;
+  `semantics.md` pins evaluation order, scope, async suspension,
+  coercion, integer/float behaviour, DB and HTTP semantics, and an
+  explicit "what is NOT specified yet" section; `builtins.md` defines
+  the contract template (Signature / Errors / Notes / Tests) and lands
+  the first batch of entries (length, replace, split, hashes, time,
+  body / response / serve).
+- **`SEMVER.md`** — what counts as a breaking change, what does not,
+  release cadence target, pre-release suffix contract, yank policy.
+- **`DEPRECATION.md`** — minimum warning window (pre-1.0 ≥ 1 minor,
+  post-1.0 full minor cycle), what can/cannot be deprecated, lifecycle,
+  authoring checklist (W#### code + CHANGELOG + test + spec update +
+  `jwc upgrade` rule).
+- **`SECURITY.md`** — private vulnerability disclosure via GitHub
+  Security Advisories, 72h ack / 14d high-severity fix SLA, explicit
+  in-scope/out-of-scope list, hardening notes for users.
+- **`.github/dependabot.yml`** — weekly updates for cargo, GitHub
+  Actions, and both npm trees (`docs/`, `vscode-extension/`), with
+  minor/patch grouped.
+- **README — Performance section** linking the
+  [http-framework-benchmark](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
+  repo with the v0.4.x headline numbers.
+
+### Changed
+- **Release artifacts now carry `.sha256` checksums.**
+  `.github/workflows/release.yml` runs `sha256sum` (Linux) and
+  `Get-FileHash -Algorithm SHA256` (Windows) over each tarball/zip and
+  attaches the sidecar `.sha256` to both the CI artifact and the GitHub
+  Release.
+- **`install.sh` / `install.ps1`** now download the `.sha256` next to
+  the archive and verify it before extracting. Releases without a
+  checksum (older than 0.4.2) warn and continue, so old tags remain
+  installable.
+
+### Deprecated
+- None.
+
+### Removed
+- None.
+
+### Internal
+- Phase 0 conformance suite (16 cases across both interpreter and
+  native AOT) shipped in `13a3cad` is now reachable from the spec docs;
+  each spec entry references its conformance case.
+- `PRODUCTION_READINESS_PLAN.md` Phase 0 + Phase 6 status updated to
+  reflect landed vs remaining items.
+
 ## [0.4.1] — Native AOT Phase A perf
 
 Performance-only release. No public API changes; user `.jwc` source compiles
