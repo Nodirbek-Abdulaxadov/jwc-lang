@@ -123,6 +123,35 @@ const CASES: &[Case] = &[
         expected_emit_contains: &["jwc_b_take("],
     },
     Case {
+        name: "simple_select_uses_typed_read",
+        source: r#"
+            dbcontext AppDb : Postgres;
+            entity Brand of AppDb {
+                id bigint pk;
+                name text(80);
+            }
+            route GET "brands" {
+                let bs = select Brand from AppDb.Brand;
+                return bs;
+            }
+            function main() {
+                print("brands route");
+            }
+        "#,
+        expected_output: "brands route\n",
+        // Phase 1 wiring: a SELECT with no projection and no `with`
+        // relations now goes through `jwc_db_query_rows` →
+        // `JwcEnt_Brand::jwc_from_row` → `jwc_to_v`, skipping the
+        // dynamic FxHashMap construction on the read side. The output
+        // still flows through V::Object so downstream serialisers stay
+        // unchanged; the write-side switchover is the next slice.
+        expected_emit_contains: &[
+            "jwc_db_query_rows(",
+            "JwcEnt_Brand::jwc_from_row(",
+            ".jwc_to_v()",
+        ],
+    },
+    Case {
         name: "monomorphized_struct_emitted",
         source: r#"
             dbcontext AppDb : Postgres;

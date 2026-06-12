@@ -69,6 +69,17 @@ shipped together since each is small.
   on `select` results with these structs so JSON serialisation skips
   the FxHashMap that `/json-large` round-trips through (closes the
   axum gap documented in PRODUCTION_READINESS_PLAN.md Phase 1).
+- **Phase 1.5c — `emit_db_select` wired to the typed read path.**
+  "Simple" entity selects (no projection, no `with` relations) now
+  generate `jwc_db_query_rows(sql, params)` →
+  `JwcEnt_<Name>::jwc_from_row(row)` → `jwc_to_v()` instead of the
+  dynamic `jwc_row_to_v` FxHashMap roundtrip. The Vec<V> shape
+  downstream is identical, so JSON serialisation and route returns
+  stay the same — this slice closes the read-side allocation, the
+  write-side switchover (skip V::Object entirely) is the next slice.
+  Complex paths (projection / eager-load) keep the dynamic codepath
+  because the monomorphized struct has a fixed shape that doesn't
+  match a partial projection.
 - **Phase 1.5b — `jwc_db_query_rows` raw-row helper on the DB
   prelude.** Returns `Vec<tokio_postgres::Row>` so generated code can
   feed each row straight into a monomorphized `JwcEnt_<Name>` via

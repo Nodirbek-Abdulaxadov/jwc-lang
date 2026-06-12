@@ -3128,6 +3128,20 @@ fn emit_db_select(
         }
     }
 
+    // Phase 1 monomorphization wiring. "Simple" selects — no projection,
+    // no `with` relations, full-row SELECT * — read rows straight into
+    // the concrete `JwcEnt_<Name>` struct, then lift to `V` via the
+    // emitted `jwc_to_v` method. Skips the dynamic per-row `jwc_row_to_v`
+    // FxHashMap construction. The downstream wrap (`v_arr`,
+    // `into_iter().next()`) keeps its existing shape.
+    //
+    // Complex selects (projection subset or `with` eager-load) still go
+    // through the dynamic `jwc_db_query` → `Vec<V>` path because the
+    // monomorphized struct has a fixed shape that doesn't match a
+    // partial projection, and eager-load injects extra columns into the
+    // map. That switchover is a follow-up.
+    let typed_read = projection.is_empty() && with_relations.is_empty();
+
     out.push('{');
     out.push_str(" let __params: DbParams = vec![");
     for (kind, expr) in &wb.params {
@@ -3136,10 +3150,19 @@ fn emit_db_select(
         out.push_str("),");
     }
     out.push_str("];");
-    out.push_str(&format!(
-        " let mut __rows = jwc_db_query(\"{}\", __params).await;",
-        escape_sql(&sql)
-    ));
+    if typed_read {
+        out.push_str(&format!(
+            " let __raw = jwc_db_query_rows(\"{}\", __params).await; \
+             let mut __rows: Vec<V> = __raw.iter().map(|r| JwcEnt_{ent}::jwc_from_row(r).jwc_to_v()).collect();",
+            escape_sql(&sql),
+            ent = table,
+        ));
+    } else {
+        out.push_str(&format!(
+            " let mut __rows = jwc_db_query(\"{}\", __params).await;",
+            escape_sql(&sql)
+        ));
+    }
 
     // Eager-load each `with` relation by issuing `WHERE fk IN (...)` against
     // the target table and grouping client-side. One round-trip per relation
