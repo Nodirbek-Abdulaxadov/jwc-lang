@@ -429,7 +429,18 @@ async fn handle_readyz() -> Response {
 /// route in every project. The PRODUCTION_READINESS_PLAN's Phase 5
 /// observability gap names exactly this endpoint.
 async fn handle_metrics(State(state): State<AppState>) -> Response {
-    let body = state.metrics.render_prometheus();
+    let mut body = state.metrics.render_prometheus();
+    // Background queue depth — operators chart this to spot a backlog
+    // before it becomes a SLO breach. The Phase 5 plan flags it as part
+    // of the observability gap.
+    let pending = queue::pending_count();
+    let dlq = queue::dlq_count();
+    body.push_str("# HELP jwc_queue_pending Number of jobs waiting to be processed by a worker.\n");
+    body.push_str("# TYPE jwc_queue_pending gauge\n");
+    body.push_str(&format!("jwc_queue_pending {pending}\n"));
+    body.push_str("# HELP jwc_queue_dlq Number of permanently-failed jobs held in the DLQ.\n");
+    body.push_str("# TYPE jwc_queue_dlq gauge\n");
+    body.push_str(&format!("jwc_queue_dlq {dlq}\n"));
     let mut resp = Response::new(body.into());
     *resp.status_mut() = StatusCode::OK;
     // Prometheus' text exposition spec. Versioned content-type so

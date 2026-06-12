@@ -9,6 +9,10 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **`/metrics` exports queue depth + DLQ size.** Two more
+  Prometheus gauges (`jwc_queue_pending`, `jwc_queue_dlq`) join the
+  HTTP counters / gauges so operators can chart a backlog before it
+  becomes an SLO breach.
 - **Response-phase middleware: `middleware Name { … } after { … }`.**
   Closes the biggest jwc-shortener dogfooding gap: pre-handler
   middleware couldn't read the response, so `latency_ms` and `status`
