@@ -3,10 +3,32 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — dogfooding patches
+## [0.4.3] — Phase 1/2/4/5 1.0-blockers, dogfooding bundle
 
-Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
-shipped together since each is small.
+Twenty-six commits land together as a single release because each is
+incremental and the shipping cadence in this session was per-commit
+green builds. The bundle closes six 1.0-blockers across four phases:
+
+- Phase 1 — Struct monomorphization (read + write), `V::RawJson`
+  fragment carrier, `emit_db_select` now skips `V::Object` on simple
+  selects. /json-large gap closed at the codegen level.
+- Phase 2 — Spanned validator errors (single + multi-file),
+  rustc-style snippets, lint enforcement in `jwc build` / `jwc test`,
+  `--deny-warnings` CI gate, unwrap-budget policy + `[lints.clippy]`
+  slot.
+- Phase 4 — Atomic `update CTX.Table set col = expr where ...`
+  closes the lost-update race observed live on jwc-shortener's
+  hits counter.
+- Phase 5 — SIGTERM handler, request body cap, /healthz + /readyz +
+  /metrics built-in endpoints, client_ip() with JWC_TRUSTED_PROXIES,
+  request_id() + x-request-id, JWC_LOG_FORMAT=json, queue drain on
+  shutdown, response-phase `after { ... }` middleware.
+- Phase 3 — `substring(s, start, len)` + `take(s, n)` builtins close
+  the dogfooded `split(s, "")` workaround.
+
+Conformance suite grew from 16 → 21 cases. Each runs in an
+8 MiB-stack thread so `case_functions` and friends don't flap under
+parallel `#[tokio::test]` pressure.
 
 ### Added
 - **Graceful shutdown drains the background queue.** The kubelet
