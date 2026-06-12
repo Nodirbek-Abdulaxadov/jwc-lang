@@ -36,7 +36,16 @@ shipped together since each is small.
 - **`Token::end_offset`** + **`SourceMap::snippet(offset)`** — building
   blocks for span-carrying AST nodes. Parser errors already use this
   to render an in-source caret under the failing token.
-- **Graceful shutdown listens for SIGTERM on Unix.** The pre-existing
+- **Per-file source tracking in validator diagnostics.** `Program` now
+  carries a `Vec<SourceFile>` (label + text) instead of a single
+  source string, and every top-level decl records the `file_idx` of
+  the file it came from. Multi-file projects now render validator
+  errors as `at <relative-path>:<line>:<col>` + snippet — the previous
+  slice cleared `program.source` on merge, so multi-file projects
+  fell back to the bare message shape. `parse_program(src)` keeps the
+  short single-file shape; `parse_program_with_label(src, label)` is
+  the new entry point the project loader uses to flow file paths in.
+  Single-file output is byte-identical so the LSP regex resolves.
   Ctrl+C path stays — but kubelet's rolling-deploy TERM signal no
   longer waits for the `terminationGracePeriodSeconds` ceiling to
   SIGKILL the process. The shutdown log line names which signal

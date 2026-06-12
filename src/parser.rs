@@ -20,13 +20,20 @@ use crate::diag::SourceMap;
 use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
 
 pub fn parse_program(source: &str) -> Result<Program> {
+    parse_program_with_label(source, "")
+}
+
+/// Like [`parse_program`] but lets the caller stamp a display label on the
+/// produced [`SourceFile`] entry. The project loader passes the
+/// repo-relative path of each file so multi-file projects can render
+/// `at <file>:<line>:<col>` for validator errors.
+pub fn parse_program_with_label(source: &str, label: &str) -> Result<Program> {
     let mut parser = Parser::new(source)?;
     let mut program = parser.parse_program()?;
-    // Stamp the original source so `validate_program` can render
-    // `at line X, col Y` + snippet for AST-stamped errors (decls now
-    // carry a byte offset of their opening keyword). Empty for
-    // hand-built test programs.
-    program.source = source.to_string();
+    program.sources = vec![crate::ast::SourceFile {
+        label: label.to_string(),
+        text: source.to_string(),
+    }];
     Ok(program)
 }
 
@@ -45,21 +52,36 @@ fn ns_fqn(namespace: &[String], name: &str) -> String {
     }
 }
 
-/// Render `<msg> at line L, col C\n<snippet>` when a decl carries a real
-/// offset and the program has a source string. Falls back to the bare
-/// `<msg>` shape when offset is `0` or source is empty / out-of-range —
-/// hand-built `Program::default()` instances in tests stay legible. The
-/// snippet matches the rustc-style shape that parser errors already
-/// produce so editors that already grep for `at line X, col Y` (e.g.
-/// `src/bin/jwc_lsp.rs::extract_line_col`) keep working.
-fn loc(program: &Program, offset: usize, msg: &str) -> anyhow::Error {
-    if offset == 0 || program.source.is_empty() || offset >= program.source.len() {
+/// Render `<msg> at <file>:line:col\n<snippet>` when a decl carries a
+/// real offset AND its [`Program::sources`] entry has a non-empty text
+/// buffer. Falls back to the bare `<msg>` shape when offset is `0`, the
+/// `file_idx` is out of range, or the source text for that file is empty
+/// — hand-built `Program::default()` instances in tests stay legible.
+/// The label is omitted when empty (single-file `parse_program` calls
+/// leave it blank), keeping single-file output identical to the previous
+/// `at line X, col Y` shape so the LSP regex in
+/// `src/bin/jwc_lsp.rs::extract_line_col` still resolves.
+fn loc_in(program: &Program, file_idx: usize, offset: usize, msg: &str) -> anyhow::Error {
+    let Some(file) = program.sources.get(file_idx) else {
+        return anyhow!("{msg}");
+    };
+    if offset == 0 || file.text.is_empty() || offset >= file.text.len() {
         return anyhow!("{msg}");
     }
-    let sm = SourceMap::new(&program.source);
+    let sm = SourceMap::new(&file.text);
     let (line, col) = sm.line_col(offset);
     let snippet = sm.snippet(offset);
-    anyhow!("{msg} at line {line}, col {col}{snippet}")
+    if file.label.is_empty() {
+        anyhow!("{msg} at line {line}, col {col}{snippet}")
+    } else {
+        anyhow!(
+            "{msg} at {file}:{line}:{col}{snippet}",
+            file = file.label,
+            line = line,
+            col = col,
+            snippet = snippet
+        )
+    }
 }
 
 pub fn validate_program(program: &Program) -> Result<()> {
@@ -68,15 +90,17 @@ pub fn validate_program(program: &Program) -> Result<()> {
     for ctx in &program.dbcontexts {
         let key = ns_fqn(&ctx.namespace, &ctx.name);
         if !ctx_names.insert(key) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                ctx.file_idx,
                 ctx.offset,
                 &format!("Duplicate dbcontext name: {}", ctx.name),
             ));
         }
         if ctx.driver.trim().is_empty() {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                ctx.file_idx,
                 ctx.offset,
                 &format!("dbcontext '{}' has empty driver", ctx.name),
             ));
@@ -93,8 +117,9 @@ pub fn validate_program(program: &Program) -> Result<()> {
     for model in &program.models {
         let model_key = ns_fqn(&model.namespace, &model.name);
         if !model_names.insert(model_key) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                model.file_idx,
                 model.offset,
                 &format!("Duplicate model name: {}", model.name),
             ));
@@ -105,8 +130,9 @@ pub fn validate_program(program: &Program) -> Result<()> {
         }
         let key = ns_fqn(&model.namespace, &model.name);
         if !entity_names.insert(key) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                model.file_idx,
                 model.offset,
                 &format!("Duplicate entity name: {}", model.name),
             ));
@@ -257,8 +283,9 @@ pub fn validate_program(program: &Program) -> Result<()> {
     for function in &program.functions {
         let key = ns_fqn(&function.namespace, &function.name);
         if !fn_names.insert(key) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                function.file_idx,
                 function.offset,
                 &format!("Duplicate function name: {}", function.name),
             ));
@@ -268,8 +295,9 @@ pub fn validate_program(program: &Program) -> Result<()> {
         for param in &function.params {
             let param_key = param.name.to_lowercase();
             if !param_names.insert(param_key) {
-                return Err(loc(
+                return Err(loc_in(
                     program,
+                    function.file_idx,
                     function.offset,
                     &format!(
                         "Function '{}': duplicate parameter '{}'",
@@ -287,8 +315,9 @@ pub fn validate_program(program: &Program) -> Result<()> {
             method.as_str(),
             "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS" | "SSE"
         ) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                route.file_idx,
                 route.offset,
                 &format!("Unsupported route method: {}", route.method),
             ));
@@ -296,23 +325,26 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
         let key = format!("{} {}", method, route.path);
         if !route_keys.insert(key) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                route.file_idx,
                 route.offset,
                 &format!("error[E005]: Duplicate route: {} {}", method, route.path),
             ));
         }
 
         if route.handler.is_some() && !route.body.is_empty() {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                route.file_idx,
                 route.offset,
                 "Route cannot define both handler and inline body",
             ));
         }
         if route.handler.is_none() && route.body.is_empty() {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                route.file_idx,
                 route.offset,
                 "Route must define either handler or inline body",
             ));
@@ -332,8 +364,9 @@ pub fn validate_program(program: &Program) -> Result<()> {
                 // single-file validation can't see — let the runtime resolver
                 // catch a real miss.
                 if !handler.contains('.') {
-                    return Err(loc(
+                    return Err(loc_in(
                         program,
+                        route.file_idx,
                         route.offset,
                         &format!("Route handler '{}' is not defined as a function", handler),
                     ));
@@ -367,8 +400,9 @@ pub fn validate_program(program: &Program) -> Result<()> {
     for mw in &program.middlewares {
         let key = ns_fqn(&mw.namespace, &mw.name);
         if !mw_names.insert(key) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                mw.file_idx,
                 mw.offset,
                 &format!("Duplicate middleware name: {}", mw.name),
             ));
@@ -517,8 +551,9 @@ fn validate_consts(program: &Program) -> Result<()> {
     for c in &program.consts {
         let key = c.name.to_lowercase();
         if !const_names.insert(key) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                c.file_idx,
                 c.offset,
                 &format!("duplicate const declaration: {}", c.name),
             ));
@@ -543,8 +578,9 @@ fn validate_consts(program: &Program) -> Result<()> {
     for c in &program.consts {
         let key = c.name.to_lowercase();
         if color.get(&key).copied().unwrap_or(0) == 0 && const_has_cycle(&key, &deps, &mut color) {
-            return Err(loc(
+            return Err(loc_in(
                 program,
+                c.file_idx,
                 c.offset,
                 &format!("circular const reference involving '{}'", c.name),
             ));
@@ -2213,6 +2249,7 @@ impl<'a> Parser<'a> {
             driver,
             namespace: Vec::new(),
             offset,
+            file_idx: 0,
         })
     }
 
@@ -2226,7 +2263,12 @@ impl<'a> Parser<'a> {
         self.expect_symbol('=')?;
         let expr = self.parse_expr()?;
         self.expect_symbol(';')?;
-        Ok(ConstDecl { name, expr, offset })
+        Ok(ConstDecl {
+            name,
+            expr,
+            offset,
+            file_idx: 0,
+        })
     }
 
     fn skip_braced_block(&mut self) -> Result<()> {
@@ -2500,6 +2542,7 @@ impl<'a> Parser<'a> {
             namespace: Vec::new(),
             visibility: Visibility::Private,
             offset,
+            file_idx: 0,
         })
     }
 
@@ -2615,6 +2658,7 @@ impl<'a> Parser<'a> {
                 protocol,
                 namespace: Vec::new(),
                 offset,
+                file_idx: 0,
             });
         }
 
@@ -2628,6 +2672,7 @@ impl<'a> Parser<'a> {
             protocol,
             namespace: Vec::new(),
             offset,
+            file_idx: 0,
         })
     }
 
@@ -2681,6 +2726,7 @@ impl<'a> Parser<'a> {
             namespace: Vec::new(),
             visibility: Visibility::Private,
             offset,
+            file_idx: 0,
         })
     }
 
@@ -2760,6 +2806,7 @@ impl<'a> Parser<'a> {
             namespace: Vec::new(),
             visibility: Visibility::Private,
             offset,
+            file_idx: 0,
         })
     }
 
@@ -4073,6 +4120,28 @@ mod tests {
     }
 
     #[test]
+    fn multi_file_validator_error_names_offending_file() {
+        // Two parse_program_with_label calls feed merge_program — the
+        // resulting Program has both source files behind one Vec, and
+        // each decl's file_idx points at its own source. A duplicate
+        // route across files must render with the SECOND file's label,
+        // not the first.
+        let file_a = "route GET \"ping\" {\n    return text(\"a\");\n}\n";
+        let file_b = "// pong handler\n// duplicates the GET above\nroute GET \"ping\" {\n    return text(\"b\");\n}\n";
+        let prog_a = parse_program_with_label(file_a, "main.jwc").unwrap();
+        let prog_b = parse_program_with_label(file_b, "extras.jwc").unwrap();
+        let mut combined = prog_a;
+        crate::project::merge_program(&mut combined, prog_b).unwrap();
+        let err = validate_program(&combined).unwrap_err().to_string();
+        assert!(err.contains("Duplicate route"), "missing msg: {err}");
+        assert!(
+            err.contains("at extras.jwc:3:1"),
+            "expected per-file location, got: {err}"
+        );
+        assert!(err.contains("^ here"), "missing snippet caret: {err}");
+    }
+
+    #[test]
     fn validator_falls_back_when_source_is_empty() {
         // A hand-built Program (no parse_program → no .source) should
         // still surface the bare error message, not panic, not omit info.
@@ -4086,6 +4155,7 @@ mod tests {
             namespace: Vec::new(),
             visibility: crate::ast::Visibility::Private,
             offset: 0,
+            file_idx: 0,
         });
         program.functions.push(crate::ast::FunctionDecl {
             name: "x".into(),
@@ -4096,6 +4166,7 @@ mod tests {
             namespace: Vec::new(),
             visibility: crate::ast::Visibility::Private,
             offset: 0,
+            file_idx: 0,
         });
         let err = validate_program(&program).unwrap_err().to_string();
         assert!(err.contains("Duplicate function name: x"));

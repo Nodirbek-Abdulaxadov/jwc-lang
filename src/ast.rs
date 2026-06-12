@@ -1,4 +1,16 @@
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceFile {
+    /// Display label for the file. The project loader sets this to a
+    /// repo-relative path (`"main.jwc"`, `"users/login.jwc"`); single-file
+    /// `parse_program` callers leave it empty and only `at line X, col Y`
+    /// is rendered.
+    pub label: String,
+    /// Verbatim text the parser saw. Used by `validate_program` to look up
+    /// line/col for an AST-stamped offset.
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Program {
     pub dbcontexts: Vec<DbContextDecl>,
     pub models: Vec<ModelDecl>,
@@ -20,11 +32,13 @@ pub struct Program {
     /// frozen; inside route/function bodies a const name resolves like a
     /// read-only variable (locals shadow consts).
     pub consts: Vec<ConstDecl>,
-    /// Concatenated source text the parser saw. Used by `validate_program`
-    /// to render `at line X, col Y` + snippet for AST-stamped errors.
-    /// Empty for hand-built `Program::default()` instances in tests — the
-    /// validator falls back to the legacy `<msg>` shape when this is empty.
-    pub source: String,
+    /// One entry per `.jwc` file the parser saw. Each top-level decl carries
+    /// a `file_idx` into this vec, so the validator can render
+    /// `at <label>:<line>:<col>` even in multi-file projects. Empty for
+    /// hand-built `Program::default()` instances; the validator falls back
+    /// to the bare `<msg>` shape when sources is empty or `file_idx` is
+    /// out of range.
+    pub sources: Vec<SourceFile>,
 }
 
 /// `const NAME = <expr>;` — a module-level immutable binding. The expression
@@ -37,6 +51,9 @@ pub struct ConstDecl {
     /// Byte offset of the `const` keyword in the source. 0 for synthesized
     /// nodes — `validate_program` treats `0` as "no location available".
     pub offset: usize,
+    /// Index into [`Program::sources`] for the file this decl came from.
+    /// Defaults to 0 (the first / only file).
+    pub file_idx: usize,
 }
 
 /// Visibility marker for top-level declarations. Default is `Private` —
@@ -92,6 +109,8 @@ pub struct MiddlewareDecl {
     pub visibility: Visibility,
     /// Byte offset of the `middleware` keyword.
     pub offset: usize,
+    /// Index into [`Program::sources`] for the file this decl came from.
+    pub file_idx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +147,8 @@ pub struct RouteDecl {
     pub namespace: Vec<String>,
     /// Byte offset of the `route` keyword.
     pub offset: usize,
+    /// Index into [`Program::sources`] for the file this decl came from.
+    pub file_idx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +160,8 @@ pub struct DbContextDecl {
     pub namespace: Vec<String>,
     /// Byte offset of the `dbcontext` keyword.
     pub offset: usize,
+    /// Index into [`Program::sources`] for the file this decl came from.
+    pub file_idx: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +179,8 @@ pub struct ModelDecl {
     pub visibility: Visibility,
     /// Byte offset of the `entity` / `class` keyword.
     pub offset: usize,
+    /// Index into [`Program::sources`] for the file this decl came from.
+    pub file_idx: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +262,8 @@ pub struct FunctionDecl {
     pub visibility: Visibility,
     /// Byte offset of the `function` keyword (or `async` if present).
     pub offset: usize,
+    /// Index into [`Program::sources`] for the file this decl came from.
+    pub file_idx: usize,
 }
 
 /// Single comparison: `field op value`

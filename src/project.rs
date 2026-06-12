@@ -402,7 +402,7 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
             .replace('\\', "/");
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let file_prog = crate::parser::parse_program(&content)
+        let file_prog = crate::parser::parse_program_with_label(&content, &rel)
             .with_context(|| format!("Failed to parse {}", rel))?;
         merge_program(&mut program, file_prog).with_context(|| format!("While merging {}", rel))?;
     }
@@ -484,9 +484,38 @@ fn apply_default_namespace(prog: &mut Program, default_ns: &str) {
 }
 
 /// Merge `incoming` (a per-file Program) into `combined`. Each file's
-/// declarations already carry the file's namespace tag; the merge just
-/// concatenates the lists and enforces the single-errorHandler invariant.
-pub fn merge_program(combined: &mut Program, incoming: Program) -> Result<()> {
+/// declarations already carry the file's namespace tag; the merge
+/// concatenates the lists, enforces the single-errorHandler invariant,
+/// and shifts every incoming decl's `file_idx` so it still points at the
+/// right entry in `combined.sources` after the source vec grows.
+pub fn merge_program(combined: &mut Program, mut incoming: Program) -> Result<()> {
+    let base = combined.sources.len();
+    if base > 0 {
+        // Shift every per-decl file_idx so it indexes into the post-merge
+        // `combined.sources` instead of `incoming.sources`. Without this,
+        // a validator error on (say) the second file's third route would
+        // render against the first file's source text — pointing at the
+        // wrong line.
+        for d in &mut incoming.dbcontexts {
+            d.file_idx += base;
+        }
+        for d in &mut incoming.models {
+            d.file_idx += base;
+        }
+        for d in &mut incoming.routes {
+            d.file_idx += base;
+        }
+        for d in &mut incoming.functions {
+            d.file_idx += base;
+        }
+        for d in &mut incoming.middlewares {
+            d.file_idx += base;
+        }
+        for d in &mut incoming.consts {
+            d.file_idx += base;
+        }
+    }
+    combined.sources.extend(incoming.sources);
     combined.dbcontexts.extend(incoming.dbcontexts);
     combined.models.extend(incoming.models);
     combined.routes.extend(incoming.routes);
@@ -501,12 +530,6 @@ pub fn merge_program(combined: &mut Program, incoming: Program) -> Result<()> {
         }
         combined.error_handler = Some(eh);
     }
-    // Multi-file projects can't share one source string — decls from
-    // different files would index into the wrong source. Clear it so the
-    // validator falls back to the legacy "no location" shape instead of
-    // pointing at the wrong line. Per-file source tracking is the
-    // follow-up; this preserves correctness today.
-    combined.source.clear();
     Ok(())
 }
 
