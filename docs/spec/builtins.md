@@ -200,13 +200,69 @@ Mutates a JSON-string value's field, returning the new JSON string.
 
 ## Hashing
 
-### `sha256`, `sha1`, `md5`
+All four hashing builtins share the same contract surface:
 
-Hex-encoded digest of the UTF-8 bytes of the input.
+- Input is the UTF-8 byte representation of the string argument; passing
+  a non-string value is a `TypeError` at runtime (the type-checker
+  catches it at compile time when the input has a declared type).
+- `null` input passes through as `null` — useful for hashing optional
+  audit columns without nesting `if x != null { sha256(x) }`.
+- Output is **lower-case hexadecimal**, never base64, never raw bytes.
+  Length is fixed by the algorithm: 64 chars for `sha256`, 40 for
+  `sha1`, 32 for `md5`, 64 for `hmac_sha256`.
+- The output is byte-stable across releases — these hashes are routinely
+  used as cache keys and password verifiers, so the value model freeze
+  applies to them at v1.0.
+- None of these are cryptographically suitable for password storage on
+  their own. JWC ships `password_hash()` / `password_verify()` for that
+  case (argon2). The hash builtins below are documented as
+  general-purpose digests, NOT credential primitives.
 
-### `hmac_sha256`
+### `sha256(s: string) -> string`
 
-HMAC of a payload with a shared secret, hex-encoded.
+```
+Signature: sha256(s: string) -> string
+Errors:    TypeError if s is not a string or null
+Notes:     SHA-256 of UTF-8 bytes of s. Lower-case hex, length 64.
+           null -> null.
+Tests:     case_hash_helpers (sha256_hex_of_known_input)
+```
+
+### `sha1(s: string) -> string`
+
+```
+Signature: sha1(s: string) -> string
+Errors:    TypeError if s is not a string or null
+Notes:     SHA-1 of UTF-8 bytes of s. Lower-case hex, length 40.
+           null -> null. Documented as "not collision-resistant" — use
+           sha256 for anything new.
+Tests:     case_hash_helpers (sha1_hex_of_known_input)
+```
+
+### `md5(s: string) -> string`
+
+```
+Signature: md5(s: string) -> string
+Errors:    TypeError if s is not a string or null
+Notes:     MD5 of UTF-8 bytes of s. Lower-case hex, length 32.
+           null -> null. Provided for legacy integration (S3 ETags,
+           gravatar) only.
+Tests:     case_hash_helpers (md5_hex_of_known_input)
+```
+
+### `hmac_sha256(payload: string, secret: string) -> string`
+
+```
+Signature: hmac_sha256(payload: string, secret: string) -> string
+Errors:    TypeError on non-string arguments
+Notes:     HMAC-SHA256 of payload with secret (RFC 2104, key padded /
+           hashed per the spec). Lower-case hex, length 64.
+           Either argument null -> null. Constant-time compare is NOT
+           applied here — callers comparing two HMACs MUST use
+           constant_time_eq() to avoid timing oracles.
+Tests:     case_hash_helpers (hmac_sha256_hex_of_known_input,
+           hmac_sha256_matches_rfc4231_vector)
+```
 
 ## Time
 
