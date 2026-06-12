@@ -1604,6 +1604,12 @@ fn emit_route_handler(
         out.push_str("            if let Some(__r) = jwc_take_return() { __r } else { V::Null }\n");
         out.push_str("        };\n");
     }
+    // Populate `Request::response_status` so `response_status()` is
+    // non-null inside after-blocks. Done after `__resp` is bound and
+    // before the reverse-order after-chain dispatches — mirrors the
+    // interpreter, which also computes the status at handler-return
+    // time so middleware on the way out can read it.
+    out.push_str("        jwc_set_response_status(jwc_status_of(&__resp));\n");
     // Response-phase middleware: reverse order so an outer `after` can
     // wrap the inner ones. Mirrors koa / express / ring + the
     // interpreter's order. Errors from an after-block are caught at

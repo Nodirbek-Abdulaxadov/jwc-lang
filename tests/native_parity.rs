@@ -215,6 +215,37 @@ const CASES: &[Case] = &[
         ],
     },
     Case {
+        name: "after_block_sees_response_status",
+        source: r#"
+            middleware Logger {
+                let _ = "before";
+            } after {
+                let _ = response_status();
+                let _ = "after-side-effect";
+            }
+            route GET "/x" use Logger {
+                return "ok";
+            }
+            function main() {
+                print("ok");
+            }
+        "#,
+        expected_output: "ok\n",
+        // The dispatcher MUST populate Request::response_status before
+        // the after-chain runs, so `response_status()` inside an
+        // after-block is non-null. The codegen-level proof points:
+        //   - jwc_set_response_status is emitted once per route,
+        //   - jwc_status_of(&__resp) computes the status from the
+        //     handler return value with zero body allocation,
+        //   - the after-fn dispatch follows in reverse order (already
+        //     pinned by `after_block_emits_separate_fn` above).
+        expected_emit_contains: &[
+            "jwc_set_response_status(jwc_status_of(&__resp))",
+            "mw_logger_after().await",
+            "jwc_b_response_status()",
+        ],
+    },
+    Case {
         name: "module_const",
         source: r#"
             const PI = 3;

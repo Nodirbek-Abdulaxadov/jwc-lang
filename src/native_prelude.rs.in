@@ -915,7 +915,7 @@ fn jwc_to_float(v: &V) -> Option<f64> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Request {
     method: String,
     path: String,
@@ -929,6 +929,14 @@ struct Request {
     /// `response_duration_ms()` so middleware / handler / errorHandler
     /// can record observed latency without a hand-rolled timer.
     started_at: std::time::Instant,
+    /// HTTP status the handler emitted, populated by the dispatcher
+    /// after the handler returns and before any `after { ... }` block
+    /// runs. `None` until then. Read by `response_status()` from inside
+    /// after-blocks. Mutex (rather than atomic) because the lock is
+    /// held for nanoseconds and the inner type is trivially clonable
+    /// while keeping the surface match-friendly for future extension
+    /// (e.g. carrying a parsed status enum).
+    response_status: std::sync::Mutex<Option<u16>>,
 }
 
 tokio::task_local! {
@@ -989,14 +997,36 @@ fn jwc_b_response_duration_ms() -> V {
     with_current_request(|req| V::Int(req.started_at.elapsed().as_millis() as i64))
 }
 
-// `response_status()` is interpreter-only for now: the native dispatch
-// doesn't know the handler's emitted status until AFTER the handler
-// returns (the JSON envelope is parsed later). Stubbed to V::Null so
-// programs that reference it in pre-handler code don't break at
-// codegen time; the after-block wire-up that needs this value will
-// land alongside a proper status thread-local.
+// `response_status()` — HTTP status the handler emitted. The
+// dispatcher populates this *after* the handler returns and *before*
+// any `after { ... }` block runs (see `jwc_set_response_status`
+// below). Returns V::Null when called from the request phase
+// (pre-handler middleware or the handler body itself), matching the
+// interpreter shape documented in docs/spec/builtins.md.
 fn jwc_b_response_status() -> V {
-    V::Null
+    with_current_request(|req| match req.response_status.lock() {
+        Ok(guard) => match *guard {
+            Some(s) => V::Int(i64::from(s)),
+            None => V::Null,
+        },
+        // A poisoned mutex would only happen if another task panicked
+        // while holding the write lock — yield Null rather than
+        // bubbling, since this is an observability surface and never a
+        // correctness one.
+        Err(_) => V::Null,
+    })
+}
+
+/// Set the current request's response status. Called from the route
+/// dispatcher between the handler returning and the after-block chain
+/// firing. Idempotent — silently ignored when there's no active
+/// request scope (e.g. main()).
+fn jwc_set_response_status(status: u16) {
+    let _ = CURRENT_REQUEST.try_with(|req| {
+        if let Ok(mut guard) = req.response_status.lock() {
+            *guard = Some(status);
+        }
+    });
 }
 
 // `request_id()` — the stable per-request identifier the server stamps.
@@ -1222,6 +1252,19 @@ fn jwc_b_status_code(code: V, v: V) -> V {
     make_response(status, body, ct)
 }
 
+/// Extract the wire HTTP status from a handler return value WITHOUT
+/// consuming or stringifying the body. Used by the route dispatcher to
+/// populate `Request::response_status` before the after-block chain
+/// runs — so `response_status()` is non-null inside `after { ... }`.
+fn jwc_status_of(v: &V) -> u16 {
+    if let V::Object(m) = v {
+        if matches!(m.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) {
+            return m.get("status").and_then(jwc_to_int).unwrap_or(200) as u16;
+        }
+    }
+    200
+}
+
 fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
     if let V::Object(ref m) = v {
         if matches!(m.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) {
@@ -1443,6 +1486,7 @@ async fn handle_axum_request(
         path_params,
         http_version_11: true,
         started_at: std::time::Instant::now(),
+        response_status: std::sync::Mutex::new(None),
     });
 
     let result_v = CURRENT_REQUEST
