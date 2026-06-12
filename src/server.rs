@@ -198,6 +198,21 @@ fn parse_shutdown_timeout_secs() -> u64 {
         .unwrap_or(5)
 }
 
+/// Per-request budget in seconds. `0` opts out (no watchdog). Default
+/// 30 covers normal CRUD plus a healthy slack for slow DB queries;
+/// streaming endpoints belong on a separate handler that bypasses this
+/// path, so a long-running response there isn't artificially capped.
+fn parse_request_timeout_secs() -> u64 {
+    match std::env::var("JWC_REQUEST_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        Some(0) => 0,
+        Some(n) => n,
+        None => 30,
+    }
+}
+
 /// Request body cap applied by [`build_router`]. The axum default is 2
 /// MiB, which is what we keep when `JWC_MAX_BODY_BYTES` is unset — that's
 /// large enough for typical JSON payloads and small uploads, small enough
@@ -644,9 +659,15 @@ async fn handle_http_fallback(
         .and_then(|v| v.to_str().ok())
         .and_then(extract_traceparent_trace_id)
         .unwrap_or_else(next_request_id);
+    // Per-request budget. The watchdog fires after `JWC_REQUEST_TIMEOUT`
+    // (default 30s) and returns a 504 instead of letting a slow handler
+    // hold the worker indefinitely. `0` opts out for projects that
+    // genuinely need long-running responses (SSE / streaming WS sit on
+    // separate handlers and aren't covered by this path).
+    let timeout = parse_request_timeout_secs();
     let program = Arc::clone(&state.program);
     let req_id_for_runner = request_id.clone();
-    let result = tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         runner::run_request_with_headers_and_id(
             &program,
             &method_str,
@@ -656,8 +677,48 @@ async fn handle_http_fallback(
             Some(req_id_for_runner),
         )
         .await
-    })
-    .await;
+    });
+    let result = if timeout > 0 {
+        match tokio::time::timeout(Duration::from_secs(timeout), join_handle).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                // The handler is still running on a worker thread —
+                // we can't cancel `spawn_blocking`-flavoured work
+                // mid-flight, but we can stop waiting on it and return
+                // 504 to the client. The handler will finish on its
+                // own (or be killed by the watchdog on shutdown) and
+                // its return value is discarded.
+                state.metrics.failed.fetch_add(1, Ordering::Relaxed);
+                state.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+                if state.request_logging {
+                    log_request_line(
+                        method.as_str(),
+                        uri.path(),
+                        504,
+                        timeout * 1_000_000,
+                        &request_id,
+                    );
+                }
+                let body = format!(
+                    "{{\"error\":\"request timed out after {timeout}s\",\"request_id\":\"{request_id}\"}}"
+                );
+                let mut resp = Response::new(body.into());
+                *resp.status_mut() = StatusCode::GATEWAY_TIMEOUT;
+                resp.headers_mut().insert(
+                    "content-type",
+                    "application/json"
+                        .parse()
+                        .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+                );
+                if let Ok(rid) = request_id.parse() {
+                    resp.headers_mut().insert("x-request-id", rid);
+                }
+                return resp;
+            }
+        }
+    } else {
+        join_handle.await
+    };
 
     let elapsed = started.elapsed().as_micros() as u64;
     state.metrics.record_latency_us(elapsed);
@@ -1001,6 +1062,41 @@ mod tests {
         with_env("JWC_SHUTDOWN_TIMEOUT", None, || {
             assert_eq!(parse_shutdown_timeout_secs(), 5);
         });
+    }
+
+    #[test]
+    fn request_timeout_defaults_to_thirty_seconds() {
+        let prev = std::env::var("JWC_REQUEST_TIMEOUT").ok();
+        std::env::remove_var("JWC_REQUEST_TIMEOUT");
+        assert_eq!(parse_request_timeout_secs(), 30);
+        if let Some(v) = prev {
+            std::env::set_var("JWC_REQUEST_TIMEOUT", v);
+        }
+    }
+
+    #[test]
+    fn request_timeout_zero_disables_the_watchdog() {
+        let prev = std::env::var("JWC_REQUEST_TIMEOUT").ok();
+        std::env::set_var("JWC_REQUEST_TIMEOUT", "0");
+        // 0 keeps as 0 — unlike JWC_SHUTDOWN_TIMEOUT where 0 falls
+        // back. Streaming projects opt out by setting this var
+        // explicitly; we honour the choice.
+        assert_eq!(parse_request_timeout_secs(), 0);
+        match prev {
+            Some(v) => std::env::set_var("JWC_REQUEST_TIMEOUT", v),
+            None => std::env::remove_var("JWC_REQUEST_TIMEOUT"),
+        }
+    }
+
+    #[test]
+    fn request_timeout_custom_value_round_trips() {
+        let prev = std::env::var("JWC_REQUEST_TIMEOUT").ok();
+        std::env::set_var("JWC_REQUEST_TIMEOUT", "120");
+        assert_eq!(parse_request_timeout_secs(), 120);
+        match prev {
+            Some(v) => std::env::set_var("JWC_REQUEST_TIMEOUT", v),
+            None => std::env::remove_var("JWC_REQUEST_TIMEOUT"),
+        }
     }
 
     #[test]
