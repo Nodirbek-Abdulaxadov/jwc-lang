@@ -88,3 +88,28 @@ function findByEmail(email: string): User? {
 ```
 
 Bindings are real parameter values, not string-interpolated SQL — there's no injection vector.
+
+## See also: atomic `update ... set`
+
+`select` returns rows; the most common follow-up is to mutate one. If
+you're tempted to write the classic "read, change, write back":
+
+```jwc
+let link = first(select Link from AppDb.Link where Link.code == @code);
+link.hits = link.hits + 1;
+update link in AppDb.Link;          // lost-update under concurrency!
+```
+
+…use the **atomic** form instead, documented in
+[insert / update / delete](./mutations.md#atomic-update-ctxtable-set-):
+
+```jwc
+update AppDb.Link set hits = hits + 1 where Link.code == @code;
+```
+
+A single round-trip, no read-modify-write race. Two concurrent requests
+will each see their increment land. The general rule: when the new
+value of a column is a pure function of the old one (counter, version
+bump, status transition), reach for `update ... set ...`; reserve
+whole-row `update u in ...` for cases where the new value comes from
+user input that you've already read end-to-end.
