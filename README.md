@@ -762,6 +762,32 @@ route GET "api/me" use AuthMw {
   middleware and the handler.
 - Multiple middlewares: `route GET "..." use AuthMw, RateLimitMw { ... }`.
 
+### Response-phase `after { ... }`
+
+A middleware can opt into a second block that runs AFTER the handler
+returns, in reverse declaration order. Useful for logging, metrics,
+audit trails — anything that needs the response, not just the request.
+
+```jwc
+middleware Logger {
+    let started = unix_timestamp();
+} after {
+    let status = response_status();
+    let ms = response_duration_ms();
+    print("[" + request_id() + "] status=" + status + " " + ms + "ms");
+}
+
+route GET "/users/{id}" use Logger -> getUser;
+```
+
+- `response_status()` — HTTP status the handler emitted (200, 4xx, 5xx).
+- `response_duration_ms()` — wall-clock since dispatcher saw the request.
+- `request_id()` — the per-request id the server stamped (also echoed
+  back as `x-request-id`, and reused from an inbound W3C `traceparent`
+  when present).
+- Errors thrown inside an `after` block are logged but don't override
+  the response — by the time it runs the client already has bytes.
+
 ## Type System
 
 Built-in types recognised in function signatures and JSON body validation:
