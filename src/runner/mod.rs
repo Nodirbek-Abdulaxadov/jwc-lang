@@ -4532,12 +4532,21 @@ mod tests {
         assert_eq!(body, "null");
     }
 
+    /// Serializes every test that reads/writes `JWC_TRUSTED_PROXIES` so
+    /// concurrent tokio tests don't see a partial state. Without this
+    /// the two client_ip tests race on the shared env var, since
+    /// cargo runs `#[tokio::test]` cases in parallel.
+    static TRUSTED_PROXIES_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
     async fn client_ip_returns_rightmost_untrusted_entry() {
         // Default JWC_TRUSTED_PROXIES is empty — no proxy is trusted,
         // so the rightmost entry of the chain is the closest hop's view
         // of the source. That's the only header value we can rely on
         // without an explicit trust list.
+        let _g = TRUSTED_PROXIES_GUARD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
         std::env::remove_var("JWC_TRUSTED_PROXIES");
         let src = r#"
@@ -4570,6 +4579,9 @@ mod tests {
         // With JWC_TRUSTED_PROXIES="10." the trailing 10.x hop is a
         // known forwarder and gets peeled off, leaving 1.2.3.4 — the
         // real client. Exact semantics nginx + go's net/http use.
+        let _g = TRUSTED_PROXIES_GUARD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
         std::env::set_var("JWC_TRUSTED_PROXIES", "10.");
         let src = r#"

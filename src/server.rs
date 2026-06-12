@@ -233,11 +233,26 @@ fn parse_max_body_bytes() -> Option<usize> {
 /// production-readiness plan calls out as a 1.0-blocker.
 async fn shutdown_signal(metrics: Arc<ServerMetrics>, ws_shutdown: watch::Sender<bool>) {
     let reason = wait_for_shutdown_signal().await;
-    let n = metrics.in_flight.load(Ordering::Relaxed);
-    eprintln!("Shutdown signal {reason} received, draining {n} inflight requests...");
+    let in_flight = metrics.in_flight.load(Ordering::Relaxed);
+    let pending = queue::pending_count();
+    eprintln!(
+        "Shutdown signal {reason} received, draining {in_flight} inflight requests + {pending} pending jobs..."
+    );
     // Tell open WS writer loops to emit a 1001 close frame and wind down.
     let _ = ws_shutdown.send(true);
     let timeout = parse_shutdown_timeout_secs();
+    // Block-spawn a queue drain on a worker thread (it polls in a tight
+    // loop with sleeps — fine on the blocking pool, the request path
+    // doesn't go through it). Best-effort: we let axum's own
+    // with_graceful_shutdown handle the HTTP side in parallel.
+    tokio::task::spawn_blocking(move || {
+        let left = queue::drain_for(Duration::from_secs(timeout));
+        if left > 0 {
+            eprintln!("Queue drain timed out with {left} jobs still pending.");
+        } else {
+            eprintln!("Queue drained cleanly.");
+        }
+    });
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(timeout)).await;
         eprintln!("Graceful shutdown timed out after {timeout}s; forcing exit.");

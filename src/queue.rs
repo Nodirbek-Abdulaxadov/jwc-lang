@@ -310,6 +310,32 @@ pub fn pending_count() -> usize {
     q.len()
 }
 
+/// Best-effort drain: block the current thread until the pending queue
+/// hits zero or `deadline` elapses, polling at 50ms intervals. Workers
+/// keep running — they're the ones drawing the queue down — so the
+/// caller doesn't need to coordinate with them.
+///
+/// Returns the number of jobs still pending when the call returned. `0`
+/// means a clean drain; anything else means the deadline fired before
+/// every job ran. Used by the server's graceful-shutdown path: kubelet
+/// sends SIGTERM, the server stops accepting HTTP, then waits up to
+/// `JWC_SHUTDOWN_TIMEOUT` here so in-flight jobs (welcome emails, sync
+/// pings) finish before the process exits.
+pub fn drain_for(deadline: std::time::Duration) -> usize {
+    use std::time::Instant;
+    let start = Instant::now();
+    loop {
+        let depth = pending_count();
+        if depth == 0 {
+            return 0;
+        }
+        if start.elapsed() >= deadline {
+            return depth;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Snapshot of dead-letter queue depth. Exposed to JWC via `dlq_count()`.
 pub fn dlq_count() -> usize {
     let st = state();

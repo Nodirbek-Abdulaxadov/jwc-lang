@@ -9,6 +9,14 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **Graceful shutdown drains the background queue.** The kubelet
+  TERM path used to log `draining N inflight requests` and return
+  immediately. Any pending job (welcome email, sync ping) was lost on
+  exit. The shutdown signal now also polls `queue::pending_count()`
+  in a `spawn_blocking` task until it hits zero or `JWC_SHUTDOWN_TIMEOUT`
+  fires — workers stay alive in the meantime so they keep draining.
+  A leftover count is logged so operators can spot a queue that
+  never drains cleanly.
 - **`client_ip()` honours `JWC_TRUSTED_PROXIES`.** Walks the
   `JWC_REAL_IP_HEADER` chain RIGHT to LEFT, peeling off any entries
   whose prefix matches the comma-separated `JWC_TRUSTED_PROXIES`
