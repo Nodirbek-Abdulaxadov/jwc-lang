@@ -48,3 +48,31 @@ with write access to the project directory.
 - Never set `JWC_DB_TLS_INSECURE_SKIP_VERIFY=1` in production.
 - Dependency advisories are tracked in CI via `cargo audit` and
   `cargo deny` (`.github/workflows/security.yml`).
+- Behind a reverse proxy (nginx, k8s ingress, Cloudflare), set
+  `JWC_TRUSTED_PROXIES` to the proxy's IP / prefix list so the
+  `client_ip()` builtin doesn't blindly trust an inbound
+  `X-Forwarded-For` from an untrusted hop. Without the list the
+  builtin returns the rightmost chain entry (the closest hop) — safe
+  but loses the real client IP. See `docs/docs/deployment/env-vars.md`
+  for the full list of hardening knobs.
+- The `raw_sql(...)` builtin takes parameterised positional binds —
+  string concatenation into the SQL is a footgun; prefer the typed
+  `select` / `insert` / `update set` forms whenever possible.
+- The HTTP `/metrics`, `/healthz`, `/readyz` endpoints are exposed by
+  default. If your service is internet-facing without an ingress
+  filter, register your own handlers for those paths (the built-ins
+  yield) or place a route-level deny.
+
+## Supply chain
+
+Each release tag triggers a CI workflow that:
+
+1. Builds the binaries on the supported target matrix.
+2. Computes SHA-256 over each archive and writes a `.sha256` sidecar.
+3. Uploads both the archive and the sidecar to the GitHub Release.
+
+`install.sh` / `install.ps1` fetch the sidecar alongside the archive
+and verify it before extracting. Older tags shipped before `.sha256`
+support emit a warning but install — pinning to a recent tag is the
+recommended path. Sigstore / cosign signing is on the
+`PRODUCTION_READINESS_PLAN.md` Phase 6 list for after 1.0.
