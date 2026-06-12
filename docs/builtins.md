@@ -47,6 +47,7 @@ run under `jwc run` but are rejected at native-build time.
 | `query_param(name[, default])` | 1–2 | ✅ | Query-string parameter. |
 | `header(name)` | 1 | ✅ | Request header (case-insensitive). |
 | `client_ip()` | 0 | ✅ | Original client IP from `JWC_REAL_IP_HEADER` (default `x-forwarded-for`). Returns the first entry in a comma-separated chain or `null`. |
+| `request_id()` | 0 | ✅ | The stable per-request id the server stamps. Returned as the `x-request-id` response header too. `null` outside server requests. |
 | `body()` / `request_body()` | 0 | ✅ / interpreter | Raw request body string. |
 | `request_path()` | 0 | ✅ | Request path (query stripped). |
 | `request_method()` | 0 | ✅ | HTTP method. |

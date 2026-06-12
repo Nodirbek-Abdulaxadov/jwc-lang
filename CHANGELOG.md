@@ -9,6 +9,16 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **`request_id()` builtin + `x-request-id` response header.** The
+  server stamps a unique id on every HTTP request (16 hex chars,
+  `<wall_secs><counter>`), threads it into the runtime so middleware
+  / handler / `errorHandler` all read the same value via
+  `request_id()`, includes it on every response as `x-request-id`,
+  and adds it to both text and JSON access log shapes (text: `(rid=…)`
+  suffix; JSON: top-level `"request_id"` field). The plain
+  `run_request_with_headers` entry point keeps its old shape — the
+  new `run_request_with_headers_and_id(...)` is what the server uses;
+  tests that don't stamp see `request_id()` as `null`.
 - **Built-in `/metrics` endpoint in Prometheus text format.** The
   bundled launcher's existing `ServerMetrics` (request counts,
   in-flight gauge, running mean / peak latency) now scrapes natively

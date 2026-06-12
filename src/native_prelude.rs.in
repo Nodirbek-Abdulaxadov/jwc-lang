@@ -963,6 +963,20 @@ fn jwc_b_header(name: V) -> V {
     })
 }
 
+// `request_id()` — the stable per-request identifier the server stamps.
+// `None` when the runtime can't find an in-flight request (e.g. called
+// from `main()` before `serve(port)`). Matches the interpreter shape so
+// programs stay portable between `jwc run` and `jwc build --native`.
+fn jwc_b_request_id() -> V {
+    with_current_request(|req| {
+        req.headers
+            .get("x-jwc-request-id")
+            .cloned()
+            .map(v_str)
+            .unwrap_or(V::Null)
+    })
+}
+
 // `client_ip()` — original client IP when the request flows through a
 // proxy (Cloudflare, nginx, k8s ingress). Reads the header named by
 // `JWC_REAL_IP_HEADER` (default `x-forwarded-for`) and returns the FIRST

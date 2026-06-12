@@ -161,7 +161,12 @@ fn parse_metrics_interval_secs() -> u64 {
 /// k8s log aggregator can ingest the stream as line-delimited JSON.
 /// Stays in legacy `[JWC] METHOD path -> status` text shape otherwise so
 /// `jwc serve --request-logging` reads naturally in a terminal.
-fn log_request_line(method: &str, path: &str, status: u16, latency_us: u64) {
+///
+/// `request_id` is included in the JSON envelope (and at the tail of the
+/// text line for grepability) so a single request's lifecycle —
+/// access line, error line, downstream service log — can be reassembled
+/// by id without timestamp guessing.
+fn log_request_line(method: &str, path: &str, status: u16, latency_us: u64, request_id: &str) {
     if std::env::var("JWC_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false)
@@ -173,14 +178,15 @@ fn log_request_line(method: &str, path: &str, status: u16, latency_us: u64) {
         // are already filtered by axum's URL parser).
         let path_esc = path.replace('\\', "\\\\").replace('"', "\\\"");
         eprintln!(
-            "{{\"level\":\"info\",\"kind\":\"access\",\"method\":\"{m}\",\"path\":\"{p}\",\"status\":{s},\"latency_us\":{lat}}}",
+            "{{\"level\":\"info\",\"kind\":\"access\",\"request_id\":\"{rid}\",\"method\":\"{m}\",\"path\":\"{p}\",\"status\":{s},\"latency_us\":{lat}}}",
+            rid = request_id,
             m = method,
             p = path_esc,
             s = status,
             lat = latency_us,
         );
     } else {
-        eprintln!("[JWC] {method} {path} -> {status}");
+        eprintln!("[JWC] {method} {path} -> {status} (rid={request_id})");
     }
 }
 
@@ -437,6 +443,26 @@ async fn handle_metrics(State(state): State<AppState>) -> Response {
     resp
 }
 
+/// Monotonic per-process counter — combined with the process start time
+/// it produces a hard-to-collide request id without pulling a uuid or
+/// rand crate into the runtime. Collisions across two processes are
+/// fine: the id only needs to be unique within ONE process's logs;
+/// cross-host correlation belongs to the tracing layer.
+static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a 16-hex-char request id of the form `<wall_secs_hex><counter_hex>`.
+/// Reused by both the access log and the runner-side `request_id()`
+/// builtin so a single request shows the same id in every log line.
+/// Trace-W3C `traceparent`/`tracestate` propagation is the follow-up.
+fn next_request_id() -> String {
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let n = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{:08x}{:08x}", wall as u32, n as u32)
+}
+
 fn readyz_db_failure(detail: String) -> Response {
     let escaped = detail.replace('"', "'");
     let body = format!("{{\"status\":\"not_ready\",\"db\":\"{escaped}\"}}");
@@ -558,9 +584,24 @@ async fn handle_http_fallback(
         Some(body_string)
     };
 
+    // Stamp a request id BEFORE dispatching so middleware / handler /
+    // errorHandler all read the same value via `request_id()`. The id
+    // is also sent back as `x-request-id` on every response, mirroring
+    // the convention nginx / Cloudflare use, so callers can correlate
+    // their client-side log with the server's logs.
+    let request_id = next_request_id();
     let program = Arc::clone(&state.program);
+    let req_id_for_runner = request_id.clone();
     let result = tokio::spawn(async move {
-        runner::run_request_with_headers(&program, &method_str, &path, body_opt, header_map).await
+        runner::run_request_with_headers_and_id(
+            &program,
+            &method_str,
+            &path,
+            body_opt,
+            header_map,
+            Some(req_id_for_runner),
+        )
+        .await
     })
     .await;
 
@@ -572,10 +613,13 @@ async fn handle_http_fallback(
         Ok(Ok((status, body, content_type, extra_headers))) => {
             state.metrics.completed.fetch_add(1, Ordering::Relaxed);
             if state.request_logging {
-                log_request_line(method.as_str(), uri.path(), status, elapsed);
+                log_request_line(method.as_str(), uri.path(), status, elapsed, &request_id);
             }
             let mut resp = Response::new(body.into());
             *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+            if let Ok(rid) = request_id.parse() {
+                resp.headers_mut().insert("x-request-id", rid);
+            }
             // `html(...)` / future `text(...)` declare an explicit content-type
             // via the runtime envelope; everything else falls back to JSON for
             // backward compatibility with handlers that just `return obj`.

@@ -326,10 +326,26 @@ pub async fn run_request_with_headers(
     body: Option<String>,
     headers: HashMap<String, String>,
 ) -> Result<(u16, String, Option<String>, Vec<(String, String)>)> {
+    run_request_with_headers_and_id(program, method, path, body, headers, None).await
+}
+
+/// Same as [`run_request_with_headers`] but lets the server stamp a
+/// per-request id that handlers / middleware / the error handler can read
+/// via `request_id()`. Server.rs generates the id; the runner just keeps
+/// it in `Vm::current_request_id` for the lifetime of the dispatch.
+pub async fn run_request_with_headers_and_id(
+    program: &Program,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    headers: HashMap<String, String>,
+    request_id: Option<String>,
+) -> Result<(u16, String, Option<String>, Vec<(String, String)>)> {
     let mut vm = Vm::new(program);
     vm.init_consts().await?;
     vm.request_body = body;
     vm.current_headers = Some(headers);
+    vm.current_request_id = request_id;
     vm.dispatch_route(method, path).await
 }
 
@@ -424,6 +440,11 @@ struct Vm<'a> {
     /// `/abc1234`). Read via `request_path()`. Set/restored alongside
     /// `current_method` so middlewares can log a meaningful endpoint.
     current_request_path: Option<String>,
+    /// Stable identifier the server assigns per HTTP request. Read via
+    /// `request_id()` so middleware / handlers / error handlers can stamp
+    /// the same value on every log line and propagate it to downstream
+    /// services via a header. `None` outside route execution.
+    current_request_id: Option<String>,
     /// Per-request key-value bag written by `setContext` and read by `context`.
     request_context: HashMap<String, Value>,
     output: String,
@@ -521,6 +542,7 @@ impl<'a> Vm<'a> {
             current_headers: None,
             current_method: None,
             current_request_path: None,
+            current_request_id: None,
             request_context: HashMap::new(),
             output: String::new(),
             depth: 0,
@@ -1711,6 +1733,17 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("client_ip") {
                     return self.eval_client_ip_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("request_id") {
+                    if !args.is_empty() {
+                        bail!("request_id() expects no args");
+                    }
+                    return Ok(self
+                        .current_request_id
+                        .clone()
+                        .map(Value::Str)
+                        .unwrap_or(Value::Null));
                 }
 
                 if name.eq_ignore_ascii_case("context") {
@@ -4307,6 +4340,55 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "Tesla\n2024\n");
+    }
+
+    #[tokio::test]
+    async fn request_id_is_visible_when_server_stamps_one() {
+        let src = r#"
+            route GET "/x" {
+                let rid = request_id();
+                if (rid == null) { return "{\"rid\":null}"; }
+                return "{\"rid\":\"" + rid + "\"}";
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let headers = std::collections::HashMap::new();
+        let (status, body, _ct, _extra) = run_request_with_headers_and_id(
+            &program,
+            "GET",
+            "/x",
+            None,
+            headers,
+            Some("abc12345".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"rid\":\"abc12345\"}");
+    }
+
+    #[tokio::test]
+    async fn request_id_returns_null_when_unstamped() {
+        // Calling `run_request_with_headers` (the legacy entry point)
+        // doesn't stamp an id; `request_id()` must surface that cleanly
+        // as null instead of panicking or returning the empty string.
+        let src = r#"
+            route GET "/x" {
+                let rid = request_id();
+                if (rid == null) { return "null"; }
+                return rid;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let headers = std::collections::HashMap::new();
+        let (status, body, _ct, _extra) =
+            run_request_with_headers(&program, "GET", "/x", None, headers)
+                .await
+                .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "null");
     }
 
     #[tokio::test]
