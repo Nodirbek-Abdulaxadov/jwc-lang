@@ -4533,10 +4533,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_ip_reads_first_xff_entry() {
-        // Two hops: original client `1.2.3.4`, then a proxy. The builtin
-        // returns the FIRST entry — the original client — not the
-        // closest proxy, matching dogfooding expectations.
+    async fn client_ip_returns_rightmost_untrusted_entry() {
+        // Default JWC_TRUSTED_PROXIES is empty — no proxy is trusted,
+        // so the rightmost entry of the chain is the closest hop's view
+        // of the source. That's the only header value we can rely on
+        // without an explicit trust list.
+        let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
+        std::env::remove_var("JWC_TRUSTED_PROXIES");
+        let src = r#"
+            route GET "/whoami" {
+                let ip = client_ip();
+                if (ip == null) { return "{\"ip\":null}"; }
+                return "{\"ip\":\"" + ip + "\"}";
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "x-forwarded-for".to_string(),
+            "1.2.3.4, 10.0.0.5".to_string(),
+        );
+        let (status, body, _ct, _extra) =
+            run_request_with_headers(&program, "GET", "/whoami", None, headers)
+                .await
+                .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"ip\":\"10.0.0.5\"}");
+        if let Some(v) = prev {
+            std::env::set_var("JWC_TRUSTED_PROXIES", v);
+        }
+    }
+
+    #[tokio::test]
+    async fn client_ip_peels_trusted_proxies_off_the_chain() {
+        // With JWC_TRUSTED_PROXIES="10." the trailing 10.x hop is a
+        // known forwarder and gets peeled off, leaving 1.2.3.4 — the
+        // real client. Exact semantics nginx + go's net/http use.
+        let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
+        std::env::set_var("JWC_TRUSTED_PROXIES", "10.");
         let src = r#"
             route GET "/whoami" {
                 let ip = client_ip();
@@ -4557,6 +4592,10 @@ mod tests {
                 .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, "{\"ip\":\"1.2.3.4\"}");
+        match prev {
+            Some(v) => std::env::set_var("JWC_TRUSTED_PROXIES", v),
+            None => std::env::remove_var("JWC_TRUSTED_PROXIES"),
+        }
     }
 
     #[tokio::test]

@@ -993,20 +993,34 @@ fn jwc_b_request_id() -> V {
 }
 
 // `client_ip()` — original client IP when the request flows through a
-// proxy (Cloudflare, nginx, k8s ingress). Reads the header named by
-// `JWC_REAL_IP_HEADER` (default `x-forwarded-for`) and returns the FIRST
-// entry of a comma-separated chain. `Null` when no such header is set.
+// proxy. Reads the header named by `JWC_REAL_IP_HEADER` (default
+// `x-forwarded-for`), walks the comma-separated chain RIGHT to LEFT
+// peeling off any entries listed in `JWC_TRUSTED_PROXIES`, and returns
+// the first untrusted entry. Empty trust list ⇒ rightmost wins.
 fn jwc_b_client_ip() -> V {
     let header_name = std::env::var("JWC_REAL_IP_HEADER")
         .unwrap_or_else(|_| "x-forwarded-for".to_string());
     let key = header_name.to_lowercase();
+    let trusted_raw = std::env::var("JWC_TRUSTED_PROXIES").unwrap_or_default();
+    let trusted: Vec<String> = trusted_raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     with_current_request(|req| {
         let raw = match req.headers.get(&key) {
             Some(v) => v,
             None => return V::Null,
         };
-        let first = raw.split(',').next().unwrap_or("").trim();
-        if first.is_empty() { V::Null } else { v_str(first.to_string()) }
+        for entry in raw.split(',').rev() {
+            let candidate = entry.trim();
+            if candidate.is_empty() { continue; }
+            let is_trusted = trusted.iter().any(|p| candidate.starts_with(p.as_str()));
+            if !is_trusted {
+                return v_str(candidate.to_string());
+            }
+        }
+        V::Null
     })
 }
 

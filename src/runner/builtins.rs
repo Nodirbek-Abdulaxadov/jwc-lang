@@ -615,16 +615,24 @@ impl<'a> Vm<'a> {
 
     /// `client_ip()` — the original client's IP when the request flows
     /// through a proxy (Cloudflare, nginx, k8s ingress). Reads the
-    /// header named by `JWC_REAL_IP_HEADER` (default `x-forwarded-for`)
-    /// and returns the FIRST entry of a comma-separated chain — the
-    /// original client, not the closest proxy. Returns null when no such
-    /// header is present.
+    /// header named by `JWC_REAL_IP_HEADER` (default `x-forwarded-for`),
+    /// then walks the comma-separated chain from RIGHT to LEFT, peeling
+    /// off any entries listed in `JWC_TRUSTED_PROXIES`. The first
+    /// untrusted entry is the original client; everything to its right
+    /// is a trusted forwarder.
+    ///
+    /// `JWC_TRUSTED_PROXIES` is a comma-separated list of exact IPs or
+    /// prefixes (e.g. `JWC_TRUSTED_PROXIES=10.,127.0.0.1,::1`). Empty /
+    /// unset means "no proxies are trusted" — the rightmost entry is
+    /// returned. That's a sane default for projects behind a load
+    /// balancer where the LB always overwrites the rightmost slot.
+    ///
+    /// Returns null when no such header is present or every chain entry
+    /// matches a trusted prefix.
     ///
     /// Closes the dogfooding gap where jwc-shortener had to hand-roll
     /// `header("x-forwarded-for")` per app and got Cloudflare's
-    /// `cf-connecting-ip` precedence wrong. Setting `JWC_REAL_IP_HEADER`
-    /// to `cf-connecting-ip` (or any other vendor header) flips the
-    /// builtin without code changes.
+    /// `cf-connecting-ip` precedence wrong.
     pub(super) async fn eval_client_ip_call(
         &mut self,
         args: &[Expr],
@@ -643,12 +651,26 @@ impl<'a> Vm<'a> {
         let Some(raw) = raw else {
             return Ok(Value::Null);
         };
-        let first = raw.split(',').next().unwrap_or("").trim();
-        if first.is_empty() {
-            Ok(Value::Null)
-        } else {
-            Ok(Value::Str(first.to_string()))
+        let trusted_raw = std::env::var("JWC_TRUSTED_PROXIES").unwrap_or_default();
+        let trusted: Vec<&str> = trusted_raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        // RIGHT-to-LEFT walk: nginx / go's net/http convention. The
+        // rightmost entry was written by the closest hop; the first
+        // entry that isn't a trusted forwarder is the real client.
+        for entry in raw.split(',').rev() {
+            let candidate = entry.trim();
+            if candidate.is_empty() {
+                continue;
+            }
+            let is_trusted = trusted.iter().any(|prefix| candidate.starts_with(prefix));
+            if !is_trusted {
+                return Ok(Value::Str(candidate.to_string()));
+            }
         }
+        Ok(Value::Null)
     }
 
     pub(super) async fn eval_context_get_call(

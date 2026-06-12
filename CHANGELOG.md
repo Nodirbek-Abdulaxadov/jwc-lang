@@ -9,6 +9,17 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **`client_ip()` honours `JWC_TRUSTED_PROXIES`.** Walks the
+  `JWC_REAL_IP_HEADER` chain RIGHT to LEFT, peeling off any entries
+  whose prefix matches the comma-separated `JWC_TRUSTED_PROXIES`
+  list, and returns the first untrusted entry — the original client.
+  Empty / unset trust list means "trust no proxy in the chain" and
+  the rightmost entry wins. Mirrors nginx + Go's `net/http`
+  semantics. **Behaviour change** from the prior slice (which always
+  returned the leftmost entry — spoofable when the LB doesn't
+  overwrite the slot); set `JWC_TRUSTED_PROXIES` to your LB / k8s
+  ingress prefix (e.g. `10.,127.0.0.1,::1`) to opt back into
+  client-IP semantics. Native AOT + interpreter both updated.
 - **`/metrics` exports queue depth + DLQ size.** Two more
   Prometheus gauges (`jwc_queue_pending`, `jwc_queue_dlq`) join the
   HTTP counters / gauges so operators can chart a backlog before it
