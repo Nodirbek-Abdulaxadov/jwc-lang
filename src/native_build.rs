@@ -471,6 +471,54 @@ const BUILD_DIR_NAME: &str = ".jwc-build";
 // combined with `SPECIAL_BUILTINS`.
 pub use crate::builtins::{native_builtin_names, SPECIAL_BUILTINS};
 
+/// Suggest the closest entry in `candidates` to `target` via Levenshtein
+/// distance. Returns `None` when no candidate is within max(2, len/3) —
+/// the same noise floor `runner::closest_match` and
+/// `parser::suggest_column` use, so all three suggestion paths surface
+/// hits with consistent strictness.
+fn codegen_closest_match(target: &str, candidates: &[String]) -> Option<String> {
+    let target_lc = target.to_ascii_lowercase();
+    let threshold = std::cmp::max(2, target_lc.chars().count() / 3);
+    let mut best: Option<(usize, &String)> = None;
+    for c in candidates {
+        if c.eq_ignore_ascii_case(target) {
+            continue;
+        }
+        let d = codegen_levenshtein(&target_lc, &c.to_ascii_lowercase());
+        if d > threshold {
+            continue;
+        }
+        match best {
+            Some((prev, _)) if prev <= d => {}
+            _ => best = Some((d, c)),
+        }
+    }
+    best.map(|(_, s)| s.clone())
+}
+
+fn codegen_levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
 /// Codegen-time metadata for a DB-bound entity. Captures the column list and
 /// each column's Postgres-target type so INSERT param boxing can pick the
 /// right `ToSql` impl.
@@ -1014,9 +1062,23 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             // Dotted names (`Dome.fn`) are flattened by the parser into a
             // single string; codegen sanitizes the `.` to `_` in user_fn_name.
             if name != "print" && !funcs.contains(name) && !builtins.contains(name.as_str()) {
+                // Use a did-you-mean hint rather than dumping the full
+                // builtin list — the old shape produced a paragraph-long
+                // error for a typo. Walk both user functions and the
+                // native builtin set so a typo'd `slep_ms` finds
+                // `sleep_ms`; we only surface a candidate when it's
+                // within the same Levenshtein noise floor the
+                // interpreter uses for "Did you mean" on unknown
+                // function calls.
+                let mut candidates: Vec<String> = funcs.iter().cloned().collect();
+                candidates.extend(native_builtin_names().iter().map(|s| (*s).to_string()));
+                let hint = match codegen_closest_match(name, &candidates) {
+                    Some(s) => format!(" — did you mean `{}`?", s),
+                    None => String::new(),
+                };
                 bail!(unsupported(&format!(
-                    "call to `{name}(...)` — unknown function. Define it or use one of the built-ins: {}, serve",
-                    native_builtin_names().join(", ")
+                    "call to `{name}(...)` — unknown function{hint}. \
+                     `jwc lint --explain E001` lists the full builtin set."
                 )));
             }
             for a in args {
