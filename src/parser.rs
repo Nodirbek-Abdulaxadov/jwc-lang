@@ -1419,7 +1419,7 @@ fn validate_stmt(
             // a trailing comma but does not currently enforce ≥1 pair).
             if assignments.is_empty() {
                 bail!(
-                    "atomic 'update {context_var}.{table} set ...' must list at least one column"
+                    "error[E012]: atomic 'update {context_var}.{table} set ...' must list at least one column"
                 );
             }
             if let Some(fields) = fields {
@@ -3002,7 +3002,7 @@ impl<'a> Parser<'a> {
                     let assignments = self.parse_update_assignments()?;
                     if !self.check_ident_eq("where") {
                         return Err(self.error_here(
-                            "atomic 'update CTX.Table set ...' requires a 'where' clause",
+                            "error[E011]: atomic 'update CTX.Table set ...' requires a 'where' clause",
                         ));
                     }
                     self.bump()?;

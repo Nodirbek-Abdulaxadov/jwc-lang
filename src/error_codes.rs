@@ -76,6 +76,14 @@ pub const VALIDATOR_ERRORS: &[DiagnosticCode] = &[
         "E010",
         "register_job_handler references a function that doesn't exist",
     ),
+    d(
+        "E011",
+        "atomic update set requires a where clause (would touch every row)",
+    ),
+    d(
+        "E012",
+        "atomic update set list must contain at least one assignment",
+    ),
 ];
 
 /// Lookup a warning code → description. Returns `None` for unknown
