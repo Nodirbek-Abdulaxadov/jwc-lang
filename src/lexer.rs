@@ -75,7 +75,24 @@ pub enum TokenKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
+    /// Byte offset of the token's first character into the source string.
+    /// Retained because most existing parser sites (and `error_here`) key
+    /// off a single offset; new code should prefer [`Token::end_offset`]
+    /// or pass a [`crate::span::Span`] when stamping AST nodes.
     pub offset: usize,
+    /// Byte offset one past the token's last character (half-open
+    /// `[offset, end_offset)`). Lets callers span across the full token —
+    /// used by future `Span`-carrying AST nodes so a diagnostic can
+    /// underline the whole identifier instead of just its first char.
+    pub end_offset: usize,
+}
+
+impl Token {
+    /// Length of the token in bytes (`end_offset - offset`). `0` is
+    /// legal for synthetic/EOF tokens.
+    pub fn byte_len(&self) -> usize {
+        self.end_offset.saturating_sub(self.offset)
+    }
 }
 
 pub struct Lexer<'a> {
@@ -96,6 +113,7 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: TokenKind::Eof,
                 offset,
+                end_offset: offset,
             });
         };
 
@@ -108,6 +126,7 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: TokenKind::String(value),
                 offset,
+                end_offset: self.i,
             });
         }
 
@@ -153,7 +172,11 @@ impl<'a> Lexer<'a> {
                 "in" => TokenKind::Keyword(Keyword::In),
                 _ => TokenKind::Ident(ident),
             };
-            return Ok(Token { kind, offset });
+            return Ok(Token {
+                kind,
+                offset,
+                end_offset: self.i,
+            });
         }
 
         if ch == '"' {
@@ -161,6 +184,7 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: TokenKind::String(value),
                 offset,
+                end_offset: self.i,
             });
         }
 
@@ -169,6 +193,7 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: TokenKind::TemplateStr(parts),
                 offset,
+                end_offset: self.i,
             });
         }
 
@@ -177,6 +202,7 @@ impl<'a> Lexer<'a> {
             return Ok(Token {
                 kind: TokenKind::Number(number),
                 offset,
+                end_offset: self.i,
             });
         }
 
@@ -184,6 +210,7 @@ impl<'a> Lexer<'a> {
         Ok(Token {
             kind: TokenKind::Symbol(ch),
             offset,
+            end_offset: self.i,
         })
     }
 

@@ -3755,8 +3755,16 @@ impl<'a> Parser<'a> {
     }
 
     fn error_here(&self, msg: &str) -> anyhow::Error {
-        let (line, col) = self.source_map.line_col(self.current.offset);
-        anyhow!("{msg} at line {line}, col {col}")
+        self.error_at(self.current.offset, msg)
+    }
+
+    /// Render an error at a known byte offset. Appends a rustc-style source
+    /// snippet ("3 | <line>\n  | ^ here") underneath the `at line X, col Y`
+    /// header so the user can place the failure without opening an editor.
+    fn error_at(&self, offset: usize, msg: &str) -> anyhow::Error {
+        let (line, col) = self.source_map.line_col(offset);
+        let snippet = self.source_map.snippet(offset);
+        anyhow!("{msg} at line {line}, col {col}{snippet}")
     }
 }
 
@@ -3770,6 +3778,27 @@ fn parse_template_hole(src: &str) -> Result<Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_error_includes_line_col_and_snippet() {
+        // Garbage token on line 3 — parser bails with `error_here(...)`.
+        let src = "function ok() {\n    print(1);\n    !!! ;\n}\n";
+        let err = parse_program(src).unwrap_err().to_string();
+        assert!(
+            err.contains("at line 3, col "),
+            "expected line:col header, got: {err}"
+        );
+        // The rustc-style snippet ("3 | ..." + "^ here") makes the failure
+        // placeable without opening an editor.
+        assert!(
+            err.contains("3 | "),
+            "expected line gutter in snippet, got: {err}"
+        );
+        assert!(
+            err.contains("^ here"),
+            "expected caret in snippet, got: {err}"
+        );
+    }
 
     #[test]
     fn parses_minimal_program() {
