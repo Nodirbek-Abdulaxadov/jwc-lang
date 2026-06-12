@@ -60,6 +60,17 @@ shipped together since each is small.
   on `select` results with these structs so JSON serialisation skips
   the FxHashMap that `/json-large` round-trips through (closes the
   axum gap documented in PRODUCTION_READINESS_PLAN.md Phase 1).
+- **Phase 1.5 — typed row reader + direct JSON writer on every
+  monomorphized struct.** `JwcEnt_<Name>` now ships with
+  `jwc_from_row(row: &tokio_postgres::Row) -> Self` (reads columns by
+  declared-order index, skipping the per-row column-name lookup the
+  dynamic `jwc_row_to_v` does) and `jwc_write_json(&self, out: &mut
+  String)` (appends `{"col":value, ...}` straight into a String — no
+  `V::Object` allocation, no `serde_json::Value` round-trip, no
+  FxHashMap on the hot path). Methods are emitted on every entity
+  unconditionally and marked `#[allow(dead_code)]`; the next slice
+  rewires `emit_db_select` to use them and closes the `/json-large`
+  RPS gap.
 
 ### Changed
 - **`jwc build` and `jwc test` now run the lint pass by default** and

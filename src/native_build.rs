@@ -1250,9 +1250,122 @@ fn emit_entity_structs(out: &mut String, entities: &HashMap<String, EntityMeta>)
         }
         out.push_str("        V::Object(Arc::new(obj))\n");
         out.push_str("    }\n");
+
+        // ── Phase 1.5 — typed row reader ──────────────────────────────
+        // Read columns by index in declared order. The select codegen
+        // already lists columns in this exact order (whether `SELECT *`
+        // or an explicit projection), so positional reads avoid the
+        // per-row column-name lookup the dynamic path does. Eventually
+        // replaces the `jwc_row_to_v` round-trip on `select`.
+        out.push_str("    /// Read one row by column index in declared order. Caller is\n");
+        out.push_str("    /// responsible for ensuring the SELECT projects columns in the\n");
+        out.push_str("    /// same order the entity declares them in.\n");
+        out.push_str("    fn jwc_from_row(row: &tokio_postgres::Row) -> Self {\n");
+        out.push_str(&format!("        JwcEnt_{} {{\n", name));
+        for (i, f) in meta.fields.iter().enumerate() {
+            let field_ident = sanitize_struct_field_name(&f.name);
+            let read = read_field_from_row(i, f);
+            out.push_str(&format!("            {}: {},\n", field_ident, read));
+        }
+        out.push_str("        }\n");
+        out.push_str("    }\n");
+
+        // ── Phase 1.5 — direct JSON writer ────────────────────────────
+        // Streams `{"col":value,...}` straight into a `String`. No
+        // FxHashMap, no `V::Object` allocation, no `jwc_write_json`
+        // dynamic dispatch on the hot path. Closing the `/json-large`
+        // RPS gap hinges on this — the dynamic path goes through three
+        // boxed allocations (Vec<V> per row, JwcObj per object,
+        // serde_json::Value per stringify).
+        out.push_str("    /// Append `{\"col\":value, ...}` to `out` without going\n");
+        out.push_str("    /// through V::Object / serde_json::Value. Matches the\n");
+        out.push_str("    /// byte-for-byte shape `jwc_write_json` produces for a `V::Object`,\n");
+        out.push_str("    /// so client code can swap the two paths transparently.\n");
+        out.push_str("    fn jwc_write_json(&self, out: &mut String) {\n");
+        out.push_str("        out.push('{');\n");
+        for (i, f) in meta.fields.iter().enumerate() {
+            if i > 0 {
+                out.push_str("        out.push(',');\n");
+            }
+            let key = json_string_escape(&f.name);
+            out.push_str(&format!("        out.push_str(\"\\\"{}\\\":\");\n", key));
+            let field_ident = sanitize_struct_field_name(&f.name);
+            let write = write_field_to_json(&field_ident, f);
+            out.push_str(&format!("        {}\n", write));
+        }
+        out.push_str("        out.push('}');\n");
+        out.push_str("    }\n");
         out.push_str("}\n");
     }
     out.push('\n');
+}
+
+/// Escape a JSON string literal (just enough for column names — they
+/// can't contain newlines or control bytes from the entity declaration,
+/// so a `"` / `\\` escape pass is sufficient).
+fn json_string_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Generate the expression that reads one column out of a
+/// `tokio_postgres::Row` into the struct's field type. Mirrors the
+/// `row.try_get::<i32, _>(i)` shape that `jwc_row_to_v` already uses for
+/// the dynamic path. Width is locked to the declared `PgKind` to avoid
+/// `WrongType` surprises.
+fn read_field_from_row(idx: usize, f: &EntityField) -> String {
+    let pg_ty = match f.pg {
+        PgKind::Smallint => "i16",
+        PgKind::Int => "i32",
+        PgKind::Bigint => "i64",
+        PgKind::Float => "f64",
+        PgKind::Bool => "bool",
+        PgKind::Timestamp | PgKind::Str => "String",
+    };
+    if f.is_nullable {
+        format!(
+            "row.try_get::<_, Option<{ty}>>({idx}).unwrap_or(None)",
+            ty = pg_ty,
+            idx = idx
+        )
+    } else {
+        // Non-null column — still go through `unwrap_or_default` so a
+        // surprise NULL surfaces as the type's zero value instead of
+        // panicking the worker on an unwrap. Mirrors `jwc_row_to_v`'s
+        // "default to Null" branch for null columns.
+        format!(
+            "row.try_get::<_, {ty}>({idx}).unwrap_or_default()",
+            ty = pg_ty,
+            idx = idx
+        )
+    }
+}
+
+/// Generate the statement that appends `<field>` to a JSON output
+/// buffer. Strings go through the existing `jwc_write_json_string`
+/// escape helper in the prelude (handles quotes, backslashes, control
+/// bytes). Numbers and booleans use `write!` for IEEE-correct output.
+fn write_field_to_json(field_ident: &str, f: &EntityField) -> String {
+    // `body` is the Rust statement that writes the inner value referenced
+    // by the identifier `__v`. For non-null columns we just bind
+    // `__v = &self.<field>` and run it; for nullable columns we wrap in
+    // a `match` and use the same body in the `Some(__v)` arm, with a
+    // `null` literal in the `None` arm.
+    let body = match f.pg {
+        PgKind::Smallint | PgKind::Int | PgKind::Bigint | PgKind::Float => {
+            "{ use std::fmt::Write; let _ = write!(out, \"{}\", __v); }".to_string()
+        }
+        PgKind::Bool => "{ out.push_str(if *__v { \"true\" } else { \"false\" }); }".to_string(),
+        PgKind::Timestamp | PgKind::Str => "jwc_write_json_string(__v, out);".to_string(),
+    };
+    if f.is_nullable {
+        format!(
+            "match &self.{f} {{ Some(__v) => {{ {body} }}, None => out.push_str(\"null\"), }}",
+            f = field_ident,
+            body = body,
+        )
+    } else {
+        format!("{{ let __v = &self.{}; {} }}", field_ident, body)
+    }
 }
 
 /// Map a `PgKind` (+ nullability) to the concrete Rust type the

@@ -146,6 +146,11 @@ const CASES: &[Case] = &[
             "name: String,",
             "slug: Option<String>,",
             "fn jwc_to_v(&self)",
+            // Phase 1.5: row reader + direct JSON writer prove the
+            // monomorphized path has everything it needs to bypass
+            // V::Object on select / response. Wiring follows next slice.
+            "fn jwc_from_row(row: &tokio_postgres::Row)",
+            "fn jwc_write_json(&self, out: &mut String)",
         ],
     },
     Case {
