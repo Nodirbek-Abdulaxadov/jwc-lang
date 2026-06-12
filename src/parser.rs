@@ -1426,7 +1426,10 @@ fn validate_stmt(
                 for (col, _) in assignments {
                     let needle = col.to_lowercase();
                     if !fields.iter().any(|f| f == &needle) {
-                        bail!("Unknown column '{col}' on '{context_var}.{table}' in atomic update");
+                        bail!(
+                            "Unknown column '{col}' on '{context_var}.{table}' in atomic update{}",
+                            suggest_column(col, fields),
+                        );
                     }
                 }
                 check_where_columns(where_clause, fields, context_var, table)?;
@@ -1515,10 +1518,11 @@ fn validate_expr(
                 let col = strip_entity_prefix(field);
                 if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                     bail!(
-                        "Unknown column '{}' in aggregate over {}.{}",
+                        "Unknown column '{}' in aggregate over {}.{}{}",
                         col,
                         context_var,
-                        table
+                        table,
+                        suggest_column(&col, fields),
                     );
                 }
                 if let Some(wc) = where_clause.as_deref() {
@@ -1596,20 +1600,22 @@ fn validate_expr(
                     let col = strip_entity_prefix(&ob.field);
                     if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                         bail!(
-                            "Unknown column '{}' in ORDER BY of {}.{}",
+                            "Unknown column '{}' in ORDER BY of {}.{}{}",
                             col,
                             context_var,
-                            table
+                            table,
+                            suggest_column(&col, fields),
                         );
                     }
                 }
                 for col in projection {
                     if !fields.iter().any(|f| f.eq_ignore_ascii_case(col)) {
                         bail!(
-                            "Unknown column '{}' in projection of {}.{}",
+                            "Unknown column '{}' in projection of {}.{}{}",
                             col,
                             context_var,
-                            table
+                            table,
+                            suggest_column(col, fields),
                         );
                     }
                 }
@@ -1617,10 +1623,11 @@ fn validate_expr(
                     let col = strip_entity_prefix(grp);
                     if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                         bail!(
-                            "error[E004]: Unknown column '{}' in GROUP BY of {}.{}",
+                            "error[E004]: Unknown column '{}' in GROUP BY of {}.{}{}",
                             col,
                             context_var,
-                            table
+                            table,
+                            suggest_column(&col, fields),
                         );
                     }
                 }
