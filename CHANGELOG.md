@@ -36,6 +36,19 @@ shipped together since each is small.
 - **`Token::end_offset`** + **`SourceMap::snippet(offset)`** — building
   blocks for span-carrying AST nodes. Parser errors already use this
   to render an in-source caret under the failing token.
+- **Graceful shutdown listens for SIGTERM on Unix.** The pre-existing
+  Ctrl+C path stays — but kubelet's rolling-deploy TERM signal no
+  longer waits for the `terminationGracePeriodSeconds` ceiling to
+  SIGKILL the process. The shutdown log line names which signal
+  fired (`SIGINT` vs `SIGTERM`) so operators can distinguish a
+  k8s deploy from an interactive Ctrl+C. Windows behaviour is
+  unchanged.
+- **Request body size cap.** New `JWC_MAX_BODY_BYTES` env var (default
+  2 MiB) hard-caps inbound request bodies via axum's `DefaultBodyLimit`.
+  Setting the var to `0` disables the cap for projects that already
+  enforce a size at the proxy (nginx, Cloudflare). Without this a
+  single client streaming an unbounded body could OOM the worker —
+  exactly the kind of footgun the Phase 5 plan flags as a 1.0-blocker.
 - **Phase 1 struct monomorphization — codegen foundation.** Every
   `entity` declared in a project now produces a concrete Rust struct
   (`JwcEnt_<Name>`) in the emitted source, alongside a `jwc_to_v`

@@ -17,7 +17,7 @@ use axum::{
     body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        DefaultBodyLimit, Path, State,
     },
     http::{HeaderMap, Method, StatusCode, Uri},
     response::Response,
@@ -107,18 +107,43 @@ fn parse_shutdown_timeout_secs() -> u64 {
         .unwrap_or(5)
 }
 
-/// Resolves when Ctrl+C (SIGINT) is received. Logs the drain notice, signals
-/// open WebSocket handlers to send a `1001 Going Away` close, and arms a
-/// watchdog that force-exits if inflight requests don't drain within
-/// `JWC_SHUTDOWN_TIMEOUT` (default 5s). Handed to axum's
-/// `with_graceful_shutdown`, which stops accepting new connections and waits
-/// for inflight requests to complete.
-async fn shutdown_signal(metrics: Arc<ServerMetrics>, ws_shutdown: watch::Sender<bool>) {
-    if tokio::signal::ctrl_c().await.is_err() {
-        return;
+/// Request body cap applied by [`build_router`]. The axum default is 2
+/// MiB, which is what we keep when `JWC_MAX_BODY_BYTES` is unset — that's
+/// large enough for typical JSON payloads and small uploads, small enough
+/// that a runaway `curl -d @huge.bin` can't OOM the worker. Setting the
+/// var to `0` disables the cap (interpreted as "trust the proxy" for
+/// users running behind nginx / cloud load balancers that already enforce
+/// a size).
+const DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+fn parse_max_body_bytes() -> Option<usize> {
+    match std::env::var("JWC_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(DEFAULT_MAX_BODY_BYTES),
     }
+}
+
+/// Resolves on the first of SIGINT (Ctrl+C, both platforms) or SIGTERM
+/// (Unix only — Windows has no SIGTERM equivalent). Logs which signal
+/// fired so kubelet's TERM during a rolling deploy is distinguishable
+/// from an operator's Ctrl+C, signals open WebSocket handlers to send a
+/// `1001 Going Away` close, and arms a watchdog that force-exits if
+/// inflight requests don't drain within `JWC_SHUTDOWN_TIMEOUT` (default
+/// 5s). Handed to axum's `with_graceful_shutdown`, which stops accepting
+/// new connections and waits for inflight requests to complete.
+///
+/// Without the SIGTERM branch the kubelet would hit the
+/// `terminationGracePeriodSeconds` ceiling on every pod and SIGKILL the
+/// process, breaking in-flight requests — the exact failure mode the
+/// production-readiness plan calls out as a 1.0-blocker.
+async fn shutdown_signal(metrics: Arc<ServerMetrics>, ws_shutdown: watch::Sender<bool>) {
+    let reason = wait_for_shutdown_signal().await;
     let n = metrics.in_flight.load(Ordering::Relaxed);
-    eprintln!("Shutdown signal received, draining {n} inflight requests...");
+    eprintln!("Shutdown signal {reason} received, draining {n} inflight requests...");
     // Tell open WS writer loops to emit a 1001 close frame and wind down.
     let _ = ws_shutdown.send(true);
     let timeout = parse_shutdown_timeout_secs();
@@ -127,6 +152,35 @@ async fn shutdown_signal(metrics: Arc<ServerMetrics>, ws_shutdown: watch::Sender
         eprintln!("Graceful shutdown timed out after {timeout}s; forcing exit.");
         std::process::exit(0);
     });
+}
+
+/// Race SIGINT (every platform) against SIGTERM (Unix only) and return
+/// a short label naming whichever fires first. Returned label appears
+/// verbatim in the shutdown log line so operators can distinguish a
+/// kubelet rolling-deploy SIGTERM from an interactive Ctrl+C.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(_) => {
+            // SIGTERM listener unavailable — fall back to SIGINT only.
+            let _ = tokio::signal::ctrl_c().await;
+            return "SIGINT";
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => "SIGINT",
+        _ = term.recv() => "SIGTERM",
+    }
+}
+
+/// Windows has no SIGTERM. Ctrl+C / Ctrl+Break both surface through
+/// `tokio::signal::ctrl_c` — keep the label simple.
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "SIGINT"
 }
 
 #[derive(Clone)]
@@ -258,7 +312,17 @@ fn build_router(state: AppState) -> Router {
         );
     }
 
-    router.fallback(handle_http_fallback).with_state(state)
+    let mut built = router.fallback(handle_http_fallback).with_state(state);
+    // Body-size cap — a missing limit lets a single client OOM the
+    // worker by streaming an unbounded `curl -d @huge.bin`.
+    // `JWC_MAX_BODY_BYTES=0` opts out for users running behind a proxy
+    // that already enforces a size; everything else takes a hard cap.
+    if let Some(max) = parse_max_body_bytes() {
+        built = built.layer(DefaultBodyLimit::max(max));
+    } else {
+        built = built.layer(DefaultBodyLimit::disable());
+    }
+    built
 }
 
 fn ensure_leading_slash(p: &str) -> String {
@@ -454,3 +518,66 @@ async fn handle_ws(
 // Silence unused warning when downstream callers don't need `socket` rebound.
 #[allow(dead_code)]
 fn _socket_marker(_s: WebSocket) {}
+
+#[cfg(test)]
+mod tests {
+    //! Phase 5 hardening defaults — verifies the env-driven knobs apply
+    //! the right cap. The body-limit and shutdown-timeout pure parsers
+    //! get exercised here; integration coverage (curl a 3 MiB body and
+    //! see a 413) belongs in the Phase 5 e2e suite once it lands.
+    use super::*;
+
+    fn with_env<F: FnOnce()>(key: &str, value: Option<&str>, f: F) {
+        // Snapshot the env var so concurrent tests don't clobber each
+        // other on shared process state. Each call sets / clears, runs
+        // the closure, then restores.
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn max_body_bytes_defaults_to_two_mib_when_unset() {
+        with_env("JWC_MAX_BODY_BYTES", None, || {
+            assert_eq!(parse_max_body_bytes(), Some(DEFAULT_MAX_BODY_BYTES));
+        });
+    }
+
+    #[test]
+    fn max_body_bytes_zero_disables_the_cap() {
+        with_env("JWC_MAX_BODY_BYTES", Some("0"), || {
+            assert_eq!(parse_max_body_bytes(), None);
+        });
+    }
+
+    #[test]
+    fn max_body_bytes_custom_value_round_trips() {
+        with_env("JWC_MAX_BODY_BYTES", Some("8388608"), || {
+            assert_eq!(parse_max_body_bytes(), Some(8 * 1024 * 1024));
+        });
+    }
+
+    #[test]
+    fn shutdown_timeout_defaults_to_five_seconds() {
+        with_env("JWC_SHUTDOWN_TIMEOUT", None, || {
+            assert_eq!(parse_shutdown_timeout_secs(), 5);
+        });
+    }
+
+    #[test]
+    fn shutdown_timeout_zero_falls_back_to_default() {
+        with_env("JWC_SHUTDOWN_TIMEOUT", Some("0"), || {
+            // A zero would mean "force-exit immediately", which silently
+            // breaks every in-flight request. The parser drops invalid
+            // values back to the safe default rather than honoring zero.
+            assert_eq!(parse_shutdown_timeout_secs(), 5);
+        });
+    }
+}
