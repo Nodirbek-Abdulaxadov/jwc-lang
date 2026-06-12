@@ -21,7 +21,13 @@ use crate::lexer::{Keyword, Lexer, TemplatePart, Token, TokenKind};
 
 pub fn parse_program(source: &str) -> Result<Program> {
     let mut parser = Parser::new(source)?;
-    parser.parse_program()
+    let mut program = parser.parse_program()?;
+    // Stamp the original source so `validate_program` can render
+    // `at line X, col Y` + snippet for AST-stamped errors (decls now
+    // carry a byte offset of their opening keyword). Empty for
+    // hand-built test programs.
+    program.source = source.to_string();
+    Ok(program)
 }
 
 /// FQN helper used by validate_program. Identical shape to `runner::fqn_key`
@@ -39,16 +45,41 @@ fn ns_fqn(namespace: &[String], name: &str) -> String {
     }
 }
 
+/// Render `<msg> at line L, col C\n<snippet>` when a decl carries a real
+/// offset and the program has a source string. Falls back to the bare
+/// `<msg>` shape when offset is `0` or source is empty / out-of-range —
+/// hand-built `Program::default()` instances in tests stay legible. The
+/// snippet matches the rustc-style shape that parser errors already
+/// produce so editors that already grep for `at line X, col Y` (e.g.
+/// `src/bin/jwc_lsp.rs::extract_line_col`) keep working.
+fn loc(program: &Program, offset: usize, msg: &str) -> anyhow::Error {
+    if offset == 0 || program.source.is_empty() || offset >= program.source.len() {
+        return anyhow!("{msg}");
+    }
+    let sm = SourceMap::new(&program.source);
+    let (line, col) = sm.line_col(offset);
+    let snippet = sm.snippet(offset);
+    anyhow!("{msg} at line {line}, col {col}{snippet}")
+}
+
 pub fn validate_program(program: &Program) -> Result<()> {
     let mut ctx_names = HashSet::new();
     let mut ctx_drivers: HashMap<String, String> = HashMap::new();
     for ctx in &program.dbcontexts {
         let key = ns_fqn(&ctx.namespace, &ctx.name);
         if !ctx_names.insert(key) {
-            bail!("Duplicate dbcontext name: {}", ctx.name);
+            return Err(loc(
+                program,
+                ctx.offset,
+                &format!("Duplicate dbcontext name: {}", ctx.name),
+            ));
         }
         if ctx.driver.trim().is_empty() {
-            bail!("dbcontext '{}' has empty driver", ctx.name);
+            return Err(loc(
+                program,
+                ctx.offset,
+                &format!("dbcontext '{}' has empty driver", ctx.name),
+            ));
         }
         ctx_drivers.insert(ctx.name.to_lowercase(), ctx.driver.to_lowercase());
     }
@@ -62,7 +93,11 @@ pub fn validate_program(program: &Program) -> Result<()> {
     for model in &program.models {
         let model_key = ns_fqn(&model.namespace, &model.name);
         if !model_names.insert(model_key) {
-            bail!("Duplicate model name: {}", model.name);
+            return Err(loc(
+                program,
+                model.offset,
+                &format!("Duplicate model name: {}", model.name),
+            ));
         }
 
         if model.kind != ModelKind::Entity {
@@ -70,7 +105,11 @@ pub fn validate_program(program: &Program) -> Result<()> {
         }
         let key = ns_fqn(&model.namespace, &model.name);
         if !entity_names.insert(key) {
-            bail!("Duplicate entity name: {}", model.name);
+            return Err(loc(
+                program,
+                model.offset,
+                &format!("Duplicate entity name: {}", model.name),
+            ));
         }
 
         let resolved_context = resolve_entity_context_name(program, model, &ctx_names)?;
@@ -218,18 +257,25 @@ pub fn validate_program(program: &Program) -> Result<()> {
     for function in &program.functions {
         let key = ns_fqn(&function.namespace, &function.name);
         if !fn_names.insert(key) {
-            bail!("Duplicate function name: {}", function.name);
+            return Err(loc(
+                program,
+                function.offset,
+                &format!("Duplicate function name: {}", function.name),
+            ));
         }
 
         let mut param_names = HashSet::new();
         for param in &function.params {
             let param_key = param.name.to_lowercase();
             if !param_names.insert(param_key) {
-                bail!(
-                    "Function '{}': duplicate parameter '{}'",
-                    function.name,
-                    param.name
-                );
+                return Err(loc(
+                    program,
+                    function.offset,
+                    &format!(
+                        "Function '{}': duplicate parameter '{}'",
+                        function.name, param.name
+                    ),
+                ));
             }
         }
     }
@@ -241,19 +287,35 @@ pub fn validate_program(program: &Program) -> Result<()> {
             method.as_str(),
             "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "WS" | "SSE"
         ) {
-            bail!("Unsupported route method: {}", route.method);
+            return Err(loc(
+                program,
+                route.offset,
+                &format!("Unsupported route method: {}", route.method),
+            ));
         }
 
         let key = format!("{} {}", method, route.path);
         if !route_keys.insert(key) {
-            bail!("error[E005]: Duplicate route: {} {}", method, route.path);
+            return Err(loc(
+                program,
+                route.offset,
+                &format!("error[E005]: Duplicate route: {} {}", method, route.path),
+            ));
         }
 
         if route.handler.is_some() && !route.body.is_empty() {
-            bail!("Route cannot define both handler and inline body");
+            return Err(loc(
+                program,
+                route.offset,
+                "Route cannot define both handler and inline body",
+            ));
         }
         if route.handler.is_none() && route.body.is_empty() {
-            bail!("Route must define either handler or inline body");
+            return Err(loc(
+                program,
+                route.offset,
+                "Route must define either handler or inline body",
+            ));
         }
 
         if let Some(handler) = &route.handler {
@@ -270,7 +332,11 @@ pub fn validate_program(program: &Program) -> Result<()> {
                 // single-file validation can't see — let the runtime resolver
                 // catch a real miss.
                 if !handler.contains('.') {
-                    bail!("Route handler '{}' is not defined as a function", handler);
+                    return Err(loc(
+                        program,
+                        route.offset,
+                        &format!("Route handler '{}' is not defined as a function", handler),
+                    ));
                 }
             }
         }
@@ -301,7 +367,11 @@ pub fn validate_program(program: &Program) -> Result<()> {
     for mw in &program.middlewares {
         let key = ns_fqn(&mw.namespace, &mw.name);
         if !mw_names.insert(key) {
-            bail!("Duplicate middleware name: {}", mw.name);
+            return Err(loc(
+                program,
+                mw.offset,
+                &format!("Duplicate middleware name: {}", mw.name),
+            ));
         }
         validate_stmts(
             &mw.body,
@@ -447,7 +517,11 @@ fn validate_consts(program: &Program) -> Result<()> {
     for c in &program.consts {
         let key = c.name.to_lowercase();
         if !const_names.insert(key) {
-            bail!("duplicate const declaration: {}", c.name);
+            return Err(loc(
+                program,
+                c.offset,
+                &format!("duplicate const declaration: {}", c.name),
+            ));
         }
     }
 
@@ -469,7 +543,11 @@ fn validate_consts(program: &Program) -> Result<()> {
     for c in &program.consts {
         let key = c.name.to_lowercase();
         if color.get(&key).copied().unwrap_or(0) == 0 && const_has_cycle(&key, &deps, &mut color) {
-            bail!("circular const reference involving '{}'", c.name);
+            return Err(loc(
+                program,
+                c.offset,
+                &format!("circular const reference involving '{}'", c.name),
+            ));
         }
     }
 
@@ -2070,6 +2148,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_dbcontext_decl(&mut self) -> Result<DbContextDecl> {
+        let offset = self.current.offset;
         self.bump()?;
         let name = self.expect_ident("expected dbcontext name")?;
         self.expect_symbol(':')?;
@@ -2085,6 +2164,7 @@ impl<'a> Parser<'a> {
             name,
             driver,
             namespace: Vec::new(),
+            offset,
         })
     }
 
@@ -2092,12 +2172,13 @@ impl<'a> Parser<'a> {
     /// no visibility modifier; the constant-expression restriction is enforced
     /// in `validate_program`, not here.
     fn parse_const_decl(&mut self) -> Result<ConstDecl> {
+        let offset = self.current.offset;
         self.bump()?; // consume `const`
         let name = self.expect_ident("expected const name after 'const'")?;
         self.expect_symbol('=')?;
         let expr = self.parse_expr()?;
         self.expect_symbol(';')?;
-        Ok(ConstDecl { name, expr })
+        Ok(ConstDecl { name, expr, offset })
     }
 
     fn skip_braced_block(&mut self) -> Result<()> {
@@ -2280,6 +2361,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_model_decl(&mut self, kind: ModelKind) -> Result<ModelDecl> {
+        let offset = self.current.offset;
         match kind {
             ModelKind::Entity => self.expect_keyword(Keyword::Entity)?,
             ModelKind::Class => self.expect_keyword(Keyword::Class)?,
@@ -2369,6 +2451,7 @@ impl<'a> Parser<'a> {
             navigations,
             namespace: Vec::new(),
             visibility: Visibility::Private,
+            offset,
         })
     }
 
@@ -2430,6 +2513,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_route_decl(&mut self) -> Result<RouteDecl> {
+        let offset = self.current.offset;
         self.expect_keyword(Keyword::Route)?;
         let method = self.expect_ident("expected HTTP method (GET/POST/PUT/DELETE/PATCH/WS)")?;
         let own_path = self.expect_string("expected route path string")?;
@@ -2482,6 +2566,7 @@ impl<'a> Parser<'a> {
                 middlewares,
                 protocol,
                 namespace: Vec::new(),
+                offset,
             });
         }
 
@@ -2494,6 +2579,7 @@ impl<'a> Parser<'a> {
             middlewares,
             protocol,
             namespace: Vec::new(),
+            offset,
         })
     }
 
@@ -2537,6 +2623,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_middleware_decl(&mut self) -> Result<MiddlewareDecl> {
+        let offset = self.current.offset;
         self.expect_keyword(Keyword::Middleware)?;
         let name = self.expect_ident("expected middleware name")?;
         let body = self.parse_block()?;
@@ -2545,6 +2632,7 @@ impl<'a> Parser<'a> {
             body,
             namespace: Vec::new(),
             visibility: Visibility::Private,
+            offset,
         })
     }
 
@@ -2577,6 +2665,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function_decl(&mut self, dome_name: Option<&str>) -> Result<FunctionDecl> {
+        let offset = self.current.offset;
         self.expect_keyword(Keyword::Function)?;
 
         let base_name = self.expect_ident("expected function name")?;
@@ -2622,6 +2711,7 @@ impl<'a> Parser<'a> {
             is_async: false,
             namespace: Vec::new(),
             visibility: Visibility::Private,
+            offset,
         })
     }
 
@@ -3778,6 +3868,59 @@ fn parse_template_hole(src: &str) -> Result<Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_route_error_carries_line_col_and_snippet() {
+        // Two identical routes — second declaration triggers E005. The
+        // validator now stamps `at line X, col Y` + snippet on the
+        // SECOND `route` keyword, not the first.
+        let src = "route GET \"ping\" {\n    return text(\"a\");\n}\n\nroute GET \"ping\" {\n    return text(\"b\");\n}\n";
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Duplicate route"), "missing msg: {err}");
+        assert!(err.contains("at line 5, col 1"), "wrong loc: {err}");
+        assert!(err.contains("5 | route"), "missing snippet: {err}");
+        assert!(err.contains("^ here"), "missing caret: {err}");
+    }
+
+    #[test]
+    fn duplicate_function_error_carries_line_col() {
+        let src = "function foo() { return 1; }\nfunction foo() { return 2; }\n";
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Duplicate function name"));
+        assert!(err.contains("at line 2, col 1"));
+    }
+
+    #[test]
+    fn validator_falls_back_when_source_is_empty() {
+        // A hand-built Program (no parse_program → no .source) should
+        // still surface the bare error message, not panic, not omit info.
+        let mut program = Program::default();
+        program.functions.push(crate::ast::FunctionDecl {
+            name: "x".into(),
+            params: Vec::new(),
+            return_type: None,
+            body: Vec::new(),
+            is_async: false,
+            namespace: Vec::new(),
+            visibility: crate::ast::Visibility::Private,
+            offset: 0,
+        });
+        program.functions.push(crate::ast::FunctionDecl {
+            name: "x".into(),
+            params: Vec::new(),
+            return_type: None,
+            body: Vec::new(),
+            is_async: false,
+            namespace: Vec::new(),
+            visibility: crate::ast::Visibility::Private,
+            offset: 0,
+        });
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Duplicate function name: x"));
+        assert!(!err.contains("at line "), "should not invent loc: {err}");
+    }
 
     #[test]
     fn parser_error_includes_line_col_and_snippet() {

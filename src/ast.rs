@@ -20,6 +20,11 @@ pub struct Program {
     /// frozen; inside route/function bodies a const name resolves like a
     /// read-only variable (locals shadow consts).
     pub consts: Vec<ConstDecl>,
+    /// Concatenated source text the parser saw. Used by `validate_program`
+    /// to render `at line X, col Y` + snippet for AST-stamped errors.
+    /// Empty for hand-built `Program::default()` instances in tests — the
+    /// validator falls back to the legacy `<msg>` shape when this is empty.
+    pub source: String,
 }
 
 /// `const NAME = <expr>;` — a module-level immutable binding. The expression
@@ -29,6 +34,9 @@ pub struct Program {
 pub struct ConstDecl {
     pub name: String,
     pub expr: Expr,
+    /// Byte offset of the `const` keyword in the source. 0 for synthesized
+    /// nodes — `validate_program` treats `0` as "no location available".
+    pub offset: usize,
 }
 
 /// Visibility marker for top-level declarations. Default is `Private` —
@@ -82,6 +90,8 @@ pub struct MiddlewareDecl {
     /// Namespace this declaration lives in. Empty = root.
     pub namespace: Vec<String>,
     pub visibility: Visibility,
+    /// Byte offset of the `middleware` keyword.
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +126,8 @@ pub struct RouteDecl {
     /// Namespace this route lives in. Routes from non-root namespaces are
     /// inactive until activated via a `mount <ns> [at "/p"];` declaration.
     pub namespace: Vec<String>,
+    /// Byte offset of the `route` keyword.
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +137,8 @@ pub struct DbContextDecl {
     /// Namespace this dbcontext lives in. Non-root dbcontexts come along
     /// automatically whenever the project imports or mounts the namespace.
     pub namespace: Vec<String>,
+    /// Byte offset of the `dbcontext` keyword.
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +154,8 @@ pub struct ModelDecl {
     /// Namespace this model lives in. Empty = root.
     pub namespace: Vec<String>,
     pub visibility: Visibility,
+    /// Byte offset of the `entity` / `class` keyword.
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +235,8 @@ pub struct FunctionDecl {
     /// Namespace this function lives in. Empty = root.
     pub namespace: Vec<String>,
     pub visibility: Visibility,
+    /// Byte offset of the `function` keyword (or `async` if present).
+    pub offset: usize,
 }
 
 /// Single comparison: `field op value`

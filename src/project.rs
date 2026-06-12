@@ -501,6 +501,12 @@ pub fn merge_program(combined: &mut Program, incoming: Program) -> Result<()> {
         }
         combined.error_handler = Some(eh);
     }
+    // Multi-file projects can't share one source string — decls from
+    // different files would index into the wrong source. Clear it so the
+    // validator falls back to the legacy "no location" shape instead of
+    // pointing at the wrong line. Per-file source tracking is the
+    // follow-up; this preserves correctness today.
+    combined.source.clear();
     Ok(())
 }
 
