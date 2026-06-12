@@ -65,6 +65,19 @@ async fn jwc_db_get() -> deadpool_postgres::Object {
 type DbParams = Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>>;
 
 async fn jwc_db_query(sql: &str, params: DbParams) -> Vec<V> {
+    let rows = jwc_db_query_rows(sql, params).await;
+    rows.iter().map(jwc_row_to_v).collect()
+}
+
+/// Raw-row variant of `jwc_db_query`. Used by the monomorphized struct
+/// path (Phase 1) so generated code can map each row straight into a
+/// concrete `JwcEnt_<Name>` (via the struct's `jwc_from_row` ctor)
+/// without going through the dynamic `V::Object` detour. The dynamic
+/// `jwc_db_query` stays as a one-line wrapper for callers that still
+/// want the FxHashMap shape; per-entity callsites switch over a slice
+/// at a time.
+#[allow(dead_code)]
+async fn jwc_db_query_rows(sql: &str, params: DbParams) -> Vec<tokio_postgres::Row> {
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
     let client = jwc_db_get().await;
@@ -72,11 +85,10 @@ async fn jwc_db_query(sql: &str, params: DbParams) -> Vec<V> {
         .prepare_cached(sql)
         .await
         .unwrap_or_else(|e| panic!("prepare failed: {}\nSQL: {}", e, sql));
-    let rows = client
+    client
         .query(&stmt, &refs)
         .await
-        .unwrap_or_else(|e| panic!("query failed: {}\nSQL: {}", e, sql));
-    rows.iter().map(jwc_row_to_v).collect()
+        .unwrap_or_else(|e| panic!("query failed: {}\nSQL: {}", e, sql))
 }
 
 async fn jwc_db_exec(sql: &str, params: DbParams) -> u64 {

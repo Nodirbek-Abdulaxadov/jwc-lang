@@ -69,6 +69,13 @@ shipped together since each is small.
   on `select` results with these structs so JSON serialisation skips
   the FxHashMap that `/json-large` round-trips through (closes the
   axum gap documented in PRODUCTION_READINESS_PLAN.md Phase 1).
+- **Phase 1.5b — `jwc_db_query_rows` raw-row helper on the DB
+  prelude.** Returns `Vec<tokio_postgres::Row>` so generated code can
+  feed each row straight into a monomorphized `JwcEnt_<Name>` via
+  the struct's `jwc_from_row` ctor without going through the dynamic
+  `V::Object` detour. `jwc_db_query` keeps its `Vec<V>` signature for
+  callers that still want the FxHashMap shape — it's a one-line
+  wrapper now. Per-callsite switchover is the next slice.
 - **Phase 1.5 — typed row reader + direct JSON writer on every
   monomorphized struct.** `JwcEnt_<Name>` now ships with
   `jwc_from_row(row: &tokio_postgres::Row) -> Self` (reads columns by
