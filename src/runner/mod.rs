@@ -1363,7 +1363,70 @@ impl<'a> Vm<'a> {
                 engine::invalidate_result_cache()?;
                 Ok(Flow::Continue)
             }
+            // The atomic `update CTX.Table set ...` body lives in its own
+            // method and returns a `BoxFuture` (heap-allocated) so its
+            // locals never inflate the `exec_stmt` future. `async_recursion`
+            // sizes each parent frame by the union of all branches'
+            // future state machines, so an inlined heavy branch (SQL
+            // fragments, param vec) would shrink the stack budget left
+            // for plain recursive user code (e.g. `fib(n)`).
+            Stmt::DbUpdateSet {
+                table,
+                assignments,
+                where_clause,
+                ..
+            } => {
+                self.exec_db_update_set(table, assignments, where_clause, vars)
+                    .await
+            }
         }
+    }
+
+    fn exec_db_update_set<'b>(
+        &'b mut self,
+        table: &'b str,
+        assignments: &'b [(String, Expr)],
+        where_clause: &'b WhereExpr,
+        vars: &'b mut HashMap<String, Value>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Flow>> + Send + 'b>> {
+        Box::pin(self.exec_db_update_set_impl(table, assignments, where_clause, vars))
+    }
+
+    async fn exec_db_update_set_impl(
+        &mut self,
+        table: &str,
+        assignments: &[(String, Expr)],
+        where_clause: &WhereExpr,
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Flow> {
+        let table_name = crate::sql::to_snake_case(table);
+        let mut shape_bits: Vec<String> = Vec::new();
+        let mut cache_bits: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
+        let mut set_fragments = Vec::with_capacity(assignments.len());
+        for (col, rhs) in assignments {
+            let col_lc = col.to_ascii_lowercase();
+            let rhs_sql = build_set_rhs_sql(rhs, &mut params, vars, self).await?;
+            set_fragments.push(format!("\"{}\" = {}", col_lc, rhs_sql));
+        }
+        let set_clause = set_fragments.join(", ");
+        let where_sql = build_where_sql(
+            where_clause,
+            &mut params,
+            &mut shape_bits,
+            &mut cache_bits,
+            vars,
+            self,
+        )
+        .await?;
+        let sql = format!(
+            "UPDATE \"{}\" SET {} WHERE {};",
+            table_name, set_clause, where_sql
+        );
+        let param_refs = boxed_params_to_refs(&params);
+        let _ = engine::exec(&sql, &param_refs).await?;
+        engine::invalidate_result_cache()?;
+        Ok(Flow::Continue)
     }
 
     #[async_recursion]
@@ -3338,6 +3401,110 @@ async fn build_where_sql(
             cache.push("OR".to_string());
             let rs = build_where_sql(r, params, shape, cache, vars, vm).await?;
             Ok(format!("({} OR {})", ls, rs))
+        }
+    }
+}
+
+/// Compile the RHS of one `col = <expr>` pair in an atomic UPDATE into a
+/// SQL fragment. Bare identifiers that name a column on the entity stay
+/// inline (`"hits"`); arithmetic ops fold recursively; anything else is
+/// evaluated host-side once and bound as `$N`.
+///
+/// The function is split in two halves so it stays sync at the recursive
+/// callsite — `async_recursion` here would inflate every parent future's
+/// state machine and shrink the stack budget for plain recursive user
+/// code (the conformance `fib(n)` case overflowed in debug before this
+/// split). Step 1 walks the expression and collects every fall-through
+/// `Expr` that needs host evaluation. Step 2 awaits the evals (flat list,
+/// no recursion). Step 3 builds the SQL string with the pre-evaluated
+/// values plugged in.
+async fn build_set_rhs_sql(
+    expr: &Expr,
+    params: &mut Vec<Box<dyn ToSql + Sync + Send>>,
+    vars: &mut HashMap<String, Value>,
+    vm: &mut Vm<'_>,
+) -> Result<String> {
+    let mut fallbacks: Vec<&Expr> = Vec::new();
+    collect_set_rhs_fallbacks(expr, vars, &mut fallbacks);
+    // Evaluate fall-through exprs in source order so `$N` indices line up
+    // with the order `build_set_rhs_sql_sync` reads them.
+    let mut values: Vec<Value> = Vec::with_capacity(fallbacks.len());
+    for f in &fallbacks {
+        values.push(vm.eval_expr(f, vars).await?);
+    }
+    let mut value_iter = values.into_iter();
+    Ok(build_set_rhs_sql_sync(expr, params, vars, &mut value_iter))
+}
+
+/// Walk the RHS tree and append every `Expr` that needs host-side
+/// evaluation. Bare column references and the arithmetic spine are
+/// SQL-inline and contribute nothing here.
+fn collect_set_rhs_fallbacks<'a>(
+    expr: &'a Expr,
+    vars: &HashMap<String, Value>,
+    out: &mut Vec<&'a Expr>,
+) {
+    match expr {
+        Expr::Var(name) => {
+            if vars.contains_key(&name.to_lowercase()) {
+                out.push(expr);
+            }
+            // Otherwise it's a column reference — no host eval needed.
+        }
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) => {
+            collect_set_rhs_fallbacks(a, vars, out);
+            collect_set_rhs_fallbacks(b, vars, out);
+        }
+        _ => out.push(expr),
+    }
+}
+
+/// Build the SQL fragment, consuming pre-evaluated values for each
+/// fall-through Expr in left-to-right order.
+fn build_set_rhs_sql_sync(
+    expr: &Expr,
+    params: &mut Vec<Box<dyn ToSql + Sync + Send>>,
+    vars: &HashMap<String, Value>,
+    values: &mut std::vec::IntoIter<Value>,
+) -> String {
+    match expr {
+        Expr::Var(name) => {
+            let key = name.to_lowercase();
+            if vars.contains_key(&key) {
+                let v = values
+                    .next()
+                    .expect("fallback collector must produce one value per Var-shadow");
+                params.push(value_to_sql_param(&v));
+                return format!("${}", params.len());
+            }
+            format!("\"{}\"", key)
+        }
+        Expr::Add(a, b) => {
+            let ls = build_set_rhs_sql_sync(a, params, vars, values);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            format!("({} + {})", ls, rs)
+        }
+        Expr::Sub(a, b) => {
+            let ls = build_set_rhs_sql_sync(a, params, vars, values);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            format!("({} - {})", ls, rs)
+        }
+        Expr::Mul(a, b) => {
+            let ls = build_set_rhs_sql_sync(a, params, vars, values);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            format!("({} * {})", ls, rs)
+        }
+        Expr::Div(a, b) => {
+            let ls = build_set_rhs_sql_sync(a, params, vars, values);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            format!("({} / {})", ls, rs)
+        }
+        _ => {
+            let v = values
+                .next()
+                .expect("fallback collector must produce one value per non-Var leaf");
+            params.push(value_to_sql_param(&v));
+            format!("${}", params.len())
         }
     }
 }

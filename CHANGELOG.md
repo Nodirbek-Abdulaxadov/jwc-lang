@@ -17,6 +17,25 @@ shipped together since each is small.
   user-declared function of the same name when one exists.
 - **`jwc build --deny-warnings` / `jwc test --deny-warnings`** — promotes
   lint warnings to errors for CI gates.
+- **Atomic `update CTX.Table set col = expr where ...`** — partial-row
+  update that compiles to a single SQL `UPDATE` (no preceding read).
+  Closes the lost-update race the whole-row form `update var in CTX.Table`
+  has under concurrency — observed live on jwc-shortener's `hits`
+  counter. Column refs (`hits`) and column arithmetic (`hits + 1`) stay
+  inline in the SQL so the increment is genuinely atomic; everything
+  else is evaluated host-side once and bound as `$N`. Both interpreter
+  and native AOT codegen. `where` clause required; column validation
+  happens at compile time.
+- **Spanned validator errors** — top-level decls (DbContext, Model,
+  Route, Function, Middleware, Const) now carry a byte `offset` of their
+  opening keyword, and `Program` carries the original source string.
+  Validator errors render as `<msg> at line X, col Y` + rustc-style
+  snippet for thirteen of the most-hit sites (duplicate name/route,
+  unsupported method, missing handler, …). Multi-file projects fall
+  back to the bare-message shape — per-file source tracking is next.
+- **`Token::end_offset`** + **`SourceMap::snippet(offset)`** — building
+  blocks for span-carrying AST nodes. Parser errors already use this
+  to render an in-source caret under the failing token.
 
 ### Changed
 - **`jwc build` and `jwc test` now run the lint pass by default** and

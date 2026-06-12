@@ -398,6 +398,23 @@ pub enum Stmt {
         table: String,
         where_clause: Box<WhereExpr>,
     },
+    /// `update CTX.TABLE set col1 = expr1, col2 = expr2 where COND ...;` —
+    /// atomic partial-row update. Compiles to a single SQL `UPDATE … SET …
+    /// WHERE …`, no preceding read. Closes the lost-update window that the
+    /// whole-row `update var in CTX.Table` form has under concurrent
+    /// reads (observed in production: jwc-shortener's `hits` counter).
+    /// `where` is required for the same reason `delete from` requires it
+    /// — a missing predicate would touch every row in the table.
+    DbUpdateSet {
+        context_var: String,
+        table: String,
+        /// Each entry is (column, RHS expression). RHS can reference
+        /// other columns of the same row directly by name (the column
+        /// validator accepts `Entity.col` references inside the RHS just
+        /// like `where Entity.col == …` does).
+        assignments: Vec<(String, Expr)>,
+        where_clause: Box<WhereExpr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

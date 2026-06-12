@@ -361,6 +361,16 @@ fn collect_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
             Stmt::DbDeleteWhere { where_clause, .. } => {
                 collect_calls_where(where_clause, out);
             }
+            Stmt::DbUpdateSet {
+                assignments,
+                where_clause,
+                ..
+            } => {
+                for (_, rhs) in assignments {
+                    collect_calls_expr(rhs, out);
+                }
+                collect_calls_where(where_clause, out);
+            }
             Stmt::Return(None)
             | Stmt::Break
             | Stmt::Continue

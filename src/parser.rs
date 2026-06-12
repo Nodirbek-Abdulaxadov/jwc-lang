@@ -735,6 +735,7 @@ fn check_mutation_fields_in_stmt(
             Ok(())
         }
         Stmt::DbDeleteWhere { .. }
+        | Stmt::DbUpdateSet { .. }
         | Stmt::Print(_)
         | Stmt::Expr(_)
         | Stmt::Return(_)
@@ -922,7 +923,8 @@ fn check_typed_field_access_in_stmt(
         Stmt::DbInsert { .. }
         | Stmt::DbUpdate { .. }
         | Stmt::DbDelete { .. }
-        | Stmt::DbDeleteWhere { .. } => Ok(()),
+        | Stmt::DbDeleteWhere { .. }
+        | Stmt::DbUpdateSet { .. } => Ok(()),
     }
 }
 
@@ -1356,6 +1358,52 @@ fn validate_stmt(
             let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
             if let Some(fields) = fields {
                 check_where_columns(where_clause, fields, context_var, table)?;
+            }
+            validate_where_expr(
+                where_clause,
+                ctx_names,
+                entity_contexts,
+                db_tables,
+                entity_fields_by_table,
+            )
+        }
+        Stmt::DbUpdateSet {
+            context_var,
+            table,
+            assignments,
+            where_clause,
+        } => {
+            let ctx_key = validate_context_exists(context_var, ctx_names)?;
+            validate_table_in_context(&ctx_key, table, db_tables)?;
+            let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
+            // Each `col = expr` LHS must be a real column on the entity.
+            // Otherwise the SQL would surface as `column "..." does not
+            // exist` at request time instead of compile time. We also
+            // require the `set` list to be non-empty (the parser refuses
+            // a trailing comma but does not currently enforce ≥1 pair).
+            if assignments.is_empty() {
+                bail!(
+                    "atomic 'update {context_var}.{table} set ...' must list at least one column"
+                );
+            }
+            if let Some(fields) = fields {
+                for (col, _) in assignments {
+                    let needle = col.to_lowercase();
+                    if !fields.iter().any(|f| f == &needle) {
+                        bail!("Unknown column '{col}' on '{context_var}.{table}' in atomic update");
+                    }
+                }
+                check_where_columns(where_clause, fields, context_var, table)?;
+            }
+            // Walk RHS expressions so nested DB calls / typed errors surface.
+            for (_, rhs) in assignments {
+                validate_expr(
+                    rhs,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
             }
             validate_where_expr(
                 where_clause,
@@ -2815,7 +2863,38 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(s) if s.eq_ignore_ascii_case("update") => {
                 self.bump()?;
-                let var = self.expect_ident("expected variable name after 'update'")?;
+                let first_ident =
+                    self.expect_ident("expected variable or context name after 'update'")?;
+                // Disambiguate the two forms:
+                //   * `update var in CTX.Table;`     — whole-row update (legacy)
+                //   * `update CTX.Table set ...;`    — atomic partial update
+                // After consuming the first ident:
+                //   * If the next token is `in` → it was a variable.
+                //   * If the next token is `.` → it was a context name, and a
+                //     `set ... where ...` clause follows.
+                if self.check_symbol('.') {
+                    self.expect_symbol('.')?;
+                    let table = self.expect_ident("expected table name after '.'")?;
+                    if !self.check_ident_eq("set") {
+                        return Err(self.error_here("expected 'set' in atomic update statement"));
+                    }
+                    self.bump()?;
+                    let assignments = self.parse_update_assignments()?;
+                    if !self.check_ident_eq("where") {
+                        return Err(self.error_here(
+                            "atomic 'update CTX.Table set ...' requires a 'where' clause",
+                        ));
+                    }
+                    self.bump()?;
+                    let where_clause = Box::new(self.parse_where_or()?);
+                    self.expect_symbol(';')?;
+                    return Ok(Stmt::DbUpdateSet {
+                        context_var: first_ident,
+                        table,
+                        assignments,
+                        where_clause,
+                    });
+                }
                 if self.current.kind != TokenKind::Keyword(Keyword::In) {
                     return Err(self.error_here("expected 'in' in update statement"));
                 }
@@ -2823,7 +2902,7 @@ impl<'a> Parser<'a> {
                 let (ctx, table) = self.parse_db_ref()?;
                 self.expect_symbol(';')?;
                 Ok(Stmt::DbUpdate {
-                    var,
+                    var: first_ident,
                     context_var: ctx,
                     table,
                 })
@@ -3382,6 +3461,26 @@ impl<'a> Parser<'a> {
         Ok((ctx, table))
     }
 
+    /// Parse one or more `col = expr` pairs separated by commas, used by
+    /// `update CTX.Table set <pairs> where ...`. Stops once it sees the
+    /// `where` keyword (the caller consumes it next). Bare `col` (without
+    /// `=`) is a parse error — the user intends a partial update.
+    fn parse_update_assignments(&mut self) -> Result<Vec<(String, Expr)>> {
+        let mut out = Vec::new();
+        loop {
+            let col = self.expect_ident("expected column name in 'set' clause")?;
+            self.expect_symbol('=')?;
+            let expr = self.parse_expr()?;
+            out.push((col, expr));
+            if self.check_symbol(',') {
+                self.expect_symbol(',')?;
+                continue;
+            }
+            break;
+        }
+        Ok(out)
+    }
+
     /// Parse field path: `ident` or `ident.ident` — returns the full string
     fn parse_field_path(&mut self) -> Result<String> {
         let first = self.expect_ident("expected field name")?;
@@ -3868,6 +3967,87 @@ fn parse_template_hole(src: &str) -> Result<Expr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_update_set_parses_and_validates() {
+        // Canonical jwc-shortener pattern: `hits = hits + 1` — the read+write
+        // race-condition fix. Should validate cleanly against the entity.
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity Link of AppDb {
+                id uuid pk;
+                code text(40);
+                hits int;
+            }
+            route POST "click/{code}" {
+                let c = path_param("code");
+                update AppDb.Link set hits = hits + 1 where Link.code == @c;
+                return text("ok");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        // Confirm the statement is the new variant, not the legacy
+        // whole-row `DbUpdate`.
+        let body = &program.routes[0].body;
+        let stmt = &body[1];
+        assert!(
+            matches!(stmt, crate::ast::Stmt::DbUpdateSet { .. }),
+            "expected DbUpdateSet, got {:?}",
+            stmt
+        );
+    }
+
+    #[test]
+    fn legacy_whole_row_update_still_parses() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity Link of AppDb { id uuid pk; }
+            function go() {
+                let x = new Link();
+                update x in AppDb.Link;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let body = &program.functions[0].body;
+        assert!(matches!(body[1], crate::ast::Stmt::DbUpdate { .. }));
+    }
+
+    #[test]
+    fn atomic_update_rejects_unknown_column() {
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity Link of AppDb { id uuid pk; code text(40); }
+            route POST "bump" {
+                update AppDb.Link set hits = hits + 1 where Link.code == @c;
+                return text("ok");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(
+            err.contains("Unknown column 'hits'"),
+            "expected unknown-column error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn atomic_update_requires_where_clause() {
+        // Mirror `delete from CTX.Table` behaviour — refuse the wide-open
+        // form at parse time. A `set ...;` without `where` would touch
+        // every row, which is almost certainly a bug.
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity Link of AppDb { id uuid pk; hits int; }
+            route POST "bump" {
+                update AppDb.Link set hits = hits + 1;
+                return text("ok");
+            }
+        "#;
+        let err = parse_program(src).unwrap_err().to_string();
+        assert!(err.contains("'where' clause"), "got: {err}");
+    }
 
     #[test]
     fn duplicate_route_error_carries_line_col_and_snippet() {

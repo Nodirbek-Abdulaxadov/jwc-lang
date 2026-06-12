@@ -617,6 +617,11 @@ fn program_uses_http_client(program: &Program) -> bool {
             } => body.iter().any(walk_stmt) || catch_body.iter().any(walk_stmt),
             Stmt::Transaction { body } => body.iter().any(walk_stmt),
             Stmt::DbDeleteWhere { where_clause, .. } => walk_where(where_clause),
+            Stmt::DbUpdateSet {
+                assignments,
+                where_clause,
+                ..
+            } => assignments.iter().any(|(_, e)| walk_expr(e)) || walk_where(where_clause),
             _ => false,
         }
     }
@@ -726,6 +731,11 @@ fn program_uses_crypto(program: &Program) -> bool {
             } => body.iter().any(walk_stmt) || catch_body.iter().any(walk_stmt),
             Stmt::Transaction { body } => body.iter().any(walk_stmt),
             Stmt::DbDeleteWhere { where_clause, .. } => walk_where(where_clause),
+            Stmt::DbUpdateSet {
+                assignments,
+                where_clause,
+                ..
+            } => assignments.iter().any(|(_, e)| walk_expr(e)) || walk_where(where_clause),
             _ => false,
         }
     }
@@ -934,6 +944,16 @@ fn check_stmt(stmt: &Stmt, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
         Stmt::Expr(e) => check_expr(e, funcs, builtins),
         Stmt::DbInsert { .. } | Stmt::DbUpdate { .. } | Stmt::DbDelete { .. } => Ok(()),
         Stmt::DbDeleteWhere { where_clause, .. } => check_where(where_clause, funcs, builtins),
+        Stmt::DbUpdateSet {
+            assignments,
+            where_clause,
+            ..
+        } => {
+            for (_, rhs) in assignments {
+                check_expr(rhs, funcs, builtins)?;
+            }
+            check_where(where_clause, funcs, builtins)
+        }
         Stmt::ValidateBody { .. } => Ok(()),
         Stmt::Try {
             body, catch_body, ..
@@ -1560,6 +1580,14 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
         } => {
             emit_db_delete_where(out, &pad, table, where_clause, ctx);
         }
+        Stmt::DbUpdateSet {
+            table,
+            assignments,
+            where_clause,
+            ..
+        } => {
+            emit_db_update_set(out, &pad, table, assignments, where_clause, ctx);
+        }
         Stmt::ValidateBody { fields } => {
             emit_validate_body(out, &pad, fields, ctx);
         }
@@ -2077,6 +2105,155 @@ fn emit_db_delete_where(
     ));
     out.push_str(pad);
     out.push_str("}\n");
+}
+
+/// Codegen for `update CTX.Table set col1 = expr1, col2 = expr2 where ...;`
+///
+/// The hot pattern is `hits = hits + 1` (an atomic increment). Bare
+/// identifiers that name a column on the entity stay inline as `"col"`
+/// SQL; arithmetic ops over them recursively fold the same way. Anything
+/// else falls back to a `$N` bind, matching the interpreter's
+/// `build_set_rhs_sql` semantics. Without this rule the increment would
+/// compile to a host read-then-write loop and race itself under load —
+/// the exact production bug this feature exists to close.
+fn emit_db_update_set(
+    out: &mut String,
+    pad: &str,
+    table: &str,
+    assignments: &[(String, Expr)],
+    where_clause: &crate::ast::WhereExpr,
+    ctx: &CodegenCtx,
+) {
+    let meta = match ctx.entities.get(table) {
+        Some(m) => m,
+        None => {
+            out.push_str(pad);
+            out.push_str(&format!(
+                "panic!(\"update set unknown entity {}\");\n",
+                table
+            ));
+            return;
+        }
+    };
+    let mut wb = WhereBuilder::new(meta);
+    // Build SET clause first so parameter indices remain stable: WHERE
+    // params follow the SET ones (Postgres `$N` is positional).
+    let mut set_fragments: Vec<String> = Vec::with_capacity(assignments.len());
+    for (col, rhs) in assignments {
+        let col_lc = col.to_ascii_lowercase();
+        // Validate the column exists on the entity, mirroring WhereBuilder.
+        if !meta
+            .fields
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case(&col_lc))
+        {
+            out.push_str(pad);
+            out.push_str(&format!(
+                "compile_error!({:?});\n",
+                format!("unknown column `{}` on entity `{}`", col, meta.table)
+            ));
+            return;
+        }
+        let rhs_sql = match build_set_rhs_sql_native(rhs, &mut wb) {
+            Ok(s) => s,
+            Err(e) => {
+                out.push_str(pad);
+                out.push_str(&format!("compile_error!({:?});\n", e.to_string()));
+                return;
+            }
+        };
+        set_fragments.push(format!("\"{}\" = {}", col_lc, rhs_sql));
+    }
+    let set_clause = set_fragments.join(", ");
+    if let Err(e) = wb.emit(where_clause) {
+        out.push_str(pad);
+        out.push_str(&format!("compile_error!({:?});\n", e.to_string()));
+        return;
+    }
+    let sql = format!(
+        "UPDATE \"{}\" SET {} WHERE {}",
+        meta.table, set_clause, wb.sql
+    );
+
+    out.push_str(pad);
+    out.push_str("{\n");
+    let inner = format!("{pad}    ");
+    out.push_str(&inner);
+    out.push_str("let __params: DbParams = vec![\n");
+    for (kind, expr) in &wb.params {
+        out.push_str(&format!("{inner}    {}(", helper_for_kind(*kind)));
+        emit_expr(out, expr, ctx);
+        out.push_str("),\n");
+    }
+    out.push_str(&inner);
+    out.push_str("];\n");
+    out.push_str(&inner);
+    out.push_str(&format!(
+        "let _ = jwc_db_exec(\"{}\", __params).await;\n",
+        escape_sql(&sql)
+    ));
+    out.push_str(pad);
+    out.push_str("}\n");
+}
+
+/// Mirror of `runner::build_set_rhs_sql` for native codegen. Bare column
+/// references stay inline (`"col"`); arithmetic ops recurse; everything
+/// else lands on the `WhereBuilder`'s param list (the SQL `$N` is
+/// allocated in the order params are pushed, and SET runs before WHERE).
+fn build_set_rhs_sql_native<'a>(expr: &'a Expr, wb: &mut WhereBuilder<'a>) -> Result<String> {
+    match expr {
+        Expr::Var(name) => {
+            let key = name.to_ascii_lowercase();
+            // Treat the identifier as a column reference when the entity
+            // has a matching field; otherwise it's a runtime variable and
+            // we bind through the param list. Mirrors the interpreter's
+            // "local vars in scope shadow column refs" rule.
+            if let Some(f) = wb
+                .entity
+                .fields
+                .iter()
+                .find(|f| f.name.eq_ignore_ascii_case(&key))
+            {
+                return Ok(format!("\"{}\"", f.name));
+            }
+            wb.params.push((PgKind::Str, expr));
+            Ok(format!("${}", wb.params.len()))
+        }
+        Expr::Add(a, b) => {
+            let ls = build_set_rhs_sql_native(a, wb)?;
+            let rs = build_set_rhs_sql_native(b, wb)?;
+            Ok(format!("({} + {})", ls, rs))
+        }
+        Expr::Sub(a, b) => {
+            let ls = build_set_rhs_sql_native(a, wb)?;
+            let rs = build_set_rhs_sql_native(b, wb)?;
+            Ok(format!("({} - {})", ls, rs))
+        }
+        Expr::Mul(a, b) => {
+            let ls = build_set_rhs_sql_native(a, wb)?;
+            let rs = build_set_rhs_sql_native(b, wb)?;
+            Ok(format!("({} * {})", ls, rs))
+        }
+        Expr::Div(a, b) => {
+            let ls = build_set_rhs_sql_native(a, wb)?;
+            let rs = build_set_rhs_sql_native(b, wb)?;
+            Ok(format!("({} / {})", ls, rs))
+        }
+        _ => {
+            // Best-effort param kind: Int literals get Bigint, Float gets
+            // Float, the rest get Str and rely on Postgres's text-coercion
+            // path. The hot pattern (`col + 1`) hits the Int branch via
+            // Add(Var, Int).
+            let kind = match expr {
+                Expr::Int(_) => PgKind::Bigint,
+                Expr::Float(_) => PgKind::Float,
+                Expr::Bool(_) => PgKind::Bool,
+                _ => PgKind::Str,
+            };
+            wb.params.push((kind, expr));
+            Ok(format!("${}", wb.params.len()))
+        }
+    }
 }
 
 fn escape_sql(s: &str) -> String {
