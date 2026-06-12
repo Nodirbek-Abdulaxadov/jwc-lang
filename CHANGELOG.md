@@ -20,6 +20,47 @@ All notable changes to JWC are documented here. This project adheres to
   dispatcher calls them in reverse middleware order after the
   handler. Interpreter shipped in v0.4.3; this slice closes the
   follow-up.
+- **Native AOT `response_status()` is fully wired.** Previously a
+  V::Null stub. The `Request` task-local now carries a
+  `Mutex<Option<u16>>` slot that the route dispatcher populates
+  between handler return and after-chain dispatch, so
+  `response_status()` inside `after { ... }` blocks reads the wire
+  status. Tied to a new `after_block_sees_response_status` parity
+  case.
+- **`jwc --version` is operator-friendly.** The long flag now also
+  prints the cargo target triple, build profile, git short commit,
+  and rustc version line. Short `-V` keeps emitting just `jwc 0.4.3`
+  for script-friendly probes.
+- **Three new diagnostic codes:** E013 (bulk `delete from CTX.Table`
+  without `where`), E014 (route handler references undefined fn),
+  E015 (duplicate function name in the project namespace).
+- **Two new conformance cases:** `case_array_helpers` pins `range`
+  edge semantics + `join` separator corners; `case_json_helpers`
+  pins `json_stringify` -> `json_parse` round-trip + mixed-type
+  array serialization. Conformance suite is now 25 cases.
+
+### Changed
+- **Docs:** `docs/spec/semantics.md` now pins after-block dispatch
+  order (reverse), error isolation, and the timeout-skip rule.
+  `docs/spec/builtins.md` pins the hash builtin family
+  (sha256/sha1/md5/hmac_sha256) with output length, casing,
+  null-prop, and the "not for passwords" warning.
+  `docs/docs/backend/middleware.md` documents `after { ... }` with
+  a runnable Telemetry example.
+  `docs/docs/backend/queue.md` adds a backoff schedule table.
+  `docs/docs/data/select.md` cross-links to atomic `update ... set`.
+  `docs/docs/deployment/native-build.md` explains the
+  monomorphization wins.
+- **CONTRIBUTING.md:** a seven-step recipe for shipping a new
+  builtin (interpreter, validator, native codegen, spec, user docs,
+  conformance, changelog) so the v1.0 freeze can't catch a builtin
+  with no test or no spec entry.
+
+### Tests
+- Lib unit tests: 243 -> 249 (six new server.rs tests covering the
+  access-line JSON envelope shape, path escaping rules, text-form
+  layout, and three new traceparent boundary cases).
+- Conformance: 23 -> 25.
 
 ## [0.4.3] — Phase 1/2/4/5 1.0-blockers, dogfooding bundle
 
