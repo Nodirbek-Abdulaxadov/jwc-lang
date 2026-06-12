@@ -7,6 +7,16 @@ edition = "2021"
 # correctly classifies this crate as private and skips the unlicensed check.
 publish = false
 
+# Phase 2 unwrap budget tracking. Both lints are `allow` for now because
+# the current tree still has ~340 unwraps — flipping to `warn` (let alone
+# `deny`) would break CI on day one. The slot exists so each "convert
+# unwrap to expect / proper error" PR walks the policy from `allow` →
+# `warn` → `deny` over time. See CONTRIBUTING.md "unwrap() policy" for
+# the conversion recipe.
+[lints.clippy]
+unwrap_used = "allow"
+expect_used = "allow"
+
 [lib]
 name = "jwc"
 path = "src/lib.rs"
