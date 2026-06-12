@@ -99,6 +99,33 @@ fn parse_metrics_interval_secs() -> u64 {
         .unwrap_or(10)
 }
 
+/// Honours `JWC_LOG_FORMAT=json` for the per-request access line so a
+/// k8s log aggregator can ingest the stream as line-delimited JSON.
+/// Stays in legacy `[JWC] METHOD path -> status` text shape otherwise so
+/// `jwc serve --request-logging` reads naturally in a terminal.
+fn log_request_line(method: &str, path: &str, status: u16, latency_us: u64) {
+    if std::env::var("JWC_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+    {
+        // No escaping needed — method is an HTTP token (ASCII), status
+        // is a number, latency is a number. The path can contain
+        // arbitrary bytes; pass it through a minimal `"` / `\\`
+        // replace which is sufficient for log shapes (control bytes
+        // are already filtered by axum's URL parser).
+        let path_esc = path.replace('\\', "\\\\").replace('"', "\\\"");
+        eprintln!(
+            "{{\"level\":\"info\",\"kind\":\"access\",\"method\":\"{m}\",\"path\":\"{p}\",\"status\":{s},\"latency_us\":{lat}}}",
+            m = method,
+            p = path_esc,
+            s = status,
+            lat = latency_us,
+        );
+    } else {
+        eprintln!("[JWC] {method} {path} -> {status}");
+    }
+}
+
 fn parse_shutdown_timeout_secs() -> u64 {
     std::env::var("JWC_SHUTDOWN_TIMEOUT")
         .ok()
@@ -452,7 +479,7 @@ async fn handle_http_fallback(
         Ok(Ok((status, body, content_type, extra_headers))) => {
             state.metrics.completed.fetch_add(1, Ordering::Relaxed);
             if state.request_logging {
-                eprintln!("[JWC] {} {} -> {}", method, uri.path(), status);
+                log_request_line(method.as_str(), uri.path(), status, elapsed);
             }
             let mut resp = Response::new(body.into());
             *resp.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);

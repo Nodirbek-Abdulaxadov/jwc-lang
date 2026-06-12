@@ -9,6 +9,17 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **`JWC_LOG_FORMAT=json` for structured logs.** When set, both the
+  per-request access line (`jwc serve --request-logging`) and the
+  runtime error log (caught by `error_report::log_runtime_error`)
+  switch from the legacy `[JWC] …` / `[JWC-ERROR] …` text shape to
+  newline-delimited JSON: `{"level":"info","kind":"access","method":...,
+  "path":...,"status":...,"latency_us":...}` and
+  `{"level":"error","context":...,"message":...,"causes":[...]}`.
+  k8s log aggregators (Loki, Datadog, CloudWatch) parse this natively
+  — no regex extraction, level field is first-class, the anyhow error
+  chain stays addressable per index. Default stays text so existing
+  scrapers and interactive `jwc run` output don't break.
 - **`client_ip()` builtin with proxy-header override.** Reads
   `JWC_REAL_IP_HEADER` (default `x-forwarded-for`) from request
   headers and returns the FIRST entry of the comma-separated chain —
