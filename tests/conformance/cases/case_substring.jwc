@@ -1,0 +1,13 @@
+// Conformance: substring(s, start, len) and take(s, n) — char-based
+// slicing. Out-of-range clamp to "", null threads through.
+function main() {
+    print(substring("hello world", 0, 5));
+    print(substring("hello world", 6, 5));
+    print(substring("salom", 100, 3));
+    print(substring("abc", -1, 2));
+    print(substring("abcdef", 2, 100));
+    print(take("hello", 3));
+    print(take("hi", 10));
+    print(take("anything", 0));
+    print(take("xx", -5));
+}

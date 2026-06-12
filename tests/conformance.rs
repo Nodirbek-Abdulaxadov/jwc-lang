@@ -197,6 +197,8 @@ const REGISTERED_CASES: &[&str] = &[
     "case_literals",
     "case_now_smoke",
     "case_strings",
+    "case_substring",
+    "case_unary_not",
     "case_while",
 ];
 
@@ -210,9 +212,30 @@ mod cases {
 
     macro_rules! conformance_test {
         ($name:ident) => {
-            #[tokio::test]
-            async fn $name() {
-                if let Err(msg) = run_case(stringify!($name)).await {
+            // Each case runs on a dedicated 8 MiB-stack thread with its
+            // own tokio current_thread runtime. The default tokio test
+            // thread is ~2 MiB and the tree-walking interpreter's
+            // async_recursion frames eat that fast on recursive cases
+            // (`fib(10)` in case_functions). Isolating per-thread also
+            // means concurrent #[test] cases can't poison each other's
+            // env vars or panic states.
+            #[test]
+            fn $name() {
+                let join = std::thread::Builder::new()
+                    .name(format!("conformance-{}", stringify!($name)))
+                    .stack_size(8 * 1024 * 1024)
+                    .spawn(|| {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .expect(
+                                "INVARIANT: tokio current_thread runtime builds with no features",
+                            );
+                        rt.block_on(run_case(stringify!($name)))
+                    })
+                    .expect("INVARIANT: OS allows a single thread spawn");
+                let result = join.join().expect("INVARIANT: conformance thread joined");
+                if let Err(msg) = result {
                     panic!("[{}] {}", stringify!($name), msg);
                 }
             }
@@ -234,6 +257,8 @@ mod cases {
     conformance_test!(case_literals);
     conformance_test!(case_now_smoke);
     conformance_test!(case_strings);
+    conformance_test!(case_substring);
+    conformance_test!(case_unary_not);
     conformance_test!(case_while);
 }
 
