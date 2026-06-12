@@ -3,6 +3,53 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] — Phase 5 close-out + observability bundle
+
+Second large bundle on top of v0.4.3. Folds 30+ commits shipped in
+this session that close the rest of the Phase 5 server-reliability
+gate, finish the Phase 1 write-side monomorphization wiring through
+the AOT codegen, and add the observability surface (Prometheus
+`/metrics`, JSON access logs, `request_id` + W3C `traceparent`
+propagation, response-phase `after { ... }` middleware in interpreter
+*and* native).
+
+Highlights:
+
+- **Phase 5** — built-in `/healthz` + `/readyz` + `/metrics`,
+  SIGTERM handler, `JWC_MAX_BODY_BYTES`, `JWC_REQUEST_TIMEOUT`
+  watchdog with 504 envelope, `JWC_LOG_FORMAT=json` structured
+  logs, `JWC_TRUSTED_PROXIES`-aware `client_ip()`, `request_id()`
+  + `x-request-id` propagation, W3C `traceparent` reuse-as-id +
+  `traceparent`/`tracestate` echo on response, queue drain on
+  shutdown, response-phase `after { ... }` middleware (interpreter
+  + native AOT), `response_status()` / `response_duration_ms()` /
+  `request_id()` builtins.
+- **Phase 1** — `V::RawJson` write-side fragment carrier;
+  `emit_db_select` simple-select path now produces
+  `JwcEnt_<Name>::jwc_from_row(r)` → `jwc_write_json(&mut buf)` →
+  `V::RawJson(buf.into())`, fully skipping `V::Object` on both the
+  read and the write side.
+- **Phase 2** — spanned validator errors with per-file `<label>:line:col`
+  + rustc snippet (single + multi-file), lint enforcement in
+  `jwc build` / `jwc test`, `--deny-warnings` CI gate, did-you-mean
+  hints on every `Unknown column` site, did-you-mean on native
+  unknown-function errors, E011 / E012 / E013 / E014 / E015 codes.
+- **Phase 4** — atomic `update CTX.Table set col = expr where ...`
+  closes the lost-update race on the jwc-shortener `hits` counter.
+- **Phase 3** — `substring(s, start, len)` + `take(s, n)` builtins.
+
+CLI / DX: `jwc --version` long form prints target + profile + rustc +
+git short hash. Conformance suite grew from 16 → 25 cases, each
+running in an isolated 8 MiB-stack thread with its own tokio
+current_thread runtime so `case_functions`-style recursive fixtures
+don't flap under parallel `#[tokio::test]` pressure.
+
+Docs: deployment env-vars reference page, k8s probes / scrape /
+trusted-proxy snippet, security supply-chain section, monomorphization
+wins note on the native-build page, response-phase `after { ... }`
+section on the README + middleware doc, seven-step "shipping a new
+builtin" recipe in CONTRIBUTING.md.
+
 ## [Unreleased]
 
 ### Added
