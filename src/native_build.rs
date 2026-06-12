@@ -1155,10 +1155,12 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
         .iter()
         .map(|c| c.name.to_lowercase())
         .collect();
+    let mw_refs: Vec<&crate::ast::MiddlewareDecl> = program.middlewares.iter().collect();
     let ctx = CodegenCtx {
         funcs: &known_funcs,
         entities: &entities,
         fn_decls: &fn_decls,
+        middlewares: mw_refs,
         consts: &const_names,
         has_error_handler: program.error_handler.is_some(),
         closure_depth: std::cell::Cell::new(0),
@@ -1475,6 +1477,11 @@ struct CodegenCtx<'a> {
     /// `-> handler` codegen to pull declared parameter names so we can bind
     /// path/query params positionally.
     fn_decls: &'a HashMap<String, &'a FunctionDecl>,
+    /// MiddlewareDecl references for `after { ... }` lookups during
+    /// route-handler codegen. Routes name middlewares by string; this
+    /// vec lets the dispatch loop find the matching decl and emit
+    /// `mw_<name>_after()` calls when the middleware ships one.
+    middlewares: Vec<&'a crate::ast::MiddlewareDecl>,
     /// Lowercased names of all module-level consts. A `Var` matching one emits
     /// a call to its `jwc_const_*` function instead of a local binding clone.
     consts: &'a HashSet<String>,
@@ -1503,6 +1510,10 @@ fn emit_route_handler(
     route: &crate::ast::RouteDecl,
     ctx: &CodegenCtx,
 ) {
+    // Collect MiddlewareDecl references for the `after` lookups. Routes
+    // reference middlewares by name; we resolve them against the
+    // already-flattened decl list `CodegenCtx` carries.
+    let mw_decls: Vec<&crate::ast::MiddlewareDecl> = ctx.middlewares.to_vec();
     out.push_str(&format!(
         "\nfn route_{idx}_inner() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> + Send>> {{\n"
     ));
@@ -1513,20 +1524,39 @@ fn emit_route_handler(
             middleware_fn_name(mw),
         ));
     }
+    // Capture the handler result so the after-chain can run on the way
+    // out. The variable is shared between the handler call and the
+    // after-block dispatch below.
     if let Some(handler) = &route.handler {
         let args = handler_arg_exprs(handler, ctx);
         out.push_str(&format!(
-            "        return {}({}).await;\n",
+            "        let __resp = {}({}).await;\n",
             user_fn_name(handler),
             args
         ));
     } else {
+        out.push_str("        let __resp = {\n");
         for stmt in &route.body {
-            emit_stmt(out, stmt, 2, ctx);
+            emit_stmt(out, stmt, 3, ctx);
+        }
+        out.push_str("            if let Some(__r) = jwc_take_return() { __r } else { V::Null }\n");
+        out.push_str("        };\n");
+    }
+    // Response-phase middleware: reverse order so an outer `after` can
+    // wrap the inner ones. Mirrors koa / express / ring + the
+    // interpreter's order. Errors from an after-block are caught at
+    // the dispatcher level — but in this slice they propagate via the
+    // standard try-shape; codegen doesn't catch them yet.
+    for mw in route.middlewares.iter().rev() {
+        if middleware_has_after(mw, &mw_decls) {
+            out.push_str(&format!(
+                "        let _ = {}_after().await;\n",
+                middleware_fn_name(mw),
+            ));
         }
     }
     out.push_str("        if let Some(__r) = jwc_take_return() { return __r; }\n");
-    out.push_str("        V::Null\n");
+    out.push_str("        __resp\n");
     out.push_str("    })\n");
     out.push_str("}\n");
 
@@ -1595,6 +1625,34 @@ fn emit_middleware_fn(out: &mut String, mw: &crate::ast::MiddlewareDecl, ctx: &C
     out.push_str("        V::Null\n");
     out.push_str("    })\n");
     out.push_str("}\n");
+
+    // Response-phase `after { ... }` block. Emitted whenever the source
+    // declares one — the dispatcher calls it in reverse middleware
+    // order after the handler completes. Same shape as the main body
+    // (boxed future, take_return drain) so callers don't need to
+    // branch on "has after".
+    if let Some(after) = &mw.after_body {
+        out.push_str(&format!(
+            "\nfn {}_after() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> + Send>> {{\n",
+            middleware_fn_name(&mw.name)
+        ));
+        out.push_str("    Box::pin(async move {\n");
+        for stmt in after {
+            emit_stmt(out, stmt, 2, ctx);
+        }
+        out.push_str("        if let Some(__r) = jwc_take_return() { return __r; }\n");
+        out.push_str("        V::Null\n");
+        out.push_str("    })\n");
+        out.push_str("}\n");
+    }
+}
+
+/// True when the named middleware ships an `after { ... }` block.
+/// Used by `emit_route_handler` to decide whether to wire a call.
+fn middleware_has_after(name: &str, decls: &[&crate::ast::MiddlewareDecl]) -> bool {
+    decls
+        .iter()
+        .any(|m| m.name.eq_ignore_ascii_case(name) && m.after_body.is_some())
 }
 
 fn emit_error_handler_fn(out: &mut String, eh: &crate::ast::ErrorHandlerDecl, ctx: &CodegenCtx) {

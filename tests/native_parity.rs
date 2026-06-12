@@ -158,6 +158,32 @@ const CASES: &[Case] = &[
         ],
     },
     Case {
+        name: "after_block_emits_separate_fn",
+        source: r#"
+            middleware Logger {
+                let _ = "before";
+            } after {
+                let _ = "after-side-effect";
+            }
+            route GET "/x" use Logger {
+                return "ok";
+            }
+            function main() {
+                print("ok");
+            }
+        "#,
+        expected_output: "ok\n",
+        expected_emit_contains: &[
+            // Codegen lowercases the resolved middleware FQN — the
+            // emitted Rust fn is `mw_logger`, not `mw_Logger`. Both the
+            // before-body fn and the after-body fn appear, and the
+            // route dispatcher calls the after-fn after the handler.
+            "fn mw_logger() ->",
+            "fn mw_logger_after() ->",
+            "mw_logger_after().await",
+        ],
+    },
+    Case {
         name: "monomorphized_struct_emitted",
         source: r#"
             dbcontext AppDb : Postgres;
