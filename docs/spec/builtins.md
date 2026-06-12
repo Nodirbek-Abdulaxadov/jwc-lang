@@ -113,9 +113,63 @@ Errors:    none — null source returns "[]"
 Tests:     case_strings
 ```
 
-> **TODO Phase 3**: `substring(s: string, start: int, len: int) -> string`
-> and `take(s: string, n: int) -> string` (production gap from
-> jwc-shortener — see PRODUCTION_READINESS_PLAN Phase 3).
+## HTTP request inspection
+
+### `client_ip`
+
+Original client IP. Reads the header named by `JWC_REAL_IP_HEADER`
+(default `x-forwarded-for`), walks the comma-separated chain RIGHT to
+LEFT, peels off entries whose prefix matches `JWC_TRUSTED_PROXIES`
+(comma-separated list, empty default), and returns the first untrusted
+entry. Returns `null` when the header is absent or every entry was
+trusted (degenerate case).
+
+```
+Signature: client_ip() -> string | null
+Errors:    none — degrades to null
+Tests:     client_ip_returns_rightmost_untrusted_entry,
+           client_ip_peels_trusted_proxies_off_the_chain,
+           client_ip_returns_null_when_header_absent
+```
+
+### `request_id`
+
+The stable per-request identifier the server stamps. Reused on every
+log line and echoed back as the `x-request-id` response header.
+Incoming W3C `traceparent` upstream IDs are honoured — if the upstream
+service already started a trace, `request_id()` returns the inbound
+`trace-id` so distributed tracing tools can correlate hops.
+
+```
+Signature: request_id() -> string | null
+Errors:    none — null outside a server request
+Tests:     request_id_is_visible_when_server_stamps_one,
+           request_id_returns_null_when_unstamped
+```
+
+### `response_status`
+
+HTTP status the handler emitted. Read inside a middleware `after { ... }`
+block; `null` elsewhere (the value isn't known until after the handler
+returns).
+
+```
+Signature: response_status() -> int | null
+Errors:    none — null outside an after-block
+Tests:     after_middleware_block_sees_response_status
+```
+
+### `response_duration_ms`
+
+Milliseconds since the dispatcher saw the request. Valid in any
+request-scoped block — middleware (before / after), handler,
+errorHandler. `null` outside requests.
+
+```
+Signature: response_duration_ms() -> int | null
+Errors:    none — null outside requests
+Tests:     after_middleware_response_duration_reads_back
+```
 
 ## Array functions
 
