@@ -103,7 +103,18 @@ pub struct ErrorHandlerDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MiddlewareDecl {
     pub name: String,
+    /// Pre-handler statements. Runs before the route's handler. May
+    /// short-circuit by `return`ing — that response becomes the
+    /// route's response and the rest of the chain (plus `after_body`)
+    /// is skipped.
     pub body: Vec<Stmt>,
+    /// Optional `after { ... }` block — runs AFTER the route handler
+    /// completes successfully. Reads `response_status()` /
+    /// `response_duration_ms()` so middleware can record real
+    /// observed latencies and statuses (the dogfooding gap
+    /// jwc-shortener flagged: `latency_ms` stuck at 0 because the
+    /// pre-handler middleware couldn't see the response).
+    pub after_body: Option<Vec<Stmt>>,
     /// Namespace this declaration lives in. Empty = root.
     pub namespace: Vec<String>,
     pub visibility: Visibility,

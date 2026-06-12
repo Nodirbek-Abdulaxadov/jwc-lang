@@ -2720,9 +2720,19 @@ impl<'a> Parser<'a> {
         self.expect_keyword(Keyword::Middleware)?;
         let name = self.expect_ident("expected middleware name")?;
         let body = self.parse_block()?;
+        // Optional `after { ... }` response-phase block immediately
+        // following the main body. Closes the dogfooding gap where
+        // request-phase middleware couldn't read the response.
+        let after_body = if self.check_ident_eq("after") {
+            self.bump()?;
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
         Ok(MiddlewareDecl {
             name,
             body,
+            after_body,
             namespace: Vec::new(),
             visibility: Visibility::Private,
             offset,

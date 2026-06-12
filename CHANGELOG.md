@@ -9,6 +9,19 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **Response-phase middleware: `middleware Name { … } after { … }`.**
+  Closes the biggest jwc-shortener dogfooding gap: pre-handler
+  middleware couldn't read the response, so `latency_ms` and `status`
+  in their request-log table were hardcoded to 0 / 200. The optional
+  `after { ... }` block now runs after the route handler, in reverse
+  middleware order (mirroring Express / koa / ring), with two new
+  builtins exposed:
+    - `response_status()` — HTTP status the handler produced.
+    - `response_duration_ms()` — ms since dispatch began.
+  Errors thrown inside an `after` block are logged but don't override
+  the response — by the time it runs the response has already been
+  committed. Native AOT covers the parser and the dispatch side via
+  the interpreter; native-codegen for `after` bodies is the follow-up.
 - **Phase 1.6 — write-side monomorphization through `V::RawJson`.**
   The native runtime gains a new V variant: `V::RawJson(JwcStr)` carries
   an opaque, already-encoded JSON fragment. `jwc_write_json` writes

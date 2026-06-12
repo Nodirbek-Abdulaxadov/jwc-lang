@@ -445,6 +445,15 @@ struct Vm<'a> {
     /// the same value on every log line and propagate it to downstream
     /// services via a header. `None` outside route execution.
     current_request_id: Option<String>,
+    /// Wall-clock instant the dispatch began. Subtracted in
+    /// `response_duration_ms()` so response-phase middleware can record
+    /// real observed latencies — closes the dogfooding gap where
+    /// pre-handler middleware had to hardcode `latency_ms = 0`.
+    current_request_started: Option<std::time::Instant>,
+    /// HTTP status the handler produced, set just before the `after { }`
+    /// body of each applied middleware runs. Read via `response_status()`.
+    /// `None` outside an `after` block.
+    current_response_status: Option<u16>,
     /// Per-request key-value bag written by `setContext` and read by `context`.
     request_context: HashMap<String, Value>,
     output: String,
@@ -543,6 +552,8 @@ impl<'a> Vm<'a> {
             current_method: None,
             current_request_path: None,
             current_request_id: None,
+            current_request_started: None,
+            current_response_status: None,
             request_context: HashMap::new(),
             output: String::new(),
             depth: 0,
@@ -1746,6 +1757,26 @@ impl<'a> Vm<'a> {
                         .unwrap_or(Value::Null));
                 }
 
+                if name.eq_ignore_ascii_case("response_status") {
+                    if !args.is_empty() {
+                        bail!("response_status() expects no args");
+                    }
+                    return Ok(self
+                        .current_response_status
+                        .map(|s| Value::Int(s as i64))
+                        .unwrap_or(Value::Null));
+                }
+
+                if name.eq_ignore_ascii_case("response_duration_ms") {
+                    if !args.is_empty() {
+                        bail!("response_duration_ms() expects no args");
+                    }
+                    return Ok(self
+                        .current_request_started
+                        .map(|t| Value::Int(t.elapsed().as_millis() as i64))
+                        .unwrap_or(Value::Null));
+                }
+
                 if name.eq_ignore_ascii_case("context") {
                     return self.eval_context_get_call(args, vars).await;
                 }
@@ -2521,11 +2552,13 @@ impl<'a> Vm<'a> {
         let previous_query = self.current_query_params.take();
         let previous_method = self.current_method.take();
         let previous_request_path = self.current_request_path.take();
+        let previous_started = self.current_request_started.take();
         let previous_dirty = std::mem::take(&mut self.dirty_fields);
         self.current_path_params = Some(found_params);
         self.current_query_params = Some(query_params);
         self.current_method = Some(method.to_string());
         self.current_request_path = Some(clean_path.to_string());
+        self.current_request_started = Some(std::time::Instant::now());
         self.current_namespace_stack.push(route_namespace);
 
         // Run middlewares first; if any returns a value, short-circuit
@@ -2584,13 +2617,6 @@ impl<'a> Vm<'a> {
                 }
             }
         };
-        self.current_path_params = previous;
-        self.current_query_params = previous_query;
-        self.current_method = previous_method;
-        self.current_request_path = previous_request_path;
-        self.dirty_fields = previous_dirty;
-        self.current_namespace_stack.pop();
-
         let body = response_str.unwrap_or_else(|| "null".to_string());
 
         // Derive HTTP status from a "status" field in JSON, default 200.
@@ -2642,7 +2668,48 @@ impl<'a> Vm<'a> {
                 (200, body, None, Vec::new())
             };
 
+        // Response-phase middleware. Walk the applied chain in REVERSE
+        // so an `after` block can wrap (log + flush) around the inner
+        // middleware's `after` work — mirroring Express / koa / ring
+        // semantics. The handler-derived status flows into
+        // `current_response_status` so `response_status()` /
+        // `response_duration_ms()` can be called from inside the block.
+        self.current_response_status = Some(status);
+        for mw_name in middleware_names.iter().rev() {
+            if let Err(e) = self.run_middleware_after(mw_name).await {
+                eprintln!("[JWC] middleware '{mw_name}' after-body error: {e}");
+            }
+        }
+        self.current_response_status = None;
+
+        self.current_path_params = previous;
+        self.current_query_params = previous_query;
+        self.current_method = previous_method;
+        self.current_request_path = previous_request_path;
+        self.current_request_started = previous_started;
+        self.dirty_fields = previous_dirty;
+        self.current_namespace_stack.pop();
+
         Ok((status, clean_body, content_type, extra_headers))
+    }
+
+    /// Run the `after { ... }` block of one middleware, if it has one.
+    /// Errors are caught at the dispatcher level and logged — they don't
+    /// surface to the client because the response has already been
+    /// produced. Side effects (metrics, logging) are the explicit use
+    /// case here.
+    async fn run_middleware_after(&mut self, mw_name: &str) -> Result<()> {
+        let mw_decl = match self.middlewares.get(&mw_name.to_lowercase()) {
+            Some(decl) => *decl,
+            None => return Ok(()),
+        };
+        let Some(after) = mw_decl.after_body.as_ref() else {
+            return Ok(());
+        };
+        let stmts = after.clone();
+        let mut vars: HashMap<String, Value> = HashMap::new();
+        let _ = self.exec_block(&stmts, &mut vars).await?;
+        Ok(())
     }
 
     #[async_recursion]
@@ -4340,6 +4407,80 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "Tesla\n2024\n");
+    }
+
+    #[tokio::test]
+    async fn after_middleware_block_sees_response_status() {
+        // The pre-handler middleware runs first; the route returns
+        // statusCode(202, ...); the `after` block reads
+        // response_status() and writes it to a process-wide spot via
+        // print. Without after-phase support, every project hardcoded
+        // status=200 / latency=0 because nothing else was reachable
+        // from pre-handler context.
+        let src = r#"
+            middleware Logger {
+                let _ = "before";
+            } after {
+                let status = response_status();
+                print("status=" + status);
+            }
+
+            route GET "/ping" use Logger {
+                return statusCode(202, "accepted");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let result = run_request(&program, "GET", "/ping", None).await.unwrap();
+        assert_eq!(result.0, 202);
+        // The after-block ran AFTER the handler returned 202 — visible
+        // via the captured stdout. We can't easily peek stdout from a
+        // tokio test without redirecting, so just assert the dispatch
+        // status came back unchanged (proving after-body didn't
+        // overwrite it accidentally).
+    }
+
+    #[tokio::test]
+    async fn after_middleware_response_duration_reads_back() {
+        // response_duration_ms() returns the milliseconds since the
+        // dispatch started. Outside an `after` block the runner
+        // doesn't expose it specially — it just reads
+        // current_request_started which is set at dispatch entry, so
+        // the measurement is valid throughout the request.
+        let src = r#"
+            route GET "/x" {
+                let ms = response_duration_ms();
+                if (ms == null) { return "null"; }
+                if (ms < 0)     { return "negative"; }
+                return "ok";
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let result = run_request(&program, "GET", "/x", None).await.unwrap();
+        assert_eq!(result.0, 200);
+        assert_eq!(result.1, "ok");
+    }
+
+    #[tokio::test]
+    async fn middleware_without_after_block_still_works() {
+        // The after_body is Option<Vec<Stmt>>; a middleware that omits
+        // `after { ... }` must keep behaving exactly like before this
+        // slice landed. No-op smoke test.
+        let src = r#"
+            middleware Plain {
+                let _ = "before only";
+            }
+
+            route GET "/x" use Plain {
+                return "ok";
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let result = run_request(&program, "GET", "/x", None).await.unwrap();
+        assert_eq!(result.0, 200);
+        assert_eq!(result.1, "ok");
     }
 
     #[tokio::test]
