@@ -70,6 +70,64 @@ impl ServerMetrics {
             }
         }
     }
+
+    /// Render the counters / gauges in Prometheus exposition format
+    /// (text/plain; version=0.0.4). Every metric carries a `# HELP` line
+    /// so Grafana's metric explorer surfaces a description, and a
+    /// `# TYPE` line so the aggregator picks the right query semantics
+    /// (counter vs gauge). No histograms in this slice — latency is
+    /// exposed as a running mean and a max so dashboards have something
+    /// to chart immediately; bucketed histograms land alongside the
+    /// tracing/OTel work.
+    fn render_prometheus(&self) -> String {
+        let total = self.total.load(Ordering::Relaxed);
+        let completed = self.completed.load(Ordering::Relaxed);
+        let failed = self.failed.load(Ordering::Relaxed);
+        let in_flight = self.in_flight.load(Ordering::Relaxed);
+        let total_latency_us = self.total_latency_us.load(Ordering::Relaxed);
+        let max_latency_us = self.max_latency_us.load(Ordering::Relaxed);
+        let avg_us = if completed == 0 {
+            0.0
+        } else {
+            total_latency_us as f64 / completed as f64
+        };
+        let mut out = String::with_capacity(1024);
+        out.push_str("# HELP jwc_http_requests_total Total HTTP requests received.\n");
+        out.push_str("# TYPE jwc_http_requests_total counter\n");
+        out.push_str(&format!("jwc_http_requests_total {total}\n"));
+        out.push_str(
+            "# HELP jwc_http_requests_completed_total HTTP requests that finished with a response.\n",
+        );
+        out.push_str("# TYPE jwc_http_requests_completed_total counter\n");
+        out.push_str(&format!("jwc_http_requests_completed_total {completed}\n"));
+        out.push_str(
+            "# HELP jwc_http_requests_failed_total HTTP requests that returned a 5xx or panicked.\n",
+        );
+        out.push_str("# TYPE jwc_http_requests_failed_total counter\n");
+        out.push_str(&format!("jwc_http_requests_failed_total {failed}\n"));
+        out.push_str(
+            "# HELP jwc_http_in_flight Number of HTTP requests being handled right now.\n",
+        );
+        out.push_str("# TYPE jwc_http_in_flight gauge\n");
+        out.push_str(&format!("jwc_http_in_flight {in_flight}\n"));
+        out.push_str(
+            "# HELP jwc_http_request_latency_avg_seconds Running mean latency since process start.\n",
+        );
+        out.push_str("# TYPE jwc_http_request_latency_avg_seconds gauge\n");
+        out.push_str(&format!(
+            "jwc_http_request_latency_avg_seconds {:.6}\n",
+            avg_us / 1_000_000.0
+        ));
+        out.push_str(
+            "# HELP jwc_http_request_latency_max_seconds Peak latency observed since start.\n",
+        );
+        out.push_str("# TYPE jwc_http_request_latency_max_seconds gauge\n");
+        out.push_str(&format!(
+            "jwc_http_request_latency_max_seconds {:.6}\n",
+            max_latency_us as f64 / 1_000_000.0
+        ));
+        out
+    }
 }
 
 fn parse_worker_count() -> usize {
@@ -359,6 +417,26 @@ async fn handle_readyz() -> Response {
     }
 }
 
+/// Prometheus scrape target. Returns the running counters / gauges in
+/// text exposition format so dashboards can chart traffic, error rate,
+/// in-flight saturation, and latency without a hand-rolled instrumentation
+/// route in every project. The PRODUCTION_READINESS_PLAN's Phase 5
+/// observability gap names exactly this endpoint.
+async fn handle_metrics(State(state): State<AppState>) -> Response {
+    let body = state.metrics.render_prometheus();
+    let mut resp = Response::new(body.into());
+    *resp.status_mut() = StatusCode::OK;
+    // Prometheus' text exposition spec. Versioned content-type so
+    // scrapers can distinguish from a future protobuf body.
+    resp.headers_mut().insert(
+        "content-type",
+        "text/plain; version=0.0.4; charset=utf-8"
+            .parse()
+            .expect("INVARIANT: prometheus content-type literal is a valid HeaderValue"),
+    );
+    resp
+}
+
 fn readyz_db_failure(detail: String) -> Response {
     let escaped = detail.replace('"', "'");
     let body = format!("{{\"status\":\"not_ready\",\"db\":\"{escaped}\"}}");
@@ -385,6 +463,9 @@ fn build_router(state: AppState) -> Router {
     }
     if !route_owned_by_user(&state.program, "/readyz") {
         router = router.route("/readyz", get(handle_readyz));
+    }
+    if !route_owned_by_user(&state.program, "/metrics") {
+        router = router.route("/metrics", get(handle_metrics));
     }
 
     // Each WS route gets its own axum entry. JWC path placeholders
@@ -695,6 +776,31 @@ mod tests {
         // also overrides the built-in.
         let prog = make_program_with_route("healthz");
         assert!(route_owned_by_user(&prog, "/healthz"));
+    }
+
+    #[test]
+    fn metrics_render_prometheus_shapes_text_exposition_format() {
+        let m = ServerMetrics::new();
+        m.total.fetch_add(7, Ordering::Relaxed);
+        m.completed.fetch_add(5, Ordering::Relaxed);
+        m.failed.fetch_add(2, Ordering::Relaxed);
+        m.in_flight.fetch_add(1, Ordering::Relaxed);
+        m.record_latency_us(1500);
+        m.record_latency_us(3000);
+        let text = m.render_prometheus();
+        // Each metric must carry both HELP + TYPE lines so Grafana's
+        // explorer surfaces them and the aggregator picks the right
+        // query semantics.
+        assert!(text.contains("# HELP jwc_http_requests_total"));
+        assert!(text.contains("# TYPE jwc_http_requests_total counter"));
+        assert!(text.contains("jwc_http_requests_total 7"));
+        assert!(text.contains("jwc_http_requests_completed_total 5"));
+        assert!(text.contains("jwc_http_requests_failed_total 2"));
+        assert!(text.contains("jwc_http_in_flight 1"));
+        // Latency is exposed as seconds (Prometheus convention) — the
+        // raw micros sum at 4500 turns into a 0.0009s running mean
+        // across the 5 completed requests, peaking at 0.003s.
+        assert!(text.contains("jwc_http_request_latency_max_seconds 0.003000"));
     }
 
     #[tokio::test]

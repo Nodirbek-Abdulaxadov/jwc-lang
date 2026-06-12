@@ -9,6 +9,17 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **Built-in `/metrics` endpoint in Prometheus text format.** The
+  bundled launcher's existing `ServerMetrics` (request counts,
+  in-flight gauge, running mean / peak latency) now scrapes natively
+  via `/metrics`. Each metric carries `# HELP` and `# TYPE` so
+  Grafana's metric explorer surfaces a description and the
+  aggregator picks the right query semantics (counter vs gauge).
+  Latency is exposed as seconds (Prometheus convention) — a running
+  mean and a peak; bucketed histograms land alongside the tracing
+  / OTel work. User precedence applies: `route GET "metrics"` in
+  the program takes the slot. Closes the Phase 5 dogfooding gap
+  where every project had to roll its own counters / scrape route.
 - **`JWC_LOG_FORMAT=json` for structured logs.** When set, both the
   per-request access line (`jwc serve --request-logging`) and the
   runtime error log (caught by `error_report::log_runtime_error`)
