@@ -1,0 +1,196 @@
+(*
+ * JWC Concrete Syntax — EBNF
+ *
+ * Status: DRAFT, extracted from src/parser.rs (v0.4.1, 4.6 kloc).
+ * Conventions:
+ *   - ALL_CAPS  = lexer token (matched verbatim or by lexer rule)
+ *   - lowercase = parser production
+ *   - "literal" = exact source token
+ *   - { x }    = zero or more
+ *   - [ x ]    = optional
+ *   - x | y    = alternative
+ *   - x , y    = sequence
+ *
+ * Where extraction is incomplete, the production says (* TODO *) and the
+ * parser source is the reference. Each TODO is a Phase 0 work item.
+ *)
+
+(* ========================================================================
+ * Top-level structure
+ * ====================================================================== *)
+
+program          = { top_level_item } ;
+
+top_level_item   = use_decl
+                 | const_decl
+                 | dbcontext_decl
+                 | entity_decl
+                 | class_decl
+                 | enum_decl
+                 | error_decl       (* TODO Phase 3 — typed catch landing *)
+                 | middleware_decl
+                 | function_decl
+                 | route_decl
+                 | job_decl ;
+
+use_decl         = "use", IDENT, { ".", IDENT }, ";" ;
+
+(* ========================================================================
+ * Names, literals, identifiers
+ * ====================================================================== *)
+
+IDENT            = letter, { letter | digit | "_" } ;
+letter           = "a".."z" | "A".."Z" | "_" ;
+digit            = "0".."9" ;
+
+INT_LIT          = digit, { digit }
+                 | "0x", hex_digit, { hex_digit } ;
+hex_digit        = digit | "a".."f" | "A".."F" ;
+
+FLOAT_LIT        = INT_LIT, ".", digit, { digit }
+                 | INT_LIT, ".", digit, { digit }, ("e"|"E"), [ "+" | "-" ], INT_LIT ;
+
+STRING_LIT       = '"', { char | escape }, '"' ;
+escape           = "\\", ( '"' | "\\" | "n" | "r" | "t" | "0" )
+                 | "\\u{", hex_digit, { hex_digit }, "}" ;
+
+BOOL_LIT         = "true" | "false" ;
+NULL_LIT         = "null" ;
+
+(* ========================================================================
+ * Types  (TODO Phase 3 — see semantics.md for current coercion rules)
+ * ====================================================================== *)
+
+type_ref         = primitive_type
+                 | "[" , type_ref , "]"          (* array *)
+                 | IDENT ;                       (* entity / class / enum *)
+
+primitive_type   = "int" | "long" | "float" | "double"
+                 | "bool" | "string" | "varchar", "(", INT_LIT, ")"
+                 | "uuid" | "datetime" | "bytea" | "json" | "void" ;
+
+(* ========================================================================
+ * Entities, dbcontext, schema
+ * ====================================================================== *)
+
+dbcontext_decl   = "dbcontext", IDENT, ":", IDENT, ";" ;   (* e.g. : Postgres *)
+
+entity_decl      = "entity", IDENT, "of", IDENT, "{", { field_decl }, "}" ;
+field_decl       = IDENT, type_ref, { field_modifier }, ";" ;
+field_modifier   = "pk" | "unique" | "nullable" | "default", "=", expr ;
+
+(* ========================================================================
+ * Functions
+ * ====================================================================== *)
+
+function_decl    = [ "async" ], "fn", IDENT, "(", [ param_list ], ")",
+                   [ "->", type_ref ], block ;
+param_list       = param, { ",", param } ;
+param            = IDENT, [ ":", type_ref ] ;
+
+(* ========================================================================
+ * Routes
+ * ====================================================================== *)
+
+route_decl       = http_method, STRING_LIT, [ middleware_attach ],
+                   "(", [ param_list ], ")", [ "->", type_ref ], block ;
+http_method      = "get" | "post" | "put" | "patch" | "delete" ;
+middleware_attach= "[", IDENT, { ",", IDENT }, "]" ;
+
+(* ========================================================================
+ * Middleware
+ * ====================================================================== *)
+
+middleware_decl  = "middleware", IDENT, "(", [ param_list ], ")", block ;
+                   (* TODO Phase 5 — after { } response-phase block *)
+
+(* ========================================================================
+ * Background jobs
+ * ====================================================================== *)
+
+job_decl         = "job", IDENT, "(", [ param_list ], ")", block ;
+
+(* ========================================================================
+ * Statements
+ * ====================================================================== *)
+
+block            = "{", { statement }, "}" ;
+
+statement        = let_stmt
+                 | assign_stmt
+                 | if_stmt
+                 | for_stmt
+                 | while_stmt
+                 | return_stmt
+                 | match_stmt
+                 | try_stmt
+                 | transaction_stmt
+                 | expr_stmt ;
+
+let_stmt         = ("let" | "var"), IDENT, [ ":", type_ref ], "=", expr, ";" ;
+assign_stmt      = lvalue, ( "=" | "+=" | "-=" | "*=" | "/=" ), expr, ";" ;
+
+if_stmt          = "if", expr, block, { "else", "if", expr, block }, [ "else", block ] ;
+for_stmt         = "for", IDENT, "in", expr, block ;
+while_stmt       = "while", expr, block ;
+
+return_stmt      = "return", [ expr ], ";" ;
+
+match_stmt       = "match", expr, "{", { match_arm }, "}" ;
+match_arm        = pattern, "=>", ( expr "," | block ) ;
+pattern          = expr | "_" ;                  (* TODO — full pattern grammar *)
+
+try_stmt         = "try", block, { catch_clause } ;
+catch_clause     = "catch", "(", IDENT, ":", IDENT, ")", block ;
+                   (* TODO Phase 3 — typed dispatch (today: any error matches) *)
+
+transaction_stmt = "transaction", block ;
+
+expr_stmt        = expr, ";" ;
+
+(* ========================================================================
+ * Expressions
+ * ====================================================================== *)
+
+expr             = or_expr ;
+or_expr          = and_expr, { "||", and_expr } ;
+and_expr         = eq_expr,  { "&&", eq_expr } ;
+eq_expr          = rel_expr, { ("==" | "!="), rel_expr } ;
+rel_expr         = add_expr, { ("<" | "<=" | ">" | ">="), add_expr } ;
+add_expr         = mul_expr, { ("+" | "-"), mul_expr } ;
+mul_expr         = unary,    { ("*" | "/" | "%"), unary } ;
+unary            = [ "!" | "-" ], postfix ;
+postfix          = primary, { "(", [ arg_list ], ")"
+                            | ".", IDENT
+                            | "[", expr, "]"
+                            | "?" } ;
+primary          = INT_LIT | FLOAT_LIT | STRING_LIT | BOOL_LIT | NULL_LIT
+                 | IDENT
+                 | "(", expr, ")"
+                 | array_literal
+                 | object_literal
+                 | sql_select_expr
+                 | await_expr
+                 | new_expr ;
+await_expr       = "await", expr ;
+new_expr         = "new", IDENT, "(", [ arg_list ], ")" ;
+
+arg_list         = expr, { ",", expr } ;
+array_literal    = "[", [ expr, { ",", expr } ], "]" ;
+object_literal   = "{", [ object_pair, { ",", object_pair } ], "}" ;
+object_pair      = ( IDENT | STRING_LIT ), ":", expr ;
+
+(* ========================================================================
+ * SQL-shaped expressions (compile-time validated against entities)
+ * ====================================================================== *)
+
+sql_select_expr  = "select", IDENT, "from", IDENT,
+                   [ "where", expr ],
+                   [ "orderby", expr, [ "asc" | "desc" ] ],
+                   [ "limit", INT_LIT ], [ "offset", INT_LIT ] ;
+                   (* TODO — full select grammar with joins, groupby,
+                            aggregates; see parser.rs::parse_select_expr *)
+
+(* TODO Phase 4 — atomic update form:
+   update_expr = "update", IDENT, "set", assign_list, "where", expr, ";"
+   Today's whole-row form is documented in semantics.md. *)

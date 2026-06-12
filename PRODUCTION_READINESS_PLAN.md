@@ -52,17 +52,23 @@ folding findings back here.
 
 > You cannot stabilize what is defined only by the implementation.
 
-- **[1.0-blocker] Language specification** (`docs/spec/`): grammar (EBNF),
-  evaluation semantics, type coercion rules, builtin contracts. Today the
-  parser (`src/parser.rs`, 4.6k lines) *is* the spec — extract it.
-- **[1.0-blocker] SemVer policy doc**: what counts as a breaking change
-  (syntax, builtin signature, JSON output shape, env var defaults).
-  `CHANGELOG.md` already follows SemVer — formalize the promise.
-- **Conformance suite**: a directory of `.jwc` programs + expected
-  stdout/HTTP responses, run against BOTH the interpreter and native AOT.
-  Extends today's `tests/native_parity.rs` into the single source of truth
-  for "what JWC means."
-- **Deprecation policy**: minimum one minor version of warning before removal.
+- **[1.0-blocker] Language specification** (`docs/spec/`) — ✅ scaffold
+  landed (this PR): `docs/spec/README.md`, `grammar.ebnf` (top-level
+  productions, statements, expressions, types, routes, SQL-shaped forms
+  with `TODO` markers for incomplete sections), `semantics.md` (evaluation
+  order, scope, coercion, integer/float behaviour, DB and HTTP semantics,
+  what is implementation-defined), `builtins.md` (contract template +
+  first batch of entries). Remaining: fill the `TODO` productions and
+  pin every entry with a conformance case.
+- **[1.0-blocker] SemVer policy doc** — ✅ landed (this PR):
+  [`SEMVER.md`](SEMVER.md). Enumerates breaking-change rules, release
+  cadence, and the pre-release suffix contract.
+- **Conformance suite**: skeleton landed in `13a3cad` (16 cases, harness
+  runs interpreter + native AOT); expansion gated on the `docs/spec/`
+  extraction so each new case pins a spec rule.
+- **Deprecation policy** — ✅ landed (this PR):
+  [`DEPRECATION.md`](DEPRECATION.md). Pre-1.0: ≥ 1 minor cycle of warning.
+  Post-1.0: full minor cycle of warning before removal in the next major.
 
 Exit criteria: every construct in the README has a spec section and at least
 one conformance test.
