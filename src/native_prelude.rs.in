@@ -925,6 +925,10 @@ struct Request {
     path_params: BTreeMap<String, String>,
     /// `true` if the request line was `HTTP/1.1`. Drives default keep-alive.
     http_version_11: bool,
+    /// Wall-clock instant the dispatcher saw the request — read by
+    /// `response_duration_ms()` so middleware / handler / errorHandler
+    /// can record observed latency without a hand-rolled timer.
+    started_at: std::time::Instant,
 }
 
 tokio::task_local! {
@@ -976,6 +980,23 @@ fn jwc_b_header(name: V) -> V {
     with_current_request(|req| {
         req.headers.get(&k).cloned().map(v_str).unwrap_or(V::Null)
     })
+}
+
+// `response_duration_ms()` — ms since dispatch started. Same semantics
+// as the interpreter shape: V::Null when called outside a request,
+// V::Int(milliseconds) inside one.
+fn jwc_b_response_duration_ms() -> V {
+    with_current_request(|req| V::Int(req.started_at.elapsed().as_millis() as i64))
+}
+
+// `response_status()` is interpreter-only for now: the native dispatch
+// doesn't know the handler's emitted status until AFTER the handler
+// returns (the JSON envelope is parsed later). Stubbed to V::Null so
+// programs that reference it in pre-handler code don't break at
+// codegen time; the after-block wire-up that needs this value will
+// land alongside a proper status thread-local.
+fn jwc_b_response_status() -> V {
+    V::Null
 }
 
 // `request_id()` — the stable per-request identifier the server stamps.
@@ -1421,6 +1442,7 @@ async fn handle_axum_request(
         body: body.to_vec(),
         path_params,
         http_version_11: true,
+        started_at: std::time::Instant::now(),
     });
 
     let result_v = CURRENT_REQUEST

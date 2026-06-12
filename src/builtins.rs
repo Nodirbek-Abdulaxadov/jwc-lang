@@ -206,14 +206,14 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         aliases: &[],
         min_args: 0,
         max_args: Some(0),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "response_duration_ms",
         aliases: &[],
         min_args: 0,
         max_args: Some(0),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "request_path",
