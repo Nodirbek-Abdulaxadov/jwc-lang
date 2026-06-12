@@ -674,6 +674,17 @@ async fn handle_http_fallback(
             if let Ok(rid) = request_id.parse() {
                 resp.headers_mut().insert("x-request-id", rid);
             }
+            // Echo inbound `traceparent` / `tracestate` back as response
+            // headers so the caller and downstream services can stitch
+            // their traces with ours without re-parsing the body. Spec:
+            // W3C Trace Context §3 — tracestate may be a comma-separated
+            // list, kept verbatim, header value casing preserved.
+            if let Some(tp) = headers.get("traceparent").cloned() {
+                resp.headers_mut().insert("traceparent", tp);
+            }
+            if let Some(ts) = headers.get("tracestate").cloned() {
+                resp.headers_mut().insert("tracestate", ts);
+            }
             // `html(...)` / future `text(...)` declare an explicit content-type
             // via the runtime envelope; everything else falls back to JSON for
             // backward compatibility with handlers that just `return obj`.
