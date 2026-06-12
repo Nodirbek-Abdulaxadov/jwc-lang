@@ -172,6 +172,62 @@ For larger work, see the **Priority Timeline** at the bottom of
 benchmark numbers), then Phase 10.2 (`tracing` + OpenTelemetry), then
 LSP completeness (Phase 3.1+).
 
+## Shipping a new builtin
+
+A new builtin function (`my_helper(...)`) is one of the most common
+contributor PRs. It also touches the most layers — skipping any one
+of them produces a "works in `jwc run` but breaks under `jwc build
+--native`" regression, or a builtin that has no spec entry and no
+test pinning its contract. The recipe below is the full checklist:
+
+1. **Interpreter** — `src/runner/builtins.rs` (or `src/runner/mod.rs::Vm::call_builtin`).
+   Wire the new name to a function returning a `Value`. Async if it
+   suspends (DB, HTTP, sleep). Null-propagation rule: if every other
+   string builtin returns `null` on `null` input, yours should too.
+
+2. **Validator (optional, recommended)** — `src/parser.rs::validate_program`.
+   If the builtin has type-checkable invariants (arg count, declared
+   arg types), assert them at compile time and bail with a numbered
+   E-code so the message is grep-friendly. See E011 / E012 / E013 for
+   the prefix shape.
+
+3. **Native AOT codegen** — `src/native_build.rs`.
+   Add the builtin name to the `BUILTINS` allow-list so
+   `jwc build --native` accepts the call instead of rejecting it as
+   unknown. If the call needs a non-trivial body, emit the helper
+   into `src/native_prelude.rs.in` (or its `_db.rs.in` sibling for
+   DB-touching code) as `fn jwc_b_<name>(...)`. Don't add a new
+   `V::Variant` here — the codegen has 25+ V match arms in the
+   prelude that need updating for each new variant; reach for an
+   existing variant (e.g. `V::Str(JwcStr::from(...))`) instead.
+
+4. **Spec entry** — `docs/spec/builtins.md`.
+   Use the entry template (signature, errors, notes, tests). The
+   `Tests:` field names the conformance case(s) that pin the
+   contract — write the test in step 5 and back-fill the name here.
+
+5. **User-facing docs** — `docs/builtins.md` (the existing
+   hand-maintained reference) AND `docs/docs/...` (docusaurus tree)
+   if the builtin belongs to a documented surface (HTTP / DB /
+   queue / observability). At v1.0 the generated reference replaces
+   the hand-maintained one; until then, keep both in sync.
+
+6. **Conformance case** — `tests/conformance/cases/case_<name>.jwc`
+   + `case_<name>.stdout.txt`. Register the case name in
+   `tests/conformance.rs::REGISTERED_CASES` AND add a
+   `conformance_test!(case_<name>);` line. The discovery test will
+   yell if you forget the registry, the macro will yell if you
+   forget the test list. Add `// CONFORMANCE: interpreter-only` as
+   the first line of the `.jwc` file when the builtin isn't yet
+   supported in the AOT path.
+
+7. **CHANGELOG** — under the next unreleased version's "Added"
+   section, naming the builtin and pointing at the spec entry.
+
+A small builtin (string helper, hash, env access) is ~50 LOC across
+the seven files; a larger one (HTTP, DB) is mostly the codegen step
+3.
+
 ## `unwrap()` policy
 
 `PRODUCTION_READINESS_PLAN.md` Phase 2 tracks the open `unwrap()`
