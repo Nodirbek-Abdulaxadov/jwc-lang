@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::{parser, project, sql};
+use crate::{cmd, parser, project, sql};
 
 /// Create a new JWC project scaffold rooted at `target`.
 pub fn new_project(target: &Path) -> Result<()> {
@@ -47,12 +47,15 @@ pub fn gen_sql(file: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Load the current project, report the source file count. Same shape
-/// as the old `Command::Test` handler.
-pub fn test() -> Result<()> {
+/// Load the current project, report the source file count. Also runs the
+/// lint pass so high-signal warnings (unused middleware, unused function)
+/// surface here — `jwc test` is the natural place a developer checks
+/// "is this project healthy?" before pushing.
+pub fn test(deny_warnings: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let root = project::find_project_root(&cwd)?;
     let loaded = project::load_project_from_root(&root)?;
+    cmd::lint::report_warnings(&loaded, deny_warnings)?;
     println!(
         "OK: project '{}' ({} source files)",
         loaded.manifest.name,

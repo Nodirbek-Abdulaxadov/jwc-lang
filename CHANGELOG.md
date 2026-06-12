@@ -3,6 +3,29 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — dogfooding patches
+
+Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
+shipped together since each is small.
+
+### Added
+- **String builtins `substring(s, start, len)` + `take(s, n)`** — char-based
+  slicing that closes the gap surfaced by jwc-shortener (where the only
+  workaround was a `split(s, "")` for-loop). UTF-8 safe, out-of-range
+  inputs clamp to `""`, null threads through. Native AOT covered; spec
+  entry pinned in `docs/spec/builtins.md`. Both names defer to a
+  user-declared function of the same name when one exists.
+- **`jwc build --deny-warnings` / `jwc test --deny-warnings`** — promotes
+  lint warnings to errors for CI gates.
+
+### Changed
+- **`jwc build` and `jwc test` now run the lint pass by default** and
+  surface warnings on stderr before continuing. Closes the dogfooding gap
+  where jwc-shortener shipped with a declared-but-unused `RateLimit`
+  middleware and nothing in the build path said a word — the warning
+  existed, but only `jwc lint` (opt-in) ran it. Warnings stay advisory
+  unless `--deny-warnings` is set.
+
 ## [0.4.2] — Spec scaffold, SemVer policy, release hardening
 
 Docs + supply-chain release. No language-level behaviour change; user

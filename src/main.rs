@@ -28,7 +28,12 @@ enum Command {
         request_logging: bool,
     },
     /// Validate current project sources (searches jwcproj.json upward)
-    Test,
+    Test {
+        /// Treat any lint warning surfaced during the check as an error
+        /// (CI-friendly gate). Matches `jwc build --deny-warnings`.
+        #[arg(long = "deny-warnings", action = ArgAction::SetTrue, default_value_t = false)]
+        deny_warnings: bool,
+    },
     /// Run lint checks (validation + dead-code warnings) on the current project
     Lint {
         /// Emit warnings as one JSON array on stdout instead of human-readable
@@ -71,6 +76,11 @@ enum Command {
         /// --native.
         #[arg(long)]
         target: Option<String>,
+        /// Fail the build when any lint warning fires (W001 unused fn,
+        /// W002 unused middleware, etc.). Warnings are advisory by
+        /// default — turn this on in CI to keep dead code out of `main`.
+        #[arg(long = "deny-warnings", action = ArgAction::SetTrue, default_value_t = false)]
+        deny_warnings: bool,
     },
     /// Manage SQL migrations for Postgres
     Migrate {
@@ -257,7 +267,7 @@ fn real_main() -> Result<()> {
             path,
             request_logging,
         } => cmd::run::run(&rt, path, request_logging)?,
-        Command::Test => cmd::check::test()?,
+        Command::Test { deny_warnings } => cmd::check::test(deny_warnings)?,
         Command::Lint {
             json,
             explain,
@@ -276,7 +286,8 @@ fn real_main() -> Result<()> {
             native,
             emit_rust_source,
             target,
-        } => cmd::build::run(release, native, emit_rust_source, target)?,
+            deny_warnings,
+        } => cmd::build::run(release, native, emit_rust_source, target, deny_warnings)?,
         Command::Migrate { command } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::{native_build, project};
+use crate::{cmd, native_build, project};
 
 /// Whitelist of Rust target triples accepted by `jwc build --native
 /// --target <triple>` in v1. Keeping this list small lets us only claim
@@ -68,6 +68,7 @@ pub fn run(
     native: bool,
     emit_rust_source: bool,
     target: Option<String>,
+    deny_warnings: bool,
 ) -> Result<()> {
     if emit_rust_source && !native {
         bail!("--emit-rust-source requires --native");
@@ -78,6 +79,7 @@ pub fn run(
     let root = project::find_project_root(&cwd)?;
     let loaded = project::load_project_from_root(&root)?;
     loaded.manifest.ensure_runnable()?;
+    cmd::lint::report_warnings(&loaded, deny_warnings)?;
     let profile = if release { "release" } else { "debug" };
 
     if native {
