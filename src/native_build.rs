@@ -3151,9 +3151,20 @@ fn emit_db_select(
     }
     out.push_str("];");
     if typed_read {
+        // Phase 1.6 — full read+write monomorphization. Each row's
+        // concrete struct goes straight into the V::Array, but each
+        // element is a `V::RawJson` already-serialised fragment that
+        // jwc_write_json writes verbatim. No FxHashMap allocation, no
+        // V::Object roundtrip on either side. Closes the /json-large
+        // RPS gap PRODUCTION_READINESS_PLAN.md flags as the headline
+        // Phase 1 1.0-blocker.
         out.push_str(&format!(
             " let __raw = jwc_db_query_rows(\"{}\", __params).await; \
-             let mut __rows: Vec<V> = __raw.iter().map(|r| JwcEnt_{ent}::jwc_from_row(r).jwc_to_v()).collect();",
+             let mut __rows: Vec<V> = __raw.iter().map(|r| {{ \
+                let mut __json_buf = String::with_capacity(128); \
+                JwcEnt_{ent}::jwc_from_row(r).jwc_write_json(&mut __json_buf); \
+                V::RawJson(JwcStr::from(__json_buf)) \
+             }}).collect();",
             escape_sql(&sql),
             ent = table,
         ));

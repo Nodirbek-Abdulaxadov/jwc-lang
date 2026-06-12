@@ -130,6 +130,15 @@ enum V {
     Str(JwcStr),
     Array(Arc<JwcArr>),
     Object(Arc<JwcObj>),
+    /// Phase 1.6 — opaque, already-encoded JSON fragment. `jwc_write_json`
+    /// writes the inner bytes verbatim instead of re-encoding; every other
+    /// V match arm treats it like a `V::Str` (length is the byte count,
+    /// truthy iff non-empty, etc.). Lets `emit_db_select` produce a
+    /// `V::Array` of `V::RawJson` rows for simple selects so JSON
+    /// serialisation skips the `V::Object` FxHashMap entirely. That's
+    /// what closes the /json-large RPS gap the production-readiness
+    /// plan calls out as the Phase 1 1.0-blocker.
+    RawJson(JwcStr),
 }
 
 impl fmt::Display for V {
@@ -140,6 +149,7 @@ impl fmt::Display for V {
             V::Int(n) => write!(f, "{}", n),
             V::Float(n) => write!(f, "{}", n),
             V::Str(s) => write!(f, "{}", s),
+            V::RawJson(s) => write!(f, "{}", s),
             V::Array(_) | V::Object(_) => write!(f, "{}", jwc_to_json(self)),
         }
     }
@@ -156,6 +166,7 @@ fn jwc_truthy(v: &V) -> bool {
         V::Int(n) => *n != 0,
         V::Float(n) => *n != 0.0,
         V::Str(s) => !s.is_empty(),
+        V::RawJson(s) => !s.is_empty(),
         V::Array(a) => !a.is_empty(),
         V::Object(o) => !o.is_empty(),
     }
@@ -432,6 +443,10 @@ fn jwc_write_json(v: &V, out: &mut String) {
             }
         }
         V::Str(s) => jwc_write_json_string(s, out),
+        // Already-encoded JSON — write the bytes verbatim. The whole
+        // point of V::RawJson is to skip the V::Object FxHashMap roundtrip
+        // on the serialisation side, so this is the load-bearing arm.
+        V::RawJson(s) => out.push_str(s),
         V::Array(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {

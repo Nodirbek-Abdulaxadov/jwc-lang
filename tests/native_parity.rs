@@ -148,7 +148,13 @@ const CASES: &[Case] = &[
         expected_emit_contains: &[
             "jwc_db_query_rows(",
             "JwcEnt_Brand::jwc_from_row(",
-            ".jwc_to_v()",
+            // Phase 1.6 — write side is wired too. Each row goes
+            // straight into a V::RawJson opaque fragment so
+            // jwc_write_json writes the pre-encoded bytes verbatim
+            // instead of round-tripping through V::Object's
+            // FxHashMap. That's the actual /json-large RPS win.
+            ".jwc_write_json(&mut __json_buf)",
+            "V::RawJson(JwcStr::from(__json_buf))",
         ],
     },
     Case {

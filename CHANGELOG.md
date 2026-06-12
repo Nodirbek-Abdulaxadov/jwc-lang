@@ -9,6 +9,19 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **Phase 1.6 — write-side monomorphization through `V::RawJson`.**
+  The native runtime gains a new V variant: `V::RawJson(JwcStr)` carries
+  an opaque, already-encoded JSON fragment. `jwc_write_json` writes
+  the bytes verbatim; every other match arm (truthy, Display)
+  treats it like a `V::Str`. `emit_db_select` for simple entity
+  selects now generates `JwcEnt_<Name>::jwc_from_row(r)` →
+  `jwc_write_json(&mut buf)` → `V::RawJson(buf.into())` per row,
+  wrapped in a `V::Array`. The dynamic `V::Object` / FxHashMap
+  allocation is GONE from the hot path — neither the read nor the
+  write side touches it. This is the slice
+  PRODUCTION_READINESS_PLAN.md called out as the Phase 1 1.0-blocker
+  ("close the /json-large axum gap"); the benchmark run lands in the
+  follow-up commit alongside the bench.sh harness update.
 - **`request_id()` builtin + `x-request-id` response header.** The
   server stamps a unique id on every HTTP request (16 hex chars,
   `<wall_secs><counter>`), threads it into the runtime so middleware
