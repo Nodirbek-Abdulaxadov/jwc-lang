@@ -172,6 +172,30 @@ For larger work, see the **Priority Timeline** at the bottom of
 benchmark numbers), then Phase 10.2 (`tracing` + OpenTelemetry), then
 LSP completeness (Phase 3.1+).
 
+## `unwrap()` policy
+
+`PRODUCTION_READINESS_PLAN.md` Phase 2 tracks the open `unwrap()`
+budget — 1.0 forbids them in non-test code unless the unwrap is
+provably safe and the proof is captured in the code.
+
+Practical rule for new code:
+
+- **Tests** (`#[cfg(test)]`, `#[test]` modules, integration suites):
+  `unwrap()` is fine — a panic is a test failure.
+- **Production code paths**: prefer `?` to propagate; when that
+  doesn't apply, use `.expect("INVARIANT: <why this can't fail>")`
+  instead of `.unwrap()`. The message is the proof obligation: if
+  you can't write it, the unwrap is unsafe and needs a real error
+  path.
+- **Recipe for unwrap conversions**: search for `.unwrap()`,
+  identify the static invariant that guarantees `Some`/`Ok`, write
+  it as the `expect()` message starting with `INVARIANT:`. Anything
+  else gets a real error return.
+
+The 1.0 gate is `cargo clippy -- -D clippy::unwrap_used` over the
+whole tree. Until then, every unwrap → expect conversion is welcome
+as a small PR.
+
 ## License and Code of Conduct
 
 This project is distributed under the **MIT** license unless a

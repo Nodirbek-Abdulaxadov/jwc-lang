@@ -319,8 +319,12 @@ async fn handle_healthz() -> Response {
     let body = "{\"status\":\"ok\"}".to_string();
     let mut resp = Response::new(body.into());
     *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut()
-        .insert("content-type", "application/json".parse().unwrap());
+    resp.headers_mut().insert(
+        "content-type",
+        "application/json"
+            .parse()
+            .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+    );
     resp
 }
 
@@ -341,8 +345,12 @@ async fn handle_readyz() -> Response {
                 let body = "{\"status\":\"ready\",\"db\":\"ok\"}".to_string();
                 let mut resp = Response::new(body.into());
                 *resp.status_mut() = StatusCode::OK;
-                resp.headers_mut()
-                    .insert("content-type", "application/json".parse().unwrap());
+                resp.headers_mut().insert(
+                    "content-type",
+                    "application/json"
+                        .parse()
+                        .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+                );
                 resp
             }
             Err(e) => readyz_db_failure(format!("query: {e}")),
@@ -356,8 +364,12 @@ fn readyz_db_failure(detail: String) -> Response {
     let body = format!("{{\"status\":\"not_ready\",\"db\":\"{escaped}\"}}");
     let mut resp = Response::new(body.into());
     *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-    resp.headers_mut()
-        .insert("content-type", "application/json".parse().unwrap());
+    resp.headers_mut().insert(
+        "content-type",
+        "application/json"
+            .parse()
+            .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+    );
     resp
 }
 
@@ -490,8 +502,12 @@ async fn handle_http_fallback(
             if let Ok(value) = ct.parse() {
                 resp.headers_mut().insert("content-type", value);
             } else {
-                resp.headers_mut()
-                    .insert("content-type", "application/json".parse().unwrap());
+                resp.headers_mut().insert(
+                    "content-type",
+                    "application/json"
+                        .parse()
+                        .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+                );
             }
             // Extra headers declared by the handler (e.g.
             // `statusCode(302, { Location: url })` produces a `Location`
@@ -514,8 +530,12 @@ async fn handle_http_fallback(
             let body = format!("{{\"error\":\"{msg}\"}}");
             let mut resp = Response::new(body.into());
             *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-            resp.headers_mut()
-                .insert("content-type", "application/json".parse().unwrap());
+            resp.headers_mut().insert(
+                "content-type",
+                "application/json"
+                    .parse()
+                    .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+            );
             resp
         }
         Err(_join_err) => {
