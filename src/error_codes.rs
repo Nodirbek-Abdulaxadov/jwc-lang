@@ -84,6 +84,18 @@ pub const VALIDATOR_ERRORS: &[DiagnosticCode] = &[
         "E012",
         "atomic update set list must contain at least one assignment",
     ),
+    d(
+        "E013",
+        "bulk delete requires a where clause (would truncate the table)",
+    ),
+    d(
+        "E014",
+        "route handler references a function that doesn't exist",
+    ),
+    d(
+        "E015",
+        "duplicate function declaration in the same project namespace",
+    ),
 ];
 
 /// Lookup a warning code → description. Returns `None` for unknown

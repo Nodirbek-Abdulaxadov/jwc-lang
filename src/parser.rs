@@ -287,7 +287,7 @@ pub fn validate_program(program: &Program) -> Result<()> {
                 program,
                 function.file_idx,
                 function.offset,
-                &format!("Duplicate function name: {}", function.name),
+                &format!("error[E015]: Duplicate function name: {}", function.name),
             ));
         }
 
@@ -368,7 +368,10 @@ pub fn validate_program(program: &Program) -> Result<()> {
                         program,
                         route.file_idx,
                         route.offset,
-                        &format!("Route handler '{}' is not defined as a function", handler),
+                        &format!(
+                            "error[E014]: Route handler '{}' is not defined as a function",
+                            handler
+                        ),
                     ));
                 }
             }
@@ -3035,8 +3038,9 @@ impl<'a> Parser<'a> {
                     self.bump()?;
                     let (ctx, table) = self.parse_db_ref()?;
                     if !self.check_ident_eq("where") {
-                        return Err(self
-                            .error_here("bulk 'delete from CTX.Table' requires a 'where' clause"));
+                        return Err(self.error_here(
+                            "error[E013]: bulk 'delete from CTX.Table' requires a 'where' clause",
+                        ));
                     }
                     self.bump()?;
                     let where_clause = Box::new(self.parse_where_or()?);
