@@ -190,4 +190,38 @@ mod tests {
         assert!(lookup_warning("W999").is_none());
         assert!(lookup_error("E999").is_none());
     }
+
+    #[test]
+    fn every_documented_error_code_is_findable_by_lookup() {
+        // Walk the table so a future entry that's never wired into a
+        // bail call site still gets exercised. Belt-and-braces against
+        // an accidental `pub const VALIDATOR_ERRORS: &[..] = &[]` blow
+        // away — every catalog entry must round-trip through the
+        // public lookup function.
+        for entry in VALIDATOR_ERRORS {
+            let desc = lookup_error(entry.code).unwrap_or_else(|| {
+                panic!("catalog has {} but lookup_error returned None", entry.code)
+            });
+            assert_eq!(
+                desc, entry.description,
+                "lookup_error({}) returned a stale description",
+                entry.code
+            );
+        }
+    }
+
+    #[test]
+    fn parser_wired_error_codes_have_catalog_entries() {
+        // Whitelist of E-codes whose `error[EXXX]:` prefix the parser
+        // emits today. Anything in this list MUST have a catalog
+        // entry — else the user sees a code they can't look up.
+        // Update this list when wiring a new bail to a code.
+        let parser_emitted = ["E011", "E012", "E013", "E014", "E015"];
+        for code in parser_emitted {
+            assert!(
+                lookup_error(code).is_some(),
+                "parser emits {code} but catalog is missing it",
+            );
+        }
+    }
 }
