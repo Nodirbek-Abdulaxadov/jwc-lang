@@ -487,6 +487,10 @@ struct EntityField {
     pg: PgKind,
     is_auto_increment: bool,
     is_primary_key: bool,
+    /// `true` when the column was declared `nullable` in the entity. Used
+    /// by struct monomorphization (Phase 1 spike) to decide whether the
+    /// generated Rust field is `T` or `Option<T>`.
+    is_nullable: bool,
 }
 
 /// Coarse-grained Postgres type bucket. JWC types collapse onto these because
@@ -1131,6 +1135,16 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
     }
     out.push('\n');
 
+    // Phase 1 spike — struct monomorphization. Every `entity` gets a
+    // concrete Rust struct + a `jwc_to_v` serializer that lifts it to
+    // the dynamic V enum the rest of the runtime speaks. Not yet wired
+    // onto the hot path; the next slice replaces `V::Object` on
+    // `select` results with these structs so JSON serialisation skips
+    // the FxHashMap lookup. `#[allow(dead_code)]` because the structs
+    // are emitted unconditionally — the linker drops the ones nothing
+    // references.
+    emit_entity_structs(&mut out, &entities);
+
     let fn_decls: HashMap<String, &FunctionDecl> = program
         .functions
         .iter()
@@ -1177,6 +1191,139 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
     Ok(out)
 }
 
+/// Phase 1 — struct monomorphization. For every `entity` declared in
+/// the program we emit a concrete Rust struct (`JwcEnt_<Name>`) whose
+/// fields match the column types one-to-one, plus a `jwc_to_v` method
+/// that lifts the struct into the dynamic `V` enum. This is the foundation
+/// the next slice will hook into `select` codegen so JSON serialisation
+/// skips the FxHashMap that `V::Object` round-trips through (the analysis
+/// in benchmark/REPORT.md attributes the `/json-large` gap to exactly
+/// this dynamic shape).
+///
+/// PgKind → Rust type mapping:
+///   * Smallint → i16, Int → i32, Bigint → i64
+///   * Float    → f64
+///   * Bool     → bool
+///   * Timestamp / Str → String  (timestamps round-trip as ISO text)
+///
+/// Nullable columns wrap in `Option<T>`. Field names are emitted as-is
+/// (snake_case in JWC source already), with `r#` raw-identifier escapes
+/// for reserved words. The struct itself is `#[allow(dead_code, non_camel_case_types)]`
+/// because (a) the spike isn't wired onto the hot path yet, and (b) the
+/// JWC entity name may not be PascalCase by convention.
+fn emit_entity_structs(out: &mut String, entities: &HashMap<String, EntityMeta>) {
+    if entities.is_empty() {
+        return;
+    }
+    // Iterate in a deterministic order so the generated source is
+    // byte-stable across builds (parity tests assert substring matches).
+    let mut names: Vec<&String> = entities.keys().collect();
+    names.sort();
+
+    out.push_str("// ── Phase 1 struct monomorphization (Phase 1 spike — not yet wired) ──\n");
+    for name in names {
+        let meta = &entities[name];
+        out.push_str("#[allow(dead_code, non_camel_case_types, non_snake_case)]\n");
+        out.push_str("#[derive(Clone, Debug, Default)]\n");
+        out.push_str(&format!("struct JwcEnt_{} {{\n", name));
+        for f in &meta.fields {
+            let ty = rust_type_for_field(f);
+            let raw = sanitize_struct_field_name(&f.name);
+            out.push_str(&format!("    {}: {},\n", raw, ty));
+        }
+        out.push_str("}\n");
+
+        out.push_str("#[allow(dead_code)]\n");
+        out.push_str(&format!("impl JwcEnt_{} {{\n", name));
+        out.push_str("    /// Lift this struct into the dynamic `V` enum so the\n");
+        out.push_str("    /// existing FxHashMap-based code paths keep working until\n");
+        out.push_str("    /// callers are upgraded to consume the struct directly.\n");
+        out.push_str("    fn jwc_to_v(&self) -> V {\n");
+        out.push_str("        let mut obj = JwcObj::default();\n");
+        for f in &meta.fields {
+            let field_ident = sanitize_struct_field_name(&f.name);
+            let lift = lift_field_to_v(&field_ident, f);
+            out.push_str(&format!(
+                "        obj.insert(\"{}\".to_string(), {});\n",
+                f.name, lift
+            ));
+        }
+        out.push_str("        V::Object(Arc::new(obj))\n");
+        out.push_str("    }\n");
+        out.push_str("}\n");
+    }
+    out.push('\n');
+}
+
+/// Map a `PgKind` (+ nullability) to the concrete Rust type the
+/// monomorphized struct field uses.
+fn rust_type_for_field(f: &EntityField) -> String {
+    let base = match f.pg {
+        PgKind::Smallint => "i16",
+        PgKind::Int => "i32",
+        PgKind::Bigint => "i64",
+        PgKind::Float => "f64",
+        PgKind::Bool => "bool",
+        PgKind::Timestamp | PgKind::Str => "String",
+    };
+    if f.is_nullable {
+        format!("Option<{}>", base)
+    } else {
+        base.to_string()
+    }
+}
+
+/// Avoid Rust reserved-word collisions (`type`, `fn`, `match`, …) by
+/// emitting a raw identifier (`r#type`) where needed. Anything else
+/// passes through.
+fn sanitize_struct_field_name(name: &str) -> String {
+    const RESERVED: &[&str] = &[
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+    ];
+    if RESERVED.contains(&name) {
+        format!("r#{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Generate the Rust expression that wraps a struct field into a `V`
+/// variant. Mirrors the Postgres → V translation the dynamic codepath
+/// already does for `V::Object` row reads.
+fn lift_field_to_v(field_ident: &str, f: &EntityField) -> String {
+    let inner = match f.pg {
+        PgKind::Smallint => format!("V::Int(self.{} as i64)", field_ident),
+        PgKind::Int => format!("V::Int(self.{} as i64)", field_ident),
+        PgKind::Bigint => format!("V::Int(self.{})", field_ident),
+        PgKind::Float => format!("V::Float(self.{})", field_ident),
+        PgKind::Bool => format!("V::Bool(self.{})", field_ident),
+        PgKind::Timestamp | PgKind::Str => format!("v_str(self.{}.clone())", field_ident),
+    };
+    if f.is_nullable {
+        // Option<T>::as_ref().map(|v| <inner>).unwrap_or(V::Null) —
+        // but we can't `self.x` twice through map() with the same form,
+        // so reroute through a match for clarity.
+        let inner_match = match f.pg {
+            PgKind::Smallint => "V::Int(*v as i64)".to_string(),
+            PgKind::Int => "V::Int(*v as i64)".to_string(),
+            PgKind::Bigint => "V::Int(*v)".to_string(),
+            PgKind::Float => "V::Float(*v)".to_string(),
+            PgKind::Bool => "V::Bool(*v)".to_string(),
+            PgKind::Timestamp | PgKind::Str => "v_str(v.clone())".to_string(),
+        };
+        format!(
+            "match &self.{} {{ Some(v) => {}, None => V::Null }}",
+            field_ident, inner_match
+        )
+    } else {
+        inner
+    }
+}
+
 fn collect_entities(program: &Program) -> HashMap<String, EntityMeta> {
     let mut out = HashMap::new();
     for model in &program.models {
@@ -1191,6 +1338,7 @@ fn collect_entities(program: &Program) -> HashMap<String, EntityMeta> {
                 pg: pg_kind_for(&f.ty.name),
                 is_auto_increment: f.is_auto_increment,
                 is_primary_key: f.is_primary_key,
+                is_nullable: f.is_nullable,
             })
             .collect();
         out.insert(

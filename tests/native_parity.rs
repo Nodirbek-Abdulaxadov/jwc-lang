@@ -123,6 +123,32 @@ const CASES: &[Case] = &[
         expected_emit_contains: &["jwc_b_take("],
     },
     Case {
+        name: "monomorphized_struct_emitted",
+        source: r#"
+            dbcontext AppDb : Postgres;
+            entity Brand of AppDb {
+                id bigint pk;
+                name text(80);
+                slug text(80) nullable;
+                created_at datetime;
+            }
+            function main() {
+                print("brand monomorphized");
+            }
+        "#,
+        expected_output: "brand monomorphized\n",
+        // Phase 1 spike: the codegen now emits one concrete Rust struct
+        // per entity alongside a `jwc_to_v` serializer. Wiring it onto
+        // the hot path is the next slice.
+        expected_emit_contains: &[
+            "struct JwcEnt_Brand",
+            "id: i64,",
+            "name: String,",
+            "slug: Option<String>,",
+            "fn jwc_to_v(&self)",
+        ],
+    },
+    Case {
         name: "module_const",
         source: r#"
             const PI = 3;

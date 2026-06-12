@@ -36,6 +36,17 @@ shipped together since each is small.
 - **`Token::end_offset`** + **`SourceMap::snippet(offset)`** — building
   blocks for span-carrying AST nodes. Parser errors already use this
   to render an in-source caret under the failing token.
+- **Phase 1 struct monomorphization — codegen foundation.** Every
+  `entity` declared in a project now produces a concrete Rust struct
+  (`JwcEnt_<Name>`) in the emitted source, alongside a `jwc_to_v`
+  serializer that lifts it into the dynamic `V` enum the rest of the
+  runtime speaks. Field types map column-for-column (Smallint → i16,
+  Int → i32, Bigint → i64, Float → f64, Bool → bool, Timestamp/Str →
+  String); nullable columns wrap in `Option<T>`. The struct is not
+  yet wired onto the hot path — the next slice replaces `V::Object`
+  on `select` results with these structs so JSON serialisation skips
+  the FxHashMap that `/json-large` round-trips through (closes the
+  axum gap documented in PRODUCTION_READINESS_PLAN.md Phase 1).
 
 ### Changed
 - **`jwc build` and `jwc test` now run the lint pass by default** and
