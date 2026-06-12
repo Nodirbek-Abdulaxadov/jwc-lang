@@ -963,6 +963,24 @@ fn jwc_b_header(name: V) -> V {
     })
 }
 
+// `client_ip()` — original client IP when the request flows through a
+// proxy (Cloudflare, nginx, k8s ingress). Reads the header named by
+// `JWC_REAL_IP_HEADER` (default `x-forwarded-for`) and returns the FIRST
+// entry of a comma-separated chain. `Null` when no such header is set.
+fn jwc_b_client_ip() -> V {
+    let header_name = std::env::var("JWC_REAL_IP_HEADER")
+        .unwrap_or_else(|_| "x-forwarded-for".to_string());
+    let key = header_name.to_lowercase();
+    with_current_request(|req| {
+        let raw = match req.headers.get(&key) {
+            Some(v) => v,
+            None => return V::Null,
+        };
+        let first = raw.split(',').next().unwrap_or("").trim();
+        if first.is_empty() { V::Null } else { v_str(first.to_string()) }
+    })
+}
+
 fn jwc_b_request_path() -> V {
     with_current_request(|req| v_str(req.path.clone()))
 }

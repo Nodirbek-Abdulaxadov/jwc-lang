@@ -613,6 +613,44 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// `client_ip()` — the original client's IP when the request flows
+    /// through a proxy (Cloudflare, nginx, k8s ingress). Reads the
+    /// header named by `JWC_REAL_IP_HEADER` (default `x-forwarded-for`)
+    /// and returns the FIRST entry of a comma-separated chain — the
+    /// original client, not the closest proxy. Returns null when no such
+    /// header is present.
+    ///
+    /// Closes the dogfooding gap where jwc-shortener had to hand-roll
+    /// `header("x-forwarded-for")` per app and got Cloudflare's
+    /// `cf-connecting-ip` precedence wrong. Setting `JWC_REAL_IP_HEADER`
+    /// to `cf-connecting-ip` (or any other vendor header) flips the
+    /// builtin without code changes.
+    pub(super) async fn eval_client_ip_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("client_ip() expects no args");
+        }
+        let header_name =
+            std::env::var("JWC_REAL_IP_HEADER").unwrap_or_else(|_| "x-forwarded-for".to_string());
+        let key = header_name.to_ascii_lowercase();
+        let raw = self
+            .current_headers
+            .as_ref()
+            .and_then(|h| h.get(&key).cloned());
+        let Some(raw) = raw else {
+            return Ok(Value::Null);
+        };
+        let first = raw.split(',').next().unwrap_or("").trim();
+        if first.is_empty() {
+            Ok(Value::Null)
+        } else {
+            Ok(Value::Str(first.to_string()))
+        }
+    }
+
     pub(super) async fn eval_context_get_call(
         &mut self,
         args: &[Expr],

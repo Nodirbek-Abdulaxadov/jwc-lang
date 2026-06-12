@@ -9,6 +9,16 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **`client_ip()` builtin with proxy-header override.** Reads
+  `JWC_REAL_IP_HEADER` (default `x-forwarded-for`) from request
+  headers and returns the FIRST entry of the comma-separated chain —
+  the original client, not the closest proxy. Returns `null` when the
+  header is absent. Closes the jwc-shortener dogfooding gap where
+  rate-limit code had to hand-roll `header("x-forwarded-for")` per
+  app and got Cloudflare's `cf-connecting-ip` precedence wrong;
+  flipping the builtin to a Cloudflare deploy is now an env-var
+  change (`JWC_REAL_IP_HEADER=cf-connecting-ip`). Native AOT and
+  interpreter both ship the builtin; spec entry follows.
 - **Built-in `/healthz` + `/readyz` endpoints with DB probe.** The
   bundled launcher's server now registers both routes by default:
   `/healthz` is the liveness probe (always 200 — if axum can answer,

@@ -46,6 +46,7 @@ run under `jwc run` but are rejected at native-build time.
 | `path_param(name)` | 1 | ✅ | Route path parameter (`/users/{id}`). |
 | `query_param(name[, default])` | 1–2 | ✅ | Query-string parameter. |
 | `header(name)` | 1 | ✅ | Request header (case-insensitive). |
+| `client_ip()` | 0 | ✅ | Original client IP from `JWC_REAL_IP_HEADER` (default `x-forwarded-for`). Returns the first entry in a comma-separated chain or `null`. |
 | `body()` / `request_body()` | 0 | ✅ / interpreter | Raw request body string. |
 | `request_path()` | 0 | ✅ | Request path (query stripped). |
 | `request_method()` | 0 | ✅ | HTTP method. |

@@ -1709,6 +1709,10 @@ impl<'a> Vm<'a> {
                     return self.eval_header_call(args, vars).await;
                 }
 
+                if name.eq_ignore_ascii_case("client_ip") {
+                    return self.eval_client_ip_call(args, vars).await;
+                }
+
                 if name.eq_ignore_ascii_case("context") {
                     return self.eval_context_get_call(args, vars).await;
                 }
@@ -4303,6 +4307,53 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).await.unwrap();
         assert_eq!(out.output, "Tesla\n2024\n");
+    }
+
+    #[tokio::test]
+    async fn client_ip_reads_first_xff_entry() {
+        // Two hops: original client `1.2.3.4`, then a proxy. The builtin
+        // returns the FIRST entry — the original client — not the
+        // closest proxy, matching dogfooding expectations.
+        let src = r#"
+            route GET "/whoami" {
+                let ip = client_ip();
+                if (ip == null) { return "{\"ip\":null}"; }
+                return "{\"ip\":\"" + ip + "\"}";
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "x-forwarded-for".to_string(),
+            "1.2.3.4, 10.0.0.5".to_string(),
+        );
+        let (status, body, _ct, _extra) =
+            run_request_with_headers(&program, "GET", "/whoami", None, headers)
+                .await
+                .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "{\"ip\":\"1.2.3.4\"}");
+    }
+
+    #[tokio::test]
+    async fn client_ip_returns_null_when_header_absent() {
+        let src = r#"
+            route GET "/whoami" {
+                let ip = client_ip();
+                if (ip == null) { return "null"; }
+                return ip;
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let headers = std::collections::HashMap::new();
+        let (status, body, _ct, _extra) =
+            run_request_with_headers(&program, "GET", "/whoami", None, headers)
+                .await
+                .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, "null");
     }
 
     #[tokio::test]
