@@ -274,8 +274,79 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
     Ok(())
 }
 
+/// Whether the user's program declared its own route for the given path.
+/// `/healthz` and `/readyz` are reserved for the built-in handlers — but
+/// only when the user hasn't taken them over. Mirrors axum's path
+/// matching (case-sensitive, exact match with leading slash) so the
+/// built-ins yield to a project that wants its own implementation.
+fn route_owned_by_user(program: &Program, path: &str) -> bool {
+    program
+        .routes
+        .iter()
+        .any(|r| ensure_leading_slash(&r.path) == path)
+}
+
+/// Process-alive probe. Always 200 — if axum can run a handler the
+/// process is up. Kubernetes' `livenessProbe` target.
+async fn handle_healthz() -> Response {
+    let body = "{\"status\":\"ok\"}".to_string();
+    let mut resp = Response::new(body.into());
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    resp
+}
+
+/// Readiness probe with a real DB round-trip. Used by k8s `readinessProbe`
+/// — when the DB is unreachable the pod stops getting traffic instead of
+/// returning 500s. jwc-shortener hand-rolled its `/healthz` with no DB
+/// check, so probes stayed green through a database outage; this closes
+/// that gap by default.
+async fn handle_readyz() -> Response {
+    // No DB configured → readiness is just process-alive (nothing to
+    // probe). Avoid wedging the gate on a missing env var.
+    if std::env::var("DATABASE_URL").is_err() && std::env::var("JWC_DATABASE_URL").is_err() {
+        return handle_healthz().await;
+    }
+    match engine::get_connection().await {
+        Ok(conn) => match conn.simple_query("SELECT 1").await {
+            Ok(_) => {
+                let body = "{\"status\":\"ready\",\"db\":\"ok\"}".to_string();
+                let mut resp = Response::new(body.into());
+                *resp.status_mut() = StatusCode::OK;
+                resp.headers_mut()
+                    .insert("content-type", "application/json".parse().unwrap());
+                resp
+            }
+            Err(e) => readyz_db_failure(format!("query: {e}")),
+        },
+        Err(e) => readyz_db_failure(format!("pool: {e}")),
+    }
+}
+
+fn readyz_db_failure(detail: String) -> Response {
+    let escaped = detail.replace('"', "'");
+    let body = format!("{{\"status\":\"not_ready\",\"db\":\"{escaped}\"}}");
+    let mut resp = Response::new(body.into());
+    *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    resp.headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    resp
+}
+
 fn build_router(state: AppState) -> Router {
     let mut router: Router<AppState> = Router::new();
+
+    // Built-in health endpoints. Registered BEFORE the user's routes so
+    // they take precedence, then deliberately overridden when the user
+    // ships their own `/healthz` / `/readyz`. axum routes are matched
+    // exact-first; the fallback at the end catches everything else.
+    if !route_owned_by_user(&state.program, "/healthz") {
+        router = router.route("/healthz", get(handle_healthz));
+    }
+    if !route_owned_by_user(&state.program, "/readyz") {
+        router = router.route("/readyz", get(handle_readyz));
+    }
 
     // Each WS route gets its own axum entry. JWC path placeholders
     // (`/items/{id}`) line up with axum's `{name}` form one-to-one.
@@ -540,6 +611,75 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
+        }
+    }
+
+    fn make_program_with_route(path: &str) -> Program {
+        Program {
+            routes: vec![crate::ast::RouteDecl {
+                method: "GET".into(),
+                path: path.into(),
+                handler: None,
+                body: Vec::new(),
+                middlewares: Vec::new(),
+                protocol: RouteProtocol::Http,
+                namespace: Vec::new(),
+                offset: 0,
+                file_idx: 0,
+            }],
+            ..Program::default()
+        }
+    }
+
+    #[test]
+    fn route_owned_by_user_detects_user_takeover() {
+        // Built-in `/healthz` and `/readyz` should yield when the user
+        // ships their own — the precedence test of the dogfooding gap
+        // (jwc-shortener's hand-rolled `/healthz` had no DB check).
+        let prog = make_program_with_route("/healthz");
+        assert!(route_owned_by_user(&prog, "/healthz"));
+        assert!(!route_owned_by_user(&prog, "/readyz"));
+    }
+
+    #[test]
+    fn route_owned_by_user_handles_missing_leading_slash() {
+        // JWC route paths sometimes drop the leading slash; the lookup
+        // must compare against the normalized form so `route GET "healthz"`
+        // also overrides the built-in.
+        let prog = make_program_with_route("healthz");
+        assert!(route_owned_by_user(&prog, "/healthz"));
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok_and_json_content_type() {
+        let resp = handle_healthz().await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap()),
+            Some("application/json"),
+        );
+    }
+
+    #[tokio::test]
+    async fn readyz_falls_back_to_healthz_when_no_db_configured() {
+        // No DATABASE_URL → /readyz behaves like /healthz, no pool ping.
+        with_env("DATABASE_URL", None, || {});
+        with_env("JWC_DATABASE_URL", None, || {});
+        let prev = (
+            std::env::var("DATABASE_URL").ok(),
+            std::env::var("JWC_DATABASE_URL").ok(),
+        );
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("JWC_DATABASE_URL");
+        let resp = handle_readyz().await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        if let Some(v) = prev.0 {
+            std::env::set_var("DATABASE_URL", v);
+        }
+        if let Some(v) = prev.1 {
+            std::env::set_var("JWC_DATABASE_URL", v);
         }
     }
 

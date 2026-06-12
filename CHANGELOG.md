@@ -9,6 +9,17 @@ Phase 2 and Phase 3 follow-ups to `PRODUCTION_READINESS_PLAN.md`,
 shipped together since each is small.
 
 ### Added
+- **Built-in `/healthz` + `/readyz` endpoints with DB probe.** The
+  bundled launcher's server now registers both routes by default:
+  `/healthz` is the liveness probe (always 200 — if axum can answer,
+  the process is alive); `/readyz` round-trips a `SELECT 1` against
+  the configured pool and returns 503 with a short `{"db":"..."}`
+  body if the DB is unreachable. The user can ship their own handler
+  for either path — `route GET "healthz"` registered in the program
+  takes precedence and the built-in yields. Closes the dogfooding
+  gap where jwc-shortener's hand-rolled `/healthz` had no DB check,
+  so kubelet probes stayed green through a database outage. No
+  `DATABASE_URL` configured means `/readyz` falls back to liveness-only.
 - **String builtins `substring(s, start, len)` + `take(s, n)`** — char-based
   slicing that closes the gap surfaced by jwc-shortener (where the only
   workaround was a `split(s, "")` for-loop). UTF-8 safe, out-of-range
