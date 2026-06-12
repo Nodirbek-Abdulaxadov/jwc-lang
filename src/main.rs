@@ -6,10 +6,38 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "jwc", version, about = "JWC MVP CLI")]
+#[command(
+    name = "jwc",
+    version,
+    about = "JWC MVP CLI",
+    long_version = long_version_string()
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+/// Long-form `jwc --version` output, including target triple, build
+/// profile, rustc version, and git short hash (when the build was made
+/// from a checkout). Cargo's `--version` short form (`jwc 0.4.3`) still
+/// works; this is the verbose long form (`jwc --version --verbose` /
+/// `-V`).
+fn long_version_string() -> &'static str {
+    // `concat!` builds a single static string at compile time so we hand
+    // clap a `&'static str` without any runtime allocation. Each env!()
+    // pulls a value emitted by build.rs (or, in CARGO_PKG_VERSION's case,
+    // cargo's built-in).
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nbuild target: ",
+        env!("JWC_BUILD_TARGET"),
+        "\nbuild profile: ",
+        env!("JWC_BUILD_PROFILE"),
+        "\ngit commit:   ",
+        env!("JWC_GIT_HASH"),
+        "\n",
+        env!("JWC_RUSTC_VERSION"),
+    )
 }
 
 #[derive(Subcommand)]
