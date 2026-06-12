@@ -1,0 +1,14 @@
+// CONFORMANCE: interpreter-only
+// Coverage smoke for the small misc helpers — env(), int(), uuid().
+// env() returning the empty string on unset is the documented behaviour.
+function main() {
+    let unset = env("JWC_CONFORMANCE_UNLIKELY_VAR_NAME_FOR_TEST");
+    print(unset == "");
+    let n = int("42");
+    print(n);
+    print(int(3.7));
+    print(int(true));
+    print(int(false));
+    let id = uuid();
+    print(length(id) == 36);
+}

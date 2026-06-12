@@ -195,6 +195,7 @@ const REGISTERED_CASES: &[&str] = &[
     "case_int_overflow",
     "case_json",
     "case_literals",
+    "case_misc_helpers",
     "case_now_smoke",
     "case_raw_string",
     "case_strings",
@@ -257,6 +258,7 @@ mod cases {
     conformance_test!(case_int_overflow);
     conformance_test!(case_json);
     conformance_test!(case_literals);
+    conformance_test!(case_misc_helpers);
     conformance_test!(case_now_smoke);
     conformance_test!(case_raw_string);
     conformance_test!(case_strings);
