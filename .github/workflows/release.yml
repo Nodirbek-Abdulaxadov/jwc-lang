@@ -68,6 +68,7 @@ jobs:
           cp README.md ROADMAP.md stage/
           asset="jwc-${{ steps.ver.outputs.label }}-${{ matrix.short }}.tar.gz"
           tar -czf "$asset" -C stage .
+          sha256sum "$asset" > "$asset.sha256"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
 
       - name: Package (windows)
@@ -80,19 +81,26 @@ jobs:
           Copy-Item README.md, ROADMAP.md "$stage/"
           $asset = "jwc-${{ steps.ver.outputs.label }}-${{ matrix.short }}.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $asset -Force
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+          # `sha256sum -c` compatible format: "<hash>  <filename>"
+          Set-Content -Path "$asset.sha256" -Value "$hash  $asset" -NoNewline -Encoding ascii
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET=$asset"
 
       - name: Upload artifact (for manual runs / debugging)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.short }}
-          path: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
 
       - name: Attach to GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ASSET }}
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
           fail_on_unmatched_files: true
           generate_release_notes: true
 

@@ -55,6 +55,22 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
 curl -fL "${url}" -o "${tmp}/${asset}"
+
+# Verify the sha256 checksum when the release publishes one (releases after
+# v0.4.1 do). Older releases lack the .sha256 asset — warn and continue.
+if curl -fsSL "${url}.sha256" -o "${tmp}/${asset}.sha256" 2>/dev/null; then
+    echo "Verifying sha256 checksum..."
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "${tmp}" && sha256sum -c "${asset}.sha256")
+    elif command -v shasum >/dev/null 2>&1; then
+        (cd "${tmp}" && shasum -a 256 -c "${asset}.sha256")
+    else
+        echo "WARNING: no sha256sum/shasum on PATH — skipping verification." >&2
+    fi
+else
+    echo "WARNING: ${asset}.sha256 not published for ${version} — skipping verification." >&2
+fi
+
 tar -xzf "${tmp}/${asset}" -C "${tmp}"
 
 mkdir -p "${INSTALL_DIR}"

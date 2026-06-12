@@ -921,6 +921,23 @@ Server tuning:
 - `JWC_SERVER_METRICS` (`false` by default; set to `true` to enable)
 - `JWC_SERVER_METRICS_INTERVAL_SECS` (default `10`)
 
+## Performance
+
+JWC's native AOT output is benchmarked against rust-axum, ASP.NET Minimal
+API, go-fiber, node-fastify, and python-fastapi under equal per-request
+workloads in [http-framework-benchmark](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
+(bombardier, sequential isolation, raw results archived, fully
+reproducible). Headlines from the v0.4.x sessions:
+
+- 2nd on `/async-delay` (1000 connections), ahead of rust-axum.
+- 4th on `/json-large` (~42 KB per response, built per request).
+- Best-in-group tail latency on the light endpoints (p99 < 10 ms).
+- **0 errors across 4.48M requests.**
+
+The roadmap for closing the remaining gap to the statically-compiled stacks
+(struct monomorphization of `entity`/`class` shapes) is in
+[`PRODUCTION_READINESS_PLAN.md`](PRODUCTION_READINESS_PLAN.md).
+
 ## Install
 
 ### Linux

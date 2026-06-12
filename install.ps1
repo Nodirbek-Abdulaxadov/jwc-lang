@@ -53,6 +53,22 @@ $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "jwc-install-$([g
 try {
     $archive = Join-Path $tmp $asset
     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
+
+    # Verify the sha256 checksum when the release publishes one (releases
+    # after v0.4.1 do). Older releases lack the .sha256 asset — warn and go on.
+    try {
+        $sumFile = Join-Path $tmp "$asset.sha256"
+        Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile $sumFile
+        $expected = ((Get-Content $sumFile -Raw).Trim() -split '\s+')[0].ToLower()
+        $actual   = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+        if ($expected -ne $actual) {
+            Write-Error "Checksum mismatch for ${asset}: expected $expected, got $actual. Aborting."
+        }
+        Write-Host 'sha256 checksum OK.'
+    } catch [System.Net.WebException], [Microsoft.PowerShell.Commands.HttpResponseException] {
+        Write-Warning "$asset.sha256 not published for $Version — skipping verification."
+    }
+
     Expand-Archive -Path $archive -DestinationPath $tmp -Force
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
