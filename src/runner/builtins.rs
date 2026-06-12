@@ -965,6 +965,59 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(JsonValue::Array(pieces).to_string()))
     }
 
+    /// `substring(s, start, len)` — char-based slice. `start` is a 0-based
+    /// char index. Out-of-range `start` or non-positive `len` yields an empty
+    /// string (no panic, no exception) — matches the dogfooding need for a
+    /// safe truncation builtin that replaces the `split(s, "")` for-loop
+    /// workaround in `jwc-shortener`.
+    pub(super) async fn eval_substring_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 3 {
+            bail!("substring(s, start, len) expects exactly 3 args");
+        }
+        let s = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Null),
+            other => bail!("substring: s must be string, got {}", other.type_name()),
+        };
+        let start = match self.eval_expr(&args[1], vars).await? {
+            Value::Int(n) => n,
+            other => bail!("substring: start must be int, got {}", other.type_name()),
+        };
+        let len = match self.eval_expr(&args[2], vars).await? {
+            Value::Int(n) => n,
+            other => bail!("substring: len must be int, got {}", other.type_name()),
+        };
+        Ok(Value::Str(slice_chars(&s, start, Some(len))))
+    }
+
+    /// `take(s, n)` — first `n` chars of `s`. `n <= 0` yields an empty
+    /// string. Equivalent to `substring(s, 0, n)`, kept as its own name
+    /// because "take the first N" reads more naturally than a 3-arg slice in
+    /// auth / token / log-prefix code paths.
+    pub(super) async fn eval_take_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("take(s, n) expects exactly 2 args");
+        }
+        let s = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            Value::Null => return Ok(Value::Null),
+            other => bail!("take: s must be string, got {}", other.type_name()),
+        };
+        let n = match self.eval_expr(&args[1], vars).await? {
+            Value::Int(n) => n,
+            other => bail!("take: n must be int, got {}", other.type_name()),
+        };
+        Ok(Value::Str(slice_chars(&s, 0, Some(n))))
+    }
+
     pub(super) async fn eval_first_or_last_call(
         &mut self,
         args: &[Expr],
@@ -1240,5 +1293,21 @@ impl<'a> Vm<'a> {
         object.insert(field, value_to_json(&value));
 
         Ok(Value::Str(json_value.to_string()))
+    }
+}
+
+/// Char-based string slice shared by `substring` / `take`. Negative `start`
+/// or a non-positive `len` returns an empty string; running past the end of
+/// `s` is not an error — we just take what's there. UTF-8 safe because we
+/// iterate `chars()` instead of indexing bytes.
+fn slice_chars(s: &str, start: i64, len: Option<i64>) -> String {
+    if start < 0 {
+        return String::new();
+    }
+    let start = start as usize;
+    match len {
+        Some(n) if n <= 0 => String::new(),
+        Some(n) => s.chars().skip(start).take(n as usize).collect(),
+        None => s.chars().skip(start).collect(),
     }
 }

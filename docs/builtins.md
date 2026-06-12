@@ -19,6 +19,8 @@ run under `jwc run` but are rejected at native-build time.
 | `ends_with(s, p)` | 2 | ✅ | Suffix test. |
 | `replace(s, from, to)` | 3 | ✅ | Replace all occurrences. |
 | `split(s, sep)` | 2 | ✅ | Split into a JSON array. |
+| `substring(s, start, len)` | 3 | ✅ | Char-based slice; out-of-range clamps to `""`. |
+| `take(s, n)` | 2 | ✅ | First `n` chars — shorthand for `substring(s, 0, n)`. |
 | `first(xs)` / `last(xs)` | 1 | ✅ | First/last element of an array (or char of a string). |
 
 ## Arrays (v0.4.0)

@@ -117,6 +117,20 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         native: true,
     },
     BuiltinDef {
+        name: "substring",
+        aliases: &[],
+        min_args: 3,
+        max_args: Some(3),
+        native: true,
+    },
+    BuiltinDef {
+        name: "take",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
+    BuiltinDef {
         name: "first",
         aliases: &[],
         min_args: 1,

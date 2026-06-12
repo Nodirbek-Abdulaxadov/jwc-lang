@@ -710,6 +710,44 @@ fn jwc_b_split(s: V, sep: V) -> V {
     }
 }
 
+fn jwc_b_substring(s: V, start: V, len: V) -> V {
+    let s = match s {
+        V::Str(s) => s,
+        V::Null => return V::Null,
+        other => panic!("substring() expects a string, got {:?}", other),
+    };
+    let start = match start {
+        V::Int(n) => n,
+        other => panic!("substring() expects int start, got {:?}", other),
+    };
+    let len = match len {
+        V::Int(n) => n,
+        other => panic!("substring() expects int len, got {:?}", other),
+    };
+    if start < 0 || len <= 0 {
+        return v_str(String::new());
+    }
+    let out: String = s.chars().skip(start as usize).take(len as usize).collect();
+    v_str(out)
+}
+
+fn jwc_b_take(s: V, n: V) -> V {
+    let s = match s {
+        V::Str(s) => s,
+        V::Null => return V::Null,
+        other => panic!("take() expects a string, got {:?}", other),
+    };
+    let n = match n {
+        V::Int(n) => n,
+        other => panic!("take() expects int n, got {:?}", other),
+    };
+    if n <= 0 {
+        return v_str(String::new());
+    }
+    let out: String = s.chars().take(n as usize).collect();
+    v_str(out)
+}
+
 fn jwc_b_first(v: V) -> V {
     match v {
         V::Array(a) => {

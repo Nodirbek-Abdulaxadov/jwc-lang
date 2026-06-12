@@ -78,6 +78,30 @@ Errors:    none — null source returns null
 Tests:     case_strings
 ```
 
+### `substring`, `take`
+
+Character-based string slicing. `substring(s, start, len)` returns up to
+`len` characters starting at the 0-based char index `start`. `take(s, n)`
+is shorthand for `substring(s, 0, n)`.
+
+Out-of-range indices clamp to empty: `start < 0`, `len <= 0`, or `n <= 0`
+yields `""`. Running past the end of `s` is not an error — the trailing
+slice is returned as-is. Iteration is char-based, not byte-based, so
+UTF-8 input (Uzbek, Cyrillic, emoji) is sliced correctly. Both
+short-circuit through `null` (null input → null output) for consistency
+with the other string builtins.
+
+```
+Signature: substring(s: string, start: int, len: int) -> string
+Signature: take(s: string, n: int) -> string
+Errors:    s/start/len/n must match declared type when present (TypeError)
+Tests:     substring_slices_chars_with_clamping, take_returns_prefix_of_string,
+           substring_basic, take_basic
+```
+
+Defers to user-declared functions of the same name when one exists in
+the program — neither identifier is reserved.
+
 ### `split`
 
 Splits on a substring separator; returns the pieces as a JSON-array string

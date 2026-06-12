@@ -103,6 +103,26 @@ const CASES: &[Case] = &[
         expected_emit_contains: &["jwc_b_hmac_sha256("],
     },
     Case {
+        name: "substring_basic",
+        source: r#"
+            function main() {
+                print(substring("hello world", 6, 5));
+            }
+        "#,
+        expected_output: "world\n",
+        expected_emit_contains: &["jwc_b_substring("],
+    },
+    Case {
+        name: "take_basic",
+        source: r#"
+            function main() {
+                print(take("hello", 3));
+            }
+        "#,
+        expected_output: "hel\n",
+        expected_emit_contains: &["jwc_b_take("],
+    },
+    Case {
         name: "module_const",
         source: r#"
             const PI = 3;

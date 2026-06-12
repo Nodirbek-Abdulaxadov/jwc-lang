@@ -15,6 +15,8 @@ sidebar_position: 1
 | `ends_with(s, p)` | `bool` | |
 | `replace(s, from, to)` | `string` | global replace |
 | `split(s, sep)` | `string` | JSON-array-string of pieces |
+| `substring(s, start, len)` | `string` | char-based slice, clamps to empty out of range |
+| `take(s, n)` | `string` | first `n` chars — shorthand for `substring(s, 0, n)` |
 
 ```jwc
 let lower_email = lower(trim(req.email));

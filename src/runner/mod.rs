@@ -1801,6 +1801,20 @@ impl<'a> Vm<'a> {
                 if name.eq_ignore_ascii_case("split") {
                     return self.eval_split_call(args, vars).await;
                 }
+                // `substring` / `take` defer to a user-declared function of
+                // the same name when one exists — neither name is reserved,
+                // and pre-existing programs use `take` as a pass-through verb
+                // in their own code. Shadowing would silently break them.
+                if name.eq_ignore_ascii_case("substring")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_substring_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("take")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_take_call(args, vars).await;
+                }
                 if name.eq_ignore_ascii_case("first") {
                     return self.eval_first_or_last_call(args, vars, true).await;
                 }
@@ -4698,6 +4712,50 @@ mod tests {
         validate_program(&program).unwrap();
         let out = run_main(&program).await.unwrap().output;
         assert_eq!(out.trim(), "4");
+    }
+
+    #[tokio::test]
+    async fn substring_slices_chars_with_clamping() {
+        let src = r#"
+            function main() {
+                print(substring("hello world", 0, 5));
+                print(substring("hello world", 6, 5));
+                print(substring("salom", 100, 3));
+                print(substring("abc", -1, 2));
+                print(substring("abcdef", 2, 100));
+                print(substring("ko'p", 0, 4));
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).await.unwrap().output;
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "hello");
+        assert_eq!(lines[1], "world");
+        assert_eq!(lines[2], "");
+        assert_eq!(lines[3], "");
+        assert_eq!(lines[4], "cdef");
+        assert_eq!(lines[5], "ko'p");
+    }
+
+    #[tokio::test]
+    async fn take_returns_prefix_of_string() {
+        let src = r#"
+            function main() {
+                print(take("hello", 3));
+                print(take("hi", 10));
+                print(take("anything", 0));
+                print(take("xx", -5));
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).await.unwrap().output;
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "hel");
+        assert_eq!(lines[1], "hi");
+        assert_eq!(lines[2], "");
+        assert_eq!(lines[3], "");
     }
 
     #[tokio::test]
