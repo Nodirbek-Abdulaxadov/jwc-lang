@@ -1065,6 +1065,42 @@ mod tests {
     }
 
     #[test]
+    fn metrics_enabled_accepts_truthy_variants() {
+        let prev = std::env::var("JWC_SERVER_METRICS").ok();
+        for v in ["1", "true", "True", "TRUE", "yes", "on"] {
+            std::env::set_var("JWC_SERVER_METRICS", v);
+            assert!(parse_metrics_enabled(), "{v} should be truthy");
+        }
+        for v in ["0", "false", "no", "off", ""] {
+            std::env::set_var("JWC_SERVER_METRICS", v);
+            assert!(!parse_metrics_enabled(), "{v} should be falsy");
+        }
+        std::env::remove_var("JWC_SERVER_METRICS");
+        assert!(!parse_metrics_enabled());
+        match prev {
+            Some(v) => std::env::set_var("JWC_SERVER_METRICS", v),
+            None => std::env::remove_var("JWC_SERVER_METRICS"),
+        }
+    }
+
+    #[test]
+    fn metrics_interval_defaults_to_ten_seconds() {
+        let prev = std::env::var("JWC_SERVER_METRICS_INTERVAL_SECS").ok();
+        std::env::remove_var("JWC_SERVER_METRICS_INTERVAL_SECS");
+        assert_eq!(parse_metrics_interval_secs(), 10);
+        std::env::set_var("JWC_SERVER_METRICS_INTERVAL_SECS", "0");
+        // Zero falls back to default — interpreting "every 0s" as
+        // "tight-loop spin" would torch a CPU on a misconfig.
+        assert_eq!(parse_metrics_interval_secs(), 10);
+        std::env::set_var("JWC_SERVER_METRICS_INTERVAL_SECS", "60");
+        assert_eq!(parse_metrics_interval_secs(), 60);
+        match prev {
+            Some(v) => std::env::set_var("JWC_SERVER_METRICS_INTERVAL_SECS", v),
+            None => std::env::remove_var("JWC_SERVER_METRICS_INTERVAL_SECS"),
+        }
+    }
+
+    #[test]
     fn request_timeout_defaults_to_thirty_seconds() {
         let prev = std::env::var("JWC_REQUEST_TIMEOUT").ok();
         std::env::remove_var("JWC_REQUEST_TIMEOUT");
