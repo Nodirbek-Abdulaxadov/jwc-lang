@@ -1754,10 +1754,11 @@ fn check_where_columns(
             let col = strip_entity_prefix(&wc.field);
             if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                 bail!(
-                    "Unknown column '{}' in WHERE of {}.{}",
+                    "Unknown column '{}' in WHERE of {}.{}{}",
                     col,
                     context_var,
-                    table
+                    table,
+                    suggest_column(&col, fields),
                 );
             }
             Ok(())
@@ -1766,10 +1767,11 @@ fn check_where_columns(
             let col = strip_entity_prefix(field);
             if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
                 bail!(
-                    "Unknown column '{}' in WHERE of {}.{}",
+                    "Unknown column '{}' in WHERE of {}.{}{}",
                     col,
                     context_var,
-                    table
+                    table,
+                    suggest_column(&col, fields),
                 );
             }
             Ok(())
@@ -1854,6 +1856,60 @@ fn lookup_table_fields<'a>(
     }
     let snake = (ctx_key.to_string(), to_snake_case(table).to_lowercase());
     entity_fields_by_table.get(&snake)
+}
+
+/// Append ` — did you mean 'X'?` to the validator's `Unknown column …`
+/// errors when an existing entity field is close enough by Levenshtein
+/// distance. Returns an empty string when no candidate is close,
+/// keeping the bare error legible. Threshold of `max(2, len/3)`
+/// mirrors `runner::closest_match` so the two paths suggest under the
+/// same noise floor.
+fn suggest_column(target: &str, fields: &[String]) -> String {
+    let target_lc = target.to_ascii_lowercase();
+    let threshold = std::cmp::max(2, target_lc.chars().count() / 3);
+    let mut best: Option<(usize, &String)> = None;
+    for f in fields {
+        if f.eq_ignore_ascii_case(target) {
+            continue;
+        }
+        let dist = simple_levenshtein(&target_lc, &f.to_ascii_lowercase());
+        if dist > threshold {
+            continue;
+        }
+        match best {
+            Some((d, _)) if d <= dist => {}
+            _ => best = Some((dist, f)),
+        }
+    }
+    match best {
+        Some((_, s)) => format!(" — did you mean '{}'?", s),
+        None => String::new(),
+    }
+}
+
+/// Plain Levenshtein. Duplicated from `runner::levenshtein` to avoid a
+/// `parser → runner` dependency for one helper.
+fn simple_levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (curr[j - 1] + 1).min(prev[j] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 fn strip_entity_prefix(path: &str) -> String {
@@ -4181,6 +4237,53 @@ mod tests {
         let err = validate_program(&program).unwrap_err().to_string();
         assert!(err.contains("Duplicate function name: x"));
         assert!(!err.contains("at line "), "should not invent loc: {err}");
+    }
+
+    #[test]
+    fn unknown_column_in_where_suggests_close_match() {
+        // `email` vs `emial` typo — Levenshtein 1 ≤ threshold 2.
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                email text(80);
+            }
+            route GET "/u" {
+                let r = select User from AppDb.User where User.emial == @s first;
+                return text("ok");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Unknown column 'emial'"), "got: {err}");
+        assert!(
+            err.contains("did you mean 'email'?"),
+            "missing suggestion: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_column_without_close_match_omits_suggestion() {
+        // `xyz` is far from any real field — no suggestion should be
+        // appended so the error stays tight.
+        let src = r#"
+            dbcontext AppDb : Postgres;
+            entity User of AppDb {
+                id uuid pk;
+                email text(80);
+            }
+            route GET "/u" {
+                let r = select User from AppDb.User where User.xyz == @s first;
+                return text("ok");
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        let err = validate_program(&program).unwrap_err().to_string();
+        assert!(err.contains("Unknown column 'xyz'"), "got: {err}");
+        assert!(
+            !err.contains("did you mean"),
+            "should not invent suggestion: {err}"
+        );
     }
 
     #[test]
