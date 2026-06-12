@@ -167,26 +167,43 @@ fn parse_metrics_interval_secs() -> u64 {
 /// access line, error line, downstream service log — can be reassembled
 /// by id without timestamp guessing.
 fn log_request_line(method: &str, path: &str, status: u16, latency_us: u64, request_id: &str) {
-    if std::env::var("JWC_LOG_FORMAT")
+    let json = std::env::var("JWC_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    eprintln!(
+        "{}",
+        format_request_log_line(method, path, status, latency_us, request_id, json)
+    );
+}
+
+/// Pure formatter for the per-request access line — extracted from
+/// [`log_request_line`] so unit tests can pin the wire shape (JSON
+/// envelope keys, text-form ordering) without capturing stderr.
+fn format_request_log_line(
+    method: &str,
+    path: &str,
+    status: u16,
+    latency_us: u64,
+    request_id: &str,
+    json: bool,
+) -> String {
+    if json {
         // No escaping needed — method is an HTTP token (ASCII), status
         // is a number, latency is a number. The path can contain
         // arbitrary bytes; pass it through a minimal `"` / `\\`
         // replace which is sufficient for log shapes (control bytes
         // are already filtered by axum's URL parser).
         let path_esc = path.replace('\\', "\\\\").replace('"', "\\\"");
-        eprintln!(
+        format!(
             "{{\"level\":\"info\",\"kind\":\"access\",\"request_id\":\"{rid}\",\"method\":\"{m}\",\"path\":\"{p}\",\"status\":{s},\"latency_us\":{lat}}}",
             rid = request_id,
             m = method,
             p = path_esc,
             s = status,
             lat = latency_us,
-        );
+        )
     } else {
-        eprintln!("[JWC] {method} {path} -> {status} (rid={request_id})");
+        format!("[JWC] {method} {path} -> {status} (rid={request_id})")
     }
 }
 
@@ -1143,5 +1160,79 @@ mod tests {
             // values back to the safe default rather than honoring zero.
             assert_eq!(parse_shutdown_timeout_secs(), 5);
         });
+    }
+
+    #[test]
+    fn format_request_log_line_emits_json_envelope_when_json_true() {
+        // The log aggregator contract: every JSON key must be present
+        // and in a stable order, status / latency_us are bare numbers,
+        // and the request_id is the first key after the kind so a
+        // tailing grep `\"request_id\":\"<rid>\"` finds the whole line.
+        let line = format_request_log_line("GET", "/users", 200, 1234, "abc123", true);
+        assert!(
+            line.starts_with(
+                r#"{"level":"info","kind":"access","request_id":"abc123","method":"GET","path":"/users","status":200,"latency_us":1234}"#
+            ),
+            "envelope shape drifted; got: {line}"
+        );
+    }
+
+    #[test]
+    fn format_request_log_line_escapes_quotes_and_backslashes_in_path() {
+        // A path containing a `"` would otherwise break out of the
+        // JSON string and corrupt the line. The escape rule is
+        // backslash-first then quote so `\` itself round-trips.
+        let line = format_request_log_line("GET", "/items/\"odd\\name\"", 200, 10, "rid", true);
+        assert!(
+            line.contains(r#""path":"/items/\"odd\\name\"""#),
+            "path escape rule drifted; got: {line}"
+        );
+    }
+
+    #[test]
+    fn format_request_log_line_uses_text_form_when_json_false() {
+        let line = format_request_log_line("POST", "/login", 401, 500, "rid42", false);
+        // Order is pinned: method, path, arrow, status, then rid in
+        // parens at the tail so a tailing grep `(rid=` finds the
+        // request id even on the text path.
+        assert_eq!(line, "[JWC] POST /login -> 401 (rid=rid42)");
+    }
+
+    #[test]
+    fn traceparent_rejects_wrong_version_field_length() {
+        // The W3C spec pins the version to a 2-char hex slot. A 1-char
+        // or 3-char value is malformed; we ignore the header and fall
+        // back to local id generation rather than honour a corrupt
+        // upstream trace.
+        let trace = "0af7651916cd43dd8448eb211c80319c";
+        let one_char = format!("0-{trace}-b7ad6b7169203331-01");
+        assert!(extract_traceparent_trace_id(&one_char).is_none());
+        let three_char = format!("000-{trace}-b7ad6b7169203331-01");
+        assert!(extract_traceparent_trace_id(&three_char).is_none());
+    }
+
+    #[test]
+    fn traceparent_accepts_uppercase_hex_in_trace_id() {
+        // is_ascii_hexdigit treats A-F and a-f as hex. Some upstream
+        // emitters (eg. some Java OpenTelemetry instrumentation) use
+        // uppercase; the JWC server preserves the original casing on
+        // echo-back so distributed-trace tools that compare bytewise
+        // can correlate.
+        let trace = "0AF7651916CD43DD8448EB211C80319C";
+        let header = format!("00-{trace}-B7AD6B7169203331-01");
+        assert_eq!(
+            extract_traceparent_trace_id(&header).as_deref(),
+            Some(trace)
+        );
+    }
+
+    #[test]
+    fn traceparent_rejects_empty_string() {
+        // Some misconfigured proxies inject an empty `traceparent:`
+        // header value. The current `split('-').next()` returns
+        // Some("") for an empty input, so the version-length check
+        // catches it; this test pins that behaviour against a future
+        // refactor that swaps split() for a different parser.
+        assert!(extract_traceparent_trace_id("").is_none());
     }
 }
