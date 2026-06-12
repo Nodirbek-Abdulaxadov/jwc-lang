@@ -1,0 +1,10 @@
+42
+ada
+3
+10
+30
+true
+7
+hello
+[1,"x",true,null]
+null

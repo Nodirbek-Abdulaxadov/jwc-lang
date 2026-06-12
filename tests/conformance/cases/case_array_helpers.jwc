@@ -1,0 +1,43 @@
+// Conformance: range edge cases + push + join.
+//
+// `case_arrays` already covers the happy-path shape; this case pins
+// the corner cases that are easy to regress when touching the array
+// builtins: range boundary semantics (exclusive end, empty / single /
+// descending) and join's behaviour on multi-char and empty separators.
+function main() {
+    // range(start, end) is exclusive of end
+    let r = [];
+    for i in range(2, 6) {
+        push(r, i);
+    }
+    print(join(r, ","));
+
+    // empty range — start == end
+    let empty = [];
+    for j in range(5, 5) {
+        push(empty, j);
+    }
+    print(length(empty));
+
+    // single-element range
+    let one = [];
+    for k in range(10, 11) {
+        push(one, k);
+    }
+    print(join(one, ","));
+    print(length(one));
+
+    // descending range yields nothing (no implicit step direction)
+    let desc = [];
+    for m in range(5, 2) {
+        push(desc, m);
+    }
+    print(length(desc));
+
+    // join with multi-char separator
+    let xs = [1, 2, 3];
+    print(join(xs, " | "));
+
+    // join with empty separator — yields concatenation
+    print(join(xs, ""));
+}

@@ -183,6 +183,7 @@ fn display_for_diff(s: &str) -> String {
 /// step 2 cannot be forgotten silently.
 const REGISTERED_CASES: &[&str] = &[
     "case_arithmetic",
+    "case_array_helpers",
     "case_arrays",
     "case_bool_short_circuit",
     "case_const",
@@ -194,6 +195,7 @@ const REGISTERED_CASES: &[&str] = &[
     "case_if_else",
     "case_int_overflow",
     "case_json",
+    "case_json_helpers",
     "case_literals",
     "case_misc_helpers",
     "case_now_smoke",
@@ -247,6 +249,7 @@ mod cases {
     }
 
     conformance_test!(case_arithmetic);
+    conformance_test!(case_array_helpers);
     conformance_test!(case_arrays);
     conformance_test!(case_bool_short_circuit);
     conformance_test!(case_const);
@@ -258,6 +261,7 @@ mod cases {
     conformance_test!(case_if_else);
     conformance_test!(case_int_overflow);
     conformance_test!(case_json);
+    conformance_test!(case_json_helpers);
     conformance_test!(case_literals);
     conformance_test!(case_misc_helpers);
     conformance_test!(case_now_smoke);
