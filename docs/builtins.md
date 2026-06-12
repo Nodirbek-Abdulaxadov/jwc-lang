@@ -48,8 +48,8 @@ run under `jwc run` but are rejected at native-build time.
 | `header(name)` | 1 | ✅ | Request header (case-insensitive). |
 | `client_ip()` | 0 | ✅ | Original client IP from `JWC_REAL_IP_HEADER` (default `x-forwarded-for`). Returns the first entry in a comma-separated chain or `null`. |
 | `request_id()` | 0 | ✅ | The stable per-request id the server stamps. Returned as the `x-request-id` response header too. `null` outside server requests. |
-| `response_status()` | 0 | interpreter | HTTP status emitted by the handler. Read inside a middleware `after { ... }` block; `null` elsewhere. |
-| `response_duration_ms()` | 0 | interpreter | Milliseconds since the dispatch began. Valid in any request-scoped block — middleware (`before`/`after`), handler, errorHandler. `null` outside requests. |
+| `response_status()` | 0 | ✅ | HTTP status emitted by the handler. Read inside a middleware `after { ... }` block; `null` elsewhere (the value isn't known until the handler returns). Wire shape: `int`. |
+| `response_duration_ms()` | 0 | ✅ | Milliseconds since the dispatch began. Valid in any request-scoped block — middleware (`before`/`after`), handler, errorHandler. `null` outside requests. Monotonically non-decreasing within a single request. |
 | `body()` / `request_body()` | 0 | ✅ / interpreter | Raw request body string. |
 | `request_path()` | 0 | ✅ | Request path (query stripped). |
 | `request_method()` | 0 | ✅ | HTTP method. |
