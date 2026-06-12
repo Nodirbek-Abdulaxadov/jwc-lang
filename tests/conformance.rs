@@ -196,9 +196,11 @@ const REGISTERED_CASES: &[&str] = &[
     "case_json",
     "case_literals",
     "case_now_smoke",
+    "case_raw_string",
     "case_strings",
     "case_substring",
     "case_unary_not",
+    "case_unix_timestamp",
     "case_while",
 ];
 
@@ -256,9 +258,11 @@ mod cases {
     conformance_test!(case_json);
     conformance_test!(case_literals);
     conformance_test!(case_now_smoke);
+    conformance_test!(case_raw_string);
     conformance_test!(case_strings);
     conformance_test!(case_substring);
     conformance_test!(case_unary_not);
+    conformance_test!(case_unix_timestamp);
     conformance_test!(case_while);
 }
 

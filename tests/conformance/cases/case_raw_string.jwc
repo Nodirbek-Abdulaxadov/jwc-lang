@@ -1,0 +1,11 @@
+// Conformance: raw string literal `r"..."`.
+// Backslashes are passed through verbatim — useful for regex patterns
+// where double-escaping would otherwise obscure the intent.
+function main() {
+    let pat = r"\d+";
+    print(pat);
+    let path = r"C:\Users\me";
+    print(path);
+    let empty = r"";
+    print(empty);
+}
