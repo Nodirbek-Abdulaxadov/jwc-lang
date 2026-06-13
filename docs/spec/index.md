@@ -17,6 +17,7 @@ where the spec is silent — see the precedence note in
 | [`visibility.md`](visibility.md) | `public` / `private` declarations, the cross-namespace rule, `E021`, and the invariant the AOT path trusts. |
 | [`threat-model.md`](threat-model.md) | Runtime security surfaces: path traversal, header injection, SSRF allowlist, JWT `exp`, SQL interpolation audit, secrets redaction, boot-time config validation. |
 | [`aot-scope.md`](aot-scope.md) | What `jwc build --native` lowers cleanly today, what panics (use `jwc run`), and what the native mirror could close next. |
+| [`ecosystem.md`](ecosystem.md) | **draft** — architectural split between core-tier hot-path infra (Redis, MySQL, Kafka, ...) and pure-JWC registry packages (S3, Stripe, OpenAI, ...). Implementation roadmap toward 1.0. |
 | [`builtins.md`](builtins.md) | Per-builtin contract: signature, error modes, tests. |
 | [`grammar.ebnf`](grammar.ebnf) | Concrete syntax — token grammar + production rules in EBNF. |
 | [`README.md`](README.md) | How the spec relates to the conformance suite, precedence rules, contributor checklist. |
