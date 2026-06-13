@@ -189,6 +189,20 @@ enum Command {
     /// Reads `~/.jwc/credentials.json` (set via `jwc login`). Picks the
     /// version from `pkgVersion` (preferred) or `version` in the manifest.
     Publish,
+    /// Run the deprecation codemod registry against `.jwc` sources.
+    ///
+    /// At v0.4.7 the registry is empty — nothing has been removed yet,
+    /// so the command reports "no rules" and exits clean. Future
+    /// versions ship rules (see `DEPRECATION.md`) that rewrite legacy
+    /// syntax / flags as they're retired. `--dry-run` prints the diff
+    /// without writing.
+    Upgrade {
+        /// Files or directories to walk. Defaults to the current project root.
+        paths: Vec<PathBuf>,
+        /// Print what would change without writing.
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        dry_run: bool,
+    },
     /// Generate `openapi.json` (OpenAPI 3.1) from the project's routes,
     /// classes, and entities. Drop the file alongside your repo or pipe
     /// to stdout for CI tooling.
@@ -229,21 +243,27 @@ enum Command {
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         watch: bool,
     },
-    /// Normalise whitespace in `.jwc` source files.
+    /// Normalise and canonicalise `.jwc` source files.
     ///
-    /// v1 is a line-based formatter (tabs → 4 spaces, strip trailing
-    /// whitespace, collapse runs of 3+ blank lines, single trailing
-    /// newline). A token-stream-aware AST → source renderer is tracked in
-    /// ROADMAP Phase 3.3.
+    /// The formatter has two tiers: an AST round-trip renderer (used when
+    /// the source is comment-free and parses cleanly) that emits canonical
+    /// output, and a line-based normaliser (tabs → 4 spaces, strip
+    /// trailing whitespace, collapse runs of 3+ blank lines, single
+    /// trailing newline) used when comments are present or parsing fails.
+    /// Both tiers are idempotent.
     Fmt {
-        /// File or directory to format. Defaults to the current directory;
-        /// directories are walked recursively, skipping `.jwc-build`,
-        /// `target`, `node_modules`, and `.git`.
-        path: Option<PathBuf>,
+        /// One or more files or directories to format. Defaults to the
+        /// current directory; directories are walked recursively, skipping
+        /// `.jwc-build`, `target`, `node_modules`, and `.git`.
+        paths: Vec<PathBuf>,
         /// Do not write changes — exit non-zero if any file would be
         /// rewritten. Suitable for CI.
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         check: bool,
+        /// Write the formatted result to stdout instead of rewriting each
+        /// file. Ignored when `--check` is also set (check wins).
+        #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
+        stdout: bool,
     },
 }
 
@@ -460,9 +480,14 @@ fn real_main() -> Result<()> {
         }
         Command::Login { token, registry } => cmd::publish::login(&token, registry.as_deref())?,
         Command::Publish => rt.block_on(cmd::publish::publish())?,
+        Command::Upgrade { paths, dry_run } => cmd::upgrade::upgrade(paths, dry_run)?,
         Command::Swagger { stdout } => cmd::swagger::run(stdout)?,
         Command::Openapi { path, out, pretty } => cmd::openapi::run(path, out, pretty)?,
-        Command::Fmt { path, check } => cmd::fmt::run(path, check)?,
+        Command::Fmt {
+            paths,
+            check,
+            stdout,
+        } => cmd::fmt::run(paths, check, stdout)?,
         Command::Serve {
             path,
             port,

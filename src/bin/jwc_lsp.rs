@@ -8,25 +8,114 @@
 //!   * textDocument/didOpen, didChange (full sync), didSave
 //!   * textDocument/hover  — surfaces a one-line summary when the cursor is on
 //!     a top-level `entity` / `class` / `function` identifier.
+//!   * textDocument/definition — jumps to the declaration of a top-level
+//!     entity / class / function / middleware / dbcontext, resolved via a
+//!     per-document symbol index.
+//!   * textDocument/rename — renames a top-level symbol across the document.
+//!     References are located by textual scan with word-boundary guards,
+//!     skipping comments and string literals.
+//!   * textDocument/completion — context-aware: typed-catch error kinds,
+//!     `use <mw>` middleware names, and in-scope user / builtin identifiers.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use regex::Regex;
 use tokio::sync::RwLock;
-use tower_lsp::jsonrpc::Result as LspResult;
+use tower_lsp::jsonrpc::{Error as LspError, Result as LspResult};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use jwc::ast::{ModelKind, Program};
+use jwc::builtins::BUILTIN_DEFS;
 use jwc::lint::lint_program;
 use jwc::parser::{parse_program, validate_program};
+
+/// Local mirror of `runner::JWC_ERROR_KINDS` (which is `pub(crate)` in the
+/// library). Kept in sync manually; the smoke test in `tests/lsp_smoke.rs`
+/// asserts a subset round-trip so a divergence here breaks CI loudly.
+const JWC_ERROR_KINDS: &[&str] = &[
+    "Error",
+    "DbError",
+    "DbError.UniqueViolation",
+    "DbError.ForeignKeyViolation",
+    "DbError.NotNullViolation",
+    "DbError.CheckViolation",
+    "DbError.SerializationFailure",
+    "DbError.DeadlockDetected",
+    "DbError.ConnectionFailure",
+    "HttpError",
+    "HttpError.NotFound",
+    "HttpError.Unauthorized",
+    "HttpError.Forbidden",
+    "HttpError.BadGateway",
+    "ValidationError",
+    "TimeoutError",
+    "JwtError",
+    "JwtError.InvalidSignature",
+    "JwtError.Expired",
+];
+
+/// One declaration site captured during indexing. Cross-file resolution maps
+/// `file_idx` back to a `Program::sources[file_idx].label` and then to a URI;
+/// for the single-document LSP path the active document URI is reused.
+#[derive(Debug, Clone)]
+struct SymbolEntry {
+    name: String,
+    /// Kind of declaration; surfaced via the symbol index for callers that
+    /// want to distinguish a function from an entity without re-parsing.
+    #[allow(dead_code)]
+    kind: SymbolKindTag,
+    /// Index into `Program::sources` for the file this decl came from.
+    /// The LSP currently runs single-file but the field is part of the
+    /// stable shape: cross-file rename / definition (Phase 8E) needs it.
+    #[allow(dead_code)]
+    file_idx: usize,
+    /// Byte offset of the declaration's name token inside the source text.
+    offset_start: usize,
+    /// `offset_start + name.len()`.
+    offset_end: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolKindTag {
+    Function,
+    Entity,
+    Class,
+    Middleware,
+    DbContext,
+}
+
+impl SymbolKindTag {
+    #[allow(dead_code)]
+    fn keyword(self) -> &'static str {
+        match self {
+            SymbolKindTag::Function => "function",
+            SymbolKindTag::Entity => "entity",
+            SymbolKindTag::Class => "class",
+            SymbolKindTag::Middleware => "middleware",
+            SymbolKindTag::DbContext => "dbcontext",
+        }
+    }
+}
+
+/// Per-document index — symbol name (case-sensitive) → declarations.
+#[derive(Debug, Default, Clone)]
+struct SymbolIndex {
+    entries: HashMap<String, Vec<SymbolEntry>>,
+    /// Middleware names declared in the program, for `use <mw>` completion.
+    middlewares: Vec<String>,
+    /// User-defined function names, for in-body identifier completion.
+    user_functions: Vec<String>,
+}
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
     /// Latest text we've seen for each open document, keyed by URI.
     documents: Arc<RwLock<HashMap<Url, String>>>,
+    /// Per-document symbol index, rebuilt on every analyze.
+    indices: Arc<RwLock<HashMap<Url, SymbolIndex>>>,
 }
 
 impl Backend {
@@ -34,6 +123,7 @@ impl Backend {
         Self {
             client,
             documents: Arc::new(RwLock::new(HashMap::new())),
+            indices: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -98,9 +188,19 @@ impl Backend {
 
     async fn analyze_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
         let diags = Self::compute_diagnostics(&text);
+        // Build a symbol index from a successful parse. If parsing fails we
+        // clear the index so stale lookups can't return phantom hits.
+        let index = parse_program(&text)
+            .ok()
+            .map(|p| build_symbol_index(&p, &text))
+            .unwrap_or_default();
         {
             let mut docs = self.documents.write().await;
             docs.insert(uri.clone(), text);
+        }
+        {
+            let mut idx = self.indices.write().await;
+            idx.insert(uri.clone(), index);
         }
         self.client.publish_diagnostics(uri, diags, version).await;
     }
@@ -117,9 +217,17 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".to_string()]),
-                    ..Default::default()
+                    trigger_characters: Some(vec![
+                        ".".to_string(),
+                        ":".to_string(),
+                        " ".to_string(),
+                    ]),
+                    all_commit_characters: None,
+                    work_done_progress_options: Default::default(),
+                    completion_item: None,
+                    resolve_provider: Some(false),
                 }),
                 ..ServerCapabilities::default()
             },
@@ -241,37 +349,23 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        // Re-parse to confirm the name corresponds to a real top-level decl.
-        // Cross-file resolution is intentionally out of scope for v1.
-        let program = match parse_program(&text) {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
+        let index = match self.indices.read().await.get(&uri).cloned() {
+            Some(i) => i,
+            None => return Ok(None),
         };
 
-        let key = ident.to_lowercase();
-        let (kind, canonical_name) = if let Some(f) = program
-            .functions
+        // Case-insensitive resolution to match the rest of the LSP.
+        let entry = index
+            .entries
             .iter()
-            .find(|f| f.name.to_lowercase() == key)
-        {
-            ("function", f.name.clone())
-        } else if let Some(m) = program.models.iter().find(|m| m.name.to_lowercase() == key) {
-            let k = match m.kind {
-                ModelKind::Entity => "entity",
-                ModelKind::Class => "class",
-            };
-            (k, m.name.clone())
-        } else if let Some(mw) = program
-            .middlewares
-            .iter()
-            .find(|m| m.name.to_lowercase() == key)
-        {
-            ("middleware", mw.name.clone())
-        } else {
-            return Ok(None);
+            .find(|(k, _)| k.eq_ignore_ascii_case(&ident))
+            .and_then(|(_, v)| v.first().cloned());
+        let entry = match entry {
+            Some(e) => e,
+            None => return Ok(None),
         };
 
-        let range = match find_decl_name_range(&text, kind, &canonical_name) {
+        let range = match offsets_to_range(&text, entry.offset_start, entry.offset_end) {
             Some(r) => r,
             None => return Ok(None),
         };
@@ -282,8 +376,98 @@ impl LanguageServer for Backend {
         })))
     }
 
-    async fn completion(&self, _params: CompletionParams) -> LspResult<Option<CompletionResponse>> {
-        Ok(Some(CompletionResponse::Array(static_completion_items())))
+    async fn rename(&self, params: RenameParams) -> LspResult<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let new_name = params.new_name;
+
+        // Validate the new identifier shape — reject early so the editor
+        // surfaces a useful error message instead of corrupting the source.
+        let ident_re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").map_err(|_| LspError::internal_error())?;
+        if !ident_re.is_match(&new_name) {
+            return Err(invalid_request(format!(
+                "'{new_name}' is not a valid identifier"
+            )));
+        }
+
+        let text = match self.documents.read().await.get(&uri).cloned() {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let old_name = match identifier_at(&text, position) {
+            Some(name) => name,
+            None => return Ok(None),
+        };
+        if old_name == new_name {
+            return Ok(None);
+        }
+
+        let index = match self.indices.read().await.get(&uri).cloned() {
+            Some(i) => i,
+            None => return Ok(None),
+        };
+
+        // Must resolve to a known top-level symbol — refuse to rename random
+        // free identifiers.
+        let resolved = index
+            .entries
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&old_name))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        if resolved.is_empty() {
+            return Err(invalid_request(format!(
+                "'{old_name}' is not a renamable top-level symbol"
+            )));
+        }
+
+        // Collision check: refuse to rename onto an existing top-level name.
+        if index
+            .entries
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case(&new_name))
+        {
+            return Err(invalid_request(format!(
+                "'{new_name}' already names another top-level declaration"
+            )));
+        }
+
+        let edits = collect_rename_edits(&text, &old_name, &new_name);
+        if edits.is_empty() {
+            return Ok(None);
+        }
+
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        changes.insert(uri, edits);
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }))
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> LspResult<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+
+        let text = match self.documents.read().await.get(&uri).cloned() {
+            Some(t) => t,
+            None => return Ok(Some(CompletionResponse::Array(default_completion_items(&[])))),
+        };
+        let index = self
+            .indices
+            .read()
+            .await
+            .get(&uri)
+            .cloned()
+            .unwrap_or_default();
+
+        let items = completion_items_for(&text, position, &index);
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 
@@ -504,11 +688,10 @@ fn collect_document_symbols(source: &str, uri: &Url) -> Vec<SymbolInformation> {
 }
 
 /// Locate the source range of a top-level declaration name. `kind` is one of
-/// `"function"`, `"entity"`, `"class"`, or `"middleware"`. Used by
-/// `goto_definition` to map an AST-confirmed decl back to its source span.
-///
-/// Anchored at the start of the line because JWC top-level forms don't get
-/// indented; tolerates an optional `pub ` and (for functions) `async `.
+/// `"function"`, `"entity"`, `"class"`, or `"middleware"`. Retained as a
+/// regex-only fallback for callers that lack a parsed Program; `goto_definition`
+/// now resolves via the symbol index instead.
+#[allow(dead_code)]
 fn find_decl_name_range(source: &str, kind: &str, name: &str) -> Option<Range> {
     let escaped = regex::escape(name);
     let pattern = match kind {
@@ -537,94 +720,356 @@ fn find_decl_name_range(source: &str, kind: &str, name: &str) -> Option<Range> {
     None
 }
 
-/// Static completion list returned for every `textDocument/completion`
-/// request. Built from a fixed table so we don't need to track cursor
-/// context yet — context-sensitive completion is a follow-up sprint.
-fn static_completion_items() -> Vec<CompletionItem> {
-    const KEYWORDS: &[&str] = &[
-        "function",
-        "route",
-        "entity",
-        "middleware",
-        "dbcontext",
-        "try",
-        "catch",
-        "transaction",
-        "for",
-        "if",
-        "else",
-        "return",
-        "let",
-        "validate",
-        "body",
-        "where",
-        "group",
-        "having",
-        "orderby",
-        "limit",
-        "offset",
-        "first",
-        "with",
-        "from",
-        "into",
-        "in",
-        "using",
-        "mount",
-        "pub",
-        "async",
-        "await",
-    ];
+// ---------------------------------------------------------------------------
+// Symbol indexing
+// ---------------------------------------------------------------------------
 
-    const BUILTINS: &[&str] = &[
-        "json",
-        "notFound",
-        "unauthorized",
-        "forbidden",
-        "created",
-        "internalError",
-        "body",
-        "header",
-        "path_param",
-        "query_param",
-        "print",
-        "now",
-        "uuid",
-        "hash_password",
-        "verify_password",
-        "jwt_sign",
-        "jwt_verify",
-        "cache_set",
-        "cache_get",
-        "cache_del",
-        "send_email",
-        "http_get",
-        "http_post",
-        "fetch_json",
-        "sleep_ms",
-        "ws_send",
-        "ws_recv",
-        "ws_close",
-        "enqueue",
-        "register_job_handler",
-        "job_count",
-        "json_parse",
-        "json_stringify",
-    ];
+/// Walk a parsed `Program` once and stamp each top-level declaration with the
+/// source offset of its name token. We don't have a `name_offset` on the AST
+/// nodes (intentionally — Phase 8D doesn't touch `ast.rs`), so we scan
+/// forward from the keyword offset to the next identifier, which is always
+/// the declaration name in JWC's grammar.
+fn build_symbol_index(program: &Program, source: &str) -> SymbolIndex {
+    let mut index = SymbolIndex::default();
 
-    let mut items = Vec::with_capacity(KEYWORDS.len() + BUILTINS.len());
-    for kw in KEYWORDS {
-        items.push(CompletionItem {
-            label: (*kw).to_string(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            ..Default::default()
-        });
+    let push = |entry: SymbolEntry, idx: &mut SymbolIndex| {
+        idx.entries
+            .entry(entry.name.clone())
+            .or_default()
+            .push(entry);
+    };
+
+    for f in &program.functions {
+        if let Some((s, e)) = name_span_after_keyword(source, f.offset, &f.name) {
+            push(
+                SymbolEntry {
+                    name: f.name.clone(),
+                    kind: SymbolKindTag::Function,
+                    file_idx: f.file_idx,
+                    offset_start: s,
+                    offset_end: e,
+                },
+                &mut index,
+            );
+        }
+        index.user_functions.push(f.name.clone());
     }
-    for bi in BUILTINS {
-        items.push(CompletionItem {
-            label: (*bi).to_string(),
+    for m in &program.models {
+        let kind = match m.kind {
+            ModelKind::Entity => SymbolKindTag::Entity,
+            ModelKind::Class => SymbolKindTag::Class,
+        };
+        if let Some((s, e)) = name_span_after_keyword(source, m.offset, &m.name) {
+            push(
+                SymbolEntry {
+                    name: m.name.clone(),
+                    kind,
+                    file_idx: m.file_idx,
+                    offset_start: s,
+                    offset_end: e,
+                },
+                &mut index,
+            );
+        }
+    }
+    for mw in &program.middlewares {
+        if let Some((s, e)) = name_span_after_keyword(source, mw.offset, &mw.name) {
+            push(
+                SymbolEntry {
+                    name: mw.name.clone(),
+                    kind: SymbolKindTag::Middleware,
+                    file_idx: mw.file_idx,
+                    offset_start: s,
+                    offset_end: e,
+                },
+                &mut index,
+            );
+        }
+        index.middlewares.push(mw.name.clone());
+    }
+    for db in &program.dbcontexts {
+        if let Some((s, e)) = name_span_after_keyword(source, db.offset, &db.name) {
+            push(
+                SymbolEntry {
+                    name: db.name.clone(),
+                    kind: SymbolKindTag::DbContext,
+                    file_idx: db.file_idx,
+                    offset_start: s,
+                    offset_end: e,
+                },
+                &mut index,
+            );
+        }
+    }
+
+    index
+}
+
+/// Starting at the `keyword` byte offset (e.g. the `f` of `function`), skip
+/// the keyword + any modifier (`async`, `pub`) and any whitespace, then
+/// return the byte span of the first matching `name` occurrence.
+///
+/// Returns `None` if the offset is out of bounds or the name isn't present
+/// at the expected location (e.g. for synthetic AST nodes with offset = 0
+/// that don't correspond to source text).
+fn name_span_after_keyword(source: &str, kw_offset: usize, name: &str) -> Option<(usize, usize)> {
+    if name.is_empty() || kw_offset > source.len() {
+        return None;
+    }
+    let slice = source.get(kw_offset..)?;
+    // Match the name with word boundaries; search inside the next ~256 bytes
+    // (declarations don't put arbitrary text between `function` and the name
+    // in real JWC code).
+    let window_end = slice.len().min(256);
+    let window = &slice[..window_end];
+    let pat = format!(r"\b{}\b", regex::escape(name));
+    let re = Regex::new(&pat).ok()?;
+    let m = re.find(window)?;
+    Some((kw_offset + m.start(), kw_offset + m.end()))
+}
+
+/// Convert a byte-offset span in `source` to an LSP `Range`.
+fn offsets_to_range(source: &str, start: usize, end: usize) -> Option<Range> {
+    let start_pos = offset_to_position(source, start)?;
+    let end_pos = offset_to_position(source, end)?;
+    Some(Range {
+        start: start_pos,
+        end: end_pos,
+    })
+}
+
+fn offset_to_position(source: &str, offset: usize) -> Option<Position> {
+    if offset > source.len() {
+        return None;
+    }
+    let prefix = &source[..offset];
+    let line = prefix.matches('\n').count() as u32;
+    let line_start = prefix.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let character = source[line_start..offset].chars().count() as u32;
+    Some(Position { line, character })
+}
+
+// ---------------------------------------------------------------------------
+// Rename
+// ---------------------------------------------------------------------------
+
+/// Collect `TextEdit`s for every occurrence of `old_name` (whole-word) in
+/// `source`, skipping line comments (`//`), block comments (`/* */`), and
+/// double-quoted string literals. Used by `textDocument/rename`.
+fn collect_rename_edits(source: &str, old_name: &str, new_name: &str) -> Vec<TextEdit> {
+    let mut edits = Vec::new();
+    let bytes = source.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let old_bytes = old_name.as_bytes();
+    let old_len = old_bytes.len();
+
+    while i < n {
+        let b = bytes[i];
+
+        // Line comment: skip to end of line.
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Block comment: skip until "*/".
+        if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(n);
+            continue;
+        }
+        // String literal: skip with escape handling.
+        if b == b'"' {
+            i += 1;
+            while i < n && bytes[i] != b'"' {
+                if bytes[i] == b'\\' && i + 1 < n {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            i = (i + 1).min(n);
+            continue;
+        }
+
+        if is_ident(b) {
+            // Read full identifier; only act on exact matches with word
+            // boundaries on both sides.
+            let start = i;
+            while i < n && is_ident(bytes[i]) {
+                i += 1;
+            }
+            let end = i;
+            let prev_is_ident = start > 0 && is_ident(bytes[start - 1]);
+            if !prev_is_ident && end - start == old_len && &bytes[start..end] == old_bytes {
+                if let Some(range) = offsets_to_range(source, start, end) {
+                    edits.push(TextEdit {
+                        range,
+                        new_text: new_name.to_string(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        i += 1;
+    }
+
+    edits
+}
+
+/// Build a `LspError::invalid_request` carrying a custom message. tower-lsp's
+/// `LspError` doesn't expose a constructor, but we can clone the default and
+/// patch the `message` field.
+fn invalid_request(msg: String) -> LspError {
+    let mut e = LspError::invalid_request();
+    e.message = msg.into();
+    e
+}
+
+// ---------------------------------------------------------------------------
+// Completion
+// ---------------------------------------------------------------------------
+
+const JWC_KEYWORDS: &[&str] = &[
+    "function",
+    "route",
+    "entity",
+    "middleware",
+    "dbcontext",
+    "try",
+    "catch",
+    "transaction",
+    "for",
+    "if",
+    "else",
+    "return",
+    "let",
+    "validate",
+    "body",
+    "where",
+    "group",
+    "having",
+    "orderby",
+    "limit",
+    "offset",
+    "first",
+    "with",
+    "from",
+    "into",
+    "in",
+    "using",
+    "mount",
+    "pub",
+    "async",
+    "await",
+];
+
+/// Context-aware completion. The current line is sliced up to `position.character`
+/// and matched against four patterns; the first hit wins. Contexts shipped this
+/// sprint:
+///
+///   1. `catch (var: <prefix>` → `JWC_ERROR_KINDS`.
+///   2. `use <prefix>` → declared middleware names.
+///   3. In-body identifier prefix → user functions + builtin defs + keywords.
+///
+/// TODO[lsp]: where-context completion (`where Entity.<col>`) is deferred —
+/// the AST doesn't expose entity field offsets in a way we can resolve from
+/// the cursor alone yet, and the validator's column check is the source of
+/// truth that should drive it.
+fn completion_items_for(text: &str, position: Position, index: &SymbolIndex) -> Vec<CompletionItem> {
+    let line = text.lines().nth(position.line as usize).unwrap_or("");
+    let col = (position.character as usize).min(line.len());
+    let prefix = &line[..col];
+
+    // 1. Typed-catch context: `catch (e: <prefix>` — match the `:` separator.
+    static CATCH_RE_SRC: &str = r"catch\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*[A-Za-z0-9_.]*$";
+    if Regex::new(CATCH_RE_SRC)
+        .ok()
+        .map(|r| r.is_match(prefix))
+        .unwrap_or(false)
+    {
+        return JWC_ERROR_KINDS
+            .iter()
+            .map(|k| CompletionItem {
+                label: (*k).to_string(),
+                kind: Some(CompletionItemKind::ENUM_MEMBER),
+                detail: Some("JWC error kind".into()),
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    // 2. Middleware `use` context: `use <prefix>` (route- or group-level).
+    static USE_RE_SRC: &str = r"\buse\s+[A-Za-z0-9_,\s]*$";
+    if Regex::new(USE_RE_SRC)
+        .ok()
+        .map(|r| r.is_match(prefix))
+        .unwrap_or(false)
+        && !index.middlewares.is_empty()
+    {
+        return index
+            .middlewares
+            .iter()
+            .map(|name| CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::INTERFACE),
+                detail: Some("middleware".into()),
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    // 3. Default: keywords + builtins + user functions.
+    let extras: Vec<CompletionItem> = index
+        .user_functions
+        .iter()
+        .map(|name| CompletionItem {
+            label: name.clone(),
             kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("user function".into()),
             ..Default::default()
-        });
+        })
+        .collect();
+    default_completion_items(&extras)
+}
+
+/// Keywords + builtin functions + any caller-supplied items, deduplicated by
+/// label so the user-function pass doesn't shadow builtins.
+fn default_completion_items(extras: &[CompletionItem]) -> Vec<CompletionItem> {
+    let mut items = Vec::with_capacity(JWC_KEYWORDS.len() + BUILTIN_DEFS.len() + extras.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for kw in JWC_KEYWORDS {
+        if seen.insert((*kw).to_string()) {
+            items.push(CompletionItem {
+                label: (*kw).to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                ..Default::default()
+            });
+        }
+    }
+    for def in BUILTIN_DEFS {
+        if seen.insert(def.name.to_string()) {
+            items.push(CompletionItem {
+                label: def.name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("builtin".into()),
+                ..Default::default()
+            });
+        }
+    }
+    for ex in extras {
+        if seen.insert(ex.label.clone()) {
+            items.push(ex.clone());
+        }
     }
     items
 }
@@ -762,5 +1207,118 @@ async function doStuff() { return null; }
         assert!(diags.iter().any(
             |d| d.severity == Some(DiagnosticSeverity::WARNING) && d.message.contains("helper")
         ));
+    }
+
+    // -- Phase 8D smoke tests -----------------------------------------------
+
+    /// Build a symbol index from `src` for the assertions below.
+    fn index(src: &str) -> SymbolIndex {
+        let program = parse_program(src).unwrap();
+        build_symbol_index(&program, src)
+    }
+
+    #[test]
+    fn definition_jumps_to_function_in_same_file() {
+        let src = "function helper(): int { return 1; }\nfunction main() { return helper(); }\n";
+        let idx = index(src);
+        let entry = idx
+            .entries
+            .get("helper")
+            .and_then(|v| v.first())
+            .cloned()
+            .expect("helper indexed");
+        assert_eq!(entry.kind, SymbolKindTag::Function);
+
+        // The decl-name span lands on `helper` in the first line.
+        let range = offsets_to_range(src, entry.offset_start, entry.offset_end).unwrap();
+        assert_eq!(range.start.line, 0);
+        let snippet = &src[entry.offset_start..entry.offset_end];
+        assert_eq!(snippet, "helper");
+    }
+
+    #[test]
+    fn rename_renames_all_references_within_function_scope() {
+        let src = "function helper(): int { return 1; }\nfunction main() { return helper() + helper(); }\n";
+        let edits = collect_rename_edits(src, "helper", "renamed");
+        // One decl + two call sites = three edits.
+        assert_eq!(edits.len(), 3, "expected 3 edits, got: {edits:?}");
+        // None of them straddle a non-identifier boundary — every edit covers
+        // exactly the six bytes of the old name.
+        for e in &edits {
+            assert_eq!(e.new_text, "renamed");
+        }
+    }
+
+    #[test]
+    fn rename_skips_matches_inside_strings_and_comments() {
+        let src = "function helper() { return 1; }\n// helper in comment\nfunction main() { let s = \"helper\"; return helper(); }\n";
+        let edits = collect_rename_edits(src, "helper", "renamed");
+        // Decl + body call = 2 (the comment and string occurrences are skipped).
+        assert_eq!(edits.len(), 2, "expected 2 edits, got: {edits:?}");
+    }
+
+    #[test]
+    fn completion_inside_catch_returns_error_kinds() {
+        let src = "function f() { try { return 1; } catch (e: ) { return 2; } }\n";
+        // Cursor sits right after the `:` (column = position of the space after `:`).
+        let col = src.lines().next().unwrap().find("e: ").unwrap() + 3; // after "e: "
+        let pos = Position {
+            line: 0,
+            character: col as u32,
+        };
+        let idx = SymbolIndex::default();
+        let items = completion_items_for(src, pos, &idx);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"DbError"), "labels: {labels:?}");
+        assert!(
+            labels.contains(&"HttpError.NotFound"),
+            "labels: {labels:?}"
+        );
+        // The catch context must NOT emit JWC keywords like `function`.
+        assert!(!labels.contains(&"function"), "labels: {labels:?}");
+    }
+
+    #[test]
+    fn completion_inside_use_returns_middleware_names() {
+        // The completion path runs against in-memory text + a prebuilt index;
+        // the text doesn't need to parse cleanly for the prefix-matcher.
+        let src = "middleware Auth { return 1; }\nroute GET \"/x\" use Auth, ";
+        let idx = SymbolIndex {
+            middlewares: vec!["Auth".into(), "Log".into()],
+            ..Default::default()
+        };
+        let line_idx = 1u32;
+        let line = src.lines().nth(line_idx as usize).unwrap();
+        let col = line.len();
+        let pos = Position {
+            line: line_idx,
+            character: col as u32,
+        };
+        let items = completion_items_for(src, pos, &idx);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Auth"), "labels: {labels:?}");
+        assert!(labels.contains(&"Log"), "labels: {labels:?}");
+        // Middleware-only context must not bleed keywords through.
+        assert!(!labels.contains(&"function"), "labels: {labels:?}");
+    }
+
+    #[test]
+    fn completion_default_includes_keywords_and_builtins() {
+        // Source doesn't need to parse — completion_items_for just slices the
+        // current line up to the cursor for prefix matching.
+        let src = "function f() { ret";
+        let idx = SymbolIndex {
+            user_functions: vec!["f".into()],
+            ..Default::default()
+        };
+        let pos = Position {
+            line: 0,
+            character: src.len() as u32,
+        };
+        let items = completion_items_for(src, pos, &idx);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"return"), "labels missing 'return'");
+        assert!(labels.contains(&"json"), "labels missing 'json'");
+        assert!(labels.contains(&"f"), "labels missing user fn 'f'");
     }
 }

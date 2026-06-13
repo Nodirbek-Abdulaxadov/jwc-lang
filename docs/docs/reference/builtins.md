@@ -2,85 +2,193 @@
 sidebar_position: 1
 ---
 
-# Built-ins reference
+# Built-in functions
 
-Cross-cutting catalog of every built-in the runtime exposes. The
-per-topic docs under [stdlib/](../stdlib/strings.md) are still the
-primary tutorials — this page is the alphabetical reference + the few
-HTTP-server-side helpers that don't fit cleanly under stdlib.
+> **Auto-generated** from `src/builtins.rs::BUILTIN_DEFS`. To regenerate after adding
+> or editing a builtin, run:
+>
+> ```bash
+> cargo run --bin gen-builtins-doc > docs/docs/reference/builtins.md
+> ```
+>
+> CI verifies this file matches the registry via `tests/builtins_doc_sync.rs`;
+> PRs that add a builtin without regenerating the doc fail.
 
-The canonical source is
-[`src/builtins.rs`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/src/builtins.rs).
+Columns:
 
-## Request / response — the `after` triad
+- **Args** — `min..max` argument count enforced by the runtime. `*` = variadic.
+- **Native** — ✅ if `jwc build --native` accepts the call; — if interpreter-only.
+- **Aliases** — additional names the interpreter dispatches case-insensitively.
 
-These three return the per-request identity / outcome. Designed for
-the middleware response phase (`after { ... }`) but can also be read
-mid-handler.
+## Strings
 
-| Built-in | Returns | Notes |
-|---|---|---|
-| `request_id()` | `string` | Stable per-request id stamped at dispatch; same id echoes back as the `x-request-id` response header and appears in every access-log line. Works in request and response phases. |
-| `response_status()` | `int?` | The wire status the handler emitted (200, 201, 500, etc.), including any explicit `response(status, body)` call. Returns `null` outside an `after` block — the value isn't known until the handler returns. |
-| `response_duration_ms()` | `int` | Milliseconds since the dispatcher first saw the request. Works in both phases; in the request phase it's "ms so far". |
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `length` | — | 1 | ✅ |
+| `lower` | — | 1 | ✅ |
+| `upper` | — | 1 | ✅ |
+| `trim` | — | 1 | ✅ |
+| `contains` | — | 2 | ✅ |
+| `starts_with` | — | 2 | ✅ |
+| `ends_with` | — | 2 | ✅ |
+| `replace` | — | 3 | ✅ |
+| `split` | — | 2 | ✅ |
+| `substring` | — | 3 | ✅ |
+| `take` | — | 2 | ✅ |
+| `first` | — | 1 | ✅ |
+| `last` | — | 1 | ✅ |
+| `len` | — | 1 | — |
 
-See [backend/middleware](../backend/middleware.md#response-phase-after--) for the response-phase pattern.
+## JSON
 
-## Request inspection
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `json_parse` | — | 1 | ✅ |
+| `json_stringify` | — | 1 | ✅ |
+| `set_json_field` | — | 3 | — |
 
-| Built-in | Returns | Notes |
-|---|---|---|
-| `header(name)` | `string?` | Case-insensitive header lookup. |
-| `path_param(name)` | `string?` | Route placeholder value (`:id` etc.). |
-| `query_param(name)` | `string?` | `?key=value` lookup. |
-| `body()` | `any` | Parsed JSON body — coerced into the declared type when the binding is annotated. |
-| `request_path()` | `string` | The URL path (without query). |
-| `request_method()` | `string` | `GET`, `POST`, etc. |
-| `client_ip()` | `string` | Peer address, peeled through `JWC_TRUSTED_PROXIES`. See below. |
+## HTTP request
 
-### `client_ip()` and trusted proxies
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `path_param` | — | 1 | ✅ |
+| `query_param` | — | 1 | ✅ |
+| `body` | — | 0 | ✅ |
+| `header` | — | 1 | ✅ |
+| `client_ip` | — | 0 | ✅ |
+| `request_id` | — | 0 | ✅ |
+| `response_status` | — | 0 | ✅ |
+| `response_duration_ms` | — | 0 | ✅ |
+| `request_path` | — | 0 | ✅ |
+| `request_method` | — | 0 | ✅ |
+| `request_body` | — | 0 | — |
 
-`client_ip()` reads the `JWC_REAL_IP_HEADER` header (default
-`x-forwarded-for`) and walks the chain right-to-left, peeling off each
-entry while it matches an IP / prefix in `JWC_TRUSTED_PROXIES`. The
-first entry that is **not** in the trusted set wins. Empty
-`JWC_TRUSTED_PROXIES` ⇒ "trust no proxy" ⇒ the rightmost (peer) entry
-is returned, which is the safest default for a server exposed directly.
+## HTTP response
 
-Pair this with `JWC_HTTP_ALLOWLIST` (v0.4.7) on outbound requests so a
-handler can't be tricked into hitting an internal address via
-`http_get(body().url)` — see [stdlib/http](../stdlib/http.md) and
-[security/](../security/index.md).
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `json` | — | 1 | ✅ |
+| `json_unchecked` | — | 1 | ✅ |
+| `text` | — | 1 | ✅ |
+| `html` | — | 1 | ✅ |
+| `response` | `raw` | 2 | ✅ |
+| `ok` | — | 0..1 | ✅ |
+| `created` | — | 1 | ✅ |
+| `not_found` | — | 0 | ✅ |
+| `no_content` | — | 0 | ✅ |
+| `unauthorized` | — | 0 | ✅ |
+| `forbidden` | — | 0 | ✅ |
+| `internal_error` | — | 0..1 | ✅ |
+| `status_code` | — | 1..2 | ✅ |
+| `notFound` | — | 0 | ✅ |
+| `noContent` | — | 0 | ✅ |
+| `internalError` | — | 0..1 | ✅ |
+| `statusCode` | — | 1..2 | ✅ |
+| `badRequest` | — | 0..1 | ✅ |
+| `bad_request` | — | 0..1 | ✅ |
 
-## Responses
+## Database
 
-| Built-in | Returns | Notes |
-|---|---|---|
-| `json(v)` | `Response` | Serialise + send as `application/json`. Validates that string input is valid JSON. |
-| `json_unchecked(v)` | `Response` | Same as `json(v)` but skips the string-validation arm — use for performance-critical paths where you've already produced trusted JSON (e.g. a `json_stringify` round-trip or a `raw_sql` text result). |
-| `text(s)` | `Response` | `text/plain`. |
-| `html(s)` | `Response` | `text/html`. |
-| `response(status, body)` | `Response` | Explicit status + body. |
-| `ok(v)` / `created(v)` / `not_found(v)` / `bad_request(v)` / `unauthorized()` / `forbidden()` / `internalError(v)` | `Response` | Conventional status helpers. |
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `setConnectionString` | — | 0..1 | ✅ |
+| `raw_sql` | — | 1..* | ✅ |
+| `db_query` | — | 1..* | — |
+| `set_connection_string` | — | 0..1 | — |
 
-## Stdlib reference (cross-link)
+## WebSocket
 
-The per-topic stdlib pages are the tutorial home for everything below;
-this list is just a pointer.
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `ws_send` | — | 1 | ✅ |
+| `ws_recv` | — | 0 | ✅ |
+| `ws_close` | — | 0 | ✅ |
 
-- [strings](../stdlib/strings.md) — `length`, `upper`, `lower`, `trim`, `replace`, `split`, `substring`, `take`, `contains`, `startswith`, `endswith`.
-- [arrays-json](../stdlib/arrays-json.md) — `length`, `first`, `last`, `contains`, `range`, `push`, `append`, `join`, `json_parse`, `json_stringify`.
-- [http](../stdlib/http.md) — `await http_get`, `await http_post`, `await fetch_json`, `await sleep_ms` (subject to `JWC_HTTP_ALLOWLIST`).
-- [jwt-passwords](../stdlib/jwt-passwords.md) — `jwt_sign`, `jwt_verify`, `password_hash`, `password_verify`, `sha256_hex`.
-- [email](../stdlib/email.md) — `send_email`.
-- [cache](../stdlib/cache.md) — `cache_get`, `cache_put`, `cache_delete`.
-- [misc](../stdlib/misc.md) — `env`, `int`, `uuid`, `now`, `now_epoch`, `print`, `serve`, `setConnectionString`.
+## Async I/O
 
-## Verification
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `sleep_ms` | — | 1 | ✅ |
+| `http_get` | — | 1 | ✅ |
+| `fetch_json` | — | 1 | ✅ |
+| `http_post` | — | 1..2 | — |
 
-If a builtin is documented here but not in `src/builtins.rs`, the
-reference page is wrong — please open an issue. The list is generated
-by hand for now; a future doc-test will diff this page against the
-runtime registry.
+## Environment + coercion
 
-<!-- TODO[docs]: wire a build-time check that diffs this page against src/builtins.rs::BUILTINS to catch drift -->
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `env` | — | 1 | ✅ |
+| `int` | — | 1 | ✅ |
+
+## Time + identifiers
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `now` | — | 0 | ✅ |
+| `uuid` | — | 0 | ✅ |
+| `unix_timestamp` | — | 0 | — |
+
+## Cache (in-memory)
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `cache_get` | — | 1 | ✅ |
+| `cache_set` | — | 2..3 | ✅ |
+| `cache_del` | — | 1 | ✅ |
+| `cache_clear` | — | 0 | ✅ |
+
+## Arrays
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `range` | — | 1..3 | ✅ |
+| `push` | `append` | 2 | ✅ |
+| `join` | — | 2 | ✅ |
+
+## Hashing + crypto
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `sha256` | — | 1 | ✅ |
+| `sha1` | — | 1 | ✅ |
+| `md5` | — | 1 | ✅ |
+| `hmac_sha256` | — | 2 | ✅ |
+| `jwt_sign` | — | 1..2 | — |
+| `jwt_verify` | — | 1..2 | — |
+| `hash_password` | — | 1 | ✅ |
+| `verify_password` | — | 2 | ✅ |
+
+## Email
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `send_email` | — | 1..* | — |
+
+## Request context
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `dispatch` | — | 1..* | — |
+| `context` | — | 1 | — |
+| `setContext` | `set_context` | 2 | — |
+
+## Background jobs
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `register_job_handler` | — | 2 | — |
+| `enqueue` | — | 1..* | — |
+| `enqueue_urgent` | — | 1..* | — |
+| `job_count` | — | 0..* | — |
+| `dlq_count` | — | 0..* | — |
+| `dlq_drain` | — | 0..* | — |
+
+## Notes
+
+- The native AOT whitelist is the set of every `Name` + every `Alias` where
+  **Native** is ✅. Interpreter-only builtins still run under `jwc run` but are
+  rejected at `jwc build --native` time — preferred over silent miscompilation.
+- For per-builtin contract (semantics, error modes, examples), see
+  [`docs/spec/builtins.md`](../../spec/builtins.md).
+- New builtin? Edit `src/builtins.rs::BUILTIN_DEFS`, regenerate this file via
+  the command at the top, then add the runtime + AOT impls per the module docs.

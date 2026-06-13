@@ -29,4 +29,12 @@ jobs:
         run: cargo build --workspace --all-targets
 
       - name: Cargo test (no DB)
-        run: cargo test --lib --test typed_catch --test imports --test native_emit --test examples_parse
+        run: cargo test --lib --test typed_catch --test imports --test native_emit --test examples_parse --test fmt_idempotency
+
+      # First-release rollout: `jwc fmt --check` against the bundled fixture
+      # roots. `continue-on-error` keeps drift from blocking unrelated PRs
+      # while we settle the canonical output; flip to required once the
+      # corpus is fully reformatted.
+      - name: jwc fmt --check examples templates
+        continue-on-error: true
+        run: cargo run --bin jwc -- fmt --check examples templates
