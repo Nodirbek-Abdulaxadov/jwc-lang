@@ -1,27 +1,13 @@
 //! Native AOT compilation: `.jwc` → Rust source → `cargo build` → native binary.
 //!
-//! Phase 4 incremental rollout. The supported subset today:
-//!   * Any number of user-defined `function name(params...)`, including `main`.
-//!   * `route GET|POST|PUT|DELETE|PATCH "path" { ... }` — block-body routes.
-//!     Path params (`{id}`) and query params are exposed inside the body via
-//!     `path_param(name)` / `query_param(name[, default])` built-ins.
-//!   * `serve(port)` starts a dependency-free HTTP/1.0 server (std-only TCP
-//!     listener + thread-per-connection worker pool) that dispatches into the
-//!     registered routes.
-//!   * Function bodies: `let` / `Assign` / `FieldAssign`, `if` / `while` /
-//!     `for in`, `break` / `continue` / `return`, `print`.
-//!   * Expressions: literals, variable refs, `var.field`, object literals,
-//!     `new Entity()`, arithmetic / comparison / boolean operators.
-//!   * Built-in functions: `length`, `lower`, `upper`, `trim`, `contains`,
-//!     `starts_with`, `ends_with`, `replace`, `split`, `first`, `last`,
-//!     `json_parse`, `json_stringify`, `path_param`, `query_param`, `body`,
-//!     `header`, `json`, `text`, `ok`, `created`, `not_found`,
-//!     `unauthorized`, `forbidden`, `internal_error`, `status_code`.
-//!
-//! Not yet supported (clear error pointing at `jwc run` / `jwc build` without
-//! --native): dbcontext / entity / class / middleware / errorHandler / route
-//! `-> handler` form, DB / WS / job-queue built-ins, `try`/`catch`,
-//! `transaction`, `await`. These land in subsequent slices.
+//! **Scope is specified in `docs/spec/aot-scope.md`** — that file is the
+//! source of truth for what the native build supports vs. what it
+//! deliberately defers to `jwc run`. One-line summary: native AOT covers
+//! the stateless route tier (routes, helpers, value/response builders,
+//! simple `select` / `update` / `insert`, cache, sleep, http_get, jwt,
+//! hash). Stateful work — `savepoint` boundaries, the persistent
+//! Postgres-backed job queue, OTLP traces — still runs under the
+//! interpreter.
 //!
 //! Package system: namespaces, `import`, and `mount`/`group` are honoured by
 //! `flatten_namespaces` before any codegen — function calls are resolved to

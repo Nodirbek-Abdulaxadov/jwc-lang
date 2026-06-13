@@ -63,6 +63,24 @@ with write access to the project directory.
   filter, register your own handlers for those paths (the built-ins
   yield) or place a route-level deny.
 
+## Dependency hygiene
+
+`cargo audit` runs on every push to main and on every PR via
+`.github/workflows/security.yml`. The job is BLOCKING — a new
+advisory against a transitive dep fails CI until the dep is
+upgraded or the advisory is justified in `deny.toml`.
+
+The triaged ignore list lives in `deny.toml` under `[advisories].ignore`,
+each entry citing the advisory ID, the upstream dep blocking the fix,
+and the impact rationale (dev-only vs. runtime). The workflow's
+`--ignore` flags MUST stay in sync with that list. When an upstream
+patch lands, drop the ID from BOTH places in the same commit.
+
+The threat model that drives the rest of this section is in
+`docs/spec/threat-model.md` — read it before opening a PR that
+touches the HTTP server, the SQL layer, the JWT helpers, or the
+secrets-bearing log paths.
+
 ## Supply chain
 
 Each release tag triggers a CI workflow that:

@@ -234,23 +234,63 @@ the seven files; a larger one (HTTP, DB) is mostly the codegen step
 budget — 1.0 forbids them in non-test code unless the unwrap is
 provably safe and the proof is captured in the code.
 
-Practical rule for new code:
+### Audit finding (Sprint 1-5 close-out)
 
-- **Tests** (`#[cfg(test)]`, `#[test]` modules, integration suites):
-  `unwrap()` is fine — a panic is a test failure.
-- **Production code paths**: prefer `?` to propagate; when that
-  doesn't apply, use `.expect("INVARIANT: <why this can't fail>")`
-  instead of `.unwrap()`. The message is the proof obligation: if
-  you can't write it, the unwrap is unsafe and needs a real error
-  path.
-- **Recipe for unwrap conversions**: search for `.unwrap()`,
-  identify the static invariant that guarantees `Some`/`Ok`, write
-  it as the `expect()` message starting with `INVARIANT:`. Anything
-  else gets a real error return.
+The plan originally listed ~340 unwraps as the open budget. The
+actual count is ~120 distinct `.unwrap()` call sites; the inflated
+number came from sites appearing in both `mod.rs` and the matching
+`tests.rs` sub-module being counted separately. Of the 120, **119
+live inside `#[cfg(test)]` modules** (allowed by policy) and **1
+lives in production code** (now converted to `.expect(...)`). The
+post-audit production unwrap count is **0**.
 
-The 1.0 gate is `cargo clippy -- -D clippy::unwrap_used` over the
-whole tree. Until then, every unwrap → expect conversion is welcome
-as a small PR.
+### Categories
+
+Every unwrap belongs to one of three categories — pick the right
+one before reaching for `.unwrap()`:
+
+- **A — init / lazy / "just checked" patterns**: a `get()` after a
+  matching `is_some()` check, a `Mutex::new(...)` that can't fail,
+  a `OnceLock` you populated three lines above. Use
+  `.expect("INVARIANT: <reason>")`. The `INVARIANT:` prefix is the
+  proof obligation: if you can't name the invariant in one line,
+  the unwrap isn't actually safe.
+- **B — user input / parse / I/O**: anything where the failure is
+  a real runtime condition (bad JSON, missing env var, network
+  blip). Use `?` with `anyhow::Context` (`.context("parsing X")?`)
+  so the error carries the call site forward.
+- **C — Mutex poisoning**: a poisoned mutex is a panic in another
+  thread, not recoverable in the current one. Use
+  `.expect("Mutex poisoned: <name>")` — the prefix lets the audit
+  script distinguish these from category A.
+
+### Marker conventions
+
+The audit script greps for these prefixes:
+
+- `INVARIANT: ...` — category A.
+- `Mutex poisoned: ...` — category C.
+- `// SAFETY: ... [unwrap budget exempt: <reason>]` — escape hatch
+  for the rare case the message itself doesn't fit the
+  `expect()` (e.g. expansion inside a macro). Reserve for cases
+  where A/B/C genuinely don't apply.
+
+### Lint roadmap
+
+- **Today**: `[lints.clippy] unwrap_used = "allow"`, `expect_used =
+  "allow"` workspace-wide. Production count is 0, but the lint
+  stays `allow` because test code legitimately uses both and we
+  haven't yet drawn the per-module cfg boundary.
+- **Next**: per-module
+  `#![cfg_attr(not(test), warn(clippy::unwrap_used))]` on every
+  `src/*.rs` and `src/**/mod.rs`. This warns in production paths
+  while leaving `#[cfg(test)]` modules untouched.
+- **1.0 gate**: per-module `deny(clippy::unwrap_used)` for
+  non-test code, `allow` for tests. The CI check becomes
+  `cargo clippy --lib -- -D clippy::unwrap_used`.
+
+Every unwrap → expect conversion is still welcome as a small PR;
+the audit script counts down from 119 (test) + 0 (prod).
 
 ## License and Code of Conduct
 

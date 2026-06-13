@@ -64,8 +64,10 @@ use util::{closest_match, levenshtein};
 /// parent kind (`DbError`) catches every subtype (`DbError.*`).
 ///
 /// Curation notes:
-/// - JWT.Expired is intentionally absent — the built-in `verify_hs256` does
-///   not check the `exp` claim, so we cannot reliably detect expiry.
+/// - `JwtError.Expired` lands in Phase 6 alongside the actual `exp` check
+///   in `jwt::verify_hs256` (Sprint 3A originally deferred this). Tokens
+///   without an `exp` claim still verify clean; only tokens whose `exp`
+///   is in the past surface this kind.
 /// - `HttpError.BadGateway` rolls up 502 / 503 / 504 since they share the
 ///   "upstream is unhealthy" production motivation.
 pub(crate) const JWC_ERROR_KINDS: &[&str] = &[
@@ -87,6 +89,7 @@ pub(crate) const JWC_ERROR_KINDS: &[&str] = &[
     "TimeoutError",
     "JwtError",
     "JwtError.InvalidSignature",
+    "JwtError.Expired",
 ];
 
 /// Classify an `anyhow::Error` into the most specific well-known JWC error
@@ -133,6 +136,9 @@ pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
     // the generic ValidationError catch-all so `jwt_verify: signature
     // mismatch` doesn't get mis-classified as a validation failure.
     if has(&["jwt_verify", "jwt_sign", "jwt:"]) {
+        if has(&["token expired", "'exp' claim"]) {
+            return "JwtError.Expired";
+        }
         if has(&["signature mismatch", "invalid base64", "hs256"]) {
             return "JwtError.InvalidSignature";
         }

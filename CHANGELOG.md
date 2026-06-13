@@ -3,6 +3,124 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.7] — Sprint 1-5 chala ishlar yopildi: Phase 2/6/7 close-outs
+
+Closing every remaining partial-state item from Phases 2, 6, and 7 so
+the 1.0 ship gate has nothing dangling above the line. v0.4.7 ships:
+
+**Phase 2 #11 — unwrap budget audit**
+
+The plan listed ~340 `.unwrap()` calls to convert; the actual audit found
+the inflation came from counting `tests.rs` modules + double-counting
+mod.rs+tests.rs. After this commit there is exactly **one** production
+`.unwrap()` in `src/`, converted to `.expect("INVARIANT: ...")` with a
+precise reason.
+
+- `src/runner/types.rs:168` — `.unwrap()` → `.expect("INVARIANT: ...")`.
+- `Cargo.toml` `[lints.clippy]` comment block rewritten: the right flip
+  is per-module `#![cfg_attr(not(test), warn(clippy::unwrap_used))]`,
+  not a global `warn`. Both lints stay `allow` with a documented
+  TODO[unwrap-budget] for the per-module pass.
+- `CONTRIBUTING.md` extended: three categories (A INVARIANT / B Result?
+  / C Mutex), marker conventions, lint roadmap.
+
+**Phase 6 — Security program close-out**
+
+A. cargo audit blocking flip:
+
+- Bumped `tokio-postgres = "0.7.18"` (from 0.7.16) — closes
+  RUSTSEC-2026-0178 / -0179 / -0180.
+- `.github/workflows/security.yml` confirmed blocking (no
+  continue-on-error). Ignore list reviewed; remaining 8 IDs justified.
+- `SECURITY.md` gains "Dependency hygiene" section pointing at the new
+  threat-model doc.
+
+B. Threat-model pass — `docs/spec/threat-model.md` (new):
+
+- **Path traversal in `{param}` capture** — `match_route_pattern`
+  rejects `..`, `.`, `/`, `\`, NUL via new `is_traversal_segment`
+  helper. +4 regression tests.
+- **Header injection** — interpreter path was already safe via
+  `axum::HeaderValue::parse()`. Native AOT now also rejects
+  `\r`/`\n`/NUL in header values (was only checking names).
+- **SSRF allowlist** — new `JWC_HTTP_ALLOWLIST` env var (CSV hosts);
+  empty/unset = no restriction (backwards compat). Helper
+  `check_url_allowlisted` wired into `http_get`/`http_post`/`fetch_json`
+  in the interpreter AND `jwc_check_url_allowlisted` in native AOT.
+  Registered in `src/config.rs::REGISTRY`. +3 tests.
+- **JWT `exp` enforcement** — `jwt::verify_hs256` now checks `exp`
+  after signature verify. Absent → accept (don't break old tokens);
+  past → reject with `"token expired"`. Closes the Sprint 3A
+  `JwtError.Expired` deferral; classifier branch added; the kind sits
+  in `JWC_ERROR_KINDS`. +3 tests.
+- **SQL interpolation audit** — clean: every `format!`-built SQL site
+  uses compiler-resolved table/column names; user values flow through
+  `$N` placeholders + `boxed_params`. Documented with file:line
+  citations.
+
+C. Secrets redaction:
+
+- `src/engine.rs::scrub_database_url` masks `://user:password@` →
+  `://user:***@`; called wherever connection-string strings flow into
+  error context. +4 tests.
+- `src/error_report.rs::scrub_secrets` is the last-pass scrubber for
+  the CLI error printer + runtime error logs. Strips
+  `scheme://user:password@` AND `password=...` (stops at
+  `&`/whitespace/quote). Wired into `print_cli_error`,
+  `log_runtime_error_text`, `log_runtime_error_json`, `to_single_line`.
+  +3 tests including `database_url_with_password_redacted_in_connection_error`
+  and `smtp_password_not_leaked_in_error_chain`.
+
+**Phase 7 — Performance with receipts (partial)**
+
+A. Bench DB tier added to `bench` repo (`_my/jwc-app`):
+
+- `entity World of BenchDb` (`@id int`, `randomNumber int`).
+- Migration `1781373067_init-bench.{up,down}.sql` — `world` table
+  + 10,000-row seed via `generate_series` with `ON CONFLICT DO NOTHING`
+  (idempotent).
+- Three new TechEmpower-shape routes:
+  * `GET /db` — single random SELECT.
+  * `GET /queries?queries=N` — N selects, N clamped 1..500.
+  * `GET /updates?queries=N` — N update+select pairs.
+- `bench/.dist/bench.sh` + `bench.ps1` extended with the three new
+  endpoints at `c=64 d=15s`; URL builder appends `?queries=20`.
+- `bench/.dist/setup-linux.sh` gains an idempotent `psql` seed block
+  guarded by `JWC_BENCH_SKIP_DB` + `DATABASE_URL` presence.
+
+B. README "Performance" section (`jwc-lang/README.md`):
+
+Top-of-file 3-bullet headline + bench-repo link. The strongest
+positioning asset the project has is now visible above the fold.
+
+C. AOT scope contract (`docs/spec/aot-scope.md` + native_build header):
+
+Explicitly scopes 1.0 native AOT as the **stateless route tier**.
+Documents: what works end-to-end on `--native` (stateless routes,
+V::Record, response helpers, simple select/update/insert, cache,
+sleep_ms, http_get, JWT, hashing), what panics in the native build
+(`savepoint`, the Postgres queue worker loop), what falls back to
+`jwc run` (long-running queue workers, mid-tx savepoints, OTLP traces).
+`src/native_build.rs:30` header comment updated to point at the new doc.
+
+**Error kinds catalog:**
+
+- `JwtError.Expired` lands (closes Sprint 3A deferral).
+
+**Env vars added:**
+
+- `JWC_HTTP_ALLOWLIST` (CSV hosts; empty = no restriction).
+
+Tests: 324 lib (was 306, +18 across security + redaction + path
+traversal + SSRF + JWT exp), 8 jwc-runtime, 35 conformance,
+3 native_parity, 21 imports, 1 chaos (ignored), 1 lib ignored.
+Builds clean default + `--features otlp`.
+
+Sprint 1-5 + every chala ish closed. Phase 6 done; Phase 7 partially
+(bench DB tier + scope docs + README — Linux session execution +
+GitHub Actions regression gate + 72h soak run remain as ops-side
+work).
+
 ## [0.4.6] — Sprints 2–5: code health + Phase 3/4/5 [1.0-blocker] close-outs
 
 The big Sprint 1-5 wrap. v0.4.5 shipped the Phase 1 unified value model;

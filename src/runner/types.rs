@@ -165,7 +165,11 @@ impl<'a> Vm<'a> {
                             anyhow!("Type error: {subject} expects {model_ty}, got non-json string")
                         })?;
 
-                        self.validate_json_against_model(subject, model.unwrap(), &parsed)?;
+                        self.validate_json_against_model(
+                            subject,
+                            model.expect("INVARIANT: model.is_none() returned early above (line 157), so model is Some here"),
+                            &parsed,
+                        )?;
                         Ok(Value::Str(parsed.to_string()))
                     }
                     other => bail!(

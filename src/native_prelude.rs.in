@@ -1617,8 +1617,15 @@ async fn handle_axum_request(
     for (k, v) in extra_headers {
         // Drop pairs whose name or value contain characters axum would
         // refuse — silently, because user code rarely has the context to
-        // recover and we'd rather emit the redirect than 500.
-        if !k.is_empty() && k.bytes().all(|b| b.is_ascii() && b != b'\n' && b != b'\r') {
+        // recover and we'd rather emit the redirect than 500. CRLF in
+        // either side is the classic response-splitting vector, so we
+        // reject it explicitly here (the interpreter path goes through
+        // `axum::http::HeaderValue::parse()` which rejects the same
+        // bytes; keep the two paths shape-equivalent).
+        let name_ok = !k.is_empty()
+            && k.bytes().all(|b| b.is_ascii() && b != b'\n' && b != b'\r' && b != 0);
+        let value_ok = v.bytes().all(|b| b != b'\n' && b != b'\r' && b != 0);
+        if name_ok && value_ok {
             builder = builder.header(k, v);
         }
     }
@@ -1663,11 +1670,50 @@ fn jwc_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// Native-AOT mirror of `runner::util::check_url_allowlisted`. Reads
+/// `JWC_HTTP_ALLOWLIST` once and caches the parsed list; empty / unset
+/// means "no restriction" (backwards compatible). Returns `Ok(())` to
+/// keep the call site shape close to the interpreter helper; the
+/// caller maps `Err` to the user-facing `v_str(format!("..."))` shape.
+fn jwc_check_url_allowlisted(url: &str) -> Result<(), String> {
+    static ALLOWLIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let list = ALLOWLIST.get_or_init(|| {
+        std::env::var("JWC_HTTP_ALLOWLIST")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    if list.is_empty() {
+        return Ok(());
+    }
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("http allowlist: invalid URL '{url}': {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("http allowlist: URL '{url}' has no host"))?
+        .to_ascii_lowercase();
+    if list.iter().any(|h| h == &host) {
+        return Ok(());
+    }
+    Err(format!(
+        "http allowlist: host '{host}' is not in JWC_HTTP_ALLOWLIST (allowed: {})",
+        list.join(", ")
+    ))
+}
+
 async fn jwc_b_http_get(url: V) -> V {
     let u = match url {
         V::Str(s) => s,
         other => return v_str(format!("http_get: url must be a string, got {:?}", other)),
     };
+    if let Err(msg) = jwc_check_url_allowlisted(u.as_ref()) {
+        return v_str(msg);
+    }
     match jwc_http_client().get(u.as_ref()).send().await {
         Ok(resp) => match resp.text().await {
             Ok(body) => v_str(body),

@@ -42,6 +42,42 @@ fn read_database_url() -> Result<String> {
         .map_err(|_| anyhow!("DATABASE_URL (or JWC_DATABASE_URL) is required for db access"))
 }
 
+/// Mask the `user:password` segment of a `postgres://` (or any
+/// `scheme://`) URL so connection-string strings can be embedded in
+/// error context without leaking the password to logs / pagers /
+/// crash reports. The host, port, path and query are preserved so an
+/// operator can still see WHICH database the call was targeting.
+///
+/// Examples:
+///   `postgres://alice:hunter2@db.internal:5432/app`
+/// → `postgres://alice:***@db.internal:5432/app`
+///
+///   `postgres://localhost/app`  (unchanged — no creds present)
+/// → `postgres://localhost/app`
+pub fn scrub_database_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = scheme_end + 3;
+    let rest = &url[after_scheme..];
+    // Userinfo (`user[:password]`) ends at the first `@` BEFORE the first `/`.
+    let at_idx = match rest.find('@') {
+        Some(i) => i,
+        None => return url.to_string(),
+    };
+    let slash_idx = rest.find('/').unwrap_or(rest.len());
+    if at_idx >= slash_idx {
+        return url.to_string();
+    }
+    let userinfo = &rest[..at_idx];
+    let after_at = &rest[at_idx..];
+    let masked_userinfo = match userinfo.find(':') {
+        Some(colon) => format!("{}:***", &userinfo[..colon]),
+        None => userinfo.to_string(),
+    };
+    format!("{}{}{}", &url[..after_scheme], masked_userinfo, after_at)
+}
+
 fn parse_pool_size() -> usize {
     std::env::var("JWC_DB_POOL_SIZE")
         .ok()
@@ -769,6 +805,38 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[test]
+    fn scrub_database_url_masks_password() {
+        // Standard postgres URL — password collapses to ***, everything
+        // else is preserved so an operator can still tell which DB the
+        // call was targeting.
+        let url = "postgres://alice:hunter2@db.internal:5432/app";
+        assert_eq!(
+            scrub_database_url(url),
+            "postgres://alice:***@db.internal:5432/app"
+        );
+    }
+
+    #[test]
+    fn scrub_database_url_handles_passwordless_url() {
+        // No `:` in userinfo, no password to mask. Leave the URL alone.
+        let url = "postgres://alice@db.internal/app";
+        assert_eq!(scrub_database_url(url), url);
+    }
+
+    #[test]
+    fn scrub_database_url_passthrough_when_no_userinfo() {
+        // Bare host/path means no creds at all.
+        let url = "postgres://db.internal/app";
+        assert_eq!(scrub_database_url(url), url);
+    }
+
+    #[test]
+    fn scrub_database_url_passthrough_when_not_a_url() {
+        let s = "not a url";
+        assert_eq!(scrub_database_url(s), s);
     }
 
     #[test]

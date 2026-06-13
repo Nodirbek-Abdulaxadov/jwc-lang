@@ -1,18 +1,20 @@
 [package]
 name = "jwc"
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 # Workspace-private until a license decision lands (see deny.toml [licenses]
 # `private = { ignore = true }`). Set to false explicitly so cargo-deny v2
 # correctly classifies this crate as private and skips the unlicensed check.
 publish = false
 
-# Phase 2 unwrap budget tracking. Both lints are `allow` for now because
-# the current tree still has ~340 unwraps — flipping to `warn` (let alone
-# `deny`) would break CI on day one. The slot exists so each "convert
-# unwrap to expect / proper error" PR walks the policy from `allow` →
-# `warn` → `deny` over time. See CONTRIBUTING.md "unwrap() policy" for
-# the conversion recipe.
+# Phase 2 unwrap budget tracking. The audit (Sprint 1-5 close-out)
+# found ONE production `.unwrap()` after this commit — the remaining
+# 119 are all inside `#[cfg(test)]` modules, which we explicitly want
+# to allow. The right flip is therefore not a global `warn` (would
+# spam test code) but `cfg_attr(not(test), warn(...))` per-module.
+# TODO[unwrap-budget]: 1 prod unwrap remaining; flip to per-module
+# `#![cfg_attr(not(test), warn(clippy::unwrap_used))]` once we have
+# the test-vs-prod boundary clean.
 [lints.clippy]
 unwrap_used = "allow"
 expect_used = "allow"
@@ -58,7 +60,7 @@ md-5 = "0.10"
 tar = "0.4"
 flate2 = "1"
 tokio = { version = "1", features = ["full"] }
-tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+tokio-postgres = { version = "0.7.18", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 tower-lsp = "0.20"
 url = "2"
 

@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::{anyhow, bail, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -6,6 +8,18 @@ use serde_json::Value as JsonValue;
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Returns the current Unix time in seconds, defaulting to 0 if the
+/// system clock is impossibly set before the epoch. The `0` default
+/// means a clock skew never accidentally accepts an expired token —
+/// the only risk would be rejecting a valid one, which is the
+/// fail-closed direction.
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// Sign a JSON payload string with HS256 and return a compact JWT
 /// (`header.payload.signature`). The header is a fixed `{"alg":"HS256","typ":"JWT"}`.
@@ -65,6 +79,22 @@ pub fn verify_hs256(token: &str, secret: &str) -> Result<String> {
     // Round-trip to normalize JSON formatting.
     let parsed: JsonValue = serde_json::from_str(&payload_str)
         .map_err(|_| anyhow!("jwt_verify: payload is not valid JSON"))?;
+
+    // Enforce `exp` if present. Absent `exp` is intentionally accepted
+    // so non-expiring tokens (long-lived API keys, machine-to-machine)
+    // keep working. Present-but-past `exp` surfaces as a classifiable
+    // `JwtError.Expired` (see `runner::JWC_ERROR_KINDS`).
+    if let Some(exp_value) = parsed.get("exp") {
+        let exp_secs = exp_value
+            .as_i64()
+            .or_else(|| exp_value.as_f64().map(|f| f as i64))
+            .ok_or_else(|| anyhow!("jwt_verify: 'exp' claim must be a number"))?;
+        let now = unix_now_secs();
+        if exp_secs <= now {
+            bail!("jwt_verify: token expired (exp={exp_secs}, now={now})");
+        }
+    }
+
     Ok(parsed.to_string())
 }
 
@@ -108,5 +138,34 @@ mod tests {
         let bad = format!("{header}.{payload}.");
         let err = verify_hs256(&bad, "k").unwrap_err().to_string();
         assert!(err.contains("HS256"));
+    }
+
+    #[test]
+    fn jwt_verify_accepts_token_without_exp() {
+        // No `exp` claim — long-lived API key shape. Must verify clean.
+        let token = sign_hs256(r#"{"sub":"svc"}"#, "k").unwrap();
+        let decoded = verify_hs256(&token, "k").unwrap();
+        let decoded_json: JsonValue = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(decoded_json["sub"], "svc");
+    }
+
+    #[test]
+    fn jwt_verify_rejects_expired_token() {
+        // `exp` in the past — must reject with a classifiable message.
+        let token = sign_hs256(r#"{"sub":"u","exp":1}"#, "k").unwrap();
+        let err = verify_hs256(&token, "k").unwrap_err().to_string();
+        assert!(
+            err.contains("expired"),
+            "expected 'expired' in error message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn jwt_verify_accepts_future_exp() {
+        // `exp` far in the future — must verify clean.
+        let token = sign_hs256(r#"{"sub":"u","exp":9999999999}"#, "k").unwrap();
+        let decoded = verify_hs256(&token, "k").unwrap();
+        let decoded_json: JsonValue = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(decoded_json["sub"], "u");
     }
 }

@@ -4,6 +4,18 @@ JWC is a small backend-focused language for building API + database applications
 
 This README is a quick, practical guide.
 
+## Performance
+
+Standalone HTTP bench against `rust-axum`, `go-fiber`, `dotnet-minimal`,
+`node-fastify`, `python-fastapi` and LiteAPI on the same machine:
+
+- `/json-large` 15,378 RPS (v0.4.5, +6% over go-fiber)
+- `/async-delay` 33,014 RPS (within 5% of rust-axum)
+- `/cpu` 127 RPS (3rd, ahead of go-fiber)
+
+Full numbers, methodology, and reproduction recipe:
+<https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark>
+
 ## Quick Start
 
 1. Create a project:

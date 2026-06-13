@@ -484,6 +484,16 @@ pub(super) fn match_route_pattern(pattern: &str, path: &str) -> Option<HashMap<S
     let mut params = HashMap::new();
     for (p, v) in pattern_segments.iter().zip(path_segments.iter()) {
         if p.starts_with('{') && p.ends_with('}') && p.len() > 2 {
+            // Path-traversal hardening: `{param}` captures user-controlled
+            // text and is commonly fed straight into filesystem reads,
+            // template lookups or downstream URLs. Reject segments that
+            // are literally `..` / `.` or that smuggle a `/` or NUL byte
+            // through (a percent-encoded `%2f` would have been decoded by
+            // the URL layer before this point). The check returns `None`
+            // so dispatch falls through to a clean 404 rather than 500.
+            if is_traversal_segment(v) {
+                return None;
+            }
             let key = p.trim_start_matches('{').trim_end_matches('}').to_string();
             params.insert(key, (*v).to_string());
             continue;
@@ -495,6 +505,14 @@ pub(super) fn match_route_pattern(pattern: &str, path: &str) -> Option<HashMap<S
     }
 
     Some(params)
+}
+
+/// `true` when a path segment should be rejected as a path-traversal
+/// attempt. Bare `.` / `..` are obvious; any embedded `/`, `\` or NUL
+/// byte means an upstream layer didn't normalise the request properly
+/// and the segment should not be trusted as a `{param}` capture.
+pub(super) fn is_traversal_segment(seg: &str) -> bool {
+    seg == "." || seg == ".." || seg.contains('/') || seg.contains('\\') || seg.contains('\0')
 }
 
 /// Append `; charset=utf-8` to text-ish MIME types that don't already declare a
@@ -520,4 +538,51 @@ pub(super) fn content_type_response(body: String, mime: &str) -> Value {
         "__jwc_body__": body,
     });
     Value::Str(envelope.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_route_pattern_rejects_dot_dot_param() {
+        // `{file}` capturing `..` would let a user-controlled filename
+        // escape its directory when piped into a `read(path + "/" + p)`
+        // builtin. Hardened matcher returns `None` so dispatch falls
+        // through to a clean 404 instead of running the handler.
+        let m = match_route_pattern("/files/{file}", "/files/..");
+        assert!(m.is_none(), "expected `..` to be rejected, got {m:?}");
+    }
+
+    #[test]
+    fn match_route_pattern_rejects_single_dot_param() {
+        let m = match_route_pattern("/files/{file}", "/files/.");
+        assert!(m.is_none(), "expected `.` to be rejected, got {m:?}");
+    }
+
+    #[test]
+    fn match_route_pattern_rejects_backslash_in_param() {
+        // Windows-style path separator should not pass through either.
+        let m = match_route_pattern("/files/{file}", "/files/a\\b");
+        assert!(m.is_none(), "expected `a\\\\b` to be rejected, got {m:?}");
+    }
+
+    #[test]
+    fn match_route_pattern_accepts_normal_param() {
+        // Sanity: clean segments still capture correctly.
+        let m = match_route_pattern("/users/{id}", "/users/42").unwrap();
+        assert_eq!(m.get("id").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn is_traversal_segment_recognises_classic_patterns() {
+        assert!(is_traversal_segment("."));
+        assert!(is_traversal_segment(".."));
+        assert!(is_traversal_segment("a/b"));
+        assert!(is_traversal_segment("a\\b"));
+        assert!(is_traversal_segment("with\0nul"));
+        assert!(!is_traversal_segment("ordinary-id"));
+        assert!(!is_traversal_segment("42"));
+        assert!(!is_traversal_segment(""));
+    }
 }

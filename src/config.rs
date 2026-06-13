@@ -292,6 +292,13 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "",
         doc: "Override the per-user data dir (default platform-specific).",
     },
+    // --- Outbound HTTP / SSRF ----------------------------------------------
+    EnvVar {
+        name: "JWC_HTTP_ALLOWLIST",
+        parse_kind: ParseKind::CsvList,
+        default: "",
+        doc: "Comma-separated host allowlist for http_get/http_post/fetch_json; empty = no restriction.",
+    },
 ];
 
 /// Names whose rendered value must be masked.
