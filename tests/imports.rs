@@ -318,3 +318,104 @@ fn root_namespace_call_resolves_without_qualification() {
     let result = rt.block_on(jwc::runner::run_main(&prog)).unwrap();
     assert!(result.output.contains("42"));
 }
+
+// ─── Static visibility enforcement (Sprint 3 #16, E021) ──────────────────
+// `validate_program` must reject cross-namespace calls into `private`
+// functions BEFORE codegen. The interpreter has a runtime check
+// (`runner::Vm::check_visibility`) but the native AOT path doesn't, so a
+// silent emit would let a private boundary leak. Spec: docs/spec/visibility.md.
+
+#[test]
+fn case_private_function_referenced_across_namespace_rejected() {
+    let lib = parse_program(
+        r#"
+        namespace math;
+        private function secret(): int { return 42; }
+        public function show(): int { return secret(); }
+        "#,
+    )
+    .unwrap();
+    let app = parse_program(
+        r#"
+        import math;
+        function main() {
+            let x = math.secret();
+            print(x);
+        }
+        "#,
+    )
+    .unwrap();
+    let merged = merge_two(lib, app);
+    let err = validate_program(&merged).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("E021") && msg.to_lowercase().contains("private"),
+        "expected E021 / private rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn case_public_function_referenced_across_namespace_ok() {
+    let lib = parse_program(
+        r#"
+        namespace math;
+        public function add(a: int, b: int): int { return a + b; }
+        "#,
+    )
+    .unwrap();
+    let app = parse_program(
+        r#"
+        import math;
+        function main() {
+            let r = math.add(1, 2);
+            print(r);
+        }
+        "#,
+    )
+    .unwrap();
+    let merged = merge_two(lib, app);
+    validate_program(&merged).expect("public callee must be reachable across namespaces");
+}
+
+#[test]
+fn case_private_function_called_inside_same_namespace_ok() {
+    // Same-namespace bare-name calls into a private must still work — the
+    // visibility check fires only across namespaces.
+    let prog = parse_program(
+        r#"
+        namespace math;
+        private function helper(x: int): int { return x + 1; }
+        public function go(x: int): int { return helper(x); }
+        "#,
+    )
+    .unwrap();
+    validate_program(&prog).expect("same-namespace private call must validate");
+}
+
+#[test]
+fn case_private_route_handler_from_other_namespace_rejected() {
+    // A route lives in the root namespace; its `-> handler` points at a
+    // private function in another namespace → must be rejected.
+    let lib = parse_program(
+        r#"
+        namespace auth;
+        private function check_token() { return null; }
+        "#,
+    )
+    .unwrap();
+    let app = parse_program(
+        r#"
+        import auth;
+        route GET "/secure" -> auth.check_token;
+        function main() {}
+        "#,
+    )
+    .unwrap();
+    let merged = merge_two(lib, app);
+    let err = validate_program(&merged).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("E021") && msg.to_lowercase().contains("private"),
+        "expected E021 / private rejection at route handler, got: {msg}"
+    );
+}

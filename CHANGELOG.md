@@ -3,6 +3,135 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.6] — Sprints 2–5: code health + Phase 3/4/5 [1.0-blocker] close-outs
+
+The big Sprint 1-5 wrap. v0.4.5 shipped the Phase 1 unified value model;
+v0.4.6 closes every remaining [1.0-blocker] across Phases 2, 3, 4, and 5
+of `PRODUCTION_READINESS_PLAN.md`.
+
+**Sprint 2 — code health & diagnostics**
+
+- `src/runner/mod.rs` (5,647 lines) decomposed into 9 sub-modules:
+  `dispatch.rs`, `eval.rs`, `exec.rs`, `sql.rs`, `types.rs`, `util.rs`,
+  `validation.rs`, plus the pre-existing `builtins.rs` and a `tests.rs`
+  harness. Every production sub-file under 1,200 lines; `mod.rs` 787.
+- `src/parser.rs` (5,197 lines) decomposed into 7 sub-modules:
+  `decl.rs`, `expr.rs`, `stmt.rs`, `validate.rs`, `validate_walk.rs`,
+  plus a `tests.rs` harness. All under 1,200 lines.
+- `fuzz/` standalone crate with `lex` + `parse` libFuzzer targets +
+  `.github/workflows/fuzz.yml` nightly 8h-per-target CI.
+
+**Sprint 3 — typed catch + dotted subtypes + gradual type checker**
+
+- `JWC_ERROR_KINDS` grows from 5 to 18 entries with hierarchical
+  dot-paths (DbError.UniqueViolation, HttpError.NotFound, etc.).
+- Classifier downcasts `tokio_postgres::Error` (SQLSTATE matrix) and
+  `reqwest::Error` (HTTP status family). Parent matches all
+  children; "Error" still catches everything.
+- Parser accepts `catch (e: A.B.C)` dotted form. Validator does
+  prefix lookup (`closest_known_kind` hint on unknown root).
+- **Gradual static type checker (`src/typecheck.rs`)**:
+  E018 return type, E019 call-site arity, E020 arg type. Wired
+  via `project::load_project_from_root_with` so every loader path
+  runs it. `--no-typecheck` escape hatch on `jwc check / run / build`.
+- `docs/spec/semantics.md` covers integer overflow, float format,
+  UTF-8 strings, `==` cross-type rules.
+
+**Sprint 3 #16 — AOT visibility re-check**
+
+- New `parser::validate::check_visibility` walks every call site in
+  functions / routes / middlewares / errorHandler. Emits E021 with a
+  did-you-mean hint when a private function is referenced across
+  namespaces.
+- `src/native_build.rs` codegen header updated: "NOT re-checked here"
+  → precise reference to the validator section + `docs/spec/visibility.md`.
+
+**Sprint 4 — data layer hardening**
+
+- **Migration safety**: `_jwc_migrations` gains a `checksum text`
+  column (idempotent ALTER). `migrate up` recomputes the SHA-256 of
+  every already-applied `.up.sql` and refuses to run on a mismatch.
+  Each migration is wrapped in `BEGIN; ... COMMIT;` UNLESS the file
+  opens with `BEGIN` itself (CREATE INDEX CONCURRENTLY etc.).
+  `jwc migrate status` prints the applied / pending / sha-mismatch /
+  orphan matrix; `--dry-run` on `up` and `down`.
+- **Savepoints**: new `savepoint <name> { ... }` syntax inside
+  `transaction { }`. Engine helper issues `SAVEPOINT/RELEASE/
+  ROLLBACK TO SAVEPOINT`. Naked `transaction { transaction {} }` is
+  rejected with **E016**; savepoint outside transaction with **E017**.
+- **`json()` validates strings, `json_unchecked()` escape hatch**.
+  Interpreter: unconditional validation. Native AOT:
+  `#[cfg(debug_assertions)]` validation. The old footgun (passing
+  malformed JSON as a 200 body) is closed by default.
+- **Pool resilience**: retry-with-backoff on transient errors
+  (SQLSTATE 08* / 40001, `tokio_postgres::Error::is_closed()`,
+  `PoolError::Backend`/`Timeout`). Skipped inside `transaction {}`
+  to avoid silent re-execution. `JWC_DB_RETRY_MAX_ATTEMPTS` (3) +
+  `JWC_DB_RETRY_BACKOFF_MS` (100, exponential). New
+  `engine::ping()` wired into `/readyz`. Four `jwc_db_pool_*` gauges
+  added to `/metrics`. Chaos test recipe at
+  `tests/integration_chaos.rs` (ignored; documents the testcontainers
+  setup).
+
+**Sprint 5 — Phase 5 close-out**
+
+- **`src/config.rs`**: 29-entry registry of every JWC_* env var.
+  Boot-time `validate_or_bail()` + rendered ASCII config table
+  (gated by `JWC_PRINT_CONFIG`, default on). Redaction of
+  PASSWORD / SECRET / TOKEN / KEY / JWT / DATABASE_URL in
+  the rendered output.
+- **OTLP optional tracing** (`src/observability/otlp.rs`) behind
+  Cargo feature `otlp`. `JWC_OTLP_ENDPOINT` runtime gate;
+  `JWC_SERVICE_NAME` resource attribute. W3C
+  `TraceContextPropagator` global. `OtlpGuard` flushes the batch
+  span processor on `Drop`.
+- **Postgres-backed persistent job queue**: pluggable `JobDriver`
+  trait + `enum Driver { InMemory, Postgres }` behind a `OnceLock`.
+  In-memory stays the default. `JWC_QUEUE_DRIVER=postgres` switches
+  to the durable driver — own multi-thread runtime + mpsc bridge to
+  avoid nested-runtime panics. DDL: `_jwc_jobs` + dispatch index +
+  `_jwc_jobs_dlq`. Dequeue uses `SELECT ... FOR UPDATE SKIP LOCKED`
+  with a 30-second lease; `nack` moves to DLQ when
+  `attempts >= max_attempts`.
+- **72h soak harness** (`soak/`): `run-soak.sh` cycle driver,
+  `analyze.py` PASS/FAIL gate (RSS drift ≤ 10%, lost responses == 0),
+  `chaos-script.sh` SIGTERM sidecar, `.github/workflows/soak.yml`
+  manual-dispatch self-hosted job.
+
+**Error codes added (catalog @ `src/error_codes.rs`):**
+
+- E016 nested transaction; E017 savepoint outside transaction
+- E018 return type mismatch; E019 arity mismatch; E020 arg type
+- E021 private function called across namespace
+
+**Env vars added:**
+
+- Phase 3: (none — error code only)
+- Phase 4: `JWC_DB_RETRY_MAX_ATTEMPTS`, `JWC_DB_RETRY_BACKOFF_MS`
+- Phase 5: `JWC_PRINT_CONFIG`, `JWC_OTLP_ENDPOINT`,
+  `JWC_SERVICE_NAME`, `JWC_QUEUE_DRIVER`
+
+**CLI additions:**
+
+- `jwc check --no-typecheck`, `jwc run --no-typecheck`,
+  `jwc build --no-typecheck`
+- `jwc migrate up --dry-run`, `jwc migrate down --dry-run`
+- `jwc migrate status`
+- `jwc --version` long form now includes target / profile / rustc /
+  git hash (carried over from v0.4.4)
+
+**New Cargo feature:** `otlp` (gated opentelemetry / tracing /
+tracing-opentelemetry deps).
+
+Tests: 306 lib (was 251 at sprint 1, +55), 8 jwc-runtime,
+35 conformance (was 25), 3 native_parity (was 1), 21 imports
+(was 17, +4 visibility), 1 chaos (ignored), 1 lib ignored
+(Postgres-driver smoke). All green.
+
+Sprint 1–5 [1.0-blocker] punch list closed. Phase 6 (security
+program close-out) and Phase 7+ (perf-with-receipts, DX, release
+engineering) remain.
+
 ## [0.4.5] — Phase 1 unified value model: Value::Record everywhere
 
 Performance + architectural release. Closes the Phase 1 [1.0-blocker]

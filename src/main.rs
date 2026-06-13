@@ -45,7 +45,14 @@ enum Command {
     /// Create a new JWC project folder with jwcproj.json and main.jwc
     New { name: String },
     /// Parse and validate a .jwc schema file
-    Check { file: PathBuf },
+    Check {
+        file: PathBuf,
+        /// Skip the gradual static type checker (E018/E019/E020). Use during
+        /// the transition release if a legacy program trips a false positive
+        /// — file an issue first, this escape hatch is temporary.
+        #[arg(long = "no-typecheck", action = ArgAction::SetTrue, default_value_t = false)]
+        no_typecheck: bool,
+    },
     /// Generate PostgreSQL CREATE TABLE SQL from entities
     GenSql { file: PathBuf },
     /// Run a JWC program from a .jwc file or project directory (defaults to current project)
@@ -54,6 +61,10 @@ enum Command {
         /// Enable HTTP request logging when server starts from main()->serve()
         #[arg(long, action = ArgAction::SetTrue, default_value_t = false)]
         request_logging: bool,
+        /// Skip the gradual static type checker (E018/E019/E020). Use during
+        /// the transition release if a legacy program trips a false positive.
+        #[arg(long = "no-typecheck", action = ArgAction::SetTrue, default_value_t = false)]
+        no_typecheck: bool,
     },
     /// Validate current project sources (searches jwcproj.json upward)
     Test {
@@ -109,6 +120,10 @@ enum Command {
         /// default — turn this on in CI to keep dead code out of `main`.
         #[arg(long = "deny-warnings", action = ArgAction::SetTrue, default_value_t = false)]
         deny_warnings: bool,
+        /// Skip the gradual static type checker (E018/E019/E020). Use during
+        /// the transition release if a legacy program trips a false positive.
+        #[arg(long = "no-typecheck", action = ArgAction::SetTrue, default_value_t = false)]
+        no_typecheck: bool,
     },
     /// Manage SQL migrations for Postgres
     Migrate {
@@ -303,12 +318,13 @@ fn real_main() -> Result<()> {
 
     match cli.command {
         Command::New { name } => cmd::check::new_project(&PathBuf::from(name))?,
-        Command::Check { file } => cmd::check::check(&file)?,
+        Command::Check { file, no_typecheck } => cmd::check::check(&file, !no_typecheck)?,
         Command::GenSql { file } => cmd::check::gen_sql(&file)?,
         Command::Run {
             path,
             request_logging,
-        } => cmd::run::run(&rt, path, request_logging)?,
+            no_typecheck,
+        } => cmd::run::run(&rt, path, request_logging, !no_typecheck)?,
         Command::Test { deny_warnings } => cmd::check::test(deny_warnings)?,
         Command::Lint {
             json,
@@ -329,7 +345,15 @@ fn real_main() -> Result<()> {
             emit_rust_source,
             target,
             deny_warnings,
-        } => cmd::build::run(release, native, emit_rust_source, target, deny_warnings)?,
+            no_typecheck,
+        } => cmd::build::run(
+            release,
+            native,
+            emit_rust_source,
+            target,
+            deny_warnings,
+            !no_typecheck,
+        )?,
         Command::Migrate { command } => {
             let cwd = std::env::current_dir()?;
             let root = project::find_project_root(&cwd)?;

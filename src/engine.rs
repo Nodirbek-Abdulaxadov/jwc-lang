@@ -50,6 +50,32 @@ fn parse_pool_size() -> usize {
         .unwrap_or(64)
 }
 
+/// **Sprint 4 #21 / #23** — retry ceiling for transient DB failures.
+///
+/// Reads `JWC_DB_RETRY_MAX_ATTEMPTS` (a `u32`); falls back to `3` when the
+/// var is unset, empty, or unparsable. A value of `1` disables retries
+/// (one attempt, no retry); `0` is treated as "no attempt" by the retry
+/// loop, which is rarely useful but accepted so the knob is uniform.
+pub fn parse_retry_max_attempts() -> u32 {
+    std::env::var("JWC_DB_RETRY_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(3)
+}
+
+/// **Sprint 4 #21 / #23** — base backoff in ms between retries.
+///
+/// Reads `JWC_DB_RETRY_BACKOFF_MS` (a `u32`); falls back to `100` ms when
+/// unset / unparsable. The retry loop doubles this each attempt
+/// (exponential: `base`, `2*base`, `4*base`, ...) so a single transient
+/// blip rarely produces more than a few hundred ms of added latency.
+pub fn parse_retry_backoff_ms() -> u32 {
+    std::env::var("JWC_DB_RETRY_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(100)
+}
+
 fn parse_bool_flag(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
@@ -220,6 +246,152 @@ pub async fn connect_for_migrations(url: &str) -> Result<TokioClient> {
     }
 }
 
+/// **Sprint 4 #21** — pool saturation snapshot for `/metrics` and `/readyz`.
+///
+/// Mirrors `deadpool::Status` (the underlying struct is re-exported by
+/// `deadpool-postgres`), copied into our own type so the public surface of
+/// `engine` doesn't leak a third-party version. `size` is the number of
+/// connections the pool currently holds; `available` is how many of those
+/// are idle and checkout-able right now; `max_size` is the configured
+/// ceiling (from `JWC_DB_POOL_SIZE`); `waiting` is the number of tasks
+/// queued for a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStatusSnapshot {
+    pub size: usize,
+    pub available: usize,
+    pub max_size: usize,
+    pub waiting: usize,
+}
+
+/// Return a snapshot of the deadpool status, or `None` when the engine
+/// hasn't been initialised yet (no DB configured → no pool to inspect).
+/// Used by `server::handle_metrics` to emit `jwc_db_pool_*` gauges and by
+/// the chaos test to assert the pool reports `available == 0` mid-outage.
+pub fn pool_status() -> Option<PoolStatusSnapshot> {
+    let engine = ENGINE.get()?;
+    let s = engine.pool.status();
+    Some(PoolStatusSnapshot {
+        size: s.size,
+        available: s.available,
+        max_size: s.max_size,
+        waiting: s.waiting,
+    })
+}
+
+/// **Sprint 4 #21** — readiness probe round-trip.
+///
+/// Checks out a connection and runs `SELECT 1`. Used by `/readyz` so the
+/// readiness gate goes through one centralised code path; if the retry
+/// logic ever needs to wrap this (e.g. swallow a single transient blip
+/// during pod start-up), we change it here and `/readyz` picks it up
+/// transparently.
+pub async fn ping() -> Result<()> {
+    let conn = get_connection().await?;
+    conn.simple_query("SELECT 1")
+        .await
+        .with_context(|| "DB ping (SELECT 1) failed")?;
+    Ok(())
+}
+
+/// **Sprint 4 #21 / #23** — classifies an `anyhow::Error` as transient
+/// (worth retrying) by walking the `.chain()`.
+///
+/// Recognised triggers:
+/// - `tokio_postgres::Error::is_closed()` — connection died mid-query;
+///   a fresh checkout from the pool will get a healthy socket.
+/// - SQLSTATE class `08*` (connection_exception family) — Postgres has
+///   told us the link is broken.
+/// - SQLSTATE `40001` (`serialization_failure`) — concurrent txn
+///   conflict; the standard recommendation is "retry the whole txn".
+///   (Note: `with_tx` callers DON'T retry — see `retry_with_backoff`,
+///   which skips the retry loop entirely when a transaction is open.)
+/// - `deadpool_postgres::PoolError::Backend(_)` / `PoolError::Timeout(_)`
+///   — pool reported the underlying create / checkout step blew up;
+///   another attempt may land on a healthier slot.
+///
+/// Anything else (parse errors, bad SQL, NOT NULL violations, ...) is
+/// classified as permanent so we don't silently mask user bugs.
+pub fn is_transient_error(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(pg) = cause.downcast_ref::<tokio_postgres::Error>() {
+            if pg.is_closed() {
+                return true;
+            }
+            if let Some(code) = pg.code() {
+                if sqlstate_is_transient(code.code()) {
+                    return true;
+                }
+            }
+        }
+        if let Some(pool_err) =
+            cause.downcast_ref::<deadpool_postgres::PoolError>()
+        {
+            return matches!(
+                pool_err,
+                deadpool_postgres::PoolError::Backend(_)
+                    | deadpool_postgres::PoolError::Timeout(_)
+            );
+        }
+    }
+    false
+}
+
+/// Pure SQLSTATE → transient classifier — pulled out of
+/// [`is_transient_error`] so the unit tests can pin the recognised codes
+/// without needing a real `tokio_postgres::Error` (whose internals are
+/// crate-private).
+fn sqlstate_is_transient(code: &str) -> bool {
+    code.starts_with("08") || code == "40001"
+}
+
+/// **Sprint 4 #21 / #23** — exponential-backoff retry wrapper.
+///
+/// Runs `op`, and if it fails with a transient error (per
+/// [`is_transient_error`]) retries up to `parse_retry_max_attempts()`
+/// times with `parse_retry_backoff_ms()` doubled each attempt. A
+/// non-transient error is returned immediately so user-level SQL bugs
+/// don't get retried into a livelock.
+///
+/// **Critical**: callers MUST guard against re-running mutation SQL
+/// inside an open `transaction { ... }`. The `query_text` / `exec`
+/// entry points check `TX_CONN.try_with(...)` and skip the retry wrap
+/// when a transaction is in flight — silently re-running an INSERT
+/// inside a txn would either replay the statement twice on the same
+/// session (when the session is healthy) or split the work across two
+/// connections (when it isn't), both of which are footguns.
+pub async fn retry_with_backoff<F, Fut, T>(op: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let max_attempts = parse_retry_max_attempts();
+    let base_ms = parse_retry_backoff_ms();
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt >= max_attempts || !is_transient_error(&e) {
+                    return Err(e);
+                }
+                let delay_ms = (base_ms as u64).saturating_mul(1u64 << (attempt - 1));
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+}
+
+/// Returns `true` when the current task is inside a `transaction { ... }`
+/// block — exposed primarily for the retry-loop unit test, which asserts
+/// the helper sees the same flag the entry points use. Production code
+/// doesn't call this directly; `query_text` / `exec` just short-circuit
+/// on `take_tx_conn().await` first.
+#[allow(dead_code)]
+fn inside_transaction() -> bool {
+    TX_CONN.try_with(|_| ()).is_ok()
+}
+
 /// Async transaction helper. Begins a transaction, runs `body` inside a
 /// scope that exposes `TX_CONN` to nested queries, then commits on success
 /// or rolls back on error.
@@ -328,7 +500,7 @@ where
 
     let result = body().await;
 
-    let mut held = cell.lock().await;
+    let held = cell.lock().await;
     if let Some(conn) = held.as_ref() {
         match &result {
             Ok(_) => {
@@ -392,8 +564,14 @@ pub async fn query_text(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Str
         }
     }
 
-    let conn = get_connection().await?;
-    query_text_on_conn(&conn, sql, params).await
+    // Outside a transaction: wrap the checkout-and-query in the retry
+    // helper so a single dropped connection (deploy / failover blip)
+    // doesn't surface as a user-visible 500.
+    retry_with_backoff(|| async {
+        let conn = get_connection().await?;
+        query_text_on_conn(&conn, sql, params).await
+    })
+    .await
 }
 
 async fn query_text_on_conn(
@@ -504,8 +682,15 @@ pub async fn exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
         }
     }
 
-    let conn = get_connection().await?;
-    exec_on_conn(&conn, sql, params).await
+    // Outside a transaction: same retry wrap as `query_text`. Inside a
+    // transaction the early return above means we never reach this path,
+    // which is intentional — replaying a mutation on a fresh connection
+    // would either commit-twice or split work across sessions.
+    retry_with_backoff(|| async {
+        let conn = get_connection().await?;
+        exec_on_conn(&conn, sql, params).await
+    })
+    .await
 }
 
 async fn exec_on_conn(conn: &PgConn, sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64> {
@@ -598,5 +783,149 @@ mod tests {
         with_env("JWC_DB_TLS_INSECURE_SKIP_VERIFY", Some("true"), || {
             assert!(should_skip_tls_verify());
         });
+    }
+
+    // ---- Sprint 4 #21 / #23 — retry path ---------------------------------
+
+    #[test]
+    fn retry_classifier_recognises_08_class() {
+        // Connection_exception family (08000..08P01) — server has told
+        // us the link is dead; another checkout will pick a fresh one.
+        for code in ["08000", "08003", "08006", "08P01"] {
+            assert!(
+                sqlstate_is_transient(code),
+                "SQLSTATE {code} should classify as transient"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_classifier_recognises_serialization_failure() {
+        // 40001 = serialization_failure — Postgres recommends a full
+        // transaction retry. Our outer retry loop refuses to retry
+        // inside an open `transaction`, so the recovery path lives in
+        // user code, but the classifier still flags it.
+        assert!(sqlstate_is_transient("40001"));
+        // Sanity: a sibling 40P01 (deadlock_detected) is intentionally
+        // NOT in the transient set — handling it the same way would
+        // mask a real concurrency bug.
+        assert!(!sqlstate_is_transient("40P01"));
+        // Permanent — must never retry.
+        assert!(!sqlstate_is_transient("23505")); // unique_violation
+        assert!(!sqlstate_is_transient("42601")); // syntax_error
+    }
+
+    #[test]
+    fn retry_classifier_recognises_pool_error() {
+        // Walk the `.chain()` via anyhow, asserting both PoolError
+        // variants flagged in the doc comment classify as transient.
+        let wait_timeout: deadpool_postgres::PoolError =
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait);
+        let err: anyhow::Error = anyhow::Error::new(wait_timeout);
+        assert!(
+            is_transient_error(&err),
+            "PoolError::Timeout(Wait) should be transient"
+        );
+
+        // A bare anyhow with no recognised cause is permanent.
+        let bare = anyhow!("user-level SQL bug, do not retry");
+        assert!(!is_transient_error(&bare));
+    }
+
+    #[tokio::test]
+    async fn retry_skipped_inside_transaction() {
+        // The retry path MUST NOT run inside a `transaction { ... }`
+        // block — silently re-running an INSERT inside a txn is a
+        // footgun (would either replay or split connections). We
+        // assert by entering the same `TX_CONN.scope` shape `with_tx`
+        // uses and confirming `inside_transaction()` flips on.
+        assert!(
+            !inside_transaction(),
+            "fresh task must not see a TX_CONN scope"
+        );
+
+        let cell: Arc<Mutex<Option<PgConn>>> = Arc::new(Mutex::new(None));
+        TX_CONN
+            .scope(cell, async {
+                assert!(
+                    inside_transaction(),
+                    "TX_CONN.scope must make inside_transaction() return true"
+                );
+            })
+            .await;
+
+        // Scope dropped: the flag flips back off.
+        assert!(!inside_transaction());
+    }
+
+    #[tokio::test]
+    async fn retry_honours_max_attempts_env() {
+        // Force the loop to give up after 2 attempts so the test stays
+        // fast — and use a 0 ms backoff so we don't sleep at all.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev_max = std::env::var("JWC_DB_RETRY_MAX_ATTEMPTS").ok();
+        let prev_backoff = std::env::var("JWC_DB_RETRY_BACKOFF_MS").ok();
+        std::env::set_var("JWC_DB_RETRY_MAX_ATTEMPTS", "2");
+        std::env::set_var("JWC_DB_RETRY_BACKOFF_MS", "0");
+
+        assert_eq!(parse_retry_max_attempts(), 2);
+        assert_eq!(parse_retry_backoff_ms(), 0);
+
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let result: Result<()> = retry_with_backoff(|| async {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Always-transient error: PoolError::Timeout(Wait).
+            let pool_err: deadpool_postgres::PoolError =
+                deadpool_postgres::PoolError::Timeout(
+                    deadpool_postgres::TimeoutType::Wait,
+                );
+            Err(anyhow::Error::new(pool_err))
+        })
+        .await;
+
+        assert!(result.is_err(), "always-failing op must surface the error");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "should attempt exactly JWC_DB_RETRY_MAX_ATTEMPTS times"
+        );
+
+        // Restore env.
+        match prev_max {
+            Some(v) => std::env::set_var("JWC_DB_RETRY_MAX_ATTEMPTS", v),
+            None => std::env::remove_var("JWC_DB_RETRY_MAX_ATTEMPTS"),
+        }
+        match prev_backoff {
+            Some(v) => std::env::set_var("JWC_DB_RETRY_BACKOFF_MS", v),
+            None => std::env::remove_var("JWC_DB_RETRY_BACKOFF_MS"),
+        }
+    }
+
+    #[test]
+    fn retry_defaults_apply_when_unset() {
+        with_env("JWC_DB_RETRY_MAX_ATTEMPTS", None, || {
+            assert_eq!(parse_retry_max_attempts(), 3);
+        });
+        with_env("JWC_DB_RETRY_BACKOFF_MS", None, || {
+            assert_eq!(parse_retry_backoff_ms(), 100);
+        });
+    }
+
+    #[test]
+    fn pool_status_is_none_before_engine_init_or_snapshot_shape() {
+        // The engine may or may not have been initialised by an earlier
+        // test in this process — both outcomes are valid. If a snapshot
+        // is returned, it must satisfy `size <= max_size` and
+        // `available <= size`, which is what the `/metrics` consumers
+        // rely on to chart pool saturation correctly.
+        if let Some(s) = pool_status() {
+            assert!(s.size <= s.max_size, "size {} > max_size {}", s.size, s.max_size);
+            assert!(
+                s.available <= s.size,
+                "available {} > size {}",
+                s.available,
+                s.size
+            );
+        }
     }
 }

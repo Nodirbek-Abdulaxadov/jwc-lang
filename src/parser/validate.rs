@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Result};
 
-use crate::ast::{Expr, ModelKind, NavigationField, Program, Stmt, WhereExpr};
+use crate::ast::{Expr, FunctionDecl, ImportDecl, ModelKind, NavigationField, Program, Stmt, Visibility, WhereExpr};
 use crate::diag::SourceMap;
 
 use super::validate_walk::{
@@ -530,7 +530,382 @@ pub fn validate_program(program: &Program) -> Result<()> {
 
     validate_consts(program)?;
 
+    // Cross-namespace visibility. AOT codegen (`src/native_build.rs`) lowers
+    // every `Expr::Call` to a flat Rust call where every emitted function is
+    // crate-public — the AST `Visibility::Private` marker has no Rust-level
+    // analogue. So if a `private function helper()` declared in namespace A is
+    // referenced from namespace B, the native build would silently link
+    // anyway. `validate_program` is the single static gate for that rule —
+    // both the interpreter (`runner::check_visibility`) and the AOT path
+    // depend on this pass having rejected the program already.
+    //
+    // See `docs/spec/visibility.md` for the full surface description.
+    check_visibility(program)?;
+
     Ok(())
+}
+
+/// Build the function lookup table the static visibility pass uses:
+/// FQN (lowercased, dot-joined) → reference to the decl. Same key shape as
+/// `runner::fqn_key` so the static resolver can mirror runtime resolution
+/// exactly.
+fn build_fn_table(program: &Program) -> HashMap<String, &FunctionDecl> {
+    let mut out: HashMap<String, &FunctionDecl> = HashMap::new();
+    for f in &program.functions {
+        let key = ns_fqn(&f.namespace, &f.name);
+        out.insert(key, f);
+    }
+    out
+}
+
+/// Group import declarations by the namespace that contains them, mirroring
+/// `Vm::imports_by_namespace`. The key is the dot-joined lowercased namespace
+/// (empty string = root); the value is the list of `using <path>;` entries
+/// declared in any file that lives in that namespace.
+fn build_imports_by_ns(program: &Program) -> HashMap<String, Vec<&ImportDecl>> {
+    let mut out: HashMap<String, Vec<&ImportDecl>> = HashMap::new();
+    for imp in &program.imports {
+        let ns_key = imp
+            .in_namespace
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        out.entry(ns_key).or_default().push(imp);
+    }
+    out
+}
+
+/// Static analogue of `Vm::resolve_function` (src/runner/mod.rs). Returns the
+/// callee a runtime resolver would pick for `name` when called from
+/// `caller_ns`. Walks the same priority chain:
+///   1. exact FQN match in the function table (handles both `pkg.fn` calls
+///      and root-namespace bare names);
+///   2. caller's own namespace;
+///   3. each `import` declared in the caller's namespace;
+///   4. nothing (we do NOT raise here — `validate_program`'s earlier
+///      route-handler / call-site checks already cover "undefined function";
+///      a resolution miss in the visibility pass just skips visibility for
+///      this call site).
+fn resolve_callee<'a>(
+    name: &str,
+    caller_ns: &[String],
+    fn_table: &HashMap<String, &'a FunctionDecl>,
+    imports_by_ns: &HashMap<String, Vec<&ImportDecl>>,
+) -> Option<&'a FunctionDecl> {
+    let lc = name.to_lowercase();
+    if let Some(f) = fn_table.get(&lc) {
+        return Some(*f);
+    }
+    if name.contains('.') {
+        // Explicit FQN that didn't match — fall through to "unresolved", same
+        // as the runtime resolver.
+        return None;
+    }
+    if !caller_ns.is_empty() {
+        let key = ns_fqn(caller_ns, name);
+        if let Some(f) = fn_table.get(&key) {
+            return Some(*f);
+        }
+    }
+    let ns_key = caller_ns
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(".");
+    if let Some(imps) = imports_by_ns.get(&ns_key) {
+        for imp in imps {
+            let key = ns_fqn(&imp.path, name);
+            if let Some(f) = fn_table.get(&key) {
+                return Some(*f);
+            }
+        }
+    }
+    None
+}
+
+/// Walk every function body, route body, middleware body, and route-handler
+/// reference and reject cross-namespace calls into `private function` decls.
+///
+/// This is the static analogue of `runner::Vm::check_visibility` (see
+/// `src/runner/mod.rs::check_visibility`). The runtime check exists for
+/// safety, but the AOT codegen path does not call into the interpreter, so
+/// without this static pass `jwc build --native` would silently emit a
+/// private-call edge as a plain Rust function call.
+fn check_visibility(program: &Program) -> Result<()> {
+    let fn_table = build_fn_table(program);
+    let imports_by_ns = build_imports_by_ns(program);
+
+    // Functions — caller_ns = the declaring namespace of the function.
+    for function in &program.functions {
+        let label = format!("Function '{}'", function.name);
+        check_visibility_in_stmts(
+            &function.body,
+            &function.namespace,
+            &fn_table,
+            &imports_by_ns,
+            &label,
+        )?;
+    }
+
+    // Routes — caller_ns = the declaring namespace of the route. Routes from
+    // a library namespace are activated by `mount`, but their bodies'
+    // calls resolve against the namespace the route was DECLARED in.
+    // Handler refs (`route GET "/x" -> someFn;`) are an implicit call site.
+    for route in &program.routes {
+        let label = format!(
+            "Route {} {}",
+            route.method.to_ascii_uppercase(),
+            route.path
+        );
+        if let Some(handler) = &route.handler {
+            check_handler_visibility(
+                handler,
+                &route.namespace,
+                &fn_table,
+                &imports_by_ns,
+                &label,
+            )?;
+        } else {
+            check_visibility_in_stmts(
+                &route.body,
+                &route.namespace,
+                &fn_table,
+                &imports_by_ns,
+                &label,
+            )?;
+        }
+    }
+
+    // Middlewares — caller_ns = the declaring namespace of the middleware.
+    for mw in &program.middlewares {
+        let label = format!("Middleware '{}'", mw.name);
+        check_visibility_in_stmts(
+            &mw.body,
+            &mw.namespace,
+            &fn_table,
+            &imports_by_ns,
+            &label,
+        )?;
+        if let Some(after) = &mw.after_body {
+            check_visibility_in_stmts(
+                after,
+                &mw.namespace,
+                &fn_table,
+                &imports_by_ns,
+                &label,
+            )?;
+        }
+    }
+
+    // errorHandler lives at the root namespace (it's a project-level fallback).
+    if let Some(handler) = &program.error_handler {
+        let root: Vec<String> = Vec::new();
+        check_visibility_in_stmts(
+            &handler.body,
+            &root,
+            &fn_table,
+            &imports_by_ns,
+            "errorHandler",
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Reject `route ... -> handler;` references that point at a `private`
+/// function declared in a different namespace.
+fn check_handler_visibility(
+    handler: &str,
+    caller_ns: &[String],
+    fn_table: &HashMap<String, &FunctionDecl>,
+    imports_by_ns: &HashMap<String, Vec<&ImportDecl>>,
+    label: &str,
+) -> Result<()> {
+    if let Some(callee) = resolve_callee(handler, caller_ns, fn_table, imports_by_ns) {
+        emit_if_private_across_ns(callee, caller_ns, label)?;
+    }
+    Ok(())
+}
+
+/// Recursive visibility walker over a statement list.
+fn check_visibility_in_stmts(
+    stmts: &[Stmt],
+    caller_ns: &[String],
+    fn_table: &HashMap<String, &FunctionDecl>,
+    imports_by_ns: &HashMap<String, Vec<&ImportDecl>>,
+    label: &str,
+) -> Result<()> {
+    for stmt in stmts {
+        check_visibility_in_stmt(stmt, caller_ns, fn_table, imports_by_ns, label)?;
+    }
+    Ok(())
+}
+
+fn check_visibility_in_stmt(
+    stmt: &Stmt,
+    caller_ns: &[String],
+    fn_table: &HashMap<String, &FunctionDecl>,
+    imports_by_ns: &HashMap<String, Vec<&ImportDecl>>,
+    label: &str,
+) -> Result<()> {
+    match stmt {
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } => {
+            check_visibility_in_expr(value, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Stmt::FieldAssign { value, .. } => {
+            check_visibility_in_expr(value, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Stmt::Print(e) => check_visibility_in_expr(e, caller_ns, fn_table, imports_by_ns, label),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            check_visibility_in_expr(cond, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_stmts(then_body, caller_ns, fn_table, imports_by_ns, label)?;
+            if let Some(eb) = else_body {
+                check_visibility_in_stmts(eb, caller_ns, fn_table, imports_by_ns, label)?;
+            }
+            Ok(())
+        }
+        Stmt::While { cond, body } => {
+            check_visibility_in_expr(cond, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_stmts(body, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Stmt::Break | Stmt::Continue => Ok(()),
+        Stmt::Expr(e) => check_visibility_in_expr(e, caller_ns, fn_table, imports_by_ns, label),
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                check_visibility_in_expr(e, caller_ns, fn_table, imports_by_ns, label)?;
+            }
+            Ok(())
+        }
+        Stmt::ValidateBody { .. } => Ok(()),
+        Stmt::Try {
+            body, catch_body, ..
+        } => {
+            check_visibility_in_stmts(body, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_stmts(catch_body, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Stmt::Transaction { body } => {
+            check_visibility_in_stmts(body, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Stmt::Savepoint { body, .. } => {
+            check_visibility_in_stmts(body, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Stmt::ForIn { iter, body, .. } => {
+            check_visibility_in_expr(iter, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_stmts(body, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Stmt::DbInsert { .. }
+        | Stmt::DbUpdate { .. }
+        | Stmt::DbDelete { .. }
+        | Stmt::DbDeleteWhere { .. } => Ok(()),
+        Stmt::DbUpdateSet { assignments, .. } => {
+            for (_col, rhs) in assignments {
+                check_visibility_in_expr(rhs, caller_ns, fn_table, imports_by_ns, label)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn check_visibility_in_expr(
+    expr: &Expr,
+    caller_ns: &[String],
+    fn_table: &HashMap<String, &FunctionDecl>,
+    imports_by_ns: &HashMap<String, Vec<&ImportDecl>>,
+    label: &str,
+) -> Result<()> {
+    match expr {
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Null
+        | Expr::Var(_)
+        | Expr::FieldGet { .. }
+        | Expr::NewEntity { .. }
+        | Expr::DbCount { .. }
+        | Expr::DbAggregate { .. }
+        | Expr::DbSelect { .. } => Ok(()),
+        Expr::Call { name, args } => {
+            // Builtins are not user functions; visibility doesn't apply.
+            if !crate::builtins::is_builtin(name) {
+                if let Some(callee) = resolve_callee(name, caller_ns, fn_table, imports_by_ns) {
+                    emit_if_private_across_ns(callee, caller_ns, label)?;
+                }
+            }
+            for a in args {
+                check_visibility_in_expr(a, caller_ns, fn_table, imports_by_ns, label)?;
+            }
+            Ok(())
+        }
+        Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => {
+            check_visibility_in_expr(inner, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Expr::ObjectLit(entries) => {
+            for (_k, v) in entries {
+                check_visibility_in_expr(v, caller_ns, fn_table, imports_by_ns, label)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayLit(items) => {
+            for it in items {
+                check_visibility_in_expr(it, caller_ns, fn_table, imports_by_ns, label)?;
+            }
+            Ok(())
+        }
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Eq(a, b)
+        | Expr::Neq(a, b)
+        | Expr::Lt(a, b)
+        | Expr::Lte(a, b)
+        | Expr::Gt(a, b)
+        | Expr::Gte(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b) => {
+            check_visibility_in_expr(a, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_expr(b, caller_ns, fn_table, imports_by_ns, label)
+        }
+    }
+}
+
+/// Fire the E021 diagnostic when `callee` is `Private` and lives in a
+/// namespace different from `caller_ns`. Same logic as
+/// `runner::check_visibility` but reported as a static error.
+fn emit_if_private_across_ns(
+    callee: &FunctionDecl,
+    caller_ns: &[String],
+    label: &str,
+) -> Result<()> {
+    if callee.namespace == caller_ns {
+        return Ok(());
+    }
+    if matches!(callee.visibility, Visibility::Public) {
+        return Ok(());
+    }
+    let callee_ns = if callee.namespace.is_empty() {
+        "<root>".to_string()
+    } else {
+        callee.namespace.join(".")
+    };
+    let caller_ns_str = if caller_ns.is_empty() {
+        "<root>".to_string()
+    } else {
+        caller_ns.join(".")
+    };
+    bail!(
+        "error[E021]: {label}: function '{}' is private to namespace '{}' and cannot be called from '{}'",
+        callee.name,
+        callee_ns,
+        caller_ns_str,
+    );
 }
 
 /// Enforce the module-level `const` invariants: no duplicates, every value is

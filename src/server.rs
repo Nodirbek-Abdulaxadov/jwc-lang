@@ -483,23 +483,25 @@ async fn handle_readyz() -> Response {
     if std::env::var("DATABASE_URL").is_err() && std::env::var("JWC_DATABASE_URL").is_err() {
         return handle_healthz().await;
     }
-    match engine::get_connection().await {
-        Ok(conn) => match conn.simple_query("SELECT 1").await {
-            Ok(_) => {
-                let body = "{\"status\":\"ready\",\"db\":\"ok\"}".to_string();
-                let mut resp = Response::new(body.into());
-                *resp.status_mut() = StatusCode::OK;
-                resp.headers_mut().insert(
-                    "content-type",
-                    "application/json"
-                        .parse()
-                        .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
-                );
-                resp
-            }
-            Err(e) => readyz_db_failure(format!("query: {e}")),
-        },
-        Err(e) => readyz_db_failure(format!("pool: {e}")),
+    // Sprint 4 #21 — centralised through `engine::ping()` so the
+    // checkout + `SELECT 1` round-trip lives in one place. If we ever
+    // want the readiness gate to tolerate a single transient blip
+    // (e.g. mid-failover), the change happens inside `engine::ping`
+    // and `/readyz` picks it up unchanged.
+    match engine::ping().await {
+        Ok(()) => {
+            let body = "{\"status\":\"ready\",\"db\":\"ok\"}".to_string();
+            let mut resp = Response::new(body.into());
+            *resp.status_mut() = StatusCode::OK;
+            resp.headers_mut().insert(
+                "content-type",
+                "application/json"
+                    .parse()
+                    .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+            );
+            resp
+        }
+        Err(e) => readyz_db_failure(format!("ping: {e}")),
     }
 }
 
@@ -521,6 +523,35 @@ async fn handle_metrics(State(state): State<AppState>) -> Response {
     body.push_str("# HELP jwc_queue_dlq Number of permanently-failed jobs held in the DLQ.\n");
     body.push_str("# TYPE jwc_queue_dlq gauge\n");
     body.push_str(&format!("jwc_queue_dlq {dlq}\n"));
+
+    // Sprint 4 #21 — DB pool saturation gauges. `pool_status()`
+    // returns None when no DB is configured (no engine init), in
+    // which case we just skip these rather than synthesising zeros
+    // — a missing gauge is a clearer signal to the operator than a
+    // misleading "0 max_size".
+    if let Some(pool) = engine::pool_status() {
+        body.push_str(
+            "# HELP jwc_db_pool_size Number of connections currently held by the deadpool-postgres pool.\n",
+        );
+        body.push_str("# TYPE jwc_db_pool_size gauge\n");
+        body.push_str(&format!("jwc_db_pool_size {}\n", pool.size));
+        body.push_str(
+            "# HELP jwc_db_pool_available Idle connections immediately checkout-able.\n",
+        );
+        body.push_str("# TYPE jwc_db_pool_available gauge\n");
+        body.push_str(&format!("jwc_db_pool_available {}\n", pool.available));
+        body.push_str(
+            "# HELP jwc_db_pool_max_size Configured pool ceiling (JWC_DB_POOL_SIZE).\n",
+        );
+        body.push_str("# TYPE jwc_db_pool_max_size gauge\n");
+        body.push_str(&format!("jwc_db_pool_max_size {}\n", pool.max_size));
+        body.push_str(
+            "# HELP jwc_db_pool_waiting Tasks queued for a pool slot — a non-zero value means contention.\n",
+        );
+        body.push_str("# TYPE jwc_db_pool_waiting gauge\n");
+        body.push_str(&format!("jwc_db_pool_waiting {}\n", pool.waiting));
+    }
+
     let mut resp = Response::new(body.into());
     *resp.status_mut() = StatusCode::OK;
     // Prometheus' text exposition spec. Versioned content-type so
@@ -996,6 +1027,67 @@ mod tests {
         // also overrides the built-in.
         let prog = make_program_with_route("healthz");
         assert!(route_owned_by_user(&prog, "/healthz"));
+    }
+
+    /// Build a bare `AppState` suitable for unit-testing the handlers
+    /// that don't touch the program AST or the WS shutdown channel.
+    fn make_test_app_state() -> AppState {
+        let (_tx, rx) = watch::channel(false);
+        AppState {
+            program: Arc::new(Program::default()),
+            request_logging: false,
+            metrics: Arc::new(ServerMetrics::new()),
+            ws_shutdown: rx,
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_handler_exposes_db_pool_gauges_when_engine_is_initialised() {
+        // The handler appends four `jwc_db_pool_*` rows after the
+        // queue gauges only when `engine::pool_status()` returns
+        // `Some(_)`. Whether that's true here depends on whether an
+        // earlier test (or this process) booted the engine — both
+        // outcomes are valid in unit-land, so we assert the SHAPE:
+        // when present, every gauge has matching HELP + TYPE + value.
+        let state = make_test_app_state();
+        let resp = handle_metrics(State(state)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drain the body into a String so we can string-match it.
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("metrics body should drain");
+        let text = String::from_utf8(body.to_vec()).expect("metrics body is utf-8");
+
+        // Queue rows are always emitted — pin them so a refactor that
+        // accidentally drops them is caught here too.
+        assert!(text.contains("jwc_queue_pending"));
+        assert!(text.contains("jwc_queue_dlq"));
+
+        let gauges = [
+            "jwc_db_pool_size",
+            "jwc_db_pool_available",
+            "jwc_db_pool_max_size",
+            "jwc_db_pool_waiting",
+        ];
+        if engine::pool_status().is_some() {
+            for name in gauges {
+                assert!(
+                    text.contains(&format!("# HELP {name} ")),
+                    "missing HELP for {name}:\n{text}"
+                );
+                assert!(
+                    text.contains(&format!("# TYPE {name} gauge")),
+                    "missing TYPE for {name}:\n{text}"
+                );
+            }
+        } else {
+            for name in gauges {
+                assert!(
+                    !text.contains(&format!("# TYPE {name}")),
+                    "{name} leaked into output despite no engine init:\n{text}"
+                );
+            }
+        }
     }
 
     #[test]

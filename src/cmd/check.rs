@@ -24,12 +24,20 @@ pub fn new_project(target: &Path) -> Result<()> {
 }
 
 /// Parse + validate a single `.jwc` file. Prints `OK` on success.
-pub fn check(file: &Path) -> Result<()> {
+///
+/// When `typecheck` is true (the default — only the CLI's `--no-typecheck`
+/// escape hatch flips it to false), the gradual static type checker
+/// also runs after `validate_program`.
+pub fn check(file: &Path, typecheck: bool) -> Result<()> {
     let source = read_source(file)?;
     let program = parser::parse_program(&source)
         .with_context(|| format!("Failed to parse {}", file.display()))?;
     parser::validate_program(&program)
         .with_context(|| format!("Validation failed for {}", file.display()))?;
+    if typecheck {
+        crate::typecheck::typecheck_program(&program)
+            .with_context(|| format!("Type check failed for {}", file.display()))?;
+    }
     println!("OK");
     Ok(())
 }

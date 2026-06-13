@@ -1,0 +1,8 @@
+# Per-cycle output of the soak harness. The harness driver (run-soak.sh)
+# writes cycle CSVs, bombardier JSON, and a per-cycle log here; analyze.py
+# renders summary.png alongside. None of it is committed — the workflow
+# uploads results/ as an Actions artifact for the operator.
+results/*.csv
+results/*.json
+results/*.log
+results/*.png

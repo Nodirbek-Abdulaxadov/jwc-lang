@@ -96,6 +96,30 @@ pub const VALIDATOR_ERRORS: &[DiagnosticCode] = &[
         "E015",
         "duplicate function declaration in the same project namespace",
     ),
+    d(
+        "E016",
+        "literal nested transaction rejected (use savepoint instead)",
+    ),
+    d(
+        "E017",
+        "savepoint declared outside an enclosing transaction block",
+    ),
+    d(
+        "E018",
+        "return type mismatch: function body returns a value incompatible with the declared return type",
+    ),
+    d(
+        "E019",
+        "wrong number of arguments at a user-function call site",
+    ),
+    d(
+        "E020",
+        "argument type at a user-function call site does not match the declared parameter type",
+    ),
+    d(
+        "E021",
+        "private function called from outside its declaring namespace",
+    ),
 ];
 
 /// Lookup a warning code → description. Returns `None` for unknown
@@ -216,7 +240,10 @@ mod tests {
         // emits today. Anything in this list MUST have a catalog
         // entry — else the user sees a code they can't look up.
         // Update this list when wiring a new bail to a code.
-        let parser_emitted = ["E011", "E012", "E013", "E014", "E015"];
+        let parser_emitted = [
+            "E011", "E012", "E013", "E014", "E015", "E016", "E017", "E018", "E019", "E020",
+            "E021",
+        ];
         for code in parser_emitted {
             assert!(
                 lookup_error(code).is_some(),

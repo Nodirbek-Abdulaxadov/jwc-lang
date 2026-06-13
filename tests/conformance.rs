@@ -238,6 +238,7 @@ const REGISTERED_CASES: &[&str] = &[
     "case_object_literal_field_read",
     "case_object_literal_field_write",
     "case_object_literal_json_round_trip",
+    "case_private_helper_called_locally",
     "case_raw_string",
     "case_strings",
     "case_substring",
@@ -313,6 +314,7 @@ mod cases {
     conformance_test!(case_object_literal_field_read);
     conformance_test!(case_object_literal_field_write);
     conformance_test!(case_object_literal_json_round_trip);
+    conformance_test!(case_private_helper_called_locally);
     conformance_test!(case_raw_string);
     conformance_test!(case_strings);
     conformance_test!(case_substring);

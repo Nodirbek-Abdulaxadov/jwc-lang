@@ -20,23 +20,28 @@ use crate::{cmd, parser, project, runner, server};
 /// argument shape, dispatches into `runner::run_main`, prints any
 /// captured output, and — when the program called `serve(port)` —
 /// hands off to `server::serve` to keep the process alive.
+///
+/// `typecheck` mirrors the `--no-typecheck` CLI flag: `true` to run the
+/// gradual static type checker (the default), `false` to skip it during
+/// the transition release.
 pub fn run(
     rt: &tokio::runtime::Runtime,
     path: Option<PathBuf>,
     request_logging: bool,
+    typecheck: bool,
 ) -> Result<()> {
     let target = path.unwrap_or(std::env::current_dir()?);
 
     if target.is_dir() {
-        run_project(rt, &target, request_logging)
+        run_project(rt, &target, request_logging, typecheck)
     } else if is_manifest_path(&target) {
         let root = target
             .parent()
             .ok_or_else(|| anyhow!("Invalid project file path"))?
             .to_path_buf();
-        run_project(rt, &root, request_logging)
+        run_project(rt, &root, request_logging, typecheck)
     } else {
-        run_single_file(rt, &target, request_logging)
+        run_single_file(rt, &target, request_logging, typecheck)
     }
 }
 
@@ -52,10 +57,11 @@ fn run_project(
     rt: &tokio::runtime::Runtime,
     target_root: &Path,
     request_logging: bool,
+    typecheck: bool,
 ) -> Result<()> {
     let root = project::find_project_root(target_root)?;
     project::load_dotenv(&root);
-    let loaded = project::load_project_from_root(&root)?;
+    let loaded = project::load_project_from_root_with(&root, project::LoadOpts { typecheck })?;
     loaded.manifest.ensure_runnable()?;
     let _ = cmd::build::project_native_artifact(&root, &loaded.manifest.name, false)?;
     let result = rt.block_on(runner::run_main(&loaded.program))?;
@@ -68,13 +74,22 @@ fn run_project(
     Ok(())
 }
 
-fn run_single_file(rt: &tokio::runtime::Runtime, file: &Path, request_logging: bool) -> Result<()> {
+fn run_single_file(
+    rt: &tokio::runtime::Runtime,
+    file: &Path,
+    request_logging: bool,
+    typecheck: bool,
+) -> Result<()> {
     let source = std::fs::read_to_string(file)
         .with_context(|| format!("Failed to read {}", file.display()))?;
     let program = parser::parse_program(&source)
         .with_context(|| format!("Failed to parse {}", file.display()))?;
     parser::validate_program(&program)
         .with_context(|| format!("Validation failed for {}", file.display()))?;
+    if typecheck {
+        crate::typecheck::typecheck_program(&program)
+            .with_context(|| format!("Type check failed for {}", file.display()))?;
+    }
     let result = rt.block_on(runner::run_main(&program))?;
     if !result.output.is_empty() {
         print!("{}", result.output);

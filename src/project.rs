@@ -368,7 +368,30 @@ pub fn find_project_root(start: &Path) -> Result<PathBuf> {
     bail!("jwc project not found")
 }
 
+/// Per-load knobs for [`load_project_from_root_with`]. Today only the
+/// gradual type checker is opt-out; future flags (lint pre-pass, schema
+/// snapshot refresh) can hang off the same struct without breaking the
+/// existing call sites that use the default [`load_project_from_root`].
+#[derive(Debug, Clone, Copy)]
+pub struct LoadOpts {
+    /// When `false`, skip [`crate::typecheck::typecheck_program`]. The
+    /// `--no-typecheck` CLI flag on `jwc run` / `jwc check` /
+    /// `jwc build` flips this to support the transition release per
+    /// `PRODUCTION_READINESS_PLAN.md` Phase 3 exit criteria.
+    pub typecheck: bool,
+}
+
+impl Default for LoadOpts {
+    fn default() -> Self {
+        Self { typecheck: true }
+    }
+}
+
 pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
+    load_project_from_root_with(root, LoadOpts::default())
+}
+
+pub fn load_project_from_root_with(root: &Path, opts: LoadOpts) -> Result<LoadedProject> {
     let manifest_path =
         find_manifest_in_dir(root).ok_or_else(|| anyhow!("jwc project not found"))?;
 
@@ -420,6 +443,9 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
     }
 
     crate::parser::validate_program(&program)?;
+    if opts.typecheck {
+        crate::typecheck::typecheck_program(&program)?;
+    }
 
     Ok(LoadedProject {
         manifest,

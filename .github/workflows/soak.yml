@@ -1,0 +1,78 @@
+name: Soak (manual dispatch)
+
+# 72-hour soak test that gates the Phase 5 / v1.0 exit-criteria
+# ("zero lost responses on graceful restart, memory flat"). NOT run on
+# push or PR — `workflow_dispatch` only — because each run burns ~72
+# CPU-hours and only matters at release-gate time. See `soak/README.md`
+# for the contract, the analyzer, and the prerequisite checklist on the
+# self-hosted box.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: "Cycle count (one hour per cycle). 72 = full release-gate run; 4-8 is enough for a smoke."
+        required: true
+        default: "72"
+      rps:
+        description: "Sustained RPS bombardier maintains across each cycle."
+        required: true
+        default: "5000"
+      project:
+        description: "JWC project the soak runs against (path relative to repo root)."
+        required: true
+        default: "examples/testapp"
+
+jobs:
+  soak:
+    name: 72h soak
+    # Pinned to a self-hosted Linux box that's been provisioned per
+    # `soak/README.md` (bombardier on PATH, local Postgres, Python +
+    # matplotlib). The label is `soak-runner` — register the runner with
+    # that label or the workflow will sit in "queued" forever.
+    runs-on: [self-hosted, linux, soak-runner]
+    # GitHub Actions default timeout is 6 h; bump enough to cover a 72 h
+    # cycle + tail (analyze + artifact upload). 75 h gives ~3 h headroom.
+    timeout-minutes: 4500
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo build --release
+        run: cargo build --release --bin jwc
+
+      - name: Verify soak prerequisites are on PATH
+        run: |
+          set -e
+          command -v bombardier || { echo "bombardier missing — see soak/README.md prerequisites"; exit 2; }
+          command -v python3   || { echo "python3 missing"; exit 2; }
+          python3 -c "import pandas, matplotlib" || { echo "pip3 install pandas matplotlib"; exit 2; }
+          test -x target/release/jwc
+
+      - name: Run soak
+        env:
+          SOAK_HOURS: ${{ inputs.hours }}
+          SOAK_RPS:   ${{ inputs.rps }}
+          SOAK_BIN:   target/release/jwc
+        run: |
+          chmod +x soak/run-soak.sh soak/chaos-script.sh
+          ./soak/run-soak.sh "${{ inputs.project }}"
+
+      - name: Analyse
+        # Always run the analyser even if `run-soak.sh` exited non-zero
+        # mid-cycle — partial CSVs are still informative to the operator
+        # debugging a failed gate.
+        if: always()
+        run: python3 soak/analyze.py soak/results
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-results-${{ github.run_id }}
+          path: soak/results/
+          if-no-files-found: warn
+          retention-days: 90

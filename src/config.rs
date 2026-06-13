@@ -133,6 +133,18 @@ pub const REGISTRY: &[EnvVar] = &[
         doc: "Result-cache TTL; 0 disables caching.",
     },
     EnvVar {
+        name: "JWC_DB_RETRY_MAX_ATTEMPTS",
+        parse_kind: ParseKind::U32,
+        default: "3",
+        doc: "Transient-error retry ceiling (outside transactions).",
+    },
+    EnvVar {
+        name: "JWC_DB_RETRY_BACKOFF_MS",
+        parse_kind: ParseKind::U32,
+        default: "100",
+        doc: "Base retry backoff (ms); doubles each attempt.",
+    },
+    EnvVar {
         name: "JWC_ADMIN_DB",
         parse_kind: ParseKind::Str,
         default: "postgres",

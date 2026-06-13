@@ -63,12 +63,16 @@ pub fn validate_target(target: Option<&str>, native: bool) -> Result<()> {
 
 /// Dispatch the Build command. `target` is the optional Rust target
 /// triple (`--target x86_64-unknown-linux-musl`, ...).
+///
+/// `typecheck` mirrors the `--no-typecheck` CLI flag — `true` to run the
+/// gradual static type checker before codegen, `false` to skip it.
 pub fn run(
     release: bool,
     native: bool,
     emit_rust_source: bool,
     target: Option<String>,
     deny_warnings: bool,
+    typecheck: bool,
 ) -> Result<()> {
     if emit_rust_source && !native {
         bail!("--emit-rust-source requires --native");
@@ -77,7 +81,7 @@ pub fn run(
 
     let cwd = std::env::current_dir()?;
     let root = project::find_project_root(&cwd)?;
-    let loaded = project::load_project_from_root(&root)?;
+    let loaded = project::load_project_from_root_with(&root, project::LoadOpts { typecheck })?;
     loaded.manifest.ensure_runnable()?;
     cmd::lint::report_warnings(&loaded, deny_warnings)?;
     let profile = if release { "release" } else { "debug" };

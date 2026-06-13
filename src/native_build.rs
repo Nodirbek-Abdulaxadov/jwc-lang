@@ -27,8 +27,16 @@
 //! `flatten_namespaces` before any codegen — function calls are resolved to
 //! their target FQN, library routes expanded per mount (prefix + middlewares
 //! applied), inactive ones dropped. Visibility (`public`/`private`) is
-//! enforced by the interpreter but NOT re-checked here; `validate_program`
-//! upstream is the single source of truth.
+//! enforced statically by `parser::validate::check_visibility`
+//! (`src/parser/validate.rs`, raised as `error[E021]`) — `validate_program`
+//! is the single source of truth and AOT codegen trusts it. See
+//! `docs/spec/visibility.md` for the public/private surface and the proof
+//! that the validator covers every cross-namespace edge the AOT lowers
+//! (function call, route handler ref, middleware body call). The
+//! interpreter still has its own runtime check
+//! (`runner::Vm::check_visibility`) as belt-and-braces for hand-built
+//! Programs that bypass the parser; the AOT path does not need it because
+//! every emission goes through `validate_program` first.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

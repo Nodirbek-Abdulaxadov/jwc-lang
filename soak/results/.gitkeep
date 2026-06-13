@@ -1,0 +1,3 @@
+# Per-cycle CSVs land here when run-soak.sh runs. Git-ignored; this file
+# keeps the directory present in checkouts so the harness doesn't have to
+# mkdir -p before the first cycle.
