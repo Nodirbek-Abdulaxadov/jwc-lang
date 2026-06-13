@@ -30,6 +30,7 @@ name = "jwc-lsp"
 path = "src/bin/jwc_lsp.rs"
 
 [dependencies]
+jwc-runtime = { path = "crates/jwc-runtime" }
 anyhow = "1"
 argon2 = { version = "0.5", features = ["std"] }
 async-recursion = "1"

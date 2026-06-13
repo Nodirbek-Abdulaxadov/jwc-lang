@@ -1226,6 +1226,7 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
         consts: &const_names,
         has_error_handler: program.error_handler.is_some(),
         closure_depth: std::cell::Cell::new(0),
+        shapes: std::cell::RefCell::new(HashMap::new()),
     };
 
     // Module-level consts become zero-arg functions. A const that references
@@ -1251,8 +1252,50 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
 
     emit_serve_impl(&mut out, &program.routes);
 
+    // **Phase 1 [1.0-blocker]** — flush all interned object-literal shapes
+    // as `__jwc_shape_N()` getters. Rust resolves item references regardless
+    // of declaration order at module scope, so emitting these after every
+    // route/function still binds correctly from every literal site above.
+    // Using `std::sync::OnceLock` instead of `once_cell::Lazy` to avoid
+    // pulling a new dep into the generated Cargo.toml — the prelude
+    // already uses `OnceLock` for the HTTP client / param store.
+    emit_shape_getters(&mut out, &ctx);
+
     out.push_str("\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {\n    jwc_load_dotenv();\n    let _ = user_main().await;\n}\n");
     Ok(out)
+}
+
+/// Drain `ctx.shapes` into Rust source: one `__jwc_shape_N() -> &'static Arc<Vec<JwcStr>>`
+/// per distinct literal key set in the program. Each getter wraps a
+/// `OnceLock` so the field-name Arc is allocated once on first construction
+/// and reused for every subsequent `v_record()` call with the same shape.
+fn emit_shape_getters(out: &mut String, ctx: &CodegenCtx) {
+    let shapes = ctx.shapes.borrow();
+    if shapes.is_empty() {
+        return;
+    }
+    // Emit in index order so the generated source is byte-stable across
+    // builds (parity tests grep for shape constants).
+    let mut pairs: Vec<(&Vec<String>, &usize)> = shapes.iter().collect();
+    pairs.sort_by_key(|(_, idx)| **idx);
+    out.push_str("\n// ── Phase 1 typed-shape constants for object literals ──\n");
+    for (keys, idx) in pairs {
+        out.push_str(&format!(
+            "#[inline]\nfn __jwc_shape_{}() -> &'static ::std::sync::Arc<Vec<JwcStr>> {{\n",
+            idx
+        ));
+        out.push_str("    static SHAPE: ::std::sync::OnceLock<::std::sync::Arc<Vec<JwcStr>>> = ::std::sync::OnceLock::new();\n");
+        out.push_str("    SHAPE.get_or_init(|| ::std::sync::Arc::new(vec![");
+        for (i, k) in keys.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str("::std::borrow::Cow::Borrowed(\"");
+            push_str_escaped(out, k);
+            out.push_str("\")");
+        }
+        out.push_str("]))\n}\n");
+    }
 }
 
 /// Phase 1 — struct monomorphization. For every `entity` declared in
@@ -1552,6 +1595,15 @@ struct CodegenCtx<'a> {
     /// `return X;` inside any closure (try/transaction body) must park the
     /// value in the thread-local slot instead of doing a direct Rust return.
     closure_depth: std::cell::Cell<usize>,
+    /// **Phase 1 [1.0-blocker]** — shape-dedup table for object-literal
+    /// codegen. Key is the field-name list in **declaration order** (matches
+    /// the interpreter, which preserves declaration order in
+    /// `Value::Record::field_names`). Value is the shape's stable index N,
+    /// which gets emitted as the `__jwc_shape_N()` getter. Every literal
+    /// `{ id, name }` site reuses the same shape Arc, so the bench app's
+    /// `/json-large` route (1000 same-shape constructions per request) gets
+    /// one shape allocation instead of one FxHashMap per row.
+    shapes: std::cell::RefCell<HashMap<Vec<String>, usize>>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -1563,6 +1615,21 @@ impl<'a> CodegenCtx<'a> {
     }
     fn in_closure(&self) -> bool {
         self.closure_depth.get() > 0
+    }
+
+    /// Intern an object-literal key list and return the stable shape index.
+    /// Identical key lists (in **declaration order** — we don't sort, so
+    /// `{a, b}` and `{b, a}` get distinct shapes, matching the interpreter
+    /// where field-name order is observable through `value_to_json`) share
+    /// the same `__jwc_shape_N` getter.
+    fn intern_shape(&self, keys: Vec<String>) -> usize {
+        let mut m = self.shapes.borrow_mut();
+        if let Some(&idx) = m.get(&keys) {
+            return idx;
+        }
+        let idx = m.len();
+        m.insert(keys, idx);
+        idx
     }
 }
 
@@ -2819,15 +2886,27 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             out.push_str("v_obj(JwcObj::default())");
         }
         Expr::ObjectLit(pairs) => {
-            out.push_str("{ let mut __o: JwcObj = JwcObj::default();");
-            for (k, v) in pairs {
-                out.push_str(" __o.insert(\"");
-                push_str_escaped(out, k);
-                out.push_str("\".to_string(), ");
+            // **Phase 1 [1.0-blocker]** — typed-shape fast path. The AST
+            // guarantees keys are static strings (no computed keys at this
+            // layer), so every literal has a compile-time-known field-name
+            // list and can take `v_record`. Shapes are interned in
+            // `CodegenCtx::shapes` so identical key sets across the whole
+            // program share ONE `__jwc_shape_N()` getter — the bench app's
+            // /json-large route (1000 `{ id, name, value }` constructions
+            // per request) collapses to one shape allocation.
+            let keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+            let idx = ctx.intern_shape(keys);
+            out.push_str(&format!(
+                "v_record(::std::sync::Arc::clone(__jwc_shape_{}()), vec![",
+                idx
+            ));
+            for (i, (_, v)) in pairs.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
                 emit_expr(out, v, ctx);
-                out.push_str(");");
             }
-            out.push_str(" v_obj(__o) }");
+            out.push_str("])");
         }
         Expr::ArrayLit(items) => {
             out.push_str("v_arr(vec![");

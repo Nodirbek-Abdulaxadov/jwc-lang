@@ -340,3 +340,120 @@ async fn interpreter_and_native_emit_agree_for_small_programs() {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1 [1.0-blocker] — typed-shape Record migration
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The native AOT runtime gained `V::Record { field_names, values }` to mirror
+// the interpreter's `Value::Record`, and object-literal codegen was rewired to
+// emit `v_record(Arc::clone(__jwc_shape_N()), vec![...])` against a shared
+// `__jwc_shape_N` constant. Two parity properties matter:
+//
+//   1. The fast-path emission shape is actually used (no fallback to
+//      `JwcObj::default() + .insert()`), AND interpreter stdout still matches.
+//   2. Same-shape literals across a function share ONE shape constant — the
+//      whole point of the migration (the bench app's /json-large route builds
+//      1000 same-shape objects per request).
+
+#[tokio::test]
+async fn object_literal_emits_v_record() {
+    let source = r#"
+        function main() {
+            let b = { id: 1, name: "x" };
+            print(b.name);
+        }
+    "#;
+    let program = parse_program(source).expect("parse");
+    validate_program(&program).expect("validate");
+
+    // Interpreter golden output.
+    let result = run_main(&program).await.expect("interpreter run");
+    assert_eq!(result.output, "x\n", "interpreter stdout drifted");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_path = emit_rust_source(&program, tmp.path(), "object_literal_emits_v_record", false)
+        .expect("emit_rust_source");
+    let body = fs::read_to_string(&out_path).expect("read emitted file");
+
+    // Fast-path construction — the literal MUST emit v_record, not v_obj.
+    assert!(
+        body.contains("v_record("),
+        "emitted source missing v_record() construction — object literal didn't take the typed-shape fast path"
+    );
+    // And the shape constant getter the literal references must be present.
+    assert!(
+        body.contains("__jwc_shape_0()"),
+        "emitted source missing __jwc_shape_0() getter for the {{id, name}} shape"
+    );
+    // The literal-construction fallback shape (`let mut __o: JwcObj =
+    // JwcObj::default(); __o.insert(...)`) MUST NOT appear — if this ever
+    // regresses, the bench /json-large gap reopens silently. Note that
+    // `JwcObj::default()` itself is still emitted by validation scaffolding
+    // and entity struct→V serializers, so we grep for the literal-site
+    // shape specifically (`let mut __o: JwcObj`).
+    assert!(
+        !body.contains("let mut __o: JwcObj"),
+        "emitted source contains `let mut __o: JwcObj` — object literal fell back to FxHashMap construction"
+    );
+}
+
+#[tokio::test]
+async fn object_literal_array_dedupes_shape() {
+    // Five same-shape literals inside a loop: codegen must intern the shape
+    // ONCE so all five constructions share the same `__jwc_shape_0()` getter,
+    // not allocate five distinct field-name Arcs. This is what makes the
+    // /json-large hot loop pay one shape alloc instead of N.
+    let source = r#"
+        function main() {
+            let xs = [];
+            let i = 0;
+            while (i < 5) {
+                push(xs, { id: i, name: "row" });
+                i = i + 1;
+            }
+            print(length(xs));
+        }
+    "#;
+    let program = parse_program(source).expect("parse");
+    validate_program(&program).expect("validate");
+
+    let result = run_main(&program).await.expect("interpreter run");
+    assert_eq!(result.output, "5\n", "interpreter stdout drifted");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_path = emit_rust_source(
+        &program,
+        tmp.path(),
+        "object_literal_array_dedupes_shape",
+        false,
+    )
+    .expect("emit_rust_source");
+    let body = fs::read_to_string(&out_path).expect("read emitted file");
+
+    // Exactly one shape getter for `{id, name}`. The dedup table keys on the
+    // declaration-order field list, so all five sites collapse to shape 0.
+    let getter_decls = body.matches("fn __jwc_shape_0()").count();
+    assert_eq!(
+        getter_decls, 1,
+        "expected exactly one `fn __jwc_shape_0()` declaration, found {} — shape dedup broke",
+        getter_decls
+    );
+    // No second shape index — the loop only ever builds the one shape, so
+    // `__jwc_shape_1` must not be emitted as a declaration anywhere.
+    assert!(
+        !body.contains("fn __jwc_shape_1()"),
+        "emitted source declared __jwc_shape_1() — second shape leaked, dedup broke"
+    );
+    // Five literal sites referencing the same getter.
+    let getter_refs = body.matches("__jwc_shape_0()").count();
+    // Decl is one of these; sites referencing it inside `v_record` add the
+    // rest. Lower-bound: 1 decl + at least 1 call (the literal). Five-loop
+    // emission unrolls into one literal site (the while-body is emitted once
+    // and reused per iteration), so we expect >= 2 occurrences (decl + use).
+    assert!(
+        getter_refs >= 2,
+        "expected the __jwc_shape_0() getter to be referenced at least once from a literal site, found only {} occurrence(s) total",
+        getter_refs
+    );
+}

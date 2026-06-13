@@ -1439,6 +1439,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hmac",
+ "jwc-runtime",
  "lazy_static",
  "lettre",
  "md-5",
@@ -1461,6 +1462,14 @@ dependencies = [
  "tower-lsp",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "jwc-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

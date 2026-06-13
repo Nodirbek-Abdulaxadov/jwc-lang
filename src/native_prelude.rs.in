@@ -63,6 +63,18 @@ fn v_obj(m: JwcObj) -> V {
     V::Object(Arc::new(m))
 }
 
+/// Phase 1 [1.0-blocker] — `V::Record` constructor. The `field_names` Arc is
+/// shared across every Record built with the same shape (object literals of
+/// identical key sets, monomorphized entity instances, DB row batches). One
+/// allocation for the schema layout + a per-row `values` Vec, instead of one
+/// FxHashMap per construction. Field access is `field_names.iter().position(...)`
+/// then `values[i]` — O(N) but linear scan beats hashing for the small N
+/// (2-10) of typical literal shapes.
+#[inline]
+fn v_record(field_names: Arc<Vec<JwcStr>>, values: Vec<V>) -> V {
+    V::Record { field_names, values: Arc::new(values) }
+}
+
 /// Load a `.env` from the current working directory or the binary's directory.
 /// Mirrors `project::load_dotenv` so a standalone native binary picks up the
 /// same env layout the `jwc run`/`jwc serve` CLI does.
@@ -139,6 +151,16 @@ enum V {
     /// what closes the /json-large RPS gap the production-readiness
     /// plan calls out as the Phase 1 1.0-blocker.
     RawJson(JwcStr),
+    /// Phase 1 [1.0-blocker] mirror of the interpreter's `Value::Record`.
+    /// `field_names` is shared across same-shape rows (one alloc for the
+    /// schema layout, per-row `values` Vec). Linear-scan field access beats
+    /// hashing for the small N (2-10) of typical literal shapes. Codegen
+    /// emits one `__jwc_shape_<N>()` getter per distinct key set in the
+    /// program and reuses it across every literal site.
+    Record {
+        field_names: Arc<Vec<JwcStr>>,
+        values: Arc<Vec<V>>,
+    },
 }
 
 impl fmt::Display for V {
@@ -150,7 +172,7 @@ impl fmt::Display for V {
             V::Float(n) => write!(f, "{}", n),
             V::Str(s) => write!(f, "{}", s),
             V::RawJson(s) => write!(f, "{}", s),
-            V::Array(_) | V::Object(_) => write!(f, "{}", jwc_to_json(self)),
+            V::Array(_) | V::Object(_) | V::Record { .. } => write!(f, "{}", jwc_to_json(self)),
         }
     }
 }
@@ -169,6 +191,7 @@ fn jwc_truthy(v: &V) -> bool {
         V::RawJson(s) => !s.is_empty(),
         V::Array(a) => !a.is_empty(),
         V::Object(o) => !o.is_empty(),
+        V::Record { values, .. } => !values.is_empty(),
     }
 }
 
@@ -365,6 +388,21 @@ fn jwc_eq(a: &V, b: &V) -> bool {
                 && x.iter()
                     .all(|(k, v)| y.get(k).map(|w| jwc_eq(v, w)).unwrap_or(false))
         }
+        // Two Records are equal iff every (name, value) pair from `a` matches
+        // a same-named field in `b`. Field-order independent so a literal
+        // built declaration-order compares equal to one with reordered keys.
+        (
+            V::Record { field_names: fa, values: va },
+            V::Record { field_names: fb, values: vb },
+        ) => {
+            fa.len() == fb.len()
+                && fa.iter().enumerate().all(|(i, name)| {
+                    fb.iter()
+                        .position(|n| n == name)
+                        .map(|j| jwc_eq(&va[i], &vb[j]))
+                        .unwrap_or(false)
+                })
+        }
         _ => false,
     }
 }
@@ -391,6 +429,14 @@ fn jwc_gte(a: &V, b: &V) -> bool { matches!(jwc_cmp(a, b), Some(std::cmp::Orderi
 fn jwc_get_field(v: &V, k: &str) -> V {
     match v {
         V::Object(m) => m.get(k).cloned().unwrap_or(V::Null),
+        // Linear scan over `field_names`; for the typical 2-10 field shapes
+        // this is faster than hashing. Returns Null on miss to match the
+        // Object arm's behaviour.
+        V::Record { field_names, values } => field_names
+            .iter()
+            .position(|f| f.as_ref() == k)
+            .map(|i| values[i].clone())
+            .unwrap_or(V::Null),
         _ => V::Null,
     }
 }
@@ -398,6 +444,25 @@ fn jwc_get_field(v: &V, k: &str) -> V {
 fn jwc_set_field(v: &mut V, k: &str, value: V) {
     match v {
         V::Object(m) => { Arc::make_mut(m).insert(k.to_string(), value); }
+        // **Phase 1** — Record CoW mutation. If the field already exists in
+        // the shape, write in place via `Arc::make_mut` on the values Arc
+        // (the shape Arc stays shared with every other Record of the same
+        // shape). For a new field the shape would have to grow; promote the
+        // whole Record to a `V::Object` so the FxHashMap path handles it —
+        // mirrors the interpreter, which falls back to the JSON-string path
+        // for the same reason.
+        V::Record { field_names, values } => {
+            if let Some(idx) = field_names.iter().position(|f| f.as_ref() == k) {
+                Arc::make_mut(values)[idx] = value;
+            } else {
+                let mut m: JwcObj = FxHashMap::default();
+                for (name, val) in field_names.iter().zip(values.iter()) {
+                    m.insert(name.as_ref().to_string(), val.clone());
+                }
+                m.insert(k.to_string(), value);
+                *v = v_obj(m);
+            }
+        }
         other => panic!("field assignment on non-object value: {:?}", other),
     }
 }
@@ -466,6 +531,21 @@ fn jwc_write_json(v: &V, out: &mut String) {
                 jwc_write_json_string(k, out);
                 out.push(':');
                 jwc_write_json(map.get(k).expect("key from keys()"), out);
+            }
+            out.push('}');
+        }
+        // Records walk `field_names` + `values` in declaration order so
+        // output mirrors the source-literal field order (and matches the
+        // interpreter's `Value::Record` JSON output). The recursive
+        // `jwc_write_json` call handles nested RawJson by writing its
+        // bytes verbatim — same as the Array arm above.
+        V::Record { field_names, values } => {
+            out.push('{');
+            for (i, (name, val)) in field_names.iter().zip(values.iter()).enumerate() {
+                if i > 0 { out.push(','); }
+                jwc_write_json_string(name, out);
+                out.push(':');
+                jwc_write_json(val, out);
             }
             out.push('}');
         }
@@ -658,6 +738,7 @@ fn jwc_b_length(v: V) -> V {
         V::Str(s) => V::Int(s.chars().count() as i64),
         V::Array(a) => V::Int(a.len() as i64),
         V::Object(o) => V::Int(o.len() as i64),
+        V::Record { values, .. } => V::Int(values.len() as i64),
         V::Null => V::Int(0),
         other => panic!("length() not supported on {:?}", other),
     }
@@ -689,6 +770,9 @@ fn jwc_b_contains(haystack: V, needle: V) -> V {
         (V::Str(s), V::Str(p)) => s.contains(p.as_ref()),
         (V::Array(items), n) => items.iter().any(|item| jwc_eq(item, n)),
         (V::Object(map), V::Str(k)) => map.contains_key(k.as_ref()),
+        (V::Record { field_names, .. }, V::Str(k)) => {
+            field_names.iter().any(|f| f.as_ref() == k.as_ref())
+        }
         _ => false,
     };
     V::Bool(result)
@@ -1251,12 +1335,25 @@ fn jwc_b_status_code(code: V, v: V) -> V {
 /// populate `Request::response_status` before the after-block chain
 /// runs — so `response_status()` is non-null inside `after { ... }`.
 fn jwc_status_of(v: &V) -> u16 {
-    if let V::Object(m) = v {
-        if matches!(m.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) {
-            return m.get("status").and_then(jwc_to_int).unwrap_or(200) as u16;
+    match v {
+        V::Object(m) => {
+            if matches!(m.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) {
+                return m.get("status").and_then(jwc_to_int).unwrap_or(200) as u16;
+            }
+            200
         }
+        // Phase 1 — handlers may now return a `V::Record` directly when a
+        // route literal produces the response shape. Look up the marker
+        // via the same field accessor used by `obj.field` reads.
+        V::Record { .. } => {
+            if matches!(jwc_get_field(v, HTTP_RESPONSE_MARKER), V::Bool(true)) {
+                let s = jwc_get_field(v, "status");
+                return jwc_to_int(&s).unwrap_or(200) as u16;
+            }
+            200
+        }
+        _ => 200,
     }
-    200
 }
 
 fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {

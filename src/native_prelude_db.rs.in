@@ -289,7 +289,7 @@ fn jwc_v_to_key(v: &V) -> String {
         V::Str(s) => s.to_string(),
         V::Bool(b) => b.to_string(),
         V::Null => String::new(),
-        V::Array(_) | V::Object(_) => jwc_to_json(v),
+        V::Array(_) | V::Object(_) | V::Record { .. } | V::RawJson(_) => jwc_to_json(v),
     }
 }
 
