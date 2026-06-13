@@ -1609,18 +1609,31 @@ fn emit_route_handler(
     // before the reverse-order after-chain dispatches — mirrors the
     // interpreter, which also computes the status at handler-return
     // time so middleware on the way out can read it.
-    out.push_str("        jwc_set_response_status(jwc_status_of(&__resp));\n");
-    // Response-phase middleware: reverse order so an outer `after` can
-    // wrap the inner ones. Mirrors koa / express / ring + the
-    // interpreter's order. Errors from an after-block are caught at
-    // the dispatcher level — but in this slice they propagate via the
-    // standard try-shape; codegen doesn't catch them yet.
-    for mw in route.middlewares.iter().rev() {
-        if middleware_has_after(mw, &mw_decls) {
-            out.push_str(&format!(
-                "        let _ = {}_after().await;\n",
-                middleware_fn_name(mw),
-            ));
+    //
+    // **Skip** when this route has zero middlewares with an after-body:
+    // the status-set is observable only through `response_status()`
+    // inside an after-block, so without one it's pure per-request
+    // overhead (~50ns: V match + atomic store) that nothing reads.
+    // Concretely: a stateless route like `route GET "/ping" { return "pong"; }`
+    // with no middleware emits zero Phase-5 instrumentation now.
+    let has_after_in_chain = route
+        .middlewares
+        .iter()
+        .any(|mw| middleware_has_after(mw, &mw_decls));
+    if has_after_in_chain {
+        out.push_str("        jwc_set_response_status(jwc_status_of(&__resp));\n");
+        // Response-phase middleware: reverse order so an outer `after` can
+        // wrap the inner ones. Mirrors koa / express / ring + the
+        // interpreter's order. Errors from an after-block are caught at
+        // the dispatcher level — but in this slice they propagate via the
+        // standard try-shape; codegen doesn't catch them yet.
+        for mw in route.middlewares.iter().rev() {
+            if middleware_has_after(mw, &mw_decls) {
+                out.push_str(&format!(
+                    "        let _ = {}_after().await;\n",
+                    middleware_fn_name(mw),
+                ));
+            }
         }
     }
     out.push_str("        if let Some(__r) = jwc_take_return() { return __r; }\n");

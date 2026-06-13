@@ -931,12 +931,12 @@ struct Request {
     started_at: std::time::Instant,
     /// HTTP status the handler emitted, populated by the dispatcher
     /// after the handler returns and before any `after { ... }` block
-    /// runs. `None` until then. Read by `response_status()` from inside
-    /// after-blocks. Mutex (rather than atomic) because the lock is
-    /// held for nanoseconds and the inner type is trivially clonable
-    /// while keeping the surface match-friendly for future extension
-    /// (e.g. carrying a parsed status enum).
-    response_status: std::sync::Mutex<Option<u16>>,
+    /// runs. `0` means "not yet set" — read by `response_status()` from
+    /// inside after-blocks. Atomic rather than `Mutex<Option<u16>>` so
+    /// the hot path is a lock-free relaxed store/load (the value flows
+    /// through happens-before via the surrounding await boundary; we
+    /// don't need stronger ordering here).
+    response_status: std::sync::atomic::AtomicU16,
 }
 
 tokio::task_local! {
@@ -1004,16 +1004,11 @@ fn jwc_b_response_duration_ms() -> V {
 // (pre-handler middleware or the handler body itself), matching the
 // interpreter shape documented in docs/spec/builtins.md.
 fn jwc_b_response_status() -> V {
-    with_current_request(|req| match req.response_status.lock() {
-        Ok(guard) => match *guard {
-            Some(s) => V::Int(i64::from(s)),
-            None => V::Null,
-        },
-        // A poisoned mutex would only happen if another task panicked
-        // while holding the write lock — yield Null rather than
-        // bubbling, since this is an observability surface and never a
-        // correctness one.
-        Err(_) => V::Null,
+    with_current_request(|req| {
+        match req.response_status.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => V::Null,
+            s => V::Int(i64::from(s)),
+        }
     })
 }
 
@@ -1023,9 +1018,8 @@ fn jwc_b_response_status() -> V {
 /// request scope (e.g. main()).
 fn jwc_set_response_status(status: u16) {
     let _ = CURRENT_REQUEST.try_with(|req| {
-        if let Ok(mut guard) = req.response_status.lock() {
-            *guard = Some(status);
-        }
+        req.response_status
+            .store(status, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
@@ -1486,7 +1480,7 @@ async fn handle_axum_request(
         path_params,
         http_version_11: true,
         started_at: std::time::Instant::now(),
-        response_status: std::sync::Mutex::new(None),
+        response_status: std::sync::atomic::AtomicU16::new(0),
     });
 
     let result_v = CURRENT_REQUEST
