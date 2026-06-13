@@ -233,6 +233,11 @@ enum MigrateCommand {
     Up {
         #[arg(long)]
         database_url: Option<String>,
+        /// Print the SQL that would run without touching the database.
+        /// Stored-checksum verification still happens — a tampered
+        /// migration is reported even under --dry-run.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Rollback the most recent applied migration(s)
     Down {
@@ -241,10 +246,19 @@ enum MigrateCommand {
         steps: usize,
         #[arg(long)]
         database_url: Option<String>,
+        /// Print the rollback SQL without executing it.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List every migration file in the project's `migrations/` dir
     /// (chronological order). Offline — does not touch the database.
     List,
+    /// Show the applied / pending / sha-mismatch matrix against the
+    /// database referenced by `--database-url` (or DATABASE_URL).
+    Status {
+        #[arg(long)]
+        database_url: Option<String>,
+    },
 }
 
 fn main() {
@@ -323,14 +337,19 @@ fn real_main() -> Result<()> {
 
             match command {
                 MigrateCommand::New { name } => cmd::migrate::new(&root, &name)?,
-                MigrateCommand::Up { database_url } => {
-                    rt.block_on(cmd::migrate::up(&root, database_url))?
-                }
+                MigrateCommand::Up {
+                    database_url,
+                    dry_run,
+                } => rt.block_on(cmd::migrate::up(&root, database_url, dry_run))?,
                 MigrateCommand::Down {
                     steps,
                     database_url,
-                } => rt.block_on(cmd::migrate::down(&root, database_url, steps))?,
+                    dry_run,
+                } => rt.block_on(cmd::migrate::down(&root, database_url, steps, dry_run))?,
                 MigrateCommand::List => cmd::migrate::list(&root)?,
+                MigrateCommand::Status { database_url } => {
+                    rt.block_on(cmd::migrate::status(&root, database_url))?
+                }
             }
         }
         Command::Add {

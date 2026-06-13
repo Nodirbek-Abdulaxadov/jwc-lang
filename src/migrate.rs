@@ -107,9 +107,75 @@ pub fn list_migrations(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Result row for `jwc migrate status` — one per known migration, on disk
+/// or in the tracking table. Sprint 4A surface.
+#[derive(Debug, Clone)]
+pub struct MigrationStatus {
+    pub name: String,
+    pub applied: bool,
+    /// `RFC 3339` timestamp from the tracking table, or `None` when pending.
+    pub applied_at: Option<String>,
+    /// `ok` if stored SHA matches on-disk SHA; `mismatch` when they
+    /// differ; `pending` when not yet applied; `orphan` when the
+    /// tracking table has a row but the `.up.sql` file is gone.
+    pub sha_state: ShaState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShaState {
+    Ok,
+    Mismatch { stored: String, on_disk: String },
+    LegacyUnstamped,
+    Pending,
+    Orphan,
+}
+
+impl ShaState {
+    pub fn label(&self) -> String {
+        match self {
+            ShaState::Ok => "ok".to_string(),
+            ShaState::Mismatch { stored, on_disk } => format!(
+                "mismatch (stored={}…, on-disk={}…)",
+                &stored[..stored.len().min(8)],
+                &on_disk[..on_disk.len().min(8)],
+            ),
+            ShaState::LegacyUnstamped => "ok (legacy, no checksum stored)".to_string(),
+            ShaState::Pending => "pending".to_string(),
+            ShaState::Orphan => "orphan (.up.sql missing)".to_string(),
+        }
+    }
+}
+
+/// SHA-256 hex digest of a string — used for migration checksumming so a
+/// future `migrate up` can refuse to run when an already-applied file was
+/// edited in place. Keeps the helper local to this module so the hashing
+/// surface stays tiny and auditable.
+fn compute_sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Detect whether a migration file already opens its own transaction. Some
+/// hand-written migrations need DDL OUTSIDE a transaction (e.g.
+/// `CREATE INDEX CONCURRENTLY`) and lead with `BEGIN;` to control the
+/// boundary themselves. Don't wrap those a second time.
+fn file_opens_transaction(sql: &str) -> bool {
+    for raw in sql.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("--") {
+            continue;
+        }
+        return line.to_ascii_uppercase().starts_with("BEGIN");
+    }
+    false
+}
+
 pub async fn apply_pending_migrations(
     root: &Path,
     database_url: Option<String>,
+    dry_run: bool,
 ) -> Result<ApplyReport> {
     let url = database_url
         .or_else(|| std::env::var("DATABASE_URL").ok())
@@ -147,9 +213,48 @@ pub async fn apply_pending_migrations(
 
     migration_files.sort();
 
-    let applied = read_applied_migrations(&client).await?;
+    let applied = read_applied_migrations_with_checksums(&client).await?;
     let mut applied_now = 0usize;
     let mut skipped = 0usize;
+
+    // Pre-flight: every row in the tracking table whose .up.sql still
+    // exists must SHA-match the recorded checksum. A mismatch means
+    // someone edited an applied migration in place — refuse to run.
+    // Rows with a NULL checksum are legacy (predate Sprint 4A); backfill
+    // them with the on-disk SHA on this pass when not dry-run.
+    for file in &migration_files {
+        let Some(name) = file.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+            bail!("Invalid migration file name: {}", file.display());
+        };
+        let Some(stored) = applied.get(&name) else {
+            continue;
+        };
+        let on_disk_sql = std::fs::read_to_string(file)
+            .with_context(|| format!("Failed to read migration file {}", file.display()))?;
+        let on_disk = compute_sha256_hex(&on_disk_sql);
+        match stored {
+            Some(s) if s != &on_disk => {
+                bail!(
+                    "migration {} was modified after it was applied (stored sha={}, on-disk sha={}) — restore the original or revert and re-apply",
+                    name,
+                    s,
+                    on_disk,
+                );
+            }
+            Some(_) => { /* match */ }
+            None => {
+                if !dry_run {
+                    client
+                        .execute(
+                            "UPDATE _jwc_migrations SET checksum = $1 WHERE name = $2 AND checksum IS NULL;",
+                            &[&on_disk, &name],
+                        )
+                        .await
+                        .with_context(|| "Failed to backfill checksum for legacy migration row")?;
+                }
+            }
+        }
+    }
 
     for file in &migration_files {
         let name = file
@@ -158,8 +263,18 @@ pub async fn apply_pending_migrations(
             .ok_or_else(|| anyhow!("Invalid migration file name: {}", file.display()))?
             .to_string();
 
-        if applied.contains(&name) {
+        if applied.contains_key(&name) {
             skipped += 1;
+            continue;
+        }
+
+        if dry_run {
+            let sql = std::fs::read_to_string(file)
+                .with_context(|| format!("Failed to read migration file {}", file.display()))?;
+            println!("-- dry-run: would apply {}", name);
+            println!("{}", sql);
+            println!("-- end {}", name);
+            applied_now += 1;
             continue;
         }
 
@@ -174,10 +289,96 @@ pub async fn apply_pending_migrations(
     })
 }
 
+/// Per-migration status row used by `jwc migrate status` to render the
+/// applied / pending / sha-mismatch / orphan matrix. Walks the on-disk
+/// `migrations/` directory + the `_jwc_migrations` table and reconciles
+/// the two.
+pub async fn migration_status(
+    root: &Path,
+    database_url: Option<String>,
+) -> Result<Vec<MigrationStatus>> {
+    let url = database_url
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .or_else(|| std::env::var("JWC_DATABASE_URL").ok())
+        .ok_or_else(|| {
+            anyhow!("database url is required: pass --database-url or set DATABASE_URL")
+        })?;
+
+    let migrations_dir = root.join("migrations");
+    if !migrations_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    ensure_database_exists(&url).await?;
+    let client = engine::connect_for_migrations(&url).await?;
+    ensure_migration_table(&client).await?;
+
+    let applied = read_applied_migrations_full(&client).await?;
+    let on_disk = list_migrations(root)?;
+
+    let mut on_disk_names: Vec<String> = Vec::new();
+    let mut name_to_path: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for path in &on_disk {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            on_disk_names.push(name.to_string());
+            name_to_path.insert(name.to_string(), path.clone());
+        }
+    }
+
+    let mut out: Vec<MigrationStatus> = Vec::new();
+    for name in &on_disk_names {
+        let path = &name_to_path[name];
+        let on_disk_sha = std::fs::read_to_string(path)
+            .map(|s| compute_sha256_hex(&s))
+            .unwrap_or_default();
+        match applied.get(name) {
+            Some(row) => {
+                let sha_state = match &row.checksum {
+                    Some(s) if s == &on_disk_sha => ShaState::Ok,
+                    Some(s) => ShaState::Mismatch {
+                        stored: s.clone(),
+                        on_disk: on_disk_sha,
+                    },
+                    None => ShaState::LegacyUnstamped,
+                };
+                out.push(MigrationStatus {
+                    name: name.clone(),
+                    applied: true,
+                    applied_at: Some(row.applied_at.clone()),
+                    sha_state,
+                });
+            }
+            None => out.push(MigrationStatus {
+                name: name.clone(),
+                applied: false,
+                applied_at: None,
+                sha_state: ShaState::Pending,
+            }),
+        }
+    }
+
+    // Orphans: rows in the tracking table whose .up.sql vanished.
+    for (name, row) in &applied {
+        if !name_to_path.contains_key(name) {
+            out.push(MigrationStatus {
+                name: name.clone(),
+                applied: true,
+                applied_at: Some(row.applied_at.clone()),
+                sha_state: ShaState::Orphan,
+            });
+        }
+    }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
 pub async fn rollback_migrations(
     root: &Path,
     database_url: Option<String>,
     steps: usize,
+    dry_run: bool,
 ) -> Result<RollbackReport> {
     if steps == 0 {
         return Ok(RollbackReport {
@@ -242,6 +443,14 @@ pub async fn rollback_migrations(
 
         if sql_trimmed.is_empty() {
             bail!("no rollback SQL for migration {}", name);
+        }
+
+        if dry_run {
+            println!("-- dry-run: would roll back {}", name);
+            println!("{}", sql);
+            println!("-- end {}", name);
+            rolled_back += 1;
+            continue;
         }
 
         client
@@ -397,11 +606,16 @@ fn quote_identifier(value: &str) -> String {
 }
 
 async fn ensure_migration_table(client: &Client) -> Result<()> {
+    // Sprint 4A — `checksum` column carries the SHA-256 of the applied
+    // `.up.sql`. The ALTER ... ADD IF NOT EXISTS path keeps pre-Sprint-4A
+    // tracking tables working; the column starts NULL on legacy rows and
+    // gets backfilled by `apply_pending_migrations` on its next pass.
     let sql = r#"
 CREATE TABLE IF NOT EXISTS _jwc_migrations (
     name text PRIMARY KEY,
     applied_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE _jwc_migrations ADD COLUMN IF NOT EXISTS checksum text;
 "#;
     client
         .batch_execute(sql)
@@ -409,6 +623,7 @@ CREATE TABLE IF NOT EXISTS _jwc_migrations (
         .with_context(|| "Failed to ensure _jwc_migrations table")
 }
 
+#[allow(dead_code)]
 async fn read_applied_migrations(client: &Client) -> Result<HashSet<String>> {
     let rows = client
         .query("SELECT name FROM _jwc_migrations ORDER BY name;", &[])
@@ -423,15 +638,78 @@ async fn read_applied_migrations(client: &Client) -> Result<HashSet<String>> {
     Ok(set)
 }
 
+/// Sprint 4A — name → optional stored SHA-256. `None` for legacy rows
+/// written before the checksum column landed.
+async fn read_applied_migrations_with_checksums(
+    client: &Client,
+) -> Result<std::collections::HashMap<String, Option<String>>> {
+    let rows = client
+        .query(
+            "SELECT name, checksum FROM _jwc_migrations ORDER BY name;",
+            &[],
+        )
+        .await
+        .with_context(|| "Failed to read applied migrations + checksums")?;
+
+    let mut out: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.get(0);
+        let checksum: Option<String> = row.get(1);
+        out.insert(name, checksum);
+    }
+    Ok(out)
+}
+
+struct AppliedRow {
+    applied_at: String,
+    checksum: Option<String>,
+}
+
+async fn read_applied_migrations_full(
+    client: &Client,
+) -> Result<std::collections::HashMap<String, AppliedRow>> {
+    let rows = client
+        .query(
+            "SELECT name, applied_at::text, checksum FROM _jwc_migrations ORDER BY name;",
+            &[],
+        )
+        .await
+        .with_context(|| "Failed to read applied migrations")?;
+
+    let mut out: std::collections::HashMap<String, AppliedRow> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.get(0);
+        let applied_at: String = row.get(1);
+        let checksum: Option<String> = row.get(2);
+        out.insert(
+            name,
+            AppliedRow {
+                applied_at,
+                checksum,
+            },
+        );
+    }
+    Ok(out)
+}
+
 async fn run_migration_file(client: &Client, file: &Path, name: &str) -> Result<()> {
     let sql = std::fs::read_to_string(file)
         .with_context(|| format!("Failed to read migration file {}", file.display()))?;
+    let checksum = compute_sha256_hex(&sql);
 
-    // `transaction()` requires &mut Client. Use SAVEPOINT-style explicit BEGIN/COMMIT instead.
-    client
-        .batch_execute("BEGIN;")
-        .await
-        .with_context(|| "Failed to start migration transaction")?;
+    // Sprint 4A — wrap the migration in BEGIN/COMMIT unless the file
+    // opens its own transaction (e.g. `CREATE INDEX CONCURRENTLY` migrations
+    // need to control their own boundary and lead with a bare DDL or with
+    // `BEGIN;...COMMIT;` already in place).
+    let wrap = !file_opens_transaction(&sql);
+    if wrap {
+        client
+            .batch_execute("BEGIN;")
+            .await
+            .with_context(|| "Failed to start migration transaction")?;
+    }
 
     let res = async {
         client
@@ -441,8 +719,8 @@ async fn run_migration_file(client: &Client, file: &Path, name: &str) -> Result<
 
         client
             .execute(
-                "INSERT INTO _jwc_migrations(name) VALUES ($1) ON CONFLICT (name) DO NOTHING;",
-                &[&name],
+                "INSERT INTO _jwc_migrations(name, checksum) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET checksum = EXCLUDED.checksum;",
+                &[&name, &checksum],
             )
             .await
             .with_context(|| "Failed to record applied migration")?;
@@ -450,17 +728,21 @@ async fn run_migration_file(client: &Client, file: &Path, name: &str) -> Result<
     }
     .await;
 
-    match res {
-        Ok(()) => {
-            client
-                .batch_execute("COMMIT;")
-                .await
-                .with_context(|| "Failed to commit migration transaction")?;
-            Ok(())
+    if wrap {
+        match res {
+            Ok(()) => {
+                client
+                    .batch_execute("COMMIT;")
+                    .await
+                    .with_context(|| "Failed to commit migration transaction")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = client.batch_execute("ROLLBACK;").await;
+                Err(e)
+            }
         }
-        Err(e) => {
-            let _ = client.batch_execute("ROLLBACK;").await;
-            Err(e)
-        }
+    } else {
+        res
     }
 }
