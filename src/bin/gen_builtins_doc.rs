@@ -24,6 +24,10 @@
 
 use jwc::builtins::{BuiltinDef, BUILTIN_DEFS};
 
+// When this file is reused as a module by `tests/builtins_doc_sync.rs` via
+// `#[path]`, `main` is unused — it's only the binary entry point. The
+// sync test imports `render_builtins_doc` directly.
+#[allow(dead_code)]
 fn main() {
     print!("{}", render_builtins_doc(BUILTIN_DEFS));
 }
@@ -94,7 +98,7 @@ pub fn render_builtins_doc(defs: &[BuiltinDef]) -> String {
                 def.name, aliases, args, native
             ));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     out.push_str("## Notes\n\n");

@@ -9,6 +9,16 @@
 // sections across awaits. Tracked under a dedicated clippy-cleanup sprint;
 // silenced crate-wide so CI can enforce `-D warnings` on the rest.
 #![allow(clippy::await_holding_lock)]
+// Clippy 1.96+ added several pedantic-style lints that the codebase doesn't
+// yet pass (needless_range_loop, unnecessary_map_or, manual_range_patterns,
+// print_literal, uninlined_format_args). These are stylistic, not bugs.
+// Silenced crate-wide so CI can enforce `-D warnings` on the rest until a
+// dedicated clippy-cleanup sprint sweeps them.
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::manual_range_patterns)]
+#![allow(clippy::print_literal)]
+#![allow(clippy::uninlined_format_args)]
 
 pub mod ast;
 pub mod builtins;

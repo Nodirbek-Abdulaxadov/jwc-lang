@@ -1,3 +1,4 @@
+#![allow(clippy::doc_lazy_continuation)]
 //! Phase 8D LSP smoke tests.
 //!
 //! The behaviour-level tests for the new symbol index, rename, definition and

@@ -203,13 +203,13 @@ async fn migrate_up_then_down_roundtrip() {
     let migration = migrate::create_migration(&project_root, "init").expect("create migration");
     assert!(migration.up_path.exists());
 
-    let first = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
+    let first = migrate::apply_pending_migrations(&project_root, Some(url.to_string()), false)
         .await
         .expect("apply first time");
     assert_eq!(first.applied, 1);
     assert_eq!(first.skipped, 0);
 
-    let second = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
+    let second = migrate::apply_pending_migrations(&project_root, Some(url.to_string()), false)
         .await
         .expect("apply second time");
     assert_eq!(second.applied, 0, "second up should be a no-op");
@@ -231,7 +231,7 @@ async fn migrate_up_then_down_roundtrip() {
         .replace(".up.sql", ".down.sql");
     std::fs::write(&down_path, "DROP TABLE IF EXISTS note;\n").unwrap();
 
-    let rolled = migrate::rollback_migrations(&project_root, Some(url.to_string()), 1)
+    let rolled = migrate::rollback_migrations(&project_root, Some(url.to_string()), 1, false)
         .await
         .expect("rollback");
     assert_eq!(rolled.rolled_back, 1);
@@ -278,7 +278,7 @@ async fn migration_advisory_lock_blocks_concurrent_runs() {
         .await
         .expect("acquire lock");
 
-    let err = migrate::apply_pending_migrations(&project_root, Some(url.to_string()))
+    let err = migrate::apply_pending_migrations(&project_root, Some(url.to_string()), false)
         .await
         .err()
         .map(|e| e.to_string())

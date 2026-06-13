@@ -4,8 +4,6 @@
 //! to verify interpreter behaviour. Kept in their own sibling file so the
 //! orchestrator `mod.rs` stays focused on production paths only.
 
-#![cfg(test)]
-
 use super::*;
 use crate::parser::{parse_program, validate_program};
 
