@@ -57,6 +57,21 @@ use jwc::runner::run_main;
 /// exact casing.
 const INTERPRETER_ONLY_MARKER: &str = "// conformance: interpreter-only";
 
+/// First-line marker that skips the case entirely. Used for tests that
+/// document the *contract* of an in-flight feature (typed-catch dotted
+/// subtypes, no-DB DbError classification) before the runtime/parser
+/// surface needed to drive the test actually exists. The case stays in
+/// the registry (so it cannot drift out of the suite) and the .jwc /
+/// .stdout pair stays on disk (so reviewers see the intended shape) —
+/// the harness just `eprintln!`s a SKIPPED line and returns `Ok(())`
+/// the same way it does for environment-shaped failures.
+///
+/// Once the blocking feature lands, drop the marker line and the case
+/// becomes a normal active test. The skip is intentionally lightweight
+/// (no separate registry, no compile-time gate) so removing the marker
+/// is the ONLY edit required to re-enable the case.
+const DEFERRED_MARKER: &str = "// conformance: deferred";
+
 fn cases_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -97,6 +112,24 @@ async fn run_case(name: &str) -> Result<(), String> {
             return Ok(());
         }
     };
+
+    // Deferred cases skip BEFORE parse — the source itself may exercise
+    // syntax that's still in flight (e.g. dotted catch types). Detecting
+    // the marker on the raw source line keeps the skip path independent
+    // of the parser's current shape.
+    let deferred = source
+        .lines()
+        .next()
+        .map(str::trim)
+        .is_some_and(|line| line.eq_ignore_ascii_case(DEFERRED_MARKER));
+    if deferred {
+        eprintln!(
+            "SKIPPED [{name}]: deferred (see header comment in {}). \
+             Drop the `// CONFORMANCE: deferred` line to re-enable.",
+            jwc_path.display()
+        );
+        return Ok(());
+    }
 
     // 1. parse + validate
     let program = parse_program(&source).map_err(|e| format!("parse failed: {e}"))?;
@@ -186,6 +219,7 @@ const REGISTERED_CASES: &[&str] = &[
     "case_array_helpers",
     "case_arrays",
     "case_bool_short_circuit",
+    "case_catch_falls_through_when_type_mismatches",
     "case_const",
     "case_equality",
     "case_format_float",
@@ -208,6 +242,9 @@ const REGISTERED_CASES: &[&str] = &[
     "case_strings",
     "case_substring",
     "case_try_catch",
+    "case_typed_catch_db_error",
+    "case_typed_catch_specific_subtype",
+    "case_typed_catch_super_kind",
     "case_unary_not",
     "case_unix_timestamp",
     "case_while",
@@ -257,6 +294,7 @@ mod cases {
     conformance_test!(case_array_helpers);
     conformance_test!(case_arrays);
     conformance_test!(case_bool_short_circuit);
+    conformance_test!(case_catch_falls_through_when_type_mismatches);
     conformance_test!(case_const);
     conformance_test!(case_equality);
     conformance_test!(case_format_float);
@@ -279,6 +317,9 @@ mod cases {
     conformance_test!(case_strings);
     conformance_test!(case_substring);
     conformance_test!(case_try_catch);
+    conformance_test!(case_typed_catch_db_error);
+    conformance_test!(case_typed_catch_specific_subtype);
+    conformance_test!(case_typed_catch_super_kind);
     conformance_test!(case_unary_not);
     conformance_test!(case_unix_timestamp);
     conformance_test!(case_while);

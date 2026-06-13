@@ -307,6 +307,18 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse a dotted type identifier: `Ident ('.' Ident)*` → `"A.B.C"`.
+    /// Used by `catch (e: A.B)` and any future surface that needs
+    /// hierarchical type names. Trailing `.` is a parse error.
+    pub(super) fn parse_dotted_type(&mut self) -> Result<String> {
+        let mut parts = vec![self.expect_ident("expected type name")?];
+        while matches!(self.current.kind, TokenKind::Symbol('.')) {
+            self.bump()?;
+            parts.push(self.expect_ident("expected type segment after '.'")?);
+        }
+        Ok(parts.join("."))
+    }
+
     pub(super) fn expect_number(&mut self, msg: &str) -> Result<i64> {
         match self.current.kind.clone() {
             TokenKind::Number(value) => {

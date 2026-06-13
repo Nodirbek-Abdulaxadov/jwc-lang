@@ -1110,3 +1110,137 @@ fn fails_on_type_keyword_model_decl() {
         "unexpected error: {err}"
     );
 }
+
+// --- Sprint 3B: dotted catch type parser + validator -----------------------
+
+/// Pull the single `Stmt::Try` out of a function body so tests can poke at
+/// its `catch_type` field directly. Panics if the shape doesn't match.
+fn try_catch_type_of(program: &Program, fn_name: &str) -> Option<String> {
+    let func = program
+        .functions
+        .iter()
+        .find(|f| f.name == fn_name)
+        .unwrap_or_else(|| panic!("function `{}` not found", fn_name));
+    for stmt in &func.body {
+        if let crate::ast::Stmt::Try { catch_type, .. } = stmt {
+            return catch_type.clone();
+        }
+    }
+    panic!("no try statement in `{}`", fn_name);
+}
+
+#[test]
+fn catch_type_single_ident_preserved() {
+    // Pre-Sprint-3B behaviour: bare `DbError` parses to `Some("DbError")`.
+    let src = r#"
+        function f() {
+            try {
+                let x = 1;
+            } catch (e: DbError) {
+                print(e);
+            }
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    assert_eq!(try_catch_type_of(&program, "f"), Some("DbError".to_string()));
+    validate_program(&program).unwrap();
+}
+
+#[test]
+fn catch_type_two_segment_dotted_parses() {
+    let src = r#"
+        function f() {
+            try {
+                let x = 1;
+            } catch (e: DbError.UniqueViolation) {
+                print(e);
+            }
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    assert_eq!(
+        try_catch_type_of(&program, "f"),
+        Some("DbError.UniqueViolation".to_string())
+    );
+    validate_program(&program).unwrap();
+}
+
+#[test]
+fn catch_type_three_segment_dotted_parses_even_if_unknown() {
+    // The parser is permissive about depth; the validator is the gatekeeper.
+    // Use a totally bogus root so this test isolates parsing only.
+    let src = r#"
+        function f() {
+            try {
+                let x = 1;
+            } catch (e: Foo.Bar.Baz) {
+                print(e);
+            }
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    assert_eq!(
+        try_catch_type_of(&program, "f"),
+        Some("Foo.Bar.Baz".to_string())
+    );
+    // Validator should reject the unknown root.
+    let err = validate_program(&program).unwrap_err().to_string();
+    assert!(
+        err.contains("unknown catch type") && err.contains("Foo.Bar.Baz"),
+        "unexpected validator error: {err}"
+    );
+}
+
+#[test]
+fn catch_type_trailing_dot_is_parse_error() {
+    let src = r#"
+        function f() {
+            try {
+                let x = 1;
+            } catch (e: DbError.) {
+                print(e);
+            }
+        }
+    "#;
+    let err = parse_program(src).unwrap_err().to_string();
+    assert!(
+        err.contains("type segment after '.'") || err.contains("after '.'"),
+        "unexpected parse error: {err}"
+    );
+}
+
+#[test]
+fn validator_rejects_unknown_root_but_accepts_unknown_subtype_of_known_root() {
+    // Bare unknown kind — must be rejected with a "did you mean" hint when
+    // a close match exists (the table includes `DbError`, so `DbErrr`
+    // should suggest it).
+    let bad = r#"
+        function f() {
+            try {
+                let x = 1;
+            } catch (e: DbErrr) {
+                print(e);
+            }
+        }
+    "#;
+    let bad_prog = parse_program(bad).unwrap();
+    let err = validate_program(&bad_prog).unwrap_err().to_string();
+    assert!(
+        err.contains("unknown catch type") && err.contains("did you mean"),
+        "expected a did-you-mean hint, got: {err}"
+    );
+
+    // Future-compat: a dotted type whose ROOT is a known kind passes the
+    // validator even when the subtype isn't (yet) in the static table.
+    let good = r#"
+        function g() {
+            try {
+                let x = 1;
+            } catch (e: DbError.NewSubtype) {
+                print(e);
+            }
+        }
+    "#;
+    let good_prog = parse_program(good).unwrap();
+    validate_program(&good_prog).expect("known-root dotted type must validate");
+}

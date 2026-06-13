@@ -1501,3 +1501,148 @@
             .to_string();
         assert!(err.contains("expects bytes"));
     }
+
+    // ------------------------------------------------------------------
+    // Sprint 3A: typed-catch dispatch with dotted-path subtypes.
+    // ------------------------------------------------------------------
+    //
+    // We can't fabricate a real `tokio_postgres::Error` with a specific
+    // SQLSTATE from outside the crate (every `Error::*` constructor is
+    // `pub(crate)`), so subtype detection on PG errors is exercised
+    // indirectly: when `classify_jwc_error` can't downcast to a PG error,
+    // it falls back to the substring scan and returns the parent kind
+    // `"DbError"` only. That fallback IS reachable from user-land errors
+    // and is what the production code path will see whenever someone
+    // raises a "looks like a DB problem" `anyhow!` without an underlying
+    // tokio_postgres source — which is precisely the gap Sprint 3A wants
+    // to keep honest.
+
+    #[test]
+    fn catch_type_matches_none_catches_everything() {
+        for &kind in JWC_ERROR_KINDS {
+            assert!(
+                catch_type_matches(None, kind),
+                "untyped catch must catch every kind, missed: {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn catch_type_matches_error_super_kind_catches_everything() {
+        for &kind in JWC_ERROR_KINDS {
+            assert!(
+                catch_type_matches(Some("Error"), kind),
+                "`catch (e: Error)` must catch every kind, missed: {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn catch_type_matches_parent_catches_child() {
+        // `catch (e: DbError)` MUST match a kind of "DbError.UniqueViolation".
+        assert!(catch_type_matches(
+            Some("DbError"),
+            "DbError.UniqueViolation"
+        ));
+        assert!(catch_type_matches(
+            Some("DbError"),
+            "DbError.ForeignKeyViolation"
+        ));
+        assert!(catch_type_matches(
+            Some("HttpError"),
+            "HttpError.NotFound"
+        ));
+        assert!(catch_type_matches(Some("JwtError"), "JwtError.InvalidSignature"));
+        // Parent also matches its own bare kind.
+        assert!(catch_type_matches(Some("DbError"), "DbError"));
+    }
+
+    #[test]
+    fn catch_type_matches_specific_subtype_does_not_match_sibling() {
+        // UniqueViolation must NOT catch ForeignKeyViolation, even though
+        // both are dotted children of DbError.
+        assert!(!catch_type_matches(
+            Some("DbError.UniqueViolation"),
+            "DbError.ForeignKeyViolation"
+        ));
+        assert!(!catch_type_matches(
+            Some("DbError.UniqueViolation"),
+            "DbError"
+        ));
+        assert!(!catch_type_matches(
+            Some("HttpError.NotFound"),
+            "HttpError.Unauthorized"
+        ));
+    }
+
+    #[test]
+    fn catch_type_matches_specific_subtype_matches_exact() {
+        assert!(catch_type_matches(
+            Some("DbError.UniqueViolation"),
+            "DbError.UniqueViolation"
+        ));
+        assert!(catch_type_matches(
+            Some("HttpError.NotFound"),
+            "HttpError.NotFound"
+        ));
+    }
+
+    #[test]
+    fn catch_type_matches_rejects_bare_prefix_overlap() {
+        // "Db" is not a real kind, but defensively: `catch (e: Db)` must
+        // NOT silently catch a "DbError.*" kind just because the string
+        // starts with "Db". The match boundary is the literal dot.
+        assert!(!catch_type_matches(Some("Db"), "DbError"));
+        assert!(!catch_type_matches(Some("Db"), "DbError.UniqueViolation"));
+        assert!(!catch_type_matches(Some("Http"), "HttpError.NotFound"));
+    }
+
+    #[test]
+    fn classify_jwc_error_falls_back_to_dberror_when_subtype_not_detectable() {
+        // No real `tokio_postgres::Error` on the chain — just a plain
+        // anyhow!() message that smells like DB. We must NOT invent a
+        // subtype; the contract is "fall back to the parent kind".
+        let e = anyhow::anyhow!("Postgres pool exhausted: no connection");
+        let kind = classify_jwc_error(&e);
+        assert_eq!(kind, "DbError");
+        // And the parent kind matches a `catch (e: DbError)`.
+        assert!(catch_type_matches(Some("DbError"), kind));
+        // But NOT a specific subtype.
+        assert!(!catch_type_matches(Some("DbError.UniqueViolation"), kind));
+    }
+
+    #[test]
+    fn classify_jwc_error_detects_jwt_invalid_signature() {
+        // Real `crate::jwt::verify_hs256` failure — its message is
+        // "jwt_verify: signature mismatch", which our substring scan
+        // routes to the InvalidSignature subtype.
+        let token = crate::jwt::sign_hs256(r#"{"a":1}"#, "right").unwrap();
+        let err = crate::jwt::verify_hs256(&token, "wrong").unwrap_err();
+        let kind = classify_jwc_error(&err);
+        assert_eq!(kind, "JwtError.InvalidSignature");
+        // Parent JwtError catches it.
+        assert!(catch_type_matches(Some("JwtError"), kind));
+        // And the catch-all `Error` does too.
+        assert!(catch_type_matches(Some("Error"), kind));
+        // But an unrelated subtype does not.
+        assert!(!catch_type_matches(Some("DbError.UniqueViolation"), kind));
+    }
+
+    #[test]
+    fn classify_jwc_error_falls_back_to_error_for_unknown_shape() {
+        let e = anyhow::anyhow!("something nobody recognises");
+        let kind = classify_jwc_error(&e);
+        assert_eq!(kind, "Error");
+    }
+
+    #[test]
+    fn classify_jwc_error_detects_validation_error_message_shape() {
+        let e = anyhow::anyhow!("validate body: field 'name' is required");
+        assert_eq!(classify_jwc_error(&e), "ValidationError");
+    }
+
+    #[test]
+    fn classify_jwc_error_detects_timeout_error_message_shape() {
+        let e = anyhow::anyhow!("request timeout: deadline elapsed");
+        assert_eq!(classify_jwc_error(&e), "TimeoutError");
+    }

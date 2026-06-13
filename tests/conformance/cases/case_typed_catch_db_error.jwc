@@ -1,0 +1,40 @@
+// CONFORMANCE: deferred
+// Conformance: `catch (e: DbError)` must catch errors classified as
+// DbError (or any DbError.* subtype, per the prefix rule in
+// `runner::mod.rs::catch_type_matches`).
+//
+// DEFERRED RATIONALE
+// ------------------
+// The conformance harness runs without a Postgres connection — the
+// integration_db.rs suite owns the testcontainer story. Today the
+// runtime classifies an error as `"DbError"` only when the error chain
+// either downcasts to `tokio_postgres::Error` (Pass 1) or contains one
+// of the substring signatures `deadpool / tokio-postgres / postgres /
+// db error / pool / advisory lock / migration / sql` (Pass 2 in
+// `classify_jwc_error`).
+//
+// None of the builtins reachable from .jwc without a DB are reliably
+// driven down that path:
+//   * `raw_sql` fails with "DATABASE_URL ... is required for db access"
+//     when no DB is configured — that string does not contain any of
+//     the DbError substring needles.
+//   * There is no .jwc surface today for synthesising a typed error
+//     ("throw" is not a stable user-facing feature, and the typed
+//     `JwcError` enum the docs gesture at is still a follow-up item).
+//
+// When a follow-up sprint adds either (a) a no-DB classifier hook the
+// test can trip, or (b) a userland `throw` form that lets the test
+// raise an error whose chain triggers the DbError needle, drop this
+// marker and convert it to an active case. The expected stdout below
+// reflects the intended behaviour once that path lands.
+function main() {
+    try {
+        // Once unblocked, replace this with a call that classifies as
+        // DbError. Today raw_sql with no DATABASE_URL classifies as the
+        // generic "Error" supertype, which is why the test is deferred.
+        let _ignored = raw_sql("select 1");
+        print("never");
+    } catch (e: DbError) {
+        print("caught db error");
+    }
+}

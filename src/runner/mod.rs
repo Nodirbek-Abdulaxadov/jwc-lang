@@ -56,25 +56,72 @@ use util::{closest_match, levenshtein};
 /// `"Error"` is the catch-all super-kind — every error matches it, equivalent
 /// to a bare `catch (e)` without a type annotation. Specific kinds match
 /// only when the error chain looks like it came from that subsystem.
+///
+/// Sprint 3A: kinds are now hierarchical via dot-separated paths.
+/// `classify_jwc_error` returns the most specific subtype it can determine
+/// (e.g. `"DbError.UniqueViolation"` for a PG `23505` SQLSTATE), and
+/// `catch_type_matches` does prefix matching on the dot boundary so a
+/// parent kind (`DbError`) catches every subtype (`DbError.*`).
+///
+/// Curation notes:
+/// - JWT.Expired is intentionally absent — the built-in `verify_hs256` does
+///   not check the `exp` claim, so we cannot reliably detect expiry.
+/// - `HttpError.BadGateway` rolls up 502 / 503 / 504 since they share the
+///   "upstream is unhealthy" production motivation.
 pub(crate) const JWC_ERROR_KINDS: &[&str] = &[
     "Error",
     "DbError",
+    "DbError.UniqueViolation",      // PG SQLSTATE 23505
+    "DbError.ForeignKeyViolation",  // 23503
+    "DbError.NotNullViolation",     // 23502
+    "DbError.CheckViolation",       // 23514
+    "DbError.SerializationFailure", // 40001
+    "DbError.DeadlockDetected",     // 40P01
+    "DbError.ConnectionFailure",    // tokio_postgres Error::is_closed()
     "HttpError",
+    "HttpError.NotFound",     // 404
+    "HttpError.Unauthorized", // 401
+    "HttpError.Forbidden",    // 403
+    "HttpError.BadGateway",   // 502 / 503 / 504
     "ValidationError",
     "TimeoutError",
+    "JwtError",
+    "JwtError.InvalidSignature",
 ];
 
-/// Classify an `anyhow::Error` into one of the well-known JWC error kinds.
+/// Classify an `anyhow::Error` into the most specific well-known JWC error
+/// kind reachable from its `.chain()`.
 ///
-/// v1 is pattern-based — it inspects the messages on the error chain looking
-/// for signature substrings each subsystem leaves behind (deadpool/postgres
-/// for DB, reqwest/http for HTTP, validate-body shape for Validation, tokio
-/// timeout for Timeout). When nothing matches we return `"Error"`, which
-/// also matches a `catch (e: Error)` clause and any untyped catch.
+/// Strategy:
+/// 1. Walk the error chain and try to downcast each link into the concrete
+///    sub-system error type (`tokio_postgres::Error`, `reqwest::Error`).
+///    These give us SQLSTATE / HTTP status — the precise signals we need to
+///    pick a subtype.
+/// 2. If a downcast succeeds but doesn't carry a specific signal, fall back
+///    to the parent kind (e.g. an unknown SQLSTATE returns `"DbError"`, not
+///    a subtype that would silently mismatch on `catch (e: DbError.X)`).
+/// 3. If no downcast hits, fall back to the v1 substring scan so the
+///    existing JWT / validation / timeout / loose "this smells like HTTP"
+///    paths keep classifying. Substring matching is messy but the only way
+///    to surface kinds whose origin is plain `anyhow!(...)` text.
 ///
-/// Future versions can switch to a typed `JwcError` enum and downcast on the
-/// chain — keep the classifier signature stable so callers don't change.
+/// The returned `&'static str` is one of `JWC_ERROR_KINDS`. The signature
+/// is intentionally stable — only the internal logic changes between
+/// sprints.
 pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
+    // --- Pass 1: typed downcasts on the error chain ----------------------
+    // These give us authoritative SQLSTATE / HTTP-status signals so we can
+    // pick the right subtype without guessing from strings.
+    for cause in e.chain() {
+        if let Some(pg) = cause.downcast_ref::<tokio_postgres::Error>() {
+            return classify_pg_error(pg);
+        }
+        if let Some(http) = cause.downcast_ref::<reqwest::Error>() {
+            return classify_reqwest_error(http);
+        }
+    }
+
+    // --- Pass 2: substring scan (legacy path) ----------------------------
     let mut msgs: Vec<String> = e.chain().map(|c| c.to_string().to_lowercase()).collect();
     let blob = msgs.join("\n");
     msgs.push(blob);
@@ -82,6 +129,15 @@ pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
 
     let has = |needles: &[&str]| -> bool { needles.iter().any(|n| combined.contains(n)) };
 
+    // JWT first — its substrings are distinctive and we want them ahead of
+    // the generic ValidationError catch-all so `jwt_verify: signature
+    // mismatch` doesn't get mis-classified as a validation failure.
+    if has(&["jwt_verify", "jwt_sign", "jwt:"]) {
+        if has(&["signature mismatch", "invalid base64", "hs256"]) {
+            return "JwtError.InvalidSignature";
+        }
+        return "JwtError";
+    }
     if has(&[
         "validate body",
         "validation failed",
@@ -124,15 +180,84 @@ pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
     "Error"
 }
 
+/// Map a `tokio_postgres::Error` onto the most specific `DbError.*` subtype.
+/// Falls back to bare `"DbError"` when the error has no SQLSTATE code we
+/// recognise — never invents a subtype.
+fn classify_pg_error(pg: &tokio_postgres::Error) -> &'static str {
+    use tokio_postgres::error::SqlState;
+    if let Some(code) = pg.code() {
+        if code == &SqlState::UNIQUE_VIOLATION {
+            return "DbError.UniqueViolation";
+        }
+        if code == &SqlState::FOREIGN_KEY_VIOLATION {
+            return "DbError.ForeignKeyViolation";
+        }
+        if code == &SqlState::NOT_NULL_VIOLATION {
+            return "DbError.NotNullViolation";
+        }
+        if code == &SqlState::CHECK_VIOLATION {
+            return "DbError.CheckViolation";
+        }
+        if code == &SqlState::T_R_SERIALIZATION_FAILURE {
+            return "DbError.SerializationFailure";
+        }
+        if code == &SqlState::T_R_DEADLOCK_DETECTED {
+            return "DbError.DeadlockDetected";
+        }
+    }
+    if pg.is_closed() {
+        return "DbError.ConnectionFailure";
+    }
+    "DbError"
+}
+
+/// Map a `reqwest::Error` onto the most specific `HttpError.*` subtype using
+/// its HTTP status (when one was attached). Network/timeout failures with
+/// no status fall back to `"HttpError"` so a `catch (e: HttpError)` still
+/// catches them.
+fn classify_reqwest_error(http: &reqwest::Error) -> &'static str {
+    if let Some(status) = http.status() {
+        let code = status.as_u16();
+        return match code {
+            401 => "HttpError.Unauthorized",
+            403 => "HttpError.Forbidden",
+            404 => "HttpError.NotFound",
+            502 | 503 | 504 => "HttpError.BadGateway",
+            _ => "HttpError",
+        };
+    }
+    "HttpError"
+}
+
 /// Returns true when an error of `kind` should be caught by a `catch (e: T)`
 /// clause whose annotated type is `catch_type` (or any error if `catch_type`
-/// is `None`). `"Error"` as the catch type matches everything, mirroring the
-/// untyped catch.
+/// is `None`).
+///
+/// Matching rules:
+/// - `None` matches every kind (untyped `catch (e)`).
+/// - `Some("Error")` matches every kind (the explicit catch-all super-kind).
+/// - `Some("DbError")` matches `"DbError"` AND every `"DbError.*"` subtype
+///   (parent catches child).
+/// - `Some("DbError.UniqueViolation")` matches only that exact kind —
+///   sibling subtypes (`DbError.ForeignKeyViolation`) do NOT match.
+///
+/// All comparisons are exact string compares on the kind returned by
+/// `classify_jwc_error`; we never split on `.` more than once because the
+/// hierarchy is intentionally two-level (parent → leaf).
 pub(crate) fn catch_type_matches(catch_type: Option<&str>, kind: &str) -> bool {
     match catch_type {
         None => true,
         Some("Error") => true,
-        Some(t) => t == kind,
+        Some(t) if t == kind => true,
+        Some(t) => {
+            // Parent kind catches its dotted children: catch (e: DbError)
+            // matches a kind of "DbError.UniqueViolation". We only treat
+            // `t` as a parent when the kind literally starts with `t.` —
+            // bare prefix overlap (e.g. "Db" vs "DbError") must NOT match.
+            kind.len() > t.len()
+                && kind.as_bytes().get(t.len()) == Some(&b'.')
+                && kind.starts_with(t)
+        }
     }
 }
 

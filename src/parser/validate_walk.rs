@@ -147,7 +147,18 @@ fn validate_stmt(
             ..
         } => {
             if let Some(t) = catch_type {
-                if !crate::runner::JWC_ERROR_KINDS.contains(&t.as_str()) {
+                // Accept if the full dotted name is a known kind, or — for
+                // forward-compat with new subtypes the runner may surface
+                // before the static table catches up — accept any dotted
+                // type whose root segment (text before the first '.') is a
+                // known kind. `catch (e: DbError.NewSubtype)` therefore
+                // parses and validates today; the runner just won't match
+                // it until the table grows. Bare unknown kinds still fail.
+                let exact = crate::runner::JWC_ERROR_KINDS.contains(&t.as_str());
+                let root_ok = t.split_once('.').map_or(false, |(root, _)| {
+                    crate::runner::JWC_ERROR_KINDS.contains(&root)
+                });
+                if !exact && !root_ok {
                     let kinds = crate::runner::JWC_ERROR_KINDS.join(", ");
                     let hint = match crate::runner::closest_known_kind(t) {
                         Some(s) => format!(" — did you mean `{}`?", s),

@@ -1,0 +1,2 @@
+outer caught: division by zero
+after outer

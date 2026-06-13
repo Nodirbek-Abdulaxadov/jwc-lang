@@ -1,0 +1,33 @@
+// Conformance: a typed `catch (e: T)` clause MUST NOT swallow errors
+// whose kind is not `T`. They must propagate to the surrounding scope so
+// an outer try or the top-level error handler gets a chance.
+//
+// Concretely: a division-by-zero classifies as the generic `"Error"`
+// kind. An inner `catch (e: HttpError)` must therefore NOT match, and
+// the error has to bubble through to the outer `catch (e: Error)` (the
+// super-kind catches everything). The two "after inner" markers
+// validate that the inner clause did not run AND that control did not
+// resume after the throwing line.
+function divide(a: int, b: int): int {
+    return a / b;
+}
+
+function main() {
+    try {
+        try {
+            let _bad = divide(1, 0);
+            print("never reached inside inner try");
+        } catch (e: HttpError) {
+            // Wrong kind for divide-by-zero — must NOT fire. If this
+            // line ever prints, type-filter dispatch is regressing.
+            print("WRONG: inner HttpError catch fired");
+        }
+        print("never reached after inner block");
+    } catch (e: Error) {
+        // The outer super-kind catch must receive the propagated
+        // division-by-zero error and print its message verbatim.
+        print("outer caught: " + e.message);
+    }
+
+    print("after outer");
+}

@@ -249,7 +249,7 @@ impl<'a> Parser<'a> {
         let catch_var = self.expect_ident("expected catch variable name")?;
         let catch_type = if self.check_symbol(':') {
             self.expect_symbol(':')?;
-            Some(self.expect_ident("expected error type after ':'")?)
+            Some(self.parse_dotted_type()?)
         } else {
             None
         };
