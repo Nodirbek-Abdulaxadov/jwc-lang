@@ -1,0 +1,101 @@
+name: Publish VS Code extension
+
+# Builds + publishes the JWC VS Code extension to the official Marketplace
+# (VSCE) and OpenVSX (Eclipse Foundation alternative used by VSCodium /
+# Gitpod / Theia). Triggered on tag push (`v*`) AND manual dispatch.
+#
+# Secrets required:
+#   - VSCE_PAT  — Visual Studio Marketplace Personal Access Token
+#                  (https://dev.azure.com/<org>/_usersSettings/tokens with
+#                  scope `Marketplace -> Manage`). Missing → publish skipped.
+#   - OVSX_PAT  — OpenVSX namespace token from open-vsx.org. Missing →
+#                  OpenVSX publish skipped (best-effort secondary).
+#
+# Both publishes are guarded so a missing secret degrades to "package the
+# .vsix and upload as a GitHub Release artefact" rather than failing the run.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write    # upload the .vsix to the GitHub Release
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+
+      - name: Install deps + compile
+        run: |
+          npm ci --no-audit --no-fund
+          npm run compile
+
+      - name: Resolve version (tag → package.json semver)
+        id: ver
+        run: |
+          # If invoked via tag push, strip the leading `v` to get a clean SemVer.
+          # Manual dispatch falls back to whatever package.json carries.
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "Tagged release v${VERSION}; bumping package.json"
+            npx --yes @vscode/vsce@latest --version >/dev/null
+            jq --arg v "$VERSION" '.version = $v' package.json > package.json.new
+            mv package.json.new package.json
+          else
+            VERSION=$(jq -r .version package.json)
+            echo "Manual run; using existing version v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Package .vsix
+        run: |
+          npx --yes @vscode/vsce@latest package --no-yarn \
+            --out "jwc-lang-${{ steps.ver.outputs.version }}.vsix"
+
+      - name: Attach .vsix to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vscode-extension/jwc-lang-${{ steps.ver.outputs.version }}.vsix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to VS Code Marketplace
+        if: env.VSCE_PAT != ''
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          npx --yes @vscode/vsce@latest publish --no-yarn --pat "$VSCE_PAT"
+
+      - name: Publish to OpenVSX (best effort)
+        if: env.OVSX_PAT != ''
+        continue-on-error: true
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          npx --yes ovsx@latest publish --pat "$OVSX_PAT" \
+            "jwc-lang-${{ steps.ver.outputs.version }}.vsix"
+
+      - name: Skip publish (no secrets)
+        if: env.VSCE_PAT == '' && env.OVSX_PAT == ''
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          echo "::notice ::Neither VSCE_PAT nor OVSX_PAT is set — .vsix was packaged + uploaded to the GitHub Release, but no marketplace publish ran. Configure repo secrets to enable publishing."

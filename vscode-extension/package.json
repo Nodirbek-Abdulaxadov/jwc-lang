@@ -1,35 +1,49 @@
 {
   "name": "jwc-lang",
   "displayName": "JWC Language",
-  "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and LSP-powered diagnostics",
-  "version": "0.4.2",
-  "publisher": "jwc-extension",
+  "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and LSP-powered diagnostics for the JWC backend language.",
+  "version": "0.4.7",
+  "publisher": "Nodirbek-Abdulaxadov",
   "license": "MIT",
+  "author": {
+    "name": "Nodirbek Abdulaxadov"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
     "Programming Languages",
-    "Snippets",
-    "Linters"
+    "Linters",
+    "Snippets"
   ],
   "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#0b1f3a",
+    "theme": "dark"
+  },
   "keywords": [
     "jwc",
     "just web code",
     "backend",
     "web",
     "database",
-    "postgres"
+    "postgres",
+    "lsp",
+    "language server",
+    "http",
+    "routes",
+    "entities",
+    "sql"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang"
+    "url": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang.git"
   },
   "bugs": {
     "url": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang/issues"
   },
   "homepage": "https://jwc.1kb.uz",
+  "qna": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang/discussions",
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:jwc"
@@ -95,7 +109,7 @@
         "jwc.lspPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the jwc-lsp executable. Leave empty to look up `jwc-lsp` on PATH."
+          "description": "Path to the jwc-lsp executable. Leave empty to look up `jwc-lsp` on PATH or under ~/.jwc/bin."
         },
         "jwc.trace.server": {
           "type": "string",
@@ -105,7 +119,7 @@
             "verbose"
           ],
           "default": "off",
-          "description": "Traces the LSP traffic between VS Code and the JWC language server."
+          "description": "Traces the LSP traffic between the editor and the JWC language server."
         }
       }
     }
@@ -126,6 +140,7 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.24.2",
+    "ovsx": "^0.10.1",
     "typescript": "^5.4.0"
   }
 }
