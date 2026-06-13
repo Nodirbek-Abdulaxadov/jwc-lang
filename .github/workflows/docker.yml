@@ -1,0 +1,93 @@
+name: Docker images
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version label (default: derived from tag; falls back to dev-<sha>)'
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # for provenance attestation
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: nodirbek-abdulaxadov
+
+jobs:
+  build-push:
+    name: Build & push ${{ matrix.image.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: jwc
+            dockerfile: Dockerfile
+            description: 'JWC compiler + runtime CLI'
+          - name: jwc-runtime
+            dockerfile: Dockerfile.slim
+            description: 'Minimal distroless runtime base for JWC native apps'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version label
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            label="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            label="${{ inputs.version }}"
+          else
+            label="dev-$(echo ${{ github.sha }} | cut -c1-7)"
+          fi
+          echo "label=${label}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.label }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+          labels: |
+            org.opencontainers.image.description=${{ matrix.image.description }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=https://github.com/Nodirbek-Abdulaxadov/jwc-lang
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,scope=${{ matrix.image.name }},mode=max

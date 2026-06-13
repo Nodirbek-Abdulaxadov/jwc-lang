@@ -10,16 +10,36 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::{cmd, parser, project, sql};
+use crate::{cmd, parser, project, sql, templates};
 
 /// Create a new JWC project scaffold rooted at `target`.
-pub fn new_project(target: &Path) -> Result<()> {
-    project::create_new_project(target)?;
-    println!("Created project: {}", target.display());
+///
+/// `name` is the project name as the user typed it (used by templated
+/// content/path substitution). `kind` picks which embedded template tree
+/// to materialise; `Empty` falls back to [`project::create_new_project`],
+/// which is the legacy behaviour we don't want to disturb.
+pub fn new_project(target: &Path, name: &str, kind: templates::TemplateKind) -> Result<()> {
+    match kind {
+        templates::TemplateKind::Empty => {
+            project::create_new_project(target)?;
+        }
+        other => {
+            templates::create_from_template(name, other, target)?;
+        }
+    }
+    println!(
+        "Created project: {} (template: {})",
+        target.display(),
+        kind.as_str()
+    );
     println!("Try:");
     println!("  cd {}", target.display());
     println!("  jwc test");
-    println!("  jwc build");
+    if !matches!(kind, templates::TemplateKind::Empty) {
+        println!("  jwc run");
+    } else {
+        println!("  jwc build");
+    }
     Ok(())
 }
 

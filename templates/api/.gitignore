@@ -1,0 +1,19 @@
+# Secrets
+.env
+.env.local
+
+# jwc bundle output
+bin/
+
+# Rust toolchain output (only when checking the compiler in)
+target/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,12 @@
+// Handler for the "process_email" queue. Receives the raw JSON payload
+// the producer passed to `enqueue("process_email", ...)`. Return value
+// is informational — the worker logs it on success.
+//
+// NOTE: `send_email` is a JWC built-in (SMTP send). We name the handler
+// `process_email` so it doesn't shadow the built-in.
+function process_email(payload) {
+    print("processing email job");
+    print(payload);
+    // Replace with: send_email({ to: ..., subject: ..., body: ... });
+    return true;
+}

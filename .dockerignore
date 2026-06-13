@@ -1,0 +1,54 @@
+# Build / target artefacts (huge, never needed inside the build context)
+target/
+**/target/
+.jwc-build/
+**/.jwc-build/
+fuzz/target/
+soak/target/
+
+# Project install / binary outputs
+bin/
+obj/
+examples/*/bin/
+examples/*/obj/
+examples/*/.jwc-build/
+.dist/
+
+# Node / VS Code extension build outputs
+node_modules/
+**/node_modules/
+vscode-extension/out/
+vscode-extension/dist/
+vscode-extension/*.vsix
+
+# Logs and local-only state
+*.log
+*.tmp
+*.pid
+audit_out.json
+
+# Git / IDE / OS metadata
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude / agent state
+.claude/
+CLAUDE.md
+next/
+ChatGPT5.5_Feedback.md
+ClaudeOpus4.7_Feedback.md
+
+# Docs site (not needed at build time)
+docs/build/
+docs/.docusaurus/
+
+# The Dockerfiles themselves (the daemon already has them out-of-band)
+Dockerfile
+Dockerfile.slim
+.dockerignore

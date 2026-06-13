@@ -1,9 +1,9 @@
-use jwc::{cmd, error_report, project, runner, server};
+use jwc::{cmd, error_report, project, runner, server, templates};
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -43,7 +43,16 @@ fn long_version_string() -> &'static str {
 #[derive(Subcommand)]
 enum Command {
     /// Create a new JWC project folder with jwcproj.json and main.jwc
-    New { name: String },
+    New {
+        name: String,
+        /// Starter template to scaffold from. Defaults to `empty` (the
+        /// original `jwc new <name>` behaviour: a minimal main.jwc + manifest).
+        /// `api` lays down a CRUD REST scaffold, `auth` adds JWT + middleware,
+        /// `jobs` wires up a background-queue handler. See
+        /// `docs/getting-started/templates.md` for the full layout.
+        #[arg(long, value_enum)]
+        template: Option<TemplateKindArg>,
+    },
     /// Parse and validate a .jwc schema file
     Check {
         file: PathBuf,
@@ -238,6 +247,33 @@ enum Command {
     },
 }
 
+/// Clap value-enum mirror of [`templates::TemplateKind`]. Kept in a
+/// separate type so the CLI surface owns its own derive (and so a
+/// downstream rename in the library doesn't accidentally break the
+/// stable CLI spelling).
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TemplateKindArg {
+    /// Minimal scaffold — same as omitting `--template`.
+    Empty,
+    /// CRUD REST API with one entity + migrations.
+    Api,
+    /// JWT auth with a middleware-protected `/me` route.
+    Auth,
+    /// Background-queue producer/handler scaffold.
+    Jobs,
+}
+
+impl From<TemplateKindArg> for templates::TemplateKind {
+    fn from(value: TemplateKindArg) -> Self {
+        match value {
+            TemplateKindArg::Empty => templates::TemplateKind::Empty,
+            TemplateKindArg::Api => templates::TemplateKind::Api,
+            TemplateKindArg::Auth => templates::TemplateKind::Auth,
+            TemplateKindArg::Jobs => templates::TemplateKind::Jobs,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum MigrateCommand {
     /// Create new migration files
@@ -317,7 +353,15 @@ fn real_main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::New { name } => cmd::check::new_project(&PathBuf::from(name))?,
+        Command::New { name, template } => {
+            // `Empty` (or no `--template`) preserves the byte-for-byte
+            // legacy behaviour of `project::create_new_project`. Anything
+            // else routes through the embedded-template materializer.
+            let kind = template
+                .map(templates::TemplateKind::from)
+                .unwrap_or(templates::TemplateKind::Empty);
+            cmd::check::new_project(&PathBuf::from(&name), &name, kind)?;
+        }
         Command::Check { file, no_typecheck } => cmd::check::check(&file, !no_typecheck)?,
         Command::GenSql { file } => cmd::check::gen_sql(&file)?,
         Command::Run {

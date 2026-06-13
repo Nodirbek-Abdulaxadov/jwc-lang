@@ -43,4 +43,5 @@ pub mod sema;
 pub mod server;
 pub mod sql;
 pub mod swagger;
+pub mod templates;
 pub mod typecheck;

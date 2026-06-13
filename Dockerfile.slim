@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+#
+# Minimal JWC app runtime image (no `jwc` CLI included).
+#
+# Trade-off vs. `Dockerfile`:
+#   - `Dockerfile`        → debian:bookworm-slim + jwc CLI (~80 MB).
+#                           Use as a build stage, or for `jwc migrate up`
+#                           init-containers, or anywhere you need the CLI.
+#   - `Dockerfile.slim`   → distroless/cc-debian12 (~25 MB), NO `jwc` CLI.
+#                           Use as the final stage for a pre-built native
+#                           `jwc-app` binary produced by `jwc build --native`.
+#
+# Distroless gives us libc + ca-certs + nothing else. No shell, no package
+# manager, no `wget`. Healthchecks must use the binary itself (e.g. exec
+# the app with `--health`) or be defined at the k8s probe layer.
+#
+# Tag `:nonroot` runs as uid 65532; pin to `cc-debian12` (NOT `static`)
+# because the native AOT binary is dynamically linked against libgcc_s
+# and libc — `distroless/static` won't load it.
+
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+
+WORKDIR /app
+
+# Users should copy their compiled native binary in their own Dockerfile:
+#   COPY --from=builder /app/bin/release/my-api /app/my-api
+# Then set their own ENTRYPOINT. We leave the entrypoint unset here so the
+# image is a true base — no surprises.
+
+LABEL org.opencontainers.image.title="jwc-runtime" \
+      org.opencontainers.image.description="Minimal distroless base for JWC native AOT apps (no CLI)" \
+      org.opencontainers.image.source="https://github.com/Nodirbek-Abdulaxadov/jwc-lang" \
+      org.opencontainers.image.url="https://github.com/Nodirbek-Abdulaxadov/jwc-lang" \
+      org.opencontainers.image.documentation="https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/docs/deployment/docker.md" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Nodirbek Abdulaxadov"
+
+# No ENTRYPOINT / CMD on purpose — downstream Dockerfiles set it.

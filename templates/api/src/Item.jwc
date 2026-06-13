@@ -1,0 +1,13 @@
+entity Item of AppDb {
+    id        int pk autoincrement;
+    name      varchar(255);
+    createdAt datetime;
+}
+
+class ItemCreateRequest {
+    name string;
+}
+
+class ItemUpdateRequest {
+    name string;
+}

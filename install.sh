@@ -19,8 +19,18 @@ DOWNLOAD_BASE="${JWC_DOWNLOAD_BASE:-}"
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
+# Set JWC_MUSL=1 to fetch the fully-static musl tarball instead of the
+# default glibc one. The musl build runs unchanged on Alpine, distroless
+# and glibc-old hosts. See docs/docs/deployment/musl-static.md.
 case "${os}-${arch}" in
-    linux-x86_64)  short="x86_64-linux";  ext="tar.gz" ;;
+    linux-x86_64)
+        if [[ "${JWC_MUSL:-0}" == "1" ]]; then
+            short="x86_64-unknown-linux-musl"
+        else
+            short="x86_64-linux"
+        fi
+        ext="tar.gz"
+        ;;
     *)
         echo "Unsupported platform: ${os}-${arch}." >&2
         echo "Prebuilt JWC binaries currently ship for x86_64 Linux + Windows." >&2

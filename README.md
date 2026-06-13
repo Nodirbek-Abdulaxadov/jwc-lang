@@ -1058,6 +1058,26 @@ The roadmap for closing the remaining gap to the statically-compiled stacks
 curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
 ```
 
+### Linux x86_64 (musl, static — works on Alpine, distroless, glibc-old)
+
+```bash
+curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.4.7/jwc-v0.4.7-x86_64-unknown-linux-musl.tar.gz | tar xz
+sudo install -m 755 jwc /usr/local/bin/
+sudo install -m 755 jwc-lsp /usr/local/bin/
+jwc --version
+```
+
+A matching `jwc-v0.4.7-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
+
+### Docker (official multi-arch images)
+
+```bash
+docker pull ghcr.io/nodirbek-abdulaxadov/jwc:0.4.7
+docker run --rm ghcr.io/nodirbek-abdulaxadov/jwc:0.4.7 --version
+```
+
+`ghcr.io/nodirbek-abdulaxadov/jwc:<version>` ships the `jwc` CLI on `debian:bookworm-slim` (use as a build stage or a `migrate up` k8s init-container). `ghcr.io/nodirbek-abdulaxadov/jwc-runtime:<version>` is a ~25 MB distroless base for your compiled native app. Full guide + k8s YAML in [`docs/docs/deployment/docker.md`](docs/docs/deployment/docker.md).
+
 ### Windows (PowerShell)
 
 ```powershell

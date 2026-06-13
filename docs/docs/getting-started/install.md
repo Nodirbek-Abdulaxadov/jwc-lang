@@ -27,6 +27,8 @@ jwc --version    # → jwc 0.4.7 (or newer)
 jwc --help
 ```
 
+After install, scaffold a project with [`jwc new --template ...`](./templates.md) — the `api`, `auth`, and `jobs` templates give you a working starter in one command.
+
 ## Build from source
 
 Requires the [Rust toolchain](https://rustup.rs/) (1.83+).

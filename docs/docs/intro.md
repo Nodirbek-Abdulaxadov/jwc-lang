@@ -37,7 +37,7 @@ function main() { serve(8080); }
 | [Standard library](./stdlib/strings) | String, array, JSON, HTTP, JWT, hashing, email, cache |
 | [Packages](./packages/manifest) | Manifest, dependencies, registry, `jwc publish` |
 | [CLI](./cli/overview) | Every `jwc` subcommand + flag |
-| [Deployment](./deployment/native-build) | Bundled launcher, native AOT, Docker, k8s, observability, OTLP |
+| [Deployment](./deployment/native-build) | Bundled launcher, native AOT, [Docker](./deployment/docker) (official `ghcr.io/.../jwc` image), k8s migrate init-container, observability, OTLP |
 | [Reference](./reference/builtins) | Built-ins reference + numbered diagnostic codes (`Wxxx` / `Exxx`) |
 | [Security](./security/) | SSRF allowlist, JWT validation, secrets redaction, trusted-proxy chain |
 
