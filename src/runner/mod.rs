@@ -1729,22 +1729,14 @@ impl<'a> Vm<'a> {
                 .await?;
                 // Cache hit short-circuit: skip get_or_compile_sql + DB roundtrip.
                 if let Some(cached) = engine::try_cached_result(&cache_key)? {
-                    return if cached == "null" || cached.is_empty() {
-                        Ok(Value::Null)
-                    } else {
-                        Ok(Value::Str(cached))
-                    };
+                    return Ok(materialize_select_result(&cached));
                 }
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let compiled_sql = engine::get_or_compile_sql(&shape_key, || Ok(sql))?;
                 let result =
                     engine::query_text_with_optional_cache(&cache_key, &compiled_sql, &param_refs)
                         .await?;
-                if result == "null" || result.is_empty() {
-                    Ok(Value::Null)
-                } else {
-                    Ok(Value::Str(result))
-                }
+                Ok(materialize_select_result(&result))
             }
             Expr::Call { name, args } => {
                 if name.eq_ignore_ascii_case("dispatch") {
@@ -3831,6 +3823,80 @@ fn value_to_json(value: &Value) -> JsonValue {
     }
 }
 
+/// Convert a `SELECT` result string from `engine::query_text_with_optional_cache`
+/// into the typed `Value` tree.
+///
+/// **Phase 1 [1.0-blocker]** — the eager-parse fast path for DB rows.
+/// Before this, every `select` returned `Value::Str(json)` and downstream
+/// code (ForIn loop, FieldGet, response wrap) paid `serde_json::from_str`
+/// + `json_to_value` PER ACCESS. Now we parse once here and emit:
+///
+/// - JSON null / empty → `Value::Null`
+/// - JSON array of homogeneous-shape objects → `Value::Array` of
+///   `Value::Record` sharing **one** `field_names` Arc across all rows
+///   (the headline /json-large win — 1000 rows = 1 allocation for the
+///   schema layout plus per-row `values` Vecs).
+/// - JSON object → single `Value::Record` (the `first` form).
+/// - Anything else → fall back through `json_to_value`.
+///
+/// Shape derivation: the first row's keys define the shape. Subsequent
+/// rows look up each field in the shape's order, missing keys become
+/// `Value::Null`. SQL `SELECT` always returns the same projected columns
+/// across rows, so the fast path is the common case; the per-row
+/// `into_iter` walk handles any extra keys gracefully without dropping
+/// to the slow path.
+fn materialize_select_result(result: &str) -> Value {
+    if result == "null" || result.is_empty() {
+        return Value::Null;
+    }
+    let parsed: JsonValue = match serde_json::from_str(result) {
+        Ok(v) => v,
+        // Not valid JSON — keep the original string so user code can
+        // still see (and debug) whatever the engine returned.
+        Err(_) => return Value::Str(result.to_string()),
+    };
+    match parsed {
+        JsonValue::Array(rows) => {
+            // Empty array — preserve the array shape (callers may iterate).
+            if rows.is_empty() {
+                return Value::Array(Vec::new());
+            }
+            // Derive the shared shape from the first row, then materialise
+            // every row against it. Non-object first row → element-wise
+            // json_to_value (heterogeneous payloads keep the dynamic path).
+            let first_obj = match &rows[0] {
+                JsonValue::Object(m) => m,
+                _ => {
+                    return Value::Array(rows.iter().map(json_to_value).collect());
+                }
+            };
+            let shape: Arc<Vec<Arc<str>>> = Arc::new(
+                first_obj.keys().map(|k| Arc::from(k.as_str())).collect(),
+            );
+            let mut out: Vec<Value> = Vec::with_capacity(rows.len());
+            for row in rows {
+                match row {
+                    JsonValue::Object(mut m) => {
+                        let mut vals: Vec<Value> = Vec::with_capacity(shape.len());
+                        for field in shape.iter() {
+                            let v = m.remove(field.as_ref()).unwrap_or(JsonValue::Null);
+                            vals.push(json_to_value(&v));
+                        }
+                        out.push(Value::record_with_shape(Arc::clone(&shape), vals));
+                    }
+                    other => out.push(json_to_value(&other)),
+                }
+            }
+            Value::Array(out)
+        }
+        // `first` form returns one object — emit a single Record.
+        // json_to_value already turns Object→Record (Stage 2B wiring),
+        // so this hands off cleanly.
+        obj @ JsonValue::Object(_) => json_to_value(&obj),
+        other => json_to_value(&other),
+    }
+}
+
 /// Format the current UTC time as an RFC 3339 / ISO 8601 string with millis,
 /// using Howard Hinnant's civil-from-days algorithm so we avoid pulling in
 /// chrono just for one call.
@@ -4420,6 +4486,75 @@ mod tests {
         }
         assert_eq!(r1.as_string(), r#"{"id":1,"name":"alpha"}"#);
         assert_eq!(r2.as_string(), r#"{"id":2,"name":"beta"}"#);
+    }
+
+    #[test]
+    fn materialize_select_result_shares_shape_across_rows() {
+        // The /json-large win: 1000 rows from one select share ONE
+        // field_names Arc, not 1000 separate Vec<String> allocations.
+        let payload = r#"[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]"#;
+        let v = materialize_select_result(payload);
+        match v {
+            Value::Array(rows) => {
+                assert_eq!(rows.len(), 3);
+                let first_arc = match &rows[0] {
+                    Value::Record { field_names, .. } => Arc::clone(field_names),
+                    _ => panic!("expected Record"),
+                };
+                for row in rows.iter().skip(1) {
+                    match row {
+                        Value::Record { field_names, .. } => {
+                            assert!(
+                                Arc::ptr_eq(&first_arc, field_names),
+                                "all rows must share the same field_names Arc",
+                            );
+                        }
+                        _ => panic!("expected Record"),
+                    }
+                }
+                assert_eq!(rows[0].record_field("id"), Some(&Value::Int(1)));
+                assert_eq!(
+                    rows[2].record_field("name"),
+                    Some(&Value::Str("c".to_string())),
+                );
+            }
+            other => panic!("expected Value::Array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn materialize_select_result_handles_null_and_empty() {
+        assert!(matches!(materialize_select_result("null"), Value::Null));
+        assert!(matches!(materialize_select_result(""), Value::Null));
+        // Empty array stays an empty array — callers may iterate.
+        match materialize_select_result("[]") {
+            Value::Array(v) => assert!(v.is_empty()),
+            other => panic!("expected empty Array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn materialize_select_result_single_object_emits_record() {
+        // `select first ...` returns one object — materialise to Record.
+        let v = materialize_select_result(r#"{"id":42,"name":"first"}"#);
+        match v {
+            Value::Record { .. } => {
+                assert_eq!(v.record_field("id"), Some(&Value::Int(42)));
+                assert_eq!(
+                    v.record_field("name"),
+                    Some(&Value::Str("first".to_string())),
+                );
+            }
+            other => panic!("expected Record, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn materialize_select_result_falls_back_on_bad_json() {
+        // Anything the engine returns that isn't JSON falls back to Str,
+        // so callers still see the engine's raw output rather than Null.
+        let v = materialize_select_result("not-json-at-all");
+        assert!(matches!(v, Value::Str(ref s) if s == "not-json-at-all"));
     }
 
     #[test]
