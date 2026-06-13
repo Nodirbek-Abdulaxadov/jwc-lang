@@ -6,7 +6,31 @@ sidebar_position: 4
 
 The official editor support for `.jwc` ships as a VS Code extension that
 points at the bundled `jwc-lsp` language server (errors, hovers,
-go-to-definition).
+go-to-definition, rename, smart completion).
+
+## LSP feature matrix
+
+| Feature              | Status   | What it does                                                                 |
+|----------------------|----------|------------------------------------------------------------------------------|
+| Diagnostics          | shipped  | Parse, validate, and lint errors published on save and on change.            |
+| Hover                | shipped  | One-line summary on top-level `entity`, `class`, and `function` names.       |
+| Document symbols     | shipped  | Outline view of every top-level declaration in the open file.                |
+| Go to Definition     | shipped  | Jump to the declaration site of entities, classes, functions, middlewares.   |
+| Rename Symbol        | shipped  | Whole-document rename with collision detection and identifier validation.    |
+| Smart Completion     | shipped  | Context-aware: catch error kinds, `use` middleware names, keywords/builtins. |
+| Find References      | planned  | Phase 8E.                                                                    |
+| Cross-file Navigation| planned  | Phase 8E.                                                                    |
+
+### VS Code keybind reminders
+
+| Action               | Default keybind        |
+|----------------------|------------------------|
+| Go to Definition     | `F12` or `Ctrl+click`  |
+| Peek Definition      | `Alt+F12`              |
+| Rename Symbol        | `F2`                   |
+| Trigger Completion   | `Ctrl+Space`           |
+| Show Hover           | `Ctrl+K Ctrl+I`        |
+| Outline view         | `Ctrl+Shift+O`         |
 
 ## VS Code
 

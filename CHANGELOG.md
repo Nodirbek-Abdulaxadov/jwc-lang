@@ -3,6 +3,53 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.8] — Phase 8 developer experience + ecosystem close-out
+
+Bundles the full Phase 8 dev-experience surface from
+PRODUCTION_READINESS_PLAN.md across eight parallel sprint deliverables
+in two batches.
+
+**Deploy**: official multi-arch Docker images on GHCR
+(`jwc:0.4.8` + `jwc-runtime:0.4.8`, distroless cc-debian12:nonroot for
+the runtime variant), `x86_64-unknown-linux-musl` static binary in
+every release with `JWC_MUSL=1` install opt-in, k8s
+migrate-as-init-container deployment guide.
+
+**Onboarding**: `jwc new <name> --template <empty|api|auth|jobs>`
+ships three starter projects baked into the binary; "Zero to deployed
+CRUD in 15 minutes" tutorial walks scaffold → Postgres + migrations →
+native build → Docker → k8s rollout.
+
+**Editor**: LSP gains go-to-definition, rename, context-aware completion
+(`catch (e: ?)` / `use ?` / default keywords + builtins + user fns).
+VS Code Marketplace publish pipeline wired (Marketplace + OpenVSX,
+GitHub Release artefact fallback when secrets are missing).
+
+**Formatter**: `jwc fmt` finished via hybrid AST + line-based dispatch
+(line-based when source contains comments, AST canonical output
+otherwise, line-based fallback on parse error). CLI:
+`jwc fmt [paths] [--check] [--stdout]`. Idempotency test walks every
+`.jwc` under `examples/`, `templates/`, `tests/conformance/cases/`.
+
+**Codemod scaffold**: `jwc upgrade [paths] [--dry-run]` lands the
+deprecation migration runner. Registry is empty at v0.4.8; first
+scheduled rule is `no-typecheck-removed` in v0.6.0
+(per `DEPRECATION.md`).
+
+**Autogen docs**: `src/bin/gen_builtins_doc.rs` walks `BUILTIN_DEFS`
+into `docs/docs/reference/builtins.md` grouped by 15 categories.
+`tests/builtins_doc_sync.rs` fails CI when the checked-in doc
+diverges from the generator output.
+
+Tests: 336 lib (+6), 8 jwc-runtime, 35 conformance, 3 native_parity,
+21 imports, 1 fmt_idempotency, 1 builtins_doc_sync, 1 lsp_smoke (3
+ignored), 1 chaos (ignored), 1 lib ignored. Builds clean default +
+`--features otlp`.
+
+Phase 8 [1.0-blocker] developer experience closed. Long-form docs
+site finalization + registry stable-contract write-up remain as
+follow-up content work.
+
 ## [0.4.7] — Sprint 1-5 chala ishlar yopildi: Phase 2/6/7 close-outs
 
 Closing every remaining partial-state item from Phases 2, 6, and 7 so
