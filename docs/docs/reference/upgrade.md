@@ -9,9 +9,9 @@ sidebar_position: 5
 JWC version removes — so when you bump the toolchain, your project keeps
 compiling.
 
-## Status at v0.4.7
+## Status at v0.4.8
 
-The rule registry is **empty** at v0.4.7. Nothing has been removed yet, so
+The rule registry is **empty** at v0.4.8. Nothing has been removed yet, so
 `jwc upgrade` reports "no rules registered" and exits clean. The command
 ships now so the CLI shape is stable and rules can land in v0.5 / v0.6
 without breaking your `jwc upgrade && jwc test && jwc publish` workflow.

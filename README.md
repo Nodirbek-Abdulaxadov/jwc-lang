@@ -2,7 +2,7 @@
 
 JWC is a small backend-focused language for building API + database applications with simple syntax.
 
-This README is a quick, practical guide. Latest release: **v0.4.7**.
+This README is a quick, practical guide. Latest release: **v0.4.8**.
 
 ## Performance
 
@@ -16,7 +16,41 @@ Standalone HTTP bench against `rust-axum`, `go-fiber`, `dotnet-minimal`,
 Full numbers, methodology, and reproduction recipe:
 <https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark>
 
-## What's new in v0.4.7 (Sprint 1–5 + Phase 6/7)
+## What's new in v0.4.8 (Phase 8 dev-experience close-out)
+
+- **Docker images** — multi-arch (`linux/amd64` + `linux/arm64`) builder
+  + slim runtime image, published on tag via `.github/workflows/docker.yml`
+  with SBOM + provenance attestations.
+- **musl static binary** — `jwc-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz`
+  ships alongside the standard release; runs on any Linux without libc
+  ABI compatibility worries.
+- **`jwc new --template api|auth|jobs`** — three embedded starters
+  (REST CRUD / argon2 + JWT auth / background-job worker) scaffold with
+  `{{name}}` substitution into a fresh project.
+- **LSP go-to-definition, rename, completion** — `jwc-lsp` now indexes
+  symbols across the whole project, rewrites references for renames, and
+  surfaces context-aware completions (catch types, `use ?`, builtins,
+  user functions, default keywords).
+- **VS Code Marketplace + OpenVSX publish** — tag-triggered
+  `.github/workflows/vscode-marketplace.yml` packages the extension and
+  publishes to both registries via `vsce` / `ovsx`.
+- **`jwc fmt`** — hybrid AST-driven formatter with a comment-preserving
+  line-based fallback when the source contains `//` or `/* */`. Idempotency
+  enforced by `tests/fmt_idempotency.rs`. CLI: `jwc fmt [paths] [--check]
+  [--stdout]`.
+- **`jwc upgrade`** — codemod scaffold (empty rule registry at v0.4.8)
+  with stable `UpgradeRule` trait; first rule (`no-typecheck-removed`)
+  scheduled for v0.6.0 in [`DEPRECATION.md`](DEPRECATION.md).
+- **Autogen builtin reference** — `cargo run --bin gen_builtins_doc`
+  emits `docs/docs/reference/builtins.md` from `jwc::builtins::BUILTIN_DEFS`;
+  CI gate (`tests/builtins_doc_sync.rs`) fails if the checked-in doc drifts
+  from the source-of-truth defs.
+- **Zero-to-deployed-CRUD tutorial** — new
+  [`docs/docs/tutorial/zero-to-crud.md`](docs/docs/tutorial/zero-to-crud.md)
+  walks `jwc new --template api` → Postgres → `jwc run` → `jwc build
+  --native` → Docker → k8s in 8 steps.
+
+## What landed in v0.4.8 (Sprint 1–5 + Phase 6/7)
 
 - **Typed catch with dotted subtypes** — `catch (e: DbError.UniqueViolation) { ... }`
   matches PG SQLSTATE-classified errors; bare `catch (e: DbError)` still
@@ -884,7 +918,7 @@ SQLSTATE `23505` only. Known kinds today: `Error`, `DbError`,
 hint.
 
 The diagnostic catalog (W001–W006, E001–E021) is in
-[`src/error_codes.rs`](src/error_codes.rs). Highlights from v0.4.7:
+[`src/error_codes.rs`](src/error_codes.rs). Highlights from v0.4.8:
 **E016** (literal nested transaction → use `savepoint`), **E017**
 (savepoint outside a transaction), **E018**/**E019**/**E020** (type
 checker — return type / arg count / arg type), **E021** (visibility —
@@ -1061,13 +1095,13 @@ curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/
 ### Linux x86_64 (musl, static — works on Alpine, distroless, glibc-old)
 
 ```bash
-curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.4.7/jwc-v0.4.7-x86_64-unknown-linux-musl.tar.gz | tar xz
+curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.4.8/jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m 755 jwc /usr/local/bin/
 sudo install -m 755 jwc-lsp /usr/local/bin/
 jwc --version
 ```
 
-A matching `jwc-v0.4.7-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
+A matching `jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
 
 ### Docker (official multi-arch images)
 

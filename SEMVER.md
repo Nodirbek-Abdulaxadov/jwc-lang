@@ -3,6 +3,8 @@
 JWC versions follow [Semantic Versioning 2.0.0](https://semver.org).
 Until v1.0 this document is the contract; at v1.0 it becomes binding.
 
+> Stable surface as of **v0.4.8** (Phase 8 dev-experience close-out).
+
 > Released as part of Phase 0 of
 > [`PRODUCTION_READINESS_PLAN.md`](PRODUCTION_READINESS_PLAN.md).
 

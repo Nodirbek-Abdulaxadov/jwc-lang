@@ -4,7 +4,7 @@
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
 >
-> Joriy holat: **v0.4.7** — Sprint 1–5 + Phase 6 + Phase 7 partial yopildi.
+> Joriy holat: **v0.4.8** — Sprint 1–5 + Phase 6 + Phase 7 partial + Phase 8 yopildi.
 > Sprint Tracker (pastda) yangi 1.0 yo'l xaritasini ("1.0 Readiness Plan")
 > aks ettiradi.
 
@@ -24,7 +24,7 @@
 | Phase 6 (security) — SECURITY.md + cargo audit + threat model + SSRF allowlist + JWT exp + secrets redaction | ✅ Done (external review = ops) |
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
 | Phase 7 (perf) — bench DB endpoints + AOT scope + README link | ✅ Done (Linux real-run + CI regression gate + 72h soak burn = ops) |
-| Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp + WebSocket) |
+| Phase 8 — Background jobs + LSP + dev-experience close-out | ✅ Done (queue + jwc-lsp go-to-def/rename/completion + WebSocket + Docker/musl/templates/fmt/upgrade/Marketplace/autogen) |
 | Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
 | Phase 10 — Observability + streaming + SSE | ⏳ Partial (10.5 typed-catch dispatch ✅; OTLP exporter ✅ behind `otlp` feature; stream `select`, `route SSE` v2, native cross-target qoldi) |
 

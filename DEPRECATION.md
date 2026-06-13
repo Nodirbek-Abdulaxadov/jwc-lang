@@ -6,6 +6,10 @@ before that break.
 
 > Phase 0 deliverable from
 > [`PRODUCTION_READINESS_PLAN.md`](PRODUCTION_READINESS_PLAN.md).
+>
+> As of **v0.4.8**, `jwc upgrade` ships as an empty-registry codemod
+> scaffold — see [`docs/docs/reference/upgrade.md`](docs/docs/reference/upgrade.md).
+> First scheduled rule (`no-typecheck-removed`) lands in v0.6.0.
 
 ---
 
