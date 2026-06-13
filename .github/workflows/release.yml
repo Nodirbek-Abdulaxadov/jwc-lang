@@ -103,7 +103,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "ASSET=$asset"
 
       - name: Upload artifact (for manual runs / debugging)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.short }}
           path: |
