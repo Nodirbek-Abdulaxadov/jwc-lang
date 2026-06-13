@@ -3186,7 +3186,9 @@ fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync + Send> {
         Value::Null | Value::Void => Box::new(Option::<String>::None),
         // No native array param type yet — bind the JSON text. The DB column is
         // expected to be json/jsonb/text; richer array binding lands later.
-        Value::Array(_) => string_to_sql_param(&value_to_json(val).to_string()),
+        Value::Array(_) | Value::Record { .. } => {
+            string_to_sql_param(&value_to_json(val).to_string())
+        }
     }
 }
 
@@ -3199,6 +3201,7 @@ fn value_to_cache_fragment(val: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Void => "void".to_string(),
         Value::Array(_) => format!("arr:{}", value_to_json(val)),
+        Value::Record { .. } => format!("rec:{}", value_to_json(val)),
     }
 }
 
@@ -3751,6 +3754,20 @@ fn value_to_json(value: &Value) -> JsonValue {
         // smart serializer so a `Value::Str` carrying nested JSON embeds raw
         // rather than double-encoded.
         Value::Array(items) => JsonValue::Array(items.iter().map(value_to_json_smart).collect()),
+        // **Phase 1** — typed-shape object. Walk the shape's field-name
+        // list in order, pairing each name with its value through the
+        // smart serializer (so a nested `Value::Str` carrying JSON embeds
+        // raw rather than double-encoded, same as Array). Field-name Arcs
+        // are cheap to deref; the output `serde_json::Map` is an alloc per
+        // serialize call (unavoidable on this path until we switch the
+        // entire response pipeline to streaming writes).
+        Value::Record { field_names, values } => {
+            let mut map = serde_json::Map::with_capacity(field_names.len());
+            for (name, val) in field_names.iter().zip(values.iter()) {
+                map.insert(name.as_ref().to_string(), value_to_json_smart(val));
+            }
+            JsonValue::Object(map)
+        }
     }
 }
 
@@ -4137,6 +4154,25 @@ enum Value {
     /// In-language array literal (`[1, "two", true]`). Elements may be
     /// heterogeneous. Renders as compact JSON via `as_string()`.
     Array(Vec<Value>),
+    /// **Phase 1 [1.0-blocker]** — compile-time-shape object value.
+    ///
+    /// `field_names` carries the ordered field-name layout (one allocation
+    /// shared via `Arc` across every Record built with the same schema —
+    /// DB rows, monomorphized entity instances, statically-typed object
+    /// literals). `values` carries the field values in the SAME order as
+    /// `field_names`. Field access is `field_names.iter().position(...)`
+    /// then `values[i]` — O(N) for small N (typical entity has 2-10
+    /// fields, linear scan beats hashing); both vecs are wrapped in `Arc`
+    /// so cloning a Record is a refcount bump.
+    ///
+    /// This is the **typed fast path**. Dynamic objects (`json_parse(s)`
+    /// output, object literals with computed keys) still travel as
+    /// `Value::Str(json_string)`. The runner decides per-site which to
+    /// produce; `value_to_json` / `as_string` render both identically.
+    Record {
+        field_names: Arc<Vec<Arc<str>>>,
+        values: Arc<Vec<Value>>,
+    },
 }
 
 impl Value {
@@ -4150,7 +4186,7 @@ impl Value {
             Value::Void => String::new(),
             // Arrays render as compact JSON (`[1,"two",true]`), reusing the
             // serde_json serializer over a Value→JsonValue conversion.
-            Value::Array(_) => value_to_json(self).to_string(),
+            Value::Array(_) | Value::Record { .. } => value_to_json(self).to_string(),
         }
     }
 
@@ -4163,6 +4199,56 @@ impl Value {
             Value::Null => "null",
             Value::Void => "void",
             Value::Array(_) => "array",
+            Value::Record { .. } => "object",
+        }
+    }
+
+    /// Build a `Value::Record` from an ordered list of `(name, value)`
+    /// pairs. Field name strings get interned into the per-record `Arc`
+    /// here; for hot paths that build many Records with the same schema
+    /// (e.g. a 1000-row select), prefer `Value::record_with_shape` so
+    /// the `field_names` Arc is shared across all rows.
+    #[allow(dead_code)]
+    fn record_from_pairs(pairs: Vec<(String, Value)>) -> Value {
+        let mut names: Vec<Arc<str>> = Vec::with_capacity(pairs.len());
+        let mut values: Vec<Value> = Vec::with_capacity(pairs.len());
+        for (k, v) in pairs {
+            names.push(Arc::from(k));
+            values.push(v);
+        }
+        Value::Record {
+            field_names: Arc::new(names),
+            values: Arc::new(values),
+        }
+    }
+
+    /// Build a `Value::Record` reusing a pre-interned `field_names` Arc
+    /// — the shape-deduping path. `values.len()` must equal
+    /// `field_names.len()`; mismatch is a codegen bug, so debug builds
+    /// assert and release builds silently truncate to `min(len_a, len_b)`
+    /// rather than panic in production.
+    #[allow(dead_code)]
+    fn record_with_shape(field_names: Arc<Vec<Arc<str>>>, values: Vec<Value>) -> Value {
+        debug_assert_eq!(field_names.len(), values.len(), "Record shape/value arity mismatch");
+        Value::Record {
+            field_names,
+            values: Arc::new(values),
+        }
+    }
+
+    /// O(N) field lookup by name. Returns `None` for non-Record values
+    /// (callers should match on the variant first when they need the
+    /// distinction); returns `None` for an unknown field name on a
+    /// genuine Record. The linear scan beats hashing for the small N
+    /// (2-10 fields) of typical entity / object-literal shapes.
+    #[allow(dead_code)]
+    fn record_field(&self, name: &str) -> Option<&Value> {
+        match self {
+            Value::Record { field_names, values } => field_names
+                .iter()
+                .position(|f| f.as_ref() == name)
+                .map(|i| &values[i]),
+            _ => None,
         }
     }
 }
@@ -4211,6 +4297,84 @@ fn content_type_response(body: String, mime: &str) -> Value {
 mod tests {
     use super::*;
     use crate::parser::{parse_program, validate_program};
+
+    // ---- Phase 1 [1.0-blocker]: Value::Record foundation ----
+
+    #[test]
+    fn record_constructs_from_pairs_and_renders_as_json() {
+        let r = Value::record_from_pairs(vec![
+            ("id".to_string(), Value::Int(7)),
+            ("name".to_string(), Value::Str("Brand".to_string())),
+            ("active".to_string(), Value::Bool(true)),
+        ]);
+        // type_name reports `object`, matching the dynamic-V::Object surface.
+        assert_eq!(r.type_name(), "object");
+        // as_string round-trips through value_to_json — `serde_json::Map`
+        // is a `BTreeMap` (no `preserve_order` feature), so output keys
+        // come out alphabetical. This matches what every other JSON
+        // path in JWC emits today (DB rows, object literals via Str).
+        let s = r.as_string();
+        assert_eq!(s, r#"{"active":true,"id":7,"name":"Brand"}"#);
+    }
+
+    #[test]
+    fn record_field_lookup_is_position_based() {
+        let r = Value::record_from_pairs(vec![
+            ("first".to_string(), Value::Int(10)),
+            ("second".to_string(), Value::Int(20)),
+            ("third".to_string(), Value::Int(30)),
+        ]);
+        assert_eq!(r.record_field("first"), Some(&Value::Int(10)));
+        assert_eq!(r.record_field("second"), Some(&Value::Int(20)));
+        assert_eq!(r.record_field("third"), Some(&Value::Int(30)));
+        assert_eq!(r.record_field("missing"), None);
+        // Non-Record values return None — callers must match the variant
+        // when they need to distinguish "this isn't a record" from "this
+        // record has no such field".
+        assert_eq!(Value::Int(5).record_field("anything"), None);
+    }
+
+    #[test]
+    fn record_with_shape_shares_the_field_name_arc() {
+        // Build one shape once, then build two Records that reuse it. The
+        // headline /json-large win comes from this Arc being shared
+        // across 1000 rows instead of 1000 separate Vec<String> allocs.
+        let shape: Arc<Vec<Arc<str>>> = Arc::new(vec![Arc::from("id"), Arc::from("name")]);
+        let r1 = Value::record_with_shape(
+            Arc::clone(&shape),
+            vec![Value::Int(1), Value::Str("alpha".to_string())],
+        );
+        let r2 = Value::record_with_shape(
+            Arc::clone(&shape),
+            vec![Value::Int(2), Value::Str("beta".to_string())],
+        );
+        // Both records' field_names point at the same allocation.
+        if let (
+            Value::Record { field_names: f1, .. },
+            Value::Record { field_names: f2, .. },
+        ) = (&r1, &r2)
+        {
+            assert!(Arc::ptr_eq(f1, f2), "field_names Arc should be shared");
+        } else {
+            unreachable!("record_with_shape must produce Value::Record");
+        }
+        assert_eq!(r1.as_string(), r#"{"id":1,"name":"alpha"}"#);
+        assert_eq!(r2.as_string(), r#"{"id":2,"name":"beta"}"#);
+    }
+
+    #[test]
+    fn record_nested_embed_does_not_double_encode() {
+        // `value_to_json_smart` recognises JSON-string carriers — so a
+        // Record containing a Value::Str of JSON should embed raw, not
+        // get re-quoted. Mirrors the same behaviour Array already has.
+        let inner_json = r#"{"x":1}"#.to_string();
+        let outer = Value::record_from_pairs(vec![
+            ("inner".to_string(), Value::Str(inner_json)),
+            ("count".to_string(), Value::Int(1)),
+        ]);
+        // Keys come out alphabetical via serde_json's BTreeMap-backed Map.
+        assert_eq!(outer.as_string(), r#"{"count":1,"inner":{"x":1}}"#);
+    }
 
     #[tokio::test]
     async fn runs_main_and_prints_output() {
