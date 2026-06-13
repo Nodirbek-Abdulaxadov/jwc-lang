@@ -950,15 +950,23 @@ Server tuning:
 ## Performance
 
 JWC's native AOT output is benchmarked against rust-axum, ASP.NET Minimal
-API, go-fiber, node-fastify, and python-fastapi under equal per-request
-workloads in [http-framework-benchmark](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
+API, go-fiber, node-fastify, python-fastapi, and the LiteAPI Rust/managed
+listeners under equal per-request workloads in
+[http-framework-benchmark](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
 (bombardier, sequential isolation, raw results archived, fully
-reproducible). Headlines from the v0.4.x sessions:
+reproducible). Headlines from the 2026-06-13 clean-environment rerun
+(8 stacks × 3 runs, Run 1 cold numbers):
 
-- 2nd on `/async-delay` (1000 connections), ahead of rust-axum.
-- 4th on `/json-large` (~42 KB per response, built per request).
-- Best-in-group tail latency on the light endpoints (p99 < 10 ms).
-- **0 errors across 4.48M requests.**
+- **3rd on `/json-large`** — 17,533 RPS, ahead of go-fiber (14,424) on the
+  per-request 1000-object array build path.
+- **3rd on `/async-delay`** — 27,341 RPS, behind liteapi-managed and
+  rust-axum but ahead of go-fiber, dotnet-minimal, and node-fastify.
+- **4th on `/cpu`** — 118 RPS on the chained-SHA-256 workload, edging
+  dotnet-minimal (111).
+- **5th on `/ping` / `/json-small`** — 137 k / 132 k RPS; behind the
+  raw-syscall stacks (go-fiber, liteapi-rust, dotnet-minimal,
+  liteapi-managed) but well clear of the dynamic runtimes.
+- **0 5xx across the full session.**
 
 The roadmap for closing the remaining gap to the statically-compiled stacks
 (struct monomorphization of `entity`/`class` shapes) is in
