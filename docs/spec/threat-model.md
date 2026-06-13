@@ -1,5 +1,16 @@
 # JWC Threat Model
 
+Status: **DRAFT** · Reflects: **v0.4.7** (Phase 6 mitigations landed).
+
+**Related spec docs**:
+[index](index.md) ·
+[semantics](semantics.md) (§4.3 string encoding underpins header & path
+matchers) ·
+[visibility](visibility.md) (E021 is the static gate; this doc is the
+runtime gate) ·
+[aot-scope](aot-scope.md) (every mitigation has a native-AOT mirror or
+is explicitly deferred).
+
 This document is the runtime-security baseline for the JWC compiler and
 server. It enumerates the threats we have explicitly mitigated, where
 the mitigation landed, and the residual risk an operator should keep
@@ -30,6 +41,58 @@ and update the relevant row.
   password check.
 - Memory zeroisation — JWT secrets and DB passwords sit in `String` /
   `Vec<u8>` until drop; we do not pin or wipe.
+
+## Secrets redaction
+
+Connection strings and password-bearing URLs are stripped before any
+log path or user-visible error envelope sees them. Two helpers
+cooperate:
+
+- **`engine::scrub_database_url`** (`src/engine.rs:57`) — exact-match
+  helper. Given a `scheme://user:password@host` URL, returns
+  `scheme://user:***@host`. Preserves host, port, path, and query so
+  an operator can still see which database the call was targeting.
+  Pass-through for URLs without a `:password` userinfo.
+- **`error_report::scrub_secrets`** (`src/error_report.rs:19`) — last-
+  pass scrubber for error chains and structured-JSON log lines. Runs
+  two substitutions on the rendered string:
+  1. `scheme://user:password@` → `scheme://user:***@` (sub-string
+     variant of `scrub_database_url` that works inside a larger
+     message).
+  2. `password=...` (non-greedy, stops at `&`, whitespace, or end of
+     string) → `password=***`. Catches SMTP auth strings, libpq-style
+     keyword/value connection strings, and stray query-param leaks.
+
+Both helpers are invoked by `error_report::render_error_*` (the CLI
+banner path) and by the structured-JSON logger before a line lands on
+stdout. Tests live alongside each function (`scrub_database_url_*`,
+`scrub_secrets_*`). When adding a new log path that touches a
+DB / SMTP / outbound-HTTP error, route the rendered string through
+`error_report::scrub_secrets` before the write.
+
+## Process model — boot-time validation
+
+`server::serve` calls `crate::config::validate_or_bail` BEFORE binding
+a socket (`src/server.rs:351`). The validator walks the
+`config::REGISTRY` (`src/config.rs::REGISTRY`) and rejects a typo in
+any known numeric var with a non-zero exit code. An operator sees the
+error in the boot log instead of hours later when a request hits the
+bad code path.
+
+After validation succeeds, the server prints a rendered config table
+unless `JWC_PRINT_CONFIG` is explicitly turned off (default is ON —
+the table is cheap and the kind of thing an operator wants in
+`kubectl logs` after a deploy; set `JWC_PRINT_CONFIG=off` to silence).
+
+**Redaction rule in the printed table** (`src/config.rs::render`): a
+row's value is replaced with `*** (redacted)` when the var name
+contains any of `PASSWORD`, `SECRET`, `TOKEN`, `KEY`, `JWT`, or
+`DATABASE_URL` (case-insensitive substring match on the *name*). The
+parsed value is preserved in `RenderedEnvVar::parsed_raw` so callers
+that legitimately need the value can still read it — only the
+rendered string is masked. The registry intentionally excludes
+`DATABASE_URL` itself (no `JWC_` prefix) because it is never echoed
+to logs at all.
 
 ## How to update this document
 

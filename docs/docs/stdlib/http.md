@@ -33,6 +33,23 @@ async function postEvent(payload: json) {
 
 `rustls` is bundled — no system OpenSSL dependency. HTTPS works out of the box.
 
+## SSRF allowlist (`JWC_HTTP_ALLOWLIST`)
+
+In production, set `JWC_HTTP_ALLOWLIST` to lock outbound HTTP to a
+known set of hosts:
+
+```
+JWC_HTTP_ALLOWLIST=api.stripe.com,api.sendgrid.com
+```
+
+When the var is non-empty, any `http_get` / `http_post` / `fetch_json`
+to a host that isn't in the list throws `HttpError` before the socket
+opens — closes the classic SSRF gap where a handler does
+`http_get(body().url)` and an attacker passes an internal address.
+
+Empty (default) ⇒ no restriction — fine for dev. Pin it down for any
+externally-facing deployment. See [security/](../security/index.md#ssrf-allowlist-jwc_http_allowlist).
+
 ## Errors
 
 HTTP non-2xx + network failures throw `HttpError`:

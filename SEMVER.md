@@ -106,6 +106,76 @@ left in place) if a regression makes it dangerous to install. Yanked
 versions never receive backported fixes; users are directed to the next
 patch. Yanks are recorded in `CHANGELOG.md`.
 
+## Stable surface as of v0.4.7
+
+A snapshot of where the contract line sits today. Bumped each minor
+release; the next refresh lands with v0.4.8.
+
+### Stable — covered by SemVer guarantees above
+
+- **Language syntax.** Everything documented in
+  [`docs/spec/grammar.ebnf`](docs/spec/grammar.ebnf) and the
+  evaluation rules in [`docs/spec/semantics.md`](docs/spec/semantics.md).
+  Adding new keywords is breaking; we do that under the pre-1.0 minor
+  rule with a `BREAKING:` line in `CHANGELOG.md`.
+- **Builtin set.** Every entry in
+  [`docs/builtins.md`](docs/builtins.md) (the user-facing reference) is
+  on the stable surface — signature, argument types, return type. New
+  *optional* builtins or new *optional* arguments to existing builtins
+  (with defaults) are non-breaking.
+- **Public CLI flags + their semantics.** Every `--flag` documented in
+  [`docs/docs/cli/overview.md`](docs/docs/cli/overview.md). Renaming /
+  removing a documented flag is breaking; adding new flags is not.
+  Exit codes for documented conditions (success = 0, validation
+  failure = 1, etc.) are part of the contract.
+- **Error code identity.** Every `E####` code is append-only — the
+  code itself never changes meaning, even if the wording does. The
+  catalog lives at
+  [`src/error_codes.rs`](src/error_codes.rs).
+- **Visibility rule.** The `public` / `private` semantics in
+  [`docs/spec/visibility.md`](docs/spec/visibility.md) — namespace
+  isolation behaviour and `E021` raising conditions.
+
+### Pre-stable — subject to break before 1.0
+
+These surfaces may change in a minor release before 1.0; each break
+ships with `BREAKING:` notes.
+
+- **Native AOT scope details.** Track
+  [`docs/spec/aot-scope.md`](docs/spec/aot-scope.md). The set of
+  builtins that work under `jwc build --native` grows minor-over-minor;
+  the set of constructs that panic shrinks. A program that runs under
+  `jwc run` is the stable surface; the AOT-acceptance subset is not.
+- **`JWC_QUEUE_DRIVER=postgres` schema.** The Postgres-backed job
+  queue tables and column layout will likely gain columns
+  (retry-after, priority, lease-owner) before 1.0. Treat the schema as
+  managed-by-jwc — do not write app SQL against the queue tables.
+- **`JWC_HTTP_ALLOWLIST` format.** Today: CSV of bare hostnames,
+  exact-match. May grow to support CIDR ranges and / or port-scoped
+  entries. A program that sets `JWC_HTTP_ALLOWLIST=api.example.com`
+  today will keep working — but the grammar may expand in a backward-
+  compatible way that the spec text needs to follow.
+- **OTLP wiring.** The observability exporter set / span names / span
+  attributes are not yet pinned; expect renames before 1.0.
+
+### Unstable — anything not listed above
+
+Anything not on the stable list above is fair game to change in any
+direction without a deprecation cycle.
+
+Explicit examples worth calling out:
+
+- **`--no-typecheck` escape hatch.** Documented as **temporary**. It
+  will be removed once the gradual type checker matures; the
+  deprecation lifecycle is tracked in
+  [`DEPRECATION.md`](DEPRECATION.md).
+- **Internal Rust crate API** of `jwc-lang` itself. This repo's Rust
+  source is NOT a public API; consumers are users of the language, not
+  the crate. Per-module refactors that don't change the language
+  surface are non-breaking even when they rename public Rust items.
+- **Error message text.** The `E####` code is stable; the rendered
+  human-readable text alongside it is not.
+
 ## Reach-out
 
 If a SemVer-relevant change is ambiguous, file an issue tagged

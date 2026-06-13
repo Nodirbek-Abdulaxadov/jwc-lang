@@ -1,7 +1,15 @@
 # JWC Builtin Functions — Contract
 
-Status: **DRAFT** — extraction in progress from `src/runner/builtins.rs`
-and `src/runner/mod.rs`. Phase 0 deliverable.
+Status: **DRAFT** · Reflects: **v0.4.7** — extraction in progress from
+`src/runner/builtins.rs` and `src/runner/mod.rs`. Phase 0 deliverable.
+
+**Related spec docs**:
+[index](index.md) ·
+[semantics](semantics.md) (§4 value model the signatures below
+operate on) ·
+[aot-scope](aot-scope.md) (which builtins lower to `--native`) ·
+[threat-model](threat-model.md) (the HTTP / JWT / SQL builtins gated
+here have runtime defences documented there).
 
 This document is the contract; the implementation (`runner/builtins.rs`)
 is the reference until each builtin lands here with a pinned conformance

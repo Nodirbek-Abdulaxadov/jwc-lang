@@ -1,8 +1,15 @@
 # JWC Evaluation Semantics
 
-Status: **DRAFT** — extracted from `src/runner/eval.rs`,
-`crates/jwc-runtime/src/lib.rs` and `src/runner/mod.rs` (v0.4.5, post
-Sprint 2 decomposition).
+Status: **DRAFT** · Reflects: **v0.4.7** — extracted from `src/runner/eval.rs`,
+`crates/jwc-runtime/src/lib.rs`, `src/runner/exec.rs`, and `src/runner/mod.rs`
+(post Sprint 2 decomposition; Sprint 3C / 4B updates).
+
+**Related spec docs**:
+[index](index.md) ·
+[visibility](visibility.md) (cross-namespace call gate) ·
+[threat-model](threat-model.md) (depends on §4.3 string encoding) ·
+[aot-scope](aot-scope.md) (which constructs lower cleanly) ·
+[builtins](builtins.md) (per-builtin contracts).
 
 This document pins the observable runtime behaviour. Where prose
 disagrees with the conformance suite, the conformance suite wins and
@@ -261,11 +268,48 @@ cross-shape equality between `Record { ... }` and an equivalent
   `catch (e: T)` matches when the error's classified kind is `T` or a
   dotted child of `T` (e.g. `catch (e: DbError)` catches
   `DbError.UniqueViolation`). Non-matching errors propagate to the
-  surrounding scope. The known kinds are listed in
-  `src/runner/mod.rs::JWC_ERROR_KINDS` and the classification rules
-  in `classify_jwc_error`. Tracked by
-  `tests/conformance/cases/case_typed_catch_*` and
-  `case_catch_falls_through_when_type_mismatches`.
+  surrounding scope. The canonical list of kinds is described in §5.1
+  below.
+
+### 5.1 Error kinds and typed `catch`
+
+The dispatch table for `catch (e: T)` is the constant
+`JWC_ERROR_KINDS` in `src/runner/mod.rs`. The current set
+(v0.4.7) is hierarchical via dot-separated paths — a parent kind
+catches every dotted child:
+
+| Kind | Catches |
+|---|---|
+| `Error` | every runtime error (root) |
+| `DbError` | every `DbError.*` subtype |
+| `DbError.UniqueViolation` | PG SQLSTATE `23505` |
+| `DbError.ForeignKeyViolation` | PG SQLSTATE `23503` |
+| `DbError.NotNullViolation` | PG SQLSTATE `23502` |
+| `DbError.CheckViolation` | PG SQLSTATE `23514` |
+| `DbError.SerializationFailure` | PG SQLSTATE `40001` |
+| `DbError.DeadlockDetected` | PG SQLSTATE `40P01` |
+| `DbError.ConnectionFailure` | `tokio_postgres::Error::is_closed()` |
+| `HttpError` | every `HttpError.*` subtype |
+| `HttpError.NotFound` | upstream 404 |
+| `HttpError.Unauthorized` | upstream 401 |
+| `HttpError.Forbidden` | upstream 403 |
+| `HttpError.BadGateway` | upstream 502 / 503 / 504 |
+| `ValidationError` | request-body / type-coercion validation failures |
+| `TimeoutError` | watchdog / `tokio::time::error::Elapsed` |
+| `JwtError` | every `JwtError.*` subtype |
+| `JwtError.InvalidSignature` | HS256 signature mismatch / bad base64 |
+| `JwtError.Expired` | `exp` claim is in the past (Phase 6) |
+
+The classification rules (`classify_jwc_error` in the same module)
+walk the `anyhow::Error::chain()`, first trying typed downcasts onto
+`tokio_postgres::Error` / `reqwest::Error` for authoritative
+SQLSTATE / HTTP status signals, then falling back to a substring
+scan of the rendered chain. The string is the single source of
+truth; downstream docs should NOT re-list the kinds — link to
+`src/runner/mod.rs::JWC_ERROR_KINDS` instead.
+
+Tracked by `tests/conformance/cases/case_typed_catch_*` and
+`case_catch_falls_through_when_type_mismatches`.
 
 ## 6. Database semantics
 
@@ -277,11 +321,39 @@ cross-shape equality between `Record { ... }` and an equivalent
 - Writes go through the `deadpool-postgres` pool; reads may hit the
   optional TTL result cache (config-driven).
 - `transaction { ... }` opens a serializable transaction; nested
-  transactions are rejected at compile time (savepoints are a Phase 4
-  item).
+  transactions are rejected at compile time.
 - **Whole-row `update`** today reads, modifies, and writes back the row
   — under concurrency it loses writes. Atomic `update Entity set col = expr
   where ...` is the [1.0-blocker] Phase 4 fix.
+
+### 6.1 Transactions and savepoints
+
+`transaction { ... }` (Sprint 4) opens a single Postgres transaction
+scoped to the block. The block runs at the engine's default
+isolation level; commit happens on clean exit, rollback on any
+error (including a panic that unwinds through `anyhow`).
+
+`savepoint <name> { ... }` (Sprint 4B) nests a SAVEPOINT inside the
+enclosing transaction. The semantics:
+
+- The savepoint is named exactly as in the source — the name reaches
+  Postgres as a SQL identifier and must be a valid one (the parser
+  rejects invalid identifiers at compile time).
+- On clean block exit, the runner issues `RELEASE SAVEPOINT <name>`.
+- On any error thrown from the block, the runner issues
+  `ROLLBACK TO SAVEPOINT <name>` and then `RELEASE` — the outer
+  transaction is **not** poisoned and continues. The error still
+  propagates up the JWC stack (so a surrounding `try`/`catch` may
+  intercept it).
+- `savepoint` outside a `transaction { ... }` is rejected at runtime
+  with error code `E017` (see `src/error_codes.rs`).
+- The codegen path in `--native` does NOT yet support savepoints —
+  see [`aot-scope.md`](aot-scope.md) "What raises a runtime panic".
+
+Implementation: `src/runner/exec.rs::Stmt::Savepoint` →
+`engine::with_savepoint`. The flat-transaction case (one
+`transaction { ... }` per request, no nested savepoints) works on
+both the interpreter AND `jwc build --native`.
 
 ## 7. HTTP serving
 

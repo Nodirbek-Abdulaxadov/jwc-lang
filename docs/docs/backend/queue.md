@@ -4,7 +4,14 @@ sidebar_position: 6
 
 # Background queue
 
-In-process job queue. Workers run on the same `tokio` runtime; on process exit, pending jobs are lost (no persistent backing in v1).
+Pluggable job queue with two drivers:
+
+- **`memory`** (default) — in-process, zero deps, **lost on restart**.
+- **`postgres`** — durable, multi-process safe, jobs survive restarts.
+
+Pick the driver at boot via `JWC_QUEUE_DRIVER`. The JWC-side API is
+identical between the two — the same `enqueue` / `register_job_handler`
+code runs against either.
 
 ## Usage
 
@@ -38,14 +45,95 @@ route POST "/signup" {
 | `dlq_count()` | Permanently-failed count (int). |
 | `dlq_drain()` | JSON array of failed jobs `{name, payload, attempts, last_error}`. Drains atomically. |
 
+## Driver selection
+
+| Env | Default | Effect |
+|---|---|---|
+| `JWC_QUEUE_DRIVER` | `memory` | `memory` = in-process (default), `postgres` = durable backing |
+
+Set at process start; the driver is initialised once on the first
+enqueue / `register_job_handler` call.
+
+### `memory` driver
+
+The default. Jobs live in a `Mutex<VecDeque<Job>>` inside the process.
+Zero external dependencies, ideal for dev and single-instance
+deployments where job loss on crash / deploy is acceptable.
+
+When the process exits — graceful or not — anything still pending or
+mid-retry is gone.
+
+### `postgres` driver
+
+Set `JWC_QUEUE_DRIVER=postgres` and make sure `DATABASE_URL` (or
+`JWC_DATABASE_URL`) points at a reachable Postgres. The driver creates
+two tables on first use (idempotent DDL — safe to run multiple times):
+
+```sql
+CREATE TABLE IF NOT EXISTS _jwc_jobs (
+    id            bigserial PRIMARY KEY,
+    name          text NOT NULL,
+    payload       text NOT NULL,
+    urgent        boolean NOT NULL DEFAULT false,
+    attempts      int NOT NULL DEFAULT 0,
+    max_attempts  int NOT NULL DEFAULT 5,
+    enqueued_at   timestamptz NOT NULL DEFAULT now(),
+    visible_at    timestamptz NOT NULL DEFAULT now(),
+    leased_until  timestamptz
+);
+CREATE INDEX IF NOT EXISTS _jwc_jobs_dispatch_idx
+    ON _jwc_jobs (urgent DESC, visible_at, id)
+    WHERE leased_until IS NULL OR leased_until < now();
+
+CREATE TABLE IF NOT EXISTS _jwc_jobs_dlq (
+    id          bigserial PRIMARY KEY,
+    job_id      bigint NOT NULL,
+    name        text NOT NULL,
+    payload     text NOT NULL,
+    attempts    int NOT NULL,
+    last_error  text NOT NULL,
+    failed_at   timestamptz NOT NULL DEFAULT now()
+);
+```
+
+Multiple processes pulling from the same `_jwc_jobs` table never see
+the same row twice — dequeue uses `SELECT ... FOR UPDATE SKIP LOCKED`.
+Crashes mid-job are recovered when the lease expires (`leased_until`),
+so a worker dying with a job in-flight just hands it back to the pool.
+
+### Querying the DLQ
+
+`_jwc_jobs_dlq` is a plain Postgres table — operators can inspect it
+from any client. From JWC code you can either drain via the builtin
+(works on both drivers) or query the table directly when using the
+Postgres driver:
+
+```jwc
+route GET "/admin/dlq" use AdminAuth {
+    return ok({ count: dlq_count() });
+}
+
+route POST "/admin/dlq/drain" use AdminAuth {
+    let entries = json_parse(dlq_drain());
+    // persist somewhere, re-enqueue, etc.
+    return ok({ drained: length(entries) });
+}
+```
+
+`dlq_drain()` returns a JSON array of `{name, payload, attempts, last_error}`
+and atomically empties the DLQ — the same shape on both drivers, so this
+code keeps working when you switch.
+
 ## Retry policy
+
+Applies to both drivers identically.
 
 | Env | Default | Effect |
 |---|---|---|
 | `JWC_QUEUE_WORKERS` | 2 (capped at host parallelism) | Worker count |
 | `JWC_QUEUE_MAX_ATTEMPTS` | 3 | Tries before moving to DLQ |
 | `JWC_QUEUE_BACKOFF_MS` | 1000 | Base; effective delay = `base * 2^(attempts-1)`, capped at 60s |
-| `JWC_QUEUE_DLQ_MAX` | 1024 | Oldest entries evicted past this |
+| `JWC_QUEUE_DLQ_MAX` | 1024 | Memory driver only — oldest entries evicted past this. Postgres DLQ is unbounded by design. |
 
 ### Backoff schedule (defaults)
 
@@ -64,13 +152,16 @@ Doubling continues until the cap at 60 000 ms. A tight retry (e.g.
 `JWC_QUEUE_MAX_ATTEMPTS=8`) takes the full clamp at later attempts and
 stretches retries across ~5 minutes.
 
-### DLQ eviction
+### DLQ eviction (memory driver)
 
-When the DLQ already holds `JWC_QUEUE_DLQ_MAX` entries and a new job
-fails its last attempt, the **oldest** existing DLQ entry is evicted to
-make room (FIFO drop). The metric exporter on `/metrics` keeps the gauge
-honest, so a sustained climb against `JWC_QUEUE_DLQ_MAX` is visible from
-Prometheus.
+When the in-memory DLQ already holds `JWC_QUEUE_DLQ_MAX` entries and a
+new job fails its last attempt, the **oldest** existing DLQ entry is
+evicted to make room (FIFO drop). The metric exporter on `/metrics`
+keeps the gauge honest, so a sustained climb against `JWC_QUEUE_DLQ_MAX`
+is visible from Prometheus.
+
+The Postgres DLQ has no cap — operators are expected to drain and
+archive periodically.
 
 ### Sizing the worker pool
 
@@ -83,24 +174,20 @@ HTTP is `JWC_QUEUE_WORKERS=2` (the default).
 
 ## Priority
 
-`enqueue_urgent` jumps the queue ahead of every normal-priority job. Multiple urgent jobs themselves stay FIFO. Good for password resets, payment webhooks — anything that mustn't wait behind a batch.
+`enqueue_urgent` jumps the queue ahead of every normal-priority job.
+Multiple urgent jobs themselves stay FIFO. Good for password resets,
+payment webhooks — anything that mustn't wait behind a batch.
+
+Both drivers honour priority — the Postgres driver's dispatch index is
+keyed `(urgent DESC, visible_at, id)`.
 
 ## Failure → DLQ
 
-After `JWC_QUEUE_MAX_ATTEMPTS` failed runs, the job lands on the dead-letter queue with its last error message. Operator code can drain + re-publish:
+After `JWC_QUEUE_MAX_ATTEMPTS` failed runs, the job lands on the
+dead-letter queue with its last error message. Operator code can drain
++ re-publish via `dlq_drain()` — same shape on both drivers.
 
-```jwc
-route GET "/admin/dlq" use AdminAuth {
-    return ok({ count: dlq_count() });
-}
+## Observability
 
-route POST "/admin/dlq/drain" use AdminAuth {
-    let entries = json_parse(dlq_drain());
-    // persist somewhere, re-enqueue, …
-    return ok({ drained: length(entries) });
-}
-```
-
-## Persistence (planned)
-
-v2 will support a Postgres backing (`_jwc_jobs` table) so jobs survive restarts. Use the env-key shape today and the API stays the same.
+`/metrics` exposes `jwc_queue_pending` and `jwc_queue_dlq` gauges
+regardless of driver. See [deployment/observability](../deployment/observability.md).

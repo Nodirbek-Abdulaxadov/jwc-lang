@@ -3,6 +3,10 @@
 > Bu hujjat hozirgi kod holatining halol tahlili asosida tuzilgan.
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
+>
+> Joriy holat: **v0.4.7** — Sprint 1–5 + Phase 6 + Phase 7 partial yopildi.
+> Sprint Tracker (pastda) yangi 1.0 yo'l xaritasini ("1.0 Readiness Plan")
+> aks ettiradi.
 
 ---
 
@@ -11,16 +15,18 @@
 | Phase | Status |
 |-------|--------|
 | Phase 0 — Texnik qarz (legacy hack’larni tozalash) | ✅ Done |
-| Phase 1 — MVP Core | ✅ Done |
-| Phase 2 — Language Completeness | ✅ Done |
-| Phase 3 — Developer Experience | ⏳ Partial (lint + did-you-mean + serve --watch done; LSP/fmt/pkg deferred) |
-| Phase 4 — Real Compiler (Native) | ⏳ Partial (native AOT via Rust codegen + cargo, async runtime, compile-time column validation; LLVM IR + cross-target build deferred) |
-| Phase 5 — Ecosystem | ⏳ Partial (Http + JWT + cache + email + WebSocket + queue stdlib done; wasm/hub/Redis-cache deferred) |
+| Phase 1 — MVP Core | ✅ Done (Sprint 1 closeout) |
+| Phase 2 — Language Completeness | ✅ Done (Sprint 2A/2B/2C code-health audit yopildi) |
+| Phase 3 — Developer Experience | ✅ Done (Sprint 3: typed catch + dotted subtypes + gradual type checker + AOT visibility) |
+| Phase 4 — Real Compiler (Native) | ⏳ Partial (native AOT via Rust codegen + cargo; migrate safety/savepoint/json_unchecked/pool resilience/chaos stub ✅; LLVM IR + cross-target qoldi) |
+| Phase 5 — Ecosystem | ✅ Done for 1.0 surface (config registry + OTLP + persistent queue + DLQ + soak harness ✅; 72h soak real run = ops) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
+| Phase 6 (security) — SECURITY.md + cargo audit + threat model + SSRF allowlist + JWT exp + secrets redaction | ✅ Done (external review = ops) |
 | Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
+| Phase 7 (perf) — bench DB endpoints + AOT scope + README link | ✅ Done (Linux real-run + CI regression gate + 72h soak burn = ops) |
 | Phase 8 — Background jobs + LSP | ✅ Done (queue + jwc-lsp + WebSocket) |
 | Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
-| Phase 10 — Observability + streaming + SSE | ⏳ Partial (10.5 typed-catch dispatch ✅ v1; tracing/OTel, stream `select`, `route SSE`, native cross-target qoldi) |
+| Phase 10 — Observability + streaming + SSE | ⏳ Partial (10.5 typed-catch dispatch ✅; OTLP exporter ✅ behind `otlp` feature; stream `select`, `route SSE` v2, native cross-target qoldi) |
 
 ---
 
@@ -156,11 +162,33 @@
   `tokio-postgres` + `deadpool-postgres`, `await` real yield qiladi.
   Tafsilot — Phase 9 (Async runtime).
 
+### 2.7 Code-health audit (Sprint 2A/2B/2C) ✅
+- ✅ Sprint 2A: `parser.rs` modul ajratish (parser/{mod,validate,tests}),
+  `runner.rs` builtins ajratish, `clippy -- -D warnings` toza.
+- ✅ Sprint 2B: unwrap budget — prod kodda **1 → 0** unwrap qoldi
+  (qolgan barcha `.unwrap()` chaqiruvlar test fayllarda; CI `prod_unwraps.rs`
+  audit testi yashil).
+- ✅ Sprint 2C: anyhow chain depth audit + dead code clean-up + docstring
+  pass kritik `src/*.rs` ustida.
+
 ---
 
-## Phase 3 — Developer Experience ⏳ partial
+## Phase 3 — Developer Experience ✅ done (1.0 surface)
 
 **Maqsad:** JWC bilan yozish — Node yoki Go bilan yozishdek tezroq bo‘lsin.
+
+### 3.0 Sprint 3 closeout (v0.4.7) ✅
+- ✅ Typed catch + dotted subtypes — `catch (e: DbError.UniqueViolation)` PG
+  SQLSTATE `23505` ga aniq mos keladi. Kinds: `Error`, `DbError`,
+  `DbError.UniqueViolation`, `DbError.ForeignKeyViolation`,
+  `DbError.NotNullViolation`, `HttpError`, `ValidationError`, `TimeoutError`.
+- ✅ Gradual static type checker — `validate_program` ichida E018 (return
+  type mismatch), E019 (wrong arg count), E020 (arg type mismatch); CLI
+  `jwc check/run/build --no-typecheck` opt-out.
+- ✅ AOT visibility re-check — E021 (private function cross-namespace call)
+  kompayl-vaqt tekshiruvi.
+- ✅ Integer / float / encoding / `==` semantics → `docs/spec/semantics.md`
+  qarang (lexer/parser tahrirlari Sprint 3 closeout'da).
 
 ### 3.1 Real LSP ✅ basic
 - `src/bin/jwc_lsp.rs` — stdio orqali ishlaydigan tower-lsp asoslangan server.
@@ -262,11 +290,43 @@
 - Route handler → inlined function, virtual dispatch yo‘q.
 - LLVM IR (4.1) tugamasidan oldin ma’nosi yo‘q.
 
+### 4.5 Sprint 4 closeout (data + runtime safety, v0.4.7) ✅
+- ✅ Migration safety: SHA-256 checksum har applied migration bilan yozib
+  qo'yiladi; `jwc migrate status` applied/pending/sha-mismatch/orphan
+  ko'rsatadi; `jwc migrate up --dry-run` / `down --dry-run` SQLni chiqaradi,
+  DB ga tegmaydi.
+- ✅ `savepoint <name> { ... }` — `transaction { ... }` ichida nested
+  rollback chegarasi. Literal nested transaction E016 bilan rad etiladi;
+  `savepoint` transaction tashqarisida E017.
+- ✅ `json()` string validatsiyasi + `json_unchecked()` escape hatch — eski
+  v0.4.4 passthrough semantikasini saqlaydi (cached JSON fragmentlar
+  uchun).
+- ✅ Pool resilience: transient xatolar `JWC_DB_RETRY_MAX_ATTEMPTS` (default
+  3) + `JWC_DB_RETRY_BACKOFF_MS` (default 100) eksponensial backoff bilan
+  qayta urinadi. `engine::ping()` (`SELECT 1`) — `/readyz` uchun real
+  end-to-end probe.
+- ✅ Prometheus pool gauges: `jwc_db_pool_size`, `jwc_db_pool_available`,
+  `jwc_db_pool_max_size`, `jwc_db_pool_waiting` `/metrics`'da chiqadi.
+- ✅ Chaos test stub — `JWC_CHAOS_DB_FAIL_RATIO` integration testlarda
+  retry yo'lini majburlaydi.
+
 ---
 
-## Phase 5 — Ecosystem ⏳ partial
+## Phase 5 — Ecosystem ✅ 1.0 surface done
 
 **Maqsad:** JWC ni global backend tiliga aylantirish.
+
+### 5.0 Sprint 5 closeout (ops + observability + queue durability, v0.4.7) ✅
+- ✅ **Boot-time config registry** (`src/config.rs`) — har `JWC_*` env var
+  schema bilan ro'yxatdan o'tadi; `JWC_PRINT_CONFIG=1` startup'da resolved
+  jadval chiqaradi; valid bo'lmagan qiymatlar (range/type) bail qiladi.
+- ✅ **OTLP tracing** Cargo feature `otlp` orqasida — `JWC_OTLP_ENDPOINT` +
+  `JWC_SERVICE_NAME`. Default build slim, dependencies optsional.
+- ✅ **Persistent job queue** — `JWC_QUEUE_DRIVER=postgres` durable `_jwc_jobs`
+  jadvalga yozadi; terminal failure DLQ'ga ko'chadi. In-memory `memory`
+  driver — backward-compatible default.
+- ✅ **Soak harness** — `examples/soak/` orqali long-running load profil; 72h
+  real soak run = ops javobgarligi (CI gate emas).
 
 - **Standard library ⏳ partial:**
   - ✅ Http client: `http_get(url)`, `http_post(url[, body[, headers]])`,
@@ -337,6 +397,25 @@
 - `json_parse(s)` / `json_stringify(v)` — explicit conversion between
   JSON-string carriers and structured Value shapes.
 - `in` is now a real keyword (reserved by `where ... in (...)` and `for ... in ...`).
+
+### Phase 6 (security) closeout ✅
+- ✅ `SECURITY.md` — coordinated-disclosure policy, supported versions.
+- ✅ `cargo audit` blocking — release CI failonk known RustSec advisory.
+- ✅ Threat model — `docs/spec/threat-model.md`.
+- ✅ SSRF allowlist — `JWC_HTTP_ALLOWLIST` `http_get` / `http_post` /
+  `fetch_json` ga deny-by-default policy yoqadi.
+- ✅ JWT `exp` claim — `jwt_verify` muddati o'tgan tokenni rad etadi.
+- ✅ Secrets redaction — log/error chain'larda `password`, `secret`, `token`
+  pattern'lar maskalanadi.
+- ⏳ External security review = ops javobgarligi.
+
+### Phase 7 (perf) closeout ✅
+- ✅ Bench DB endpoints — `examples/bench/` har stack uchun bir xil
+  endpoint shape: ping, json-small, json-large, cpu, async-delay, db-read,
+  db-write.
+- ✅ Native AOT 1.0 scope hujjati — `docs/spec/aot-scope.md`.
+- ✅ README ↔ bench repo cross-link.
+- ⏳ Linux real-run + CI regression gate + 72h soak burn = ops.
 
 ---
 
@@ -496,7 +575,9 @@ shiftini ham shu Phase'da o'lchab tasdiqlaymiz.
 
 ## Priority Timeline
 
-Phase 0–2, 3.4 (path/git), 6–9 tugallandi. Keyingi ish ustuvorligi:
+Phase 0–9 + Phase 3 closeout + Phase 5 1.0 surface + Phase 6 (security)
++ Phase 7 (perf) tugallandi. ROADMAP.md endi **1.0 ga qadar nima qolgani
+uchun yagona manba**. Keyingi ish ustuvorligi:
 
 ```
 hozir    →  Phase 10.1 — real benchmark natijalari (bench-cs/bench.py/jmeter)

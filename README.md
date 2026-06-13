@@ -2,7 +2,7 @@
 
 JWC is a small backend-focused language for building API + database applications with simple syntax.
 
-This README is a quick, practical guide.
+This README is a quick, practical guide. Latest release: **v0.4.7**.
 
 ## Performance
 
@@ -15,6 +15,44 @@ Standalone HTTP bench against `rust-axum`, `go-fiber`, `dotnet-minimal`,
 
 Full numbers, methodology, and reproduction recipe:
 <https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark>
+
+## What's new in v0.4.7 (Sprint 1–5 + Phase 6/7)
+
+- **Typed catch with dotted subtypes** — `catch (e: DbError.UniqueViolation) { ... }`
+  matches PG SQLSTATE-classified errors; bare `catch (e: DbError)` still
+  catches the parent kind.
+- **Gradual static type checker** — return-type, arity, and arg-type checks
+  on user functions (E018/E019/E020). Opt out with `--no-typecheck` on
+  `jwc check / run / build` while migrating older code.
+- **AOT visibility re-check** — E021 fires when one namespace calls another
+  namespace's `private` function. Same rule, enforced at compile time.
+- **Migration safety** — SHA-256 checksum recorded for every applied
+  migration, surfaced by `jwc migrate status`; `jwc migrate up --dry-run`
+  / `down --dry-run` print the SQL without touching the DB.
+- **`savepoint <name> { ... }`** — nested rollback boundary inside
+  `transaction { ... }`. Literal nested `transaction { transaction { ... } }`
+  is rejected with E016; `savepoint` outside a transaction is E017.
+- **`json()` validation + escape hatch** — `json(s)` now validates string
+  bodies before sending; `json_unchecked(s)` keeps the v0.4.4 passthrough
+  behaviour for known-good JSON.
+- **DB pool resilience** — transient errors retry with exponential backoff
+  (`JWC_DB_RETRY_MAX_ATTEMPTS`, `JWC_DB_RETRY_BACKOFF_MS`), `engine::ping()`
+  drives an end-to-end `/readyz`, and four `jwc_db_pool_*` Prometheus
+  gauges expose pool health.
+- **Boot-time config validation** — every `JWC_*` env var is registered;
+  `JWC_PRINT_CONFIG=1` prints the resolved table at startup.
+- **Postgres-backed persistent job queue** — `JWC_QUEUE_DRIVER=postgres`
+  uses a durable `_jwc_jobs` table with a dead-letter queue for terminal
+  failures.
+- **Optional OTLP tracing** — behind the `otlp` Cargo feature, enabled at
+  runtime with `JWC_OTLP_ENDPOINT` + `JWC_SERVICE_NAME`.
+- **SSRF allowlist + JWT `exp`** — `JWC_HTTP_ALLOWLIST` gates outbound
+  `http_get` / `http_post` / `fetch_json`; `jwt_verify` rejects expired
+  tokens up front.
+- **cargo-fuzz scaffold** — lexer + parser fuzz targets, exercised by a
+  nightly CI job.
+
+Full env-var reference: [`docs/docs/deployment/env-vars.md`](docs/docs/deployment/env-vars.md).
 
 ## Quick Start
 
@@ -151,12 +189,15 @@ Main commands:
 - `jwc serve [path] --watch`: Watch `.jwc` files and restart on change
 - `jwc test`: Validate project
 - `jwc lint`: Validate + emit dead-code warnings (unused functions, unused middleware)
-- `jwc check <file>`: Parse/validate one file
+- `jwc check <file> [--no-typecheck]`: Parse/validate one file (`--no-typecheck` skips E018/E019/E020/E021)
+- `jwc run [path] [--no-typecheck]`: Run with the static type checker on (default) or off
+- `jwc build [--no-typecheck]`: Same opt-out on the bundler / native AOT path
 - `jwc gen-sql <file>`: Generate PostgreSQL schema SQL from entities
 - `jwc migrate add <name>`: Alias for creating migration files
 - `jwc migrate new <name>`: Create migration files
-- `jwc migrate up`: Apply pending migrations
-- `jwc migrate down [--steps N]`: Rollback the most recent applied migration(s)
+- `jwc migrate up [--dry-run]`: Apply pending migrations (or just print the SQL with `--dry-run`)
+- `jwc migrate down [--steps N] [--dry-run]`: Rollback the most recent applied migration(s)
+- `jwc migrate status`: Show applied / pending migrations + SHA-256 drift
 - `jwc add <pkg> [--version <req>|--path <dir>|--git <url> [--rev <rev>]]`: Add a dependency
 - `jwc install` (alias `jwc fetch`): Resolve `jwcproj.lock` and populate `~/.jwc/registry/`
 - `jwc update [pkg]`: Re-resolve all (or one) deps within their semver ranges
@@ -834,8 +875,20 @@ try {
 }
 ```
 
-> Typed catch (`catch (e: DbError)`) parses but currently matches all errors —
-> first-class error types come with Phase 2.1.
+Typed catch with dotted subtypes is real now: `catch (e: DbError)` matches
+every DB error and `catch (e: DbError.UniqueViolation)` narrows to PG
+SQLSTATE `23505` only. Known kinds today: `Error`, `DbError`,
+`DbError.UniqueViolation`, `DbError.ForeignKeyViolation`,
+`DbError.NotNullViolation`, `HttpError`, `ValidationError`,
+`TimeoutError`. Unknown kinds bail at compile time with a "did you mean"
+hint.
+
+The diagnostic catalog (W001–W006, E001–E021) is in
+[`src/error_codes.rs`](src/error_codes.rs). Highlights from v0.4.7:
+**E016** (literal nested transaction → use `savepoint`), **E017**
+(savepoint outside a transaction), **E018**/**E019**/**E020** (type
+checker — return type / arg count / arg type), **E021** (visibility —
+cross-namespace private call).
 
 ## Foreign Keys
 
@@ -959,6 +1012,19 @@ Server tuning:
 - `JWC_SERVER_METRICS` (`false` by default; set to `true` to enable)
 - `JWC_SERVER_METRICS_INTERVAL_SECS` (default `10`)
 
+Resilience, observability, queue, and security (Sprint 4/5/6):
+
+- `JWC_DB_RETRY_MAX_ATTEMPTS` (default `3`) — pool retry budget on transient errors
+- `JWC_DB_RETRY_BACKOFF_MS` (default `100`) — exponential backoff base
+- `JWC_PRINT_CONFIG` — set to `1` to print the resolved `JWC_*` config table on boot
+- `JWC_OTLP_ENDPOINT` — OTLP/HTTP exporter URL (requires the `otlp` Cargo feature)
+- `JWC_SERVICE_NAME` — `service.name` attached to OTLP spans
+- `JWC_QUEUE_DRIVER` — `memory` (default) or `postgres` (durable `_jwc_jobs` + DLQ)
+- `JWC_HTTP_ALLOWLIST` — comma-separated SSRF allowlist for `http_get` / `http_post` / `fetch_json`
+
+The full env-var catalog (defaults, validation rules, machine-readable
+table) lives in [`docs/docs/deployment/env-vars.md`](docs/docs/deployment/env-vars.md).
+
 ## Performance
 
 JWC's native AOT output is benchmarked against rust-axum, ASP.NET Minimal
@@ -1076,6 +1142,30 @@ Project-level native artifacts:
 - `jwc run` on a project also refreshes the debug launcher automatically.
 
 This keeps interpreter-style development flow (`jwc run`) and also gives compiled native artifacts for distribution.
+
+### Cargo features
+
+The compiler defaults to a slim build. Optional integrations live behind
+feature flags:
+
+- `otlp` — OpenTelemetry/OTLP trace exporter. Enable with
+  `cargo build --features otlp`; runtime is still gated on
+  `JWC_OTLP_ENDPOINT` being set.
+
+### Native AOT scope at 1.0
+
+The `jwc build --native` path targets the **stateless route tier** —
+low-latency request handlers, simple selects, `transaction { ... }` at
+request scope. Stateful work falls back to `jwc run` (the interpreter):
+
+- `savepoint <name> { ... }` (nested rollback inside `transaction`)
+- The Postgres-backed queue worker (`JWC_QUEUE_DRIVER=postgres`)
+- OTLP distributed tracing spans
+
+The authoritative scope list lives in
+[`docs/spec/aot-scope.md`](docs/spec/aot-scope.md). Threat model and the
+hardened defaults shipped in Phase 6 are documented in
+[`docs/spec/threat-model.md`](docs/spec/threat-model.md).
 
 ## Notes
 

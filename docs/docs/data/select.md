@@ -16,11 +16,30 @@ Returns a JSON array of objects. Empty list when no rows.
 
 ## Single row
 
+Two equivalent shapes — pick the one that reads better at the call
+site.
+
+**`first(...)` — function form:**
+
 ```jwc
 let me = first(select User from AppDb.User where User.id == @uid);
 ```
 
-`first(...)` collapses a list to its first element (or `null`). Forgetting it is so common that lint W004 flags single-row PK lookups that lack it.
+`first(...)` collapses a list to its first element (or `null`).
+Forgetting it is so common that lint W004 flags single-row PK lookups
+that lack it.
+
+**`select ... first` — trailing keyword:**
+
+```jwc
+let me = select User from AppDb.User where User.id == @uid first;
+```
+
+The trailing `first` keyword is parsed as part of the select expression
+itself — same result as `first(...)`, no outer call needed.
+Particularly nice in middleware / route bodies where the `select` lives
+inside a longer expression chain. Either form is fine; the project's
+existing style usually wins.
 
 ## where
 

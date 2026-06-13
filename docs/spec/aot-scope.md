@@ -1,6 +1,17 @@
 # Native AOT scope (`jwc build --native`)
 
-Status: **DRAFT** · Target: stable at v1.0
+Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.7** (Phase 7 partial).
+
+**Related spec docs**:
+[index](index.md) ·
+[visibility](visibility.md) (the AOT path trusts the validator's
+visibility pass — `pub fn` / `fn` modifiers in the emitted Rust crate
+do NOT correspond to JWC `Visibility`) ·
+[semantics](semantics.md) (value model, savepoints, error kinds — the
+constructs this doc says lower or panic) ·
+[threat-model](threat-model.md) (every mitigation is mirrored in
+`src/native_prelude.rs.in` — header byte loop, SSRF allowlist) ·
+[builtins](builtins.md) (the surface the AOT codegen promises to lower).
 
 This file documents what the v1.0 native AOT build (`src/native_build.rs`
 → Rust codegen → `cargo build`) supports, what it deliberately defers, and
@@ -89,3 +100,40 @@ If a feature is needed in AOT, the work item is "lift it from
 `runner/builtins.rs` into `native_build.rs` BUILTINS + emit a
 real lowering" — see the CLAUDE.md note at the top of `native_build.rs`
 for the contract.
+
+## Future — items the native mirror could close next
+
+Concrete follow-ups that would shrink the "panics in --native" surface.
+Each is a self-contained codegen task; none requires a language-level
+change.
+
+- **Savepoint codegen.** `Stmt::Savepoint` currently lowers to
+  `panic!("savepoint not supported in --native build yet; use \`jwc run\`")`
+  (`src/native_build.rs:2101`). The interpreter path
+  (`engine::with_savepoint`) is already self-contained — the codegen
+  mirror is "emit `SAVEPOINT <n>` / `RELEASE` / `ROLLBACK TO` against the
+  same `tokio_postgres::Transaction` handle the enclosing
+  `transaction { ... }` block holds". See
+  [`semantics.md`](semantics.md) §6.1 for the contract the codegen
+  needs to honour.
+- **Full queue driver.** The interpreter wires both the in-process
+  driver AND the `JWC_QUEUE_DRIVER=postgres` worker loop; the AOT path
+  panics if you try to drive the queue from a native binary because
+  the pop loop would nest tokio runtimes. The fix is to refactor
+  `queue.rs` so the pop loop can be spawned onto the AOT binary's
+  primary runtime (one runtime per process) instead of starting its
+  own.
+- **OTLP wiring.** The `observability/` OTLP exporter is only
+  initialised by the interpreter's request span. Lifting the
+  initialisation into the AOT prelude (`src/native_prelude.rs.in`)
+  would let `OTEL_EXPORTER_OTLP_ENDPOINT` work out of the box for
+  native binaries.
+- **Interpreter-only builtins on the parity list.** `set_json_field`,
+  `request_body`, `http_post`, `db_query`, `jwt_sign`, `jwt_verify`,
+  `unix_timestamp`, the `register_job_handler` family, `send_email`,
+  `setContext` / `context`, and `dispatch` are all flagged as
+  *interpreter* in [`docs/builtins.md`](../builtins.md). Each is a
+  candidate for native lowering on its own merit — the shape of the
+  work is "add the name to `BUILTINS`, emit a body in
+  `native_prelude.rs.in`, pin a conformance case without the
+  `// CONFORMANCE: interpreter-only` header".

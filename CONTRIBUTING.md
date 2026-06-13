@@ -86,6 +86,39 @@ See [`ROADMAP.md`](./ROADMAP.md) for which phases each subsystem belongs to
 and which gaps are intentional deferrals (LLVM IR backend, cross-target
 native builds, multi-catch dispatch, etc.).
 
+## Reviewer cross-references
+
+When you (or a reviewer) approach a PR, the docs below are the
+single-source-of-truth references the spec / security / config
+posture is graded against:
+
+- **Security surfaces.** When the change touches the HTTP server, the
+  SQL layer, the JWT helpers, any outbound HTTP call, or a log path
+  that handles a connection string — re-read
+  [`docs/spec/threat-model.md`](./docs/spec/threat-model.md) and
+  update the relevant row. Run `/security-review` for any new threat
+  class not already on the list.
+- **AOT scope.** Before adding a new builtin or syntactic form, decide
+  whether it must lower under `jwc build --native`. The contract is
+  documented in [`docs/spec/aot-scope.md`](./docs/spec/aot-scope.md);
+  features deferred to the interpreter MUST add `// AOT: deferred` to
+  the relevant code site so the deferral is grep-findable.
+- **Boot-time config.** The canonical list of `JWC_*` environment
+  variables — name, parse kind, default, doc — lives in the
+  Sprint 5A registry: [`src/config.rs::REGISTRY`](./src/config.rs).
+  When a PR introduces a new env var, add it here so the boot-time
+  validation table picks it up and the printed config snapshot covers
+  it.
+- **Error code catalog.** Every new user-facing error (`E####`) is
+  registered in [`src/error_codes.rs`](./src/error_codes.rs). When a
+  PR raises a new failure mode that a user can write code against,
+  land a fresh `EXXX` code in the catalog and reference it in the
+  spec doc / CHANGELOG entry.
+- **Fuzzing runbook.** When a change touches the tokenizer or the
+  parser, run the fuzz harness locally before pushing — the runbook
+  (manifest path, smoke-vs-soak budgets, corpus layout) is in
+  [`fuzz/README.md`](./fuzz/README.md).
+
 ## Tests
 
 ```bash

@@ -105,3 +105,20 @@ A running list of deprecations and their target removals lives in
 deprecation list is alongside the rest of that release's notes. The
 first entries land alongside Phase 0 spec extraction work, as legacy
 surface is identified.
+
+## Currently flagged (heads-up, not yet `W####`)
+
+These surfaces are documented as **temporary** in
+[`SEMVER.md`](SEMVER.md) and are on track to enter the
+deprecation lifecycle above as the underlying replacement matures.
+None has a `W####` warning code yet — that lands together with the
+deprecation PR.
+
+| Surface | Replacement / blocker | Notional removal |
+|---|---|---|
+| `--no-typecheck` CLI flag | The gradual type checker stabilising (currently soft-fail; needs to become source-of-truth before the escape hatch can go). | Flip to "deprecated" once the checker covers the parser-asserted invariants; targeted removal in **v0.6.0**. |
+
+The "notional removal" column is a planning hint, not a contract —
+the actual removal still lands through the lifecycle above (warning
+in a minor, removal in the next minor pre-1.0 or the next major
+post-1.0).

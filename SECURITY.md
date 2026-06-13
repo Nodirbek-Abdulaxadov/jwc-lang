@@ -15,21 +15,38 @@ supported — older 0.x releases do not receive backported fixes.
 
 **Please do not open a public issue for security problems.**
 
-Preferred channel: GitHub **private vulnerability reporting** —
+**Preferred channel — GitHub private security advisory.** Open a
+private report at
 [Security → Report a vulnerability](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/security/advisories/new)
-on this repository.
+on this repository. GitHub routes the advisory directly to the
+maintainers; no third-party form or email address is involved, and the
+advisory stays private until coordinated disclosure.
 
-Include where possible: affected component (CLI, runtime/server, LSP,
-install scripts, VS Code extension), a minimal `.jwc` reproduction or
-request trace, the version (`jwc --version`), and impact assessment.
+Include where possible:
+
+- **Affected component** — CLI, runtime/server, LSP, install scripts,
+  VS Code extension.
+- **Minimal reproduction** — a `.jwc` snippet or `curl` trace that
+  triggers the issue. Smaller is better.
+- **Version** — output of `jwc --version` (or the commit SHA if you
+  reproduced from source).
+- **Impact assessment** — what an attacker gains, what privileges they
+  need, and whether the issue is remotely or locally exploitable.
 
 ## What to expect
 
-- **Acknowledgement** within 72 hours.
-- **Triage + severity assessment** within 7 days.
-- **Fix target**: high/critical issues within 14 days of triage; lower
-  severities in the next regular release.
-- Credit in the release notes and advisory, unless you ask otherwise.
+- **Acknowledgement** within **72 hours** of the advisory being filed
+  (we monitor the security tab daily).
+- **Triage + severity assessment** within **7 days** of acknowledgement
+  — including a CVSS estimate and the targeted fix window.
+- **Fix target**: high/critical issues within **14 days** of triage;
+  lower severities in the next regular release.
+- **Coordinated disclosure** — we publish the advisory + fix together.
+  If you have a preferred disclosure date, tell us in the report and
+  we will align where the fix timeline allows.
+- **Hall of fame.** Reporters are credited in the GitHub Release notes
+  and in the published advisory, unless you ask to remain anonymous.
+  We do not currently offer a paid bounty.
 
 ## Scope
 

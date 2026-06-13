@@ -33,9 +33,47 @@ There's no explicit `rollback` keyword. Either:
   }
   ```
 
-## Nesting
+## Savepoints — partial rollback
 
-Transactions don't nest in v1. A second `transaction { ... }` inside an existing block is a runtime error (it would silently SAVEPOINT today, which is surprising). Just structure the work as a single block.
+A literal nested `transaction { ... }` inside an existing block is a
+compile-time error (E016) — Postgres would silently SAVEPOINT it, which
+hides the intent. For the genuine "let me roll back part of this
+transaction without losing the rest" case, use the **savepoint** form:
+
+```jwc
+transaction {
+    insert order into AppDb.Order;
+
+    savepoint try_charge {
+        insert charge into AppDb.Charge;
+        if (charge.status == "failed") {
+            throw "card declined";   // rolls back just this savepoint
+        }
+    }
+
+    // outer transaction is still healthy: order persists,
+    // charge row was rolled back, control resumes here.
+    insert audit into AppDb.AuditLog;
+}
+```
+
+Semantics:
+
+- `savepoint <name> { body }` emits `SAVEPOINT <name>` before `body` runs.
+- Clean exit: `RELEASE SAVEPOINT <name>` — the inner work folds into the surrounding transaction.
+- Exception / early `return` inside `body`: `ROLLBACK TO SAVEPOINT <name>` first, then the error propagates so a surrounding `try` can catch it. The outer transaction is **not** aborted.
+- `<name>` must be a valid SQL identifier (`[A-Za-z_][A-Za-z0-9_]*`); the parser validates that at compile time.
+- A `savepoint { ... }` block outside an enclosing `transaction { ... }` is a runtime error (**E017**: "`savepoint` is only valid inside a `transaction` block").
+- Native AOT (`jwc build --native`) currently rejects projects that use savepoints — interpreter only for now.
+
+The error catalog: see [reference/error-codes](../reference/error-codes.md#e016--e017--transactions--savepoints).
+
+## Nesting (without savepoints)
+
+A literal `transaction { ... }` directly inside another `transaction { ... }`
+is rejected at validation with **E016** — use a savepoint instead, or
+restructure the work to one block. The earlier "silent SAVEPOINT" behaviour
+was surprising enough that we surface it as a compile-time error now.
 
 ## Read-only
 

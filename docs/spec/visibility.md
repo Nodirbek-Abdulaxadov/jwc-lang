@@ -1,6 +1,13 @@
 # Visibility — `public` and `private` declarations
 
-Status: **DRAFT** · Target: stable at v1.0
+Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.7**
+
+**Related spec docs**:
+[index](index.md) ·
+[semantics](semantics.md) (the call sites this gate inspects) ·
+[aot-scope](aot-scope.md) (the native AOT path that trusts this gate) ·
+[threat-model](threat-model.md) (runtime gates that sit on top of the
+static one here).
 
 This file specifies the public/private surface of JWC top-level declarations
 and the validator invariant that downstream stages (interpreter, native AOT
@@ -117,3 +124,29 @@ relevant cases are:
 Any change to the validator's visibility rule MUST update both this spec
 and the matching tests in the same change — the conformance precedence
 note in `docs/spec/README.md` applies.
+
+## Follow-ups
+
+These adjacent surfaces will need a parallel cross-namespace check once
+they land in the language. They are NOT gated by the current
+`check_visibility` pass; if you ship one, extend the validator in the
+same change.
+
+- **User-declared error types.** A future `error Name { fields }`
+  declaration (currently tracked under the typed-catch follow-ups in
+  `docs/spec/semantics.md` §5.1) will live in a namespace just like a
+  function or entity. The `throw Ns.MyError(...)` call site needs the
+  same `Public` / same-namespace check applied here for functions, and
+  the matching `catch (e: Ns.MyError)` clause will need the same
+  resolution path that `resolve_callee` runs today.
+- **Entity / middleware cross-namespace edges.** The current validator
+  intentionally only gates function calls because the AOT codegen
+  flattens both before lowering (see "Invariant the AOT path trusts"
+  above). If a future change emits per-namespace lowered output for
+  entities or middlewares, the same `(namespace, visibility)` check
+  needs to extend to `new EntityName(...)` and `use Mw1, Mw2` edges.
+- **Imports.** `resolve_callee` already walks the caller's `import`
+  declarations; the rule above ("same namespace OR `Public`") still
+  applies. If a future `import as` alias form lands, the visibility
+  check operates on the resolved (post-alias) declaration, not the
+  alias name.
