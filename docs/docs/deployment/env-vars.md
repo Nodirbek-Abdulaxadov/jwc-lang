@@ -38,7 +38,7 @@ Cross-link: [data/dbcontext](../data/dbcontext.md), [deployment/migrations](./mi
 | `JWC_MAX_BODY_BYTES` | `2097152` (2 MiB) | Request body cap. `0` disables for behind-LB setups. | v0.3 |
 | `JWC_REAL_IP_HEADER` | `x-forwarded-for` | Header `client_ip()` reads. Flip to `cf-connecting-ip` behind Cloudflare. | v0.4 |
 | `JWC_TRUSTED_PROXIES` | _(empty)_ | Comma-separated list of IP / prefix entries. Peeled off the chain right-to-left so the first untrusted entry wins. Empty ⇒ "trust no proxy", rightmost entry wins. | v0.4 |
-| `JWC_HTTP_ALLOWLIST` | _(unset)_ | CSV host allowlist for outbound `http_get` / `http_post` / `fetch_json`. Empty ⇒ no restriction (default). Closes the SSRF gap for production. | v0.4.7 |
+| `JWC_HTTP_ALLOWLIST` | _(unset)_ | CSV host allowlist for outbound `http_get` / `http_post` / `fetch_json`. Empty ⇒ no restriction (default). Closes the SSRF gap for production. | v0.4.8 |
 | `JWC_SHUTDOWN_TIMEOUT` | `5` (seconds) | How long graceful shutdown waits for in-flight requests + queued jobs before the watchdog forces exit. | v0.4 |
 | `JWC_REQUEST_TIMEOUT` | `30` (seconds) | Per-request budget. The watchdog returns 504 + `{"error":"request timed out after Ns"}` if the handler hasn't finished. `0` disables — use only on projects that genuinely need long-running responses. | v0.4 |
 

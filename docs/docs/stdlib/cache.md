@@ -4,6 +4,12 @@ sidebar_position: 6
 
 # In-memory cache
 
+> **Scope note.** Intentionally a process-local cache only. Distributed
+> caches (Redis, Memcached) are not a core JWC concern — they belong in a
+> separate `jwc-cache` package post-1.0. If you outgrow the in-process
+> cache, you're already past JWC's CRUD ergonomics niche; reach for
+> Redis directly.
+
 Per-process, TTL-bounded. Good for hot lookups (config, user-permissions); not a Redis replacement.
 
 | Built-in | Returns | Notes |

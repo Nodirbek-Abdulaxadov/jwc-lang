@@ -5,47 +5,93 @@ sidebar_position: 1
 
 # JWC
 
-**Backend-first programming language with HTTP routes, entities, and SQL as first-class language constructs.**
+**Write web backends without hand-coding CRUD, without fighting an ORM, native-fast.**
+
+JWC is a small, Postgres-first backend language. The compiler reads your
+entity definitions and emits the routes, the SQL, and the migrations for
+you — there's no ORM layer, no DTO mapping, no repository boilerplate to
+maintain. What you'd hand-write across a controller, a service, a
+repository, a request DTO, a response DTO, and an AutoMapper profile is
+one entity + one `dbcontext` block in JWC.
 
 ```jwc
-dbcontext AppDb { driver = "postgres"; }
-
-entity User {
-    id: int pk;
-    name: string;
-    email: string;
+entity Note {
+    id:        Guid     primary_key
+    title:     string   max(200) required
+    body:      string
+    createdAt: DateTime default(now())
 }
 
-route GET "/users" {
-    let users = select User from AppDb.User orderby User.id;
-    return json(users);
+dbcontext AppDb {
+    Notes: Note
+    routes Notes
 }
-
-function main() { serve(8080); }
 ```
 
-`jwc run` → server up on `:8080`. That's the whole app.
+`jwc run` boots a Postgres-backed HTTP server with full CRUD on `/notes`
+(GET/POST/PUT/DELETE, pagination, validation, JSON in/out). `jwc build
+--native` produces a single static binary.
+
+## Why JWC
+
+- **No ORM, no mapping** — entities compile to SQL directly. No
+  EF/Hibernate change-tracker, no AutoMapper, no repository pattern, no
+  DTO duplication.
+- **Postgres-honest** — every query the compiler emits is plain SQL you
+  can read in `jwc gen-sql`. No N+1, no lazy-loading surprises, no
+  hidden fetch plans.
+- **One language, one binary** — routes, entities, validation, JWT
+  auth, background jobs, migrations. `jwc build --native` → one static
+  binary.
+- **Fast enough** — close to `rust-axum`, ahead of `go-fiber` on JSON
+  paths. Performance is a *consequence* of the design, not the headline.
+
+## Where JWC fits — and where it doesn't
+
+**Fits well:**
+
+- CRUD-heavy services (admin backends, internal tools, line-of-business
+  APIs, prototype-to-prod webapps).
+- Postgres-only stacks where you already write SQL by hand or use a
+  thin layer like Dapper / sqlc / PostgREST.
+- Teams that want one engineer to ship a service end-to-end without
+  juggling a half-dozen frameworks.
+
+**Does NOT fit (by design):**
+
+- Rich-domain code with deep object graphs, polymorphism, or
+  change-tracking semantics (EF Core / Hibernate territory).
+- Multi-database portability — Postgres is the only supported driver
+  and that's a deliberate non-goal until 1.0.
+- Performance-critical hot paths where the last 10% of an axum number
+  matters — use axum.
+- Anything that needs a mature ecosystem (1000s of packages). JWC's
+  package count is small and curated.
 
 ## What's here
 
 | Section | What it covers |
 |---|---|
-| [Getting started](./getting-started/install) | Install, hello world, project layout |
+| [Getting started](./getting-started/install) | Install, first project, templates, editor setup |
+| [Tutorial — zero to deployed CRUD](./tutorial/zero-to-crud) | 15-minute end-to-end walkthrough |
 | [Language](./language/syntax) | Types, variables, functions, control flow, async |
 | [Data](./data/dbcontext) | Entities, select / insert / update / delete, migrations, transactions |
-| [Backend](./backend/routes) | Routes, middleware, validation, error handler, websockets, queue |
-| [Standard library](./stdlib/strings) | String, array, JSON, HTTP, JWT, hashing, email, cache |
-| [Packages](./packages/manifest) | Manifest, dependencies, registry, `jwc publish` |
+| [Backend](./backend/routes) | Routes, middleware, validation, error handler, websockets, background queue |
+| [Standard library](./stdlib/strings) | String, array, JSON, HTTP, JWT, hashing |
 | [CLI](./cli/overview) | Every `jwc` subcommand + flag |
-| [Deployment](./deployment/native-build) | Bundled launcher, native AOT, [Docker](./deployment/docker) (official `ghcr.io/.../jwc` image), k8s migrate init-container, observability, OTLP |
+| [Deployment](./deployment/native-build) | Native AOT, [Docker](./deployment/docker), musl static, k8s migrate init-container |
 | [Reference](./reference/builtins) | Built-ins reference + numbered diagnostic codes (`Wxxx` / `Exxx`) |
 | [Security](./security/) | SSRF allowlist, JWT validation, secrets redaction, trusted-proxy chain |
 
 ## Status
 
-- **Interpreter** — production-ready (`jwc run`, `jwc serve`).
-- **Native AOT** — partial. Most programs compile via `jwc build --native` (Rust-source path).
-- **LLVM IR backend** — skeleton only ([Sprint 13](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md)).
-- **Registry** — live at [`registry-jwc.1kb.uz`](https://registry-jwc.1kb.uz).
+Production-ready for the maintainer's own workload; external pilots TBD.
 
-See [`ROADMAP.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md) for the full per-feature status.
+- **Interpreter** — stable (`jwc run`, `jwc serve`).
+- **Native AOT** — stable for the documented surface
+  ([`aot-scope`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/aot-scope.md)).
+- **Query layer (join + projection + composable filter)** — Phase 11,
+  1.0-blocker. See [`ROADMAP.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md).
+- **LLVM IR backend, cross-target native matrix, WASM, self-hosting,
+  multi-database driver, SSE v2** — **declared Non-goals** (see ROADMAP
+  Non-goals section).

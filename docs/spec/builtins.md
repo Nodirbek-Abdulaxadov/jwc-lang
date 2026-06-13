@@ -1,6 +1,6 @@
 # JWC Builtin Functions — Contract
 
-Status: **DRAFT** · Reflects: **v0.4.7** — extraction in progress from
+Status: **DRAFT** · Reflects: **v0.4.8** — extraction in progress from
 `src/runner/builtins.rs` and `src/runner/mod.rs`. Phase 0 deliverable.
 
 **Related spec docs**:

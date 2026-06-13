@@ -1,6 +1,6 @@
 # JWC Language Specification
 
-Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.7**
+Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.8**
 
 This directory is the language specification — the contract between the
 JWC compiler and any code written in it. Until v1.0 the parser

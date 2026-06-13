@@ -1,6 +1,6 @@
 # JWC Threat Model
 
-Status: **DRAFT** · Reflects: **v0.4.7** (Phase 6 mitigations landed).
+Status: **DRAFT** · Reflects: **v0.4.8** (Phase 6 mitigations landed).
 
 **Related spec docs**:
 [index](index.md) ·

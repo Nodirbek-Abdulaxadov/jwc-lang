@@ -6,8 +6,9 @@ sidebar_position: 7
 
 JWC ships three observability surfaces out of the box: HTTP health /
 readiness probes, a Prometheus scrape endpoint, and structured access
-logs. Distributed tracing (OTLP) is a separate page —
-[deployment/otlp](./otlp.md).
+logs. **Distributed tracing (OTLP) is optional / advanced** — see
+[deployment/otlp](./otlp.md). OTLP is an ops tool, not a JWC ergonomics
+surface; default builds and runs don't enable it.
 
 ## Health probes
 

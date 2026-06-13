@@ -1,6 +1,12 @@
 # JWC Language Specification — Index
 
-Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.7**
+Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.8**
+
+> **North star.** "Write web backends without hand-coding CRUD, without
+> fighting an ORM, native-fast." Surface that doesn't serve this goal is
+> declared Non-goal — see [`ROADMAP.md` Non-goals](../../ROADMAP.md#non-goals-10-ga-qadar-va-undan-keyin-ham--qatiy-yoq).
+> LLVM IR, cross-target native matrix, WASM, self-hosting, multi-DB
+> driver, SSE v2 won't ship pre-1.0.
 
 This page is the entry point for the JWC language specification. Each file
 below is a free-standing spec document; together they are the contract

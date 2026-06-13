@@ -4,6 +4,13 @@ sidebar_position: 5
 
 # Email
 
+> **Scope note.** Email is not part of JWC's CRUD north star. The current
+> SMTP builtins ship in the core because they're useful for auth flows
+> (password reset, magic links), but the surface is intentionally
+> minimal — no templating engine, no provider-specific APIs (SendGrid /
+> SES). Larger email needs belong in a separate `jwc-email` package
+> post-1.0.
+
 SMTP transport over TLS via `lettre` + `rustls`. Async.
 
 ```jwc

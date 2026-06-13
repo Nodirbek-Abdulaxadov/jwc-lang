@@ -59,9 +59,15 @@ auth, separate namespace.)
 
 ## Site structure
 
-- `docs/intro.md` — landing
-- `docs/getting-started.md` — install + CLI cheat sheet
-- `docs/language-tour.md` — 10-minute walkthrough
-- `docs/language/` — routes, entities, control flow
-- `docs/db.md` — query / migration / pool reference
-- `docs/stdlib.md` — every built-in shipped today
+- `docs/intro.md` — landing (north star + niche statement)
+- `docs/getting-started/` — install, first project, templates, editor
+- `docs/tutorial/zero-to-crud.md` — 15-minute end-to-end walkthrough
+- `docs/language/` — syntax, types, control flow, functions, async
+- `docs/data/` — entities, dbcontext, select / insert / update / delete,
+  migrations, transactions
+- `docs/backend/` — routes, middleware, validation, error handler,
+  websockets, queue
+- `docs/stdlib/` — strings, arrays / JSON, HTTP, JWT, hashing
+- `docs/deployment/` — native build, Docker, musl, k8s, env vars
+- `docs/reference/` — autogen builtins, fmt, upgrade, error codes
+- `docs/security/` — SSRF, JWT validation, secrets redaction

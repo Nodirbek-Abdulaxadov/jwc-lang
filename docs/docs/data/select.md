@@ -132,3 +132,16 @@ value of a column is a pure function of the old one (counter, version
 bump, status transition), reach for `update ... set ...`; reserve
 whole-row `update u in ...` for cases where the new value comes from
 user input that you've already read end-to-end.
+
+## Joins, projection, aggregation (coming in Phase 11)
+
+The current `select` surface is single-entity. Cross-entity joins,
+arbitrary-shape projection (`select { id, title, author.email }`), and
+scalar aggregation (`count`, `sum`, `avg`, `min`, `max`) land in **Phase
+11 — Query Layer** before v1.0. Joinsiz the "no ORM pain" promise is
+half-finished; once Phase 11 ships, raw_sql fallback is no longer the
+default escape hatch for cross-table reads.
+
+Until then: use `select` per entity and assemble the response shape in
+JWC code, or drop to raw SQL via the engine helpers if the join is
+unavoidable.

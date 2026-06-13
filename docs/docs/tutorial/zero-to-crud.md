@@ -25,7 +25,7 @@ By the end you will have:
 
 | You need | Why |
 |---|---|
-| `jwc` v0.4.7+ | The CLI itself — install via the one-liner in [Install](../getting-started/install.md). |
+| `jwc` v0.4.8+ | The CLI itself — install via the one-liner in [Install](../getting-started/install.md). |
 | Postgres 13+ | The entity layer SQL-generates against it. Anything `psql`-reachable works. |
 | Docker | For the deploy step. Skip if you only want `jwc run`. |
 
@@ -174,7 +174,7 @@ JWC ships an official Docker base image:
 # Dockerfile
 cat > Dockerfile <<'EOF'
 # Stage 1: build the native binary inside the JWC base.
-FROM ghcr.io/nodirbek-abdulaxadov/jwc:0.4.7 AS build
+FROM ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8 AS build
 WORKDIR /src
 COPY . .
 RUN jwc build --native --release
@@ -228,7 +228,7 @@ spec:
       initContainers:
         - name: migrate
           # The official JWC image. Carries `jwc migrate`.
-          image: ghcr.io/nodirbek-abdulaxadov/jwc:0.4.7
+          image: ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8
           args: ["migrate", "up"]
           env:
             - name: DATABASE_URL

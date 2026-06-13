@@ -1,6 +1,6 @@
 # Visibility — `public` and `private` declarations
 
-Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.7**
+Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.8**
 
 **Related spec docs**:
 [index](index.md) ·

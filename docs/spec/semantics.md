@@ -1,6 +1,6 @@
 # JWC Evaluation Semantics
 
-Status: **DRAFT** · Reflects: **v0.4.7** — extracted from `src/runner/eval.rs`,
+Status: **DRAFT** · Reflects: **v0.4.8** — extracted from `src/runner/eval.rs`,
 `crates/jwc-runtime/src/lib.rs`, `src/runner/exec.rs`, and `src/runner/mod.rs`
 (post Sprint 2 decomposition; Sprint 3C / 4B updates).
 
@@ -275,7 +275,7 @@ cross-shape equality between `Record { ... }` and an equivalent
 
 The dispatch table for `catch (e: T)` is the constant
 `JWC_ERROR_KINDS` in `src/runner/mod.rs`. The current set
-(v0.4.7) is hierarchical via dot-separated paths — a parent kind
+(v0.4.8) is hierarchical via dot-separated paths — a parent kind
 catches every dotted child:
 
 | Kind | Catches |

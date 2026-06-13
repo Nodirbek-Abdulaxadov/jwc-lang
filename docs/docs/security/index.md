@@ -19,7 +19,7 @@ The runtime's outbound HTTP builtins (`http_get`, `http_post`,
 `http_get(body().url)` can be tricked into hitting `169.254.169.254`
 or any internal service.
 
-The defence is `JWC_HTTP_ALLOWLIST` (v0.4.7): a comma-separated host
+The defence is `JWC_HTTP_ALLOWLIST` (v0.4.8): a comma-separated host
 allowlist applied at the outbound-call boundary. Empty (the default)
 means "no restriction" — fine for dev, but pin it down in production:
 

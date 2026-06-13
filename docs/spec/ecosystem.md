@@ -251,7 +251,7 @@ Redaction'ga `JWC_REDIS_URL` (parol bo'lishi mumkin) ham qo'shiladi —
   "pkgVersion": "0.1.0",
   "license": "MIT",
   "homepage": "https://github.com/...",
-  "minJwcVersion": "0.4.7",
+  "minJwcVersion": "0.4.8",
   "description": "Stripe API client for JWC"
 }
 ```

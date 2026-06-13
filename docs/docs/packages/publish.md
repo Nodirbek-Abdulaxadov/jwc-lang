@@ -4,6 +4,13 @@ sidebar_position: 3
 
 # Publishing
 
+> **Scope note.** JWC's package registry is small and curated by design.
+> Mass-ecosystem ambition is not part of the north star — JWC competes on
+> CRUD ergonomics, not on the breadth of npm-style availability. If you
+> need 1000s of packages, JWC isn't the right tool. See
+> [`docs/spec/ecosystem.md`](../../../spec/ecosystem.md) for what belongs
+> in core vs. what belongs in a package.
+
 ## One-time setup
 
 1. Sign in to [registry-jwc.1kb.uz](https://registry-jwc.1kb.uz/) with Google.
