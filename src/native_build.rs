@@ -1013,7 +1013,9 @@ fn check_stmt(stmt: &Stmt, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             check_block(body, funcs, builtins)?;
             check_block(catch_body, funcs, builtins)
         }
-        Stmt::Transaction { body } => check_block(body, funcs, builtins),
+        Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
+            check_block(body, funcs, builtins)
+        }
     }
 }
 
@@ -2078,6 +2080,18 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
         }
         Stmt::Transaction { body } => {
             emit_transaction(out, &pad, body, indent, ctx);
+        }
+        Stmt::Savepoint { .. } => {
+            // Sprint 4B — `savepoint <name> { ... }` is interpreter-only in
+            // this slice. The native AOT path doesn't yet model nested
+            // transaction boundaries; emit a clear panic so a user who hit
+            // `jwc build --native` on a project using savepoints gets a
+            // helpful diagnostic instead of silent breakage. The
+            // interpreter (`jwc run`) handles the full flow.
+            out.push_str(&pad);
+            out.push_str(
+                "panic!(\"savepoint not supported in --native build yet; use `jwc run`\");\n",
+            );
         }
     }
 }

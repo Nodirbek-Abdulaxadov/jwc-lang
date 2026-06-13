@@ -40,6 +40,9 @@ pub enum Keyword {
     Async,
     Await,
     Transaction,
+    /// Sprint 4B [1.0-blocker] — `savepoint <name> { ... }` nested rollback
+    /// boundary inside a `transaction { ... }` block.
+    Savepoint,
     ErrorHandler,
     For,
     In,
@@ -167,6 +170,7 @@ impl<'a> Lexer<'a> {
                 "async" => TokenKind::Keyword(Keyword::Async),
                 "await" => TokenKind::Keyword(Keyword::Await),
                 "transaction" => TokenKind::Keyword(Keyword::Transaction),
+                "savepoint" => TokenKind::Keyword(Keyword::Savepoint),
                 "errorHandler" => TokenKind::Keyword(Keyword::ErrorHandler),
                 "for" => TokenKind::Keyword(Keyword::For),
                 "in" => TokenKind::Keyword(Keyword::In),

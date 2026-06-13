@@ -6,7 +6,7 @@
 //! `crate::ast::*` re-exports below.
 
 use super::*;
-use crate::ast::{ModelKind, Program};
+use crate::ast::{ModelKind, Program, Stmt};
 
 #[test]
 fn atomic_update_set_parses_and_validates() {
@@ -1243,4 +1243,73 @@ fn validator_rejects_unknown_root_but_accepts_unknown_subtype_of_known_root() {
     "#;
     let good_prog = parse_program(good).unwrap();
     validate_program(&good_prog).expect("known-root dotted type must validate");
+}
+
+// --- Sprint 4B: savepoint syntax + nested-transaction rejection ----------
+
+#[test]
+fn savepoint_parses_inside_transaction() {
+    let src = r#"
+        function main() {
+            transaction {
+                savepoint sp1 {
+                    print("ok");
+                }
+            }
+        }
+    "#;
+    let prog = parse_program(src).expect("savepoint inside transaction must parse");
+    let func = prog
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main fn");
+    let outer = func.body.first().expect("outer stmt");
+    let Stmt::Transaction { body } = outer else {
+        panic!("expected outer Transaction, got {outer:?}");
+    };
+    let inner = body.first().expect("inner stmt");
+    let Stmt::Savepoint { name, .. } = inner else {
+        panic!("expected Savepoint, got {inner:?}");
+    };
+    assert_eq!(name, "sp1");
+}
+
+#[test]
+fn nested_transaction_rejected_at_parse_time_with_e016() {
+    let src = r#"
+        function main() {
+            transaction {
+                transaction {
+                    print("hi");
+                }
+            }
+        }
+    "#;
+    let err = parse_program(src).expect_err("nested transaction must fail").to_string();
+    assert!(
+        err.contains("E016"),
+        "expected E016 code in error, got: {err}"
+    );
+    assert!(
+        err.contains("savepoint"),
+        "expected hint about savepoint, got: {err}"
+    );
+}
+
+#[test]
+fn savepoint_with_invalid_identifier_rejected() {
+    // `expect_ident` already constrains the keyword, but our defensive
+    // pattern check rejects anything the lexer ever lets through that
+    // wouldn't survive raw SQL interpolation.
+    let src = r#"
+        function main() {
+            transaction {
+                savepoint 123foo {
+                    print("hi");
+                }
+            }
+        }
+    "#;
+    assert!(parse_program(src).is_err());
 }

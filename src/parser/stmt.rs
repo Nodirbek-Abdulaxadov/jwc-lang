@@ -20,7 +20,35 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::Transaction) => {
                 self.bump()?;
                 let body = self.parse_block()?;
+                // Sprint 4B [E016] — naked `transaction { transaction { ... } }`
+                // is rejected at parse time. SQL forbids nested BEGINs;
+                // `savepoint <name> { ... }` is the supported nesting form.
+                for s in &body {
+                    if matches!(s, Stmt::Transaction { .. }) {
+                        anyhow::bail!("error[E016]: nested `transaction` is not allowed — use `savepoint <name> {{ ... }}` to nest inside the outer transaction");
+                    }
+                }
                 Ok(Stmt::Transaction { body })
+            }
+            TokenKind::Keyword(Keyword::Savepoint) => {
+                self.bump()?;
+                let name = self.expect_ident("expected savepoint name after `savepoint`")?;
+                // SQL identifier rules — `[A-Za-z_][A-Za-z0-9_]*`. The
+                // lexer already restricts idents to this charset; we just
+                // re-assert here so codegen never sees a savepoint name
+                // it can't safely interpolate. Defence in depth.
+                if !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    || name.chars().next().is_some_and(|c| c.is_ascii_digit())
+                {
+                    anyhow::bail!(
+                        "savepoint name '{}' is not a valid SQL identifier (use [A-Za-z_][A-Za-z0-9_]*)",
+                        name
+                    );
+                }
+                let body = self.parse_block()?;
+                Ok(Stmt::Savepoint { name, body })
             }
             TokenKind::Keyword(Keyword::Let) => {
                 self.bump()?;

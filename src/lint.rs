@@ -266,7 +266,9 @@ fn collect_select_sites(stmts: &[Stmt], out: &mut Vec<(String, bool, Option<Wher
                 collect_select_sites(body, out);
                 collect_select_sites(catch_body, out);
             }
-            Stmt::Transaction { body } => collect_select_sites(body, out),
+            Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
+                collect_select_sites(body, out)
+            }
             Stmt::ForIn { iter, body, .. } => {
                 collect_select_sites_expr(iter, out);
                 collect_select_sites(body, out);
@@ -353,7 +355,9 @@ fn collect_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
                 collect_calls(body, out);
                 collect_calls(catch_body, out);
             }
-            Stmt::Transaction { body } => collect_calls(body, out),
+            Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
+                collect_calls(body, out)
+            }
             Stmt::ForIn { iter, body, .. } => {
                 collect_calls_expr(iter, out);
                 collect_calls(body, out);

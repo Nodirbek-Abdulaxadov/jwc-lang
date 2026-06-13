@@ -272,6 +272,82 @@ where
     result
 }
 
+/// **Sprint 4B [1.0-blocker]** — `savepoint <name> { ... }` helper.
+///
+/// Issues `SAVEPOINT <name>` on the in-flight transaction connection,
+/// runs `body`, then `RELEASE SAVEPOINT <name>` on success or
+/// `ROLLBACK TO SAVEPOINT <name>; RELEASE SAVEPOINT <name>` on error.
+/// The error is re-raised so the surrounding code (e.g. an outer
+/// `catch`) can react. Refuses to run when called outside an active
+/// `transaction { ... }` block — E017 surfaced as a clear runtime
+/// error so users get the same diagnostic shape as the validator would.
+///
+/// `name` MUST already be a valid SQL identifier (the parser checks
+/// `[A-Za-z_][A-Za-z0-9_]*`); we re-assert here so any caller bypassing
+/// the parser path still can't smuggle SQL through this surface.
+pub async fn with_savepoint<F, Fut, T>(name: &str, body: F) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || name.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        bail!(
+            "savepoint name '{}' is not a valid SQL identifier (use [A-Za-z_][A-Za-z0-9_]*)",
+            name
+        );
+    }
+
+    let Some(cell) = take_tx_conn().await else {
+        bail!(
+            "error[E017]: `savepoint` is only valid inside a `transaction` block — wrap the call site in `transaction {{ savepoint {name} {{ ... }} }}`"
+        );
+    };
+
+    let begin_sql = format!("SAVEPOINT {name}");
+    let release_sql = format!("RELEASE SAVEPOINT {name}");
+    let rollback_sql = format!("ROLLBACK TO SAVEPOINT {name}");
+
+    // Issue SAVEPOINT then run body. We pull the conn out of the cell
+    // briefly to call batch_execute, then drop the guard so the body's
+    // inner DB calls (which also lock the cell) can proceed.
+    {
+        let held = cell.lock().await;
+        let Some(conn) = held.as_ref() else {
+            bail!(
+                "error[E017]: transaction connection unexpectedly closed before SAVEPOINT could run"
+            );
+        };
+        conn.batch_execute(&begin_sql)
+            .await
+            .with_context(|| format!("Failed to issue SAVEPOINT {name}"))?;
+    }
+
+    let result = body().await;
+
+    let mut held = cell.lock().await;
+    if let Some(conn) = held.as_ref() {
+        match &result {
+            Ok(_) => {
+                conn.batch_execute(&release_sql)
+                    .await
+                    .with_context(|| format!("Failed to RELEASE SAVEPOINT {name}"))?;
+            }
+            Err(_) => {
+                // Best-effort cleanup — if the outer error already poisoned
+                // the connection, both calls will fail and we surface the
+                // original error from the body.
+                let _ = conn.batch_execute(&rollback_sql).await;
+                let _ = conn.batch_execute(&release_sql).await;
+            }
+        }
+    }
+    result
+}
+
 pub fn get_or_compile_sql<F>(cache_key: &str, compiler: F) -> Result<String>
 where
     F: FnOnce() -> Result<String>,

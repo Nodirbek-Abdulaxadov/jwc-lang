@@ -403,6 +403,18 @@ pub enum Stmt {
     Transaction {
         body: Vec<Stmt>,
     },
+    /// **Sprint 4B [1.0-blocker]** — `savepoint <name> { ... }` — nested
+    /// rollback boundary INSIDE a `transaction { ... }`. Emits
+    /// `SAVEPOINT <name>` at entry, `RELEASE SAVEPOINT <name>` on normal
+    /// exit, and `ROLLBACK TO SAVEPOINT <name>; RELEASE SAVEPOINT <name>`
+    /// on error so the outer transaction stays usable. Validator (E017)
+    /// rejects savepoints declared outside a transaction. The legacy
+    /// `transaction { transaction { ... } }` literal is rejected by the
+    /// parser with E016 directing users at savepoint.
+    Savepoint {
+        name: String,
+        body: Vec<Stmt>,
+    },
     /// `for VAR in EXPR { ... }` — iterate over a JSON array (returned by
     /// `select`, `body()` parsed array, etc). `VAR` is rebound per iteration.
     ForIn {

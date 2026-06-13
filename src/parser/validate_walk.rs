@@ -194,6 +194,13 @@ fn validate_stmt(
             db_tables,
             entity_fields_by_table,
         ),
+        Stmt::Savepoint { body, .. } => validate_stmts(
+            body,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
         Stmt::ForIn { iter, body, .. } => {
             validate_expr(
                 iter,

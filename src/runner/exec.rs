@@ -297,6 +297,20 @@ impl<'a> Vm<'a> {
                 .await;
                 outcome
             }
+            Stmt::Savepoint { name, body } => {
+                // Sprint 4B — wire `savepoint <name> { ... }` to the
+                // engine's SAVEPOINT/RELEASE/ROLLBACK helper. Outside a
+                // transaction the helper bails with E017; inside, body
+                // errors rollback to the savepoint without poisoning
+                // the outer transaction.
+                let body_clone = body.clone();
+                let name_clone = name.clone();
+                let outcome: Result<Flow> = engine::with_savepoint(&name_clone, || {
+                    Box::pin(async move { self.exec_block(&body_clone, vars).await })
+                })
+                .await;
+                outcome
+            }
             Stmt::ForIn { var, iter, body } => {
                 let iter_val = self.eval_expr(iter, vars).await?;
                 // Three iterable shapes:

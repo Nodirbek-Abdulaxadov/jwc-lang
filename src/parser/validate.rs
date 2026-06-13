@@ -827,7 +827,9 @@ fn check_mutation_fields_in_stmt(
             *bindings = intersect_bindings(&try_state, &catch_state);
             Ok(())
         }
-        Stmt::Transaction { body } => check_mutation_fields_in_stmts(body, bindings, entity_fields),
+        Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
+            check_mutation_fields_in_stmts(body, bindings, entity_fields)
+        }
     }
 }
 
@@ -935,7 +937,9 @@ fn check_typed_field_access_in_stmt(
             check_typed_field_access_in_stmts(body, locals, model_fields)?;
             check_typed_field_access_in_stmts(catch_body, locals, model_fields)
         }
-        Stmt::Transaction { body } => check_typed_field_access_in_stmts(body, locals, model_fields),
+        Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
+            check_typed_field_access_in_stmts(body, locals, model_fields)
+        }
         Stmt::ForIn { var, iter, body } => {
             check_typed_field_access_in_expr(iter, locals, model_fields)?;
             // Loop variable is currently untyped — it's an array element from
@@ -1107,7 +1111,9 @@ fn check_with_relations_in_stmt(
             check_with_relations_in_stmts(body, entity_navigations)?;
             check_with_relations_in_stmts(catch_body, entity_navigations)
         }
-        Stmt::Transaction { body } => check_with_relations_in_stmts(body, entity_navigations),
+        Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
+            check_with_relations_in_stmts(body, entity_navigations)
+        }
         Stmt::ForIn { iter, body, .. } => {
             check_with_relations_in_expr(iter, entity_navigations)?;
             check_with_relations_in_stmts(body, entity_navigations)
