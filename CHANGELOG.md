@@ -3,6 +3,77 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] — Phase 1 unified value model: Value::Record everywhere
+
+Performance + architectural release. Closes the Phase 1 [1.0-blocker]
+Sprint 1 punch-list from `PRODUCTION_READINESS_PLAN.md`: the
+interpreter and AOT both flow object-shaped values through a single
+typed-shape Record carrier, shape names are deduplicated across rows,
+and the value model now lives in a sibling `jwc-runtime` crate so a
+future interpreter ⇄ AOT unification has somewhere to land.
+
+Highlights:
+
+- **`Value::Record { field_names: Arc<Vec<Arc<str>>>, values: Arc<Vec<Value>> }`**
+  — the interpreter's typed-shape object variant. Object literals,
+  `select` rows, `json_parse(s)` of any object, and `set_json_field`
+  on a known shape all materialise as Record. Field access is O(N)
+  linear scan over the shared `field_names` Arc — no JSON parse
+  round-trip on `obj.field`, no per-row Vec<String> allocation. The
+  `Value::Str(json_string)` fallback stays for computed-key literals
+  + non-JSON `json_parse` payloads.
+
+- **DB rows go straight to Record.** `Expr::DbSelect` eagerly parses
+  the engine's JSON result via the new `materialize_select_result`
+  helper: one `field_names` Arc per query, one `Vec<Value>` per row,
+  N rows share the schema layout via Arc refcount. The headline
+  /json-large win the production-readiness plan targets.
+
+- **AOT mirror.** `src/native_prelude.rs.in` gains a `V::Record`
+  variant with the same shape (`field_names: Arc<Vec<JwcStr>>`,
+  `values: Arc<Vec<V>>`). `native_build.rs` interns each
+  declaration-order key list into `CodegenCtx.shapes` and emits one
+  `fn __jwc_shape_N() -> &'static Arc<Vec<JwcStr>>` getter (wrapping
+  a `std::sync::OnceLock`) per distinct shape. Object literals
+  become `v_record(Arc::clone(__jwc_shape_N()), vec![...])` — no
+  per-construction `JwcObj::default()` + 3-7 FxHashMap inserts.
+
+- **`crates/jwc-runtime/` sibling crate.** Extracted `Value`,
+  `format_float`, `value_to_json`, `value_to_json_smart`,
+  `json_to_value`, `materialize_select_result`, and the
+  matching unit tests into `crates/jwc-runtime/src/lib.rs`. The
+  main crate keeps a `pub use jwc_runtime::{...}` re-export so
+  call sites compile unchanged. Path dep, no `[workspace]` mode
+  (kept simple deliberately — the AOT-uses-runtime-as-crate
+  follow-up is a separate sprint).
+
+- **Per-request micro-fixes** (carried over from v0.4.4 close):
+  `Request.response_status` is now `AtomicU16` instead of
+  `Mutex<Option<u16>>`; `jwc_set_response_status()` is only
+  emitted on routes whose middleware chain has at least one
+  `after { ... }` block (stateless routes emit zero Phase-5
+  instrumentation now).
+
+Bench against the http-framework-benchmark suite on the same
+machine (bombardier 15s @ warmup 3s):
+
+  /json-large:  14,643 -> 15,378  (+5.0%, the targeted V::Record win)
+  /async-delay: 31,108 -> 33,014  (+6.1%, reduced alloc pressure)
+  /ping:        129,227 -> 129,382 (noise)
+  /json-small:  125,918 -> 128,017 (+1.7%)
+  /cpu:         127 -> 120        (noise on the SHA-256 bound path)
+
+jwc-app now ~6% clear of go-fiber on /json-large (15,378 vs 14,516).
+Other stacks unchanged from the v0.4.0 cross-stack snapshot.
+
+Tests: 251 lib (8 moved out to the sub-crate), 8 jwc-runtime,
+30 conformance (5 new Record cases), 3 native_parity (2 new V::Record
++ shape-dedup codegen cases). All green.
+
+Sprint 1 of the production-readiness plan closed. Sprint 2
+(decompose `runner/mod.rs` + `parser.rs`, unwrap budget walk,
+cargo-fuzz CI) is next.
+
 ## [0.4.4] — Phase 5 close-out + observability bundle
 
 Second large bundle on top of v0.4.3. Folds 30+ commits shipped in
