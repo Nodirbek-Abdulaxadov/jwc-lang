@@ -99,7 +99,11 @@ impl Value {
     /// assert and release builds silently truncate to `min(len_a, len_b)`
     /// rather than panic in production.
     pub fn record_with_shape(field_names: Arc<Vec<Arc<str>>>, values: Vec<Value>) -> Value {
-        debug_assert_eq!(field_names.len(), values.len(), "Record shape/value arity mismatch");
+        debug_assert_eq!(
+            field_names.len(),
+            values.len(),
+            "Record shape/value arity mismatch"
+        );
         Value::Record {
             field_names,
             values: Arc::new(values),
@@ -113,7 +117,10 @@ impl Value {
     /// (2-10 fields) of typical entity / object-literal shapes.
     pub fn record_field(&self, name: &str) -> Option<&Value> {
         match self {
-            Value::Record { field_names, values } => field_names
+            Value::Record {
+                field_names,
+                values,
+            } => field_names
                 .iter()
                 .position(|f| f.as_ref() == name)
                 .map(|i| &values[i]),
@@ -206,7 +213,10 @@ pub fn value_to_json(value: &Value) -> JsonValue {
         // are cheap to deref; the output `serde_json::Map` is an alloc per
         // serialize call (unavoidable on this path until we switch the
         // entire response pipeline to streaming writes).
-        Value::Record { field_names, values } => {
+        Value::Record {
+            field_names,
+            values,
+        } => {
             let mut map = serde_json::Map::with_capacity(field_names.len());
             for (name, val) in field_names.iter().zip(values.iter()) {
                 map.insert(name.as_ref().to_string(), value_to_json_smart(val));
@@ -263,9 +273,8 @@ pub fn materialize_select_result(result: &str) -> Value {
                     return Value::Array(rows.iter().map(json_to_value).collect());
                 }
             };
-            let shape: Arc<Vec<Arc<str>>> = Arc::new(
-                first_obj.keys().map(|k| Arc::from(k.as_str())).collect(),
-            );
+            let shape: Arc<Vec<Arc<str>>> =
+                Arc::new(first_obj.keys().map(|k| Arc::from(k.as_str())).collect());
             let mut out: Vec<Value> = Vec::with_capacity(rows.len());
             for row in rows {
                 match row {
@@ -346,8 +355,12 @@ mod tests {
         );
         // Both records' field_names point at the same allocation.
         if let (
-            Value::Record { field_names: f1, .. },
-            Value::Record { field_names: f2, .. },
+            Value::Record {
+                field_names: f1, ..
+            },
+            Value::Record {
+                field_names: f2, ..
+            },
         ) = (&r1, &r2)
         {
             assert!(Arc::ptr_eq(f1, f2), "field_names Arc should be shared");
