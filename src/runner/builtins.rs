@@ -16,10 +16,15 @@ use tokio_postgres::types::ToSql;
 use crate::ast::Expr;
 
 // Pull in `Vm`, the `Value`/`Flow` enums, `WS_HANDLE`, the `engine` import
-// alias, and the private free helper functions (`http_client`,
-// `apply_headers_reqwest`, `boxed_params_to_refs`, etc.) defined in the parent
-// `runner` module. A child module may name private items of its ancestors.
+// alias, and the private free helper functions (`http_client`, etc.) defined
+// in the parent `runner` module. A child module may name private items of
+// its ancestors.
 use super::*;
+use super::sql::{boxed_params_to_refs, json_value_to_sql_param};
+use super::util::{
+    apply_headers_reqwest, assemble_url_from_pg_env, connection_string_from_arg,
+    http_response_to_json_string,
+};
 
 impl<'a> Vm<'a> {
     pub(super) async fn eval_path_param_call(

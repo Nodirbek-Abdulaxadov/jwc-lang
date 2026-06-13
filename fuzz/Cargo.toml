@@ -1,0 +1,41 @@
+[package]
+name = "jwc-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# This crate intentionally lives OUTSIDE the main workspace. The main
+# `Cargo.toml` has no `[workspace]` table; `jwc` and `crates/jwc-runtime`
+# are wired together with plain `path = "..."` deps. Keeping the fuzz
+# crate standalone means:
+#   1. `cargo build` at the repo root never tries to compile fuzz targets
+#      (which require `cargo-fuzz` + nightly libFuzzer linkage).
+#   2. CI's normal lint/test jobs are unaffected.
+#   3. Fuzzing is invoked explicitly via
+#      `cargo fuzz run --manifest-path fuzz/Cargo.toml <target>`.
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+jwc = { path = ".." }
+
+# Each fuzz target is its own [[bin]] entry. `path` points at the source
+# file under `fuzz_targets/`. `test = false`, `doc = false` keep cargo
+# from trying to run unit-test / doc-test glue against the fuzz harness
+# (libFuzzer owns `main`).
+
+[[bin]]
+name = "lex"
+path = "fuzz_targets/lex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false

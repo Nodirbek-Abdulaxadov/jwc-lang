@@ -1,0 +1,65 @@
+name: fuzz
+
+# Nightly fuzz soak. Each target gets an 8-hour wall-clock budget on
+# ubuntu-latest — that's the "24h" goal in PRODUCTION_READINESS_PLAN.md
+# rounded down to what a single GitHub-hosted runner can deliver in one
+# job (the runner timeout cap is 6h per step but the job cap is 35 days;
+# we keep each fuzz step well under that). Crashes upload as artifacts
+# instead of failing the job so one bad target does not skip the other.
+
+on:
+  schedule:
+    # 03:00 UTC every day. Off-peak for hosted runners.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    # Allow on-demand runs from the Actions tab for triage / reproducer
+    # gathering after a crash report.
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz-${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # 9h wall-clock cap per job: 8h fuzz budget + headroom for toolchain
+    # install, build, and artifact upload. GitHub's hard cap on hosted
+    # runners is 6h per job by default, but self-hosted / org plans can
+    # raise it; keep the declared timeout honest about the budget.
+    timeout-minutes: 540
+    strategy:
+      # Don't cancel the parse run if lex crashes — both targets are
+      # independent and we want full nightly coverage even on a finding.
+      fail-fast: false
+      matrix:
+        target: [lex, parse]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust (required by cargo-fuzz)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz target (${{ matrix.target }}) for 8h
+        # 28800 seconds = 8h. `--` separates cargo-fuzz args from
+        # libFuzzer args. `continue-on-error` so a crash uploads
+        # artifacts instead of skipping later steps.
+        continue-on-error: true
+        run: |
+          cargo fuzz run \
+            --manifest-path fuzz/Cargo.toml \
+            ${{ matrix.target }} \
+            -- -max_total_time=28800
+
+      - name: Upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 14
