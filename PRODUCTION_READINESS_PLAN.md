@@ -1,12 +1,23 @@
 # JWC Production Readiness Plan
 
-Status: PROPOSED · Target: v1.0.0
-Scope: everything between today's v0.4.1 and a version teams can bet a real backend on.
+Status: ACTIVE · Target: v1.0.0
+Scope: everything between today's v0.4.8 and a version teams can bet a real backend on.
 
-This plan is grounded in a code audit of the current tree (v0.4.1, ~26.5k LOC Rust):
+This plan is grounded in a code audit of the current tree:
 it names the actual files and gaps, not generic advice. Phases are ordered by
 dependency — each unblocks the next. Items marked **[1.0-blocker]** gate the
 1.0 release; everything else can ship in 1.x.
+
+> **North star** (see [`ROADMAP.md`](ROADMAP.md)): "Write web backends
+> without hand-coding CRUD, without fighting an ORM, native-fast." Any
+> band that doesn't serve this — LLVM IR, WASM, cross-target matrix,
+> multi-database driver, SSE v2, self-hosting — is a **Non-goal** and
+> won't ship before 1.0. See ROADMAP Non-goals section.
+
+> **Honesty note (2026-06):** "Production-ready" means the maintainer
+> runs JWC services in production on his own workload. External pilots
+> are TBD; star count is low. This document tracks what would let *other*
+> teams bet on JWC, not a claim that they should today.
 
 ---
 

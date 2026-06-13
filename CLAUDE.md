@@ -13,9 +13,10 @@ extension, and example projects under `examples/`.
 default runtime is an interpreter. `jwc build` (alias `jwc bundle`) without
 flags still does launcher + runtime bundling. `jwc build --native` is the
 real AOT path: `src/native_build.rs` emits Rust source from the AST, shells
-out to `cargo` and produces a standalone tokio binary. The LLVM IR backend
-is still deferred (Phase 4.1/4.2), so `--native` is currently the Rust
-codegen path only.
+out to `cargo` and produces a standalone tokio binary. **LLVM IR backend
+and cross-target native build matrix are declared Non-goals** (see
+`ROADMAP.md` Non-goals). `--native` is the Rust codegen path on Linux
+x86_64 (+ musl) only; that's intentional, not a deferral.
 
 ## Build / run commands
 
@@ -176,7 +177,11 @@ the same change.
 ## Roadmap awareness
 
 `ROADMAP.md` is the source of truth for what counts as "done" vs.
-"partial" vs. "deferred". Before adding a feature that overlaps a Phase
-item, re-read the relevant section — several apparent gaps (typed `catch`
-dispatch, LLVM IR backend, cross-target native builds) are intentional
-deferrals with documented reasons, not oversights.
+"partial" vs. **"non-goal"**. Before adding a feature that overlaps a
+Phase item, re-read the relevant section. The **Non-goals** block at the
+top of ROADMAP.md is policy — those items (LLVM IR, cross-target matrix,
+WASM, self-hosting, multi-database driver, SSE v2, OTLP-as-core,
+job-priority/DLQ ML, rich-domain object graphs) won't ship pre-1.0 and
+PRs that add them get closed. The north star — "Web backend yoz —
+CRUD'ni qo'lda yozmasdan, ORM bilan kurashmasdan, native-tez" — gates
+every new feature.

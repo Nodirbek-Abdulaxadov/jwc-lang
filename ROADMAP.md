@@ -10,6 +10,34 @@
 
 ---
 
+## North Star (v1.0 fokusi)
+
+> "Web backend yoz — CRUD'ni qo'lda yozmasdan, ORM bilan kurashmasdan, native-tez."
+
+Har bir roadmap bandi shu jumlaga xizmat qilishi shart. Qilmasa — **Non-goals** ga ketadi.
+
+## Non-goals (1.0 ga qadar va undan keyin ham — qat'iy "yo'q")
+
+Bu band loyihaning soddaligini himoyalash uchun. Foydalanuvchilar so'rasa
+yoki PR yuborsa ham — siyosat darajasidagi rad etish.
+
+| Item | Sabab | Status |
+|---|---|---|
+| **LLVM IR backend** | Native AOT Rust-codegen orqali yetadi. LLVM yakka muhandis sig'imidan tashqarida | Non-goal |
+| **Cross-target native build matrisi** (Windows-ARM, macOS-ARM, FreeBSD, …) | Linux x86_64 (glibc + musl) + Docker amd64/arm64 yetadi. Boshqa target'lar shovqin | Non-goal |
+| **Self-hosting compiler** | JWC kompilyatori JWC'da yozilishi maqsad emas. Rust qoladi | Non-goal |
+| **WASM target** | Backend tili — brauzer/edge runtimega chiqish niche'ga to'g'ri kelmaydi | Non-goal |
+| **Multi-database driver** (MySQL/SQLite/MSSQL/Oracle) | Postgres-first va'dasi. SQL'ning Postgres dialect'iga sodiq qolamiz | Non-goal |
+| **HTTP route SSE v2 / `stream select`** | CRUD og'rig'ini kamaytirmaydi | Non-goal (basic WebSocket bor) |
+| **Background-job priority queue / DLQ ML retry policy** | Hozirgi durable queue + dead-letter yetarli | Non-goal (over-engineering) |
+| **OTLP'ni "yadro" featuresi qilish** | `otlp` Cargo feature ortida qolishi kifoya, default-off | Non-goal (ops vositasi, ergonomika emas) |
+| **Rich-domain object graph, change-tracking, lazy-loading, EF-style navigation propertylar** | Maqsad — ORM'siz qolish. JWC bu hududga kirmaydi | Non-goal (by design) |
+| **Module / import sistemasi** | Bir-proyekt-bir-flat-namespace yetarli; modullar 1.0-blocker emas | Defer post-1.0 |
+
+Ushbu band'lar uchun PR'lar yopiladi yoki forka tavsiya etiladi.
+
+---
+
 ## Progress Snapshot
 
 | Phase | Status |
@@ -18,7 +46,7 @@
 | Phase 1 — MVP Core | ✅ Done (Sprint 1 closeout) |
 | Phase 2 — Language Completeness | ✅ Done (Sprint 2A/2B/2C code-health audit yopildi) |
 | Phase 3 — Developer Experience | ✅ Done (Sprint 3: typed catch + dotted subtypes + gradual type checker + AOT visibility) |
-| Phase 4 — Real Compiler (Native) | ⏳ Partial (native AOT via Rust codegen + cargo; migrate safety/savepoint/json_unchecked/pool resilience/chaos stub ✅; LLVM IR + cross-target qoldi) |
+| Phase 4 — Real Compiler (Native) | ✅ Done for 1.0 scope (native AOT via Rust codegen + cargo; migrate safety/savepoint/json_unchecked/pool resilience/chaos stub ✅). LLVM IR + cross-target → **Non-goals** |
 | Phase 5 — Ecosystem | ✅ Done for 1.0 surface (config registry + OTLP + persistent queue + DLQ + soak harness ✅; 72h soak real run = ops) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 | Phase 6 (security) — SECURITY.md + cargo audit + threat model + SSRF allowlist + JWT exp + secrets redaction | ✅ Done (external review = ops) |
@@ -26,7 +54,8 @@
 | Phase 7 (perf) — bench DB endpoints + AOT scope + README link | ✅ Done (Linux real-run + CI regression gate + 72h soak burn = ops) |
 | Phase 8 — Background jobs + LSP + dev-experience close-out | ✅ Done (queue + jwc-lsp go-to-def/rename/completion + WebSocket + Docker/musl/templates/fmt/upgrade/Marketplace/autogen) |
 | Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
-| Phase 10 — Observability + streaming + SSE | ⏳ Partial (10.5 typed-catch dispatch ✅; OTLP exporter ✅ behind `otlp` feature; stream `select`, `route SSE` v2, native cross-target qoldi) |
+| Phase 10 — Observability (kichiroq scope) | ✅ Done for 1.0 surface (typed-catch dispatch ✅; OTLP exporter ✅ behind `otlp` feature). Stream `select` / `route SSE v2` / cross-target → **Non-goals** |
+| **Phase 11 — Query Layer (1.0-blocker)** | ⏳ Planned: join + projection + composable filter. Joinsiz "ORM og'rig'ini o'ldirdik" da'vosi yarim qoladi |
 
 ---
 
@@ -502,94 +531,90 @@ Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
 
 ---
 
-## Phase 10 — Observability + streaming + SSE ⬜ planned
+## Phase 10 — Observability ✅ done for 1.0 surface
 
-**Maqsad:** Production-ready obzor: tracing, real-time stream, va Phase 2.3
-da qoldirilgan typed-catch tafsilotini yopish. Phase 9 da qo'yilgan perf
-shiftini ham shu Phase'da o'lchab tasdiqlaymiz.
-
-### 10.1 Perf baseline (Phase 9.5 closure) ⏳ blocked-on-infra
-- `examples/bench.sh` + `bench.py` + JMeter run natijalarini ROADMAP'ga
-  yozish: yangi async stack vs eski sync (v0.1.2) RPS/p99 jadvali.
-- `.NET` baseline (`examples/bench-cs/`) bilan kontroll solishtirma —
-  bir xil endpoint, bir xil DB, bir xil yuk.
-- Maqsad: 40–60k RPS GET / 30–50k RPS POST (Phase 9.5 target) tasdig'i
-  yoki yangi shiftga moslab raqamlarni yangilash.
-- **Blocked:** kerakli infratuzilma — Postgres (Docker), bombardier/JMeter
-  agent, .NET runtime — bu sessiyada mavjud emas. Bench setup fayllari
-  tayyor; raqamlar live-host muhitida olinishi kerak.
-
-### 10.2 Tracing + OpenTelemetry
-- `tracing` crate bilan structured logs: request_id, route, status, latency.
-- OTLP exporter — Jaeger / Tempo / Honeycomb'ga to'g'ridan-to'g'ri.
-- Built-in: `trace_span(name)` / `trace_event(name, attrs)` til ichida.
-- Env: `JWC_OTEL_ENDPOINT`, `JWC_OTEL_SERVICE_NAME`, sample rate.
-- HTTP middleware'iga otomatik `traceparent` header propagation.
-
-### 10.3 Stream-based `select` (katta result setlar)
-- `for row in stream select Post from db.Posts where ...` — `tokio-postgres`
-  `query_raw` orqali async iterator, butun resultni xotirada to'plamasdan.
-- `break` / `early return` — server-side cursor close.
-- JSON streaming response: `return ndjson(stream)` — chunked transfer.
-
-### 10.4 Server-Sent Events ⏳ v1 syntax-only
-- ✅ `route SSE "/feed"` syntaxsi — `route WS` ga parallel. AST'da
-  `RouteProtocol::Sse` variant; method normalisation "SSE" formaga.
-- ✅ Validator: `SSE` known method ro'yxatida.
-- ⬜ v2: `Content-Type: text/event-stream` + chunked transport,
-  `sse_send(event_name, data)`, `sse_close()`, `sse_broadcast(topic,
-  payload)` builtinlar + per-topic subscriber registry.
+**Maqsad:** Production-ready obzor. North star fokusiga moslab qisqartirildi —
+streaming/SSE va cross-target **Non-goals** ga ko'chdi.
 
 ### 10.5 Typed-catch dispatch ✅ v1
 - ✅ Built-in error kinds (`runner::JWC_ERROR_KINDS`): `Error`,
   `DbError`, `HttpError`, `ValidationError`, `TimeoutError`.
 - ✅ `catch (e: DbError)` filter — runtime message-pattern classifier
-  (`runner::classify_jwc_error`) ishlaydi; type mos kelmasa xato qayta
-  ko'tariladi (outer handler / `errorHandler` ushlaydi).
-- ✅ Catch'da bound bo'lgan err JSON endi `{ "type": kind, "message", "causes" }` —
-  `e.type` orqali user code branch qila oladi.
+  (`runner::classify_jwc_error`); type mos kelmasa xato qayta ko'tariladi.
+- ✅ Catch'da bound bo'lgan err JSON: `{ "type": kind, "message", "causes" }`.
 - ✅ Validator: noma'lum catch type "Did you mean?" hint bilan kompayl
-  vaqtida bail qiladi (`closest_known_kind`).
-- ✅ Native AOT codegen mirror'i: `jwc_classify_error` + `jwc_catch_type_matches`
-  prelude'da, mismatch'da `resume_unwind`.
-- ⬜ **Qoldi v2:** bir `try` blokda bir nechta `catch` clause
-  (`catch (e: DbError) {} catch (e) {}`) — hozir bitta catch. Bu AST refactor.
-- ⬜ **Qoldi v2:** classifierni `JwcError` enum + `.downcast_ref` ga
-  ko'chirish — message-pattern brittle.
+  vaqtida bail (`closest_known_kind`).
+- ✅ Native AOT codegen mirror'i: `jwc_classify_error` + `jwc_catch_type_matches`.
+- 📦 Defer post-1.0: multi-catch (`catch (e: DbError) {} catch (e) {}`) +
+  `JwcError` enum + `.downcast_ref` classifier.
 
-### 10.6 Native cross-target (Phase 4.2 davomi)
-- `jwc build --native --target x86_64-unknown-linux-musl` — static binary.
-- `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` matrix.
-- Generatsiya qilingan `Cargo.toml` `--target` ni hisobga olib o'zgaradi
-  (`reqwest` features, TLS backend tanlovi).
-- CI'ga release matrix qo'shish (release.yml allaqachon `v*` tag'da ishlaydi).
+### 10.2 OTLP tracing ✅ optional, gated
+- ✅ `otlp` Cargo feature ortida; runtime'da `JWC_OTLP_ENDPOINT` env bilan yoqiladi.
+- ✅ Postgres pool, HTTP request, queue worker span'lari.
+- Non-goal: OTLP'ni "yadro" qilish. Ergonomika emas, ops vositasi. Default-off.
 
-### 10.7 Schema diff `migrate new` ga to'liq ulash
-- `schema_diff.rs` joriy entity'lar va oldingi `.up.sql` o'rtasidagi farqdan
+### 10.7 Schema diff `migrate new` ga to'liq ulash ✅
+- ✅ `schema_diff.rs` joriy entity'lar va oldingi `.up.sql` o'rtasidagi farqdan
   faqat `ALTER TABLE` / yangi `CREATE TABLE` chiqaradi.
-- Diff bo'lmasa "no schema changes" — bo'sh migration yaratilmasin.
-- `--force` flag — diff bo'lmasa ham bo'sh migration yaratish (manual SQL
-  uchun).
+- ✅ Diff bo'lmasa "no schema changes" — bo'sh migration yaratilmaydi.
+
+### Cut: Streaming + SSE v2 + cross-target
+- ❌ Stream `select` / `route SSE v2` / native cross-target matrix —
+  hammasi **Non-goals** ga ko'chdi. CRUD og'rig'ini kamaytirmaydi.
 
 ---
 
-## Priority Timeline
+## Phase 11 — Query Layer ⬜ 1.0-blocker
 
-Phase 0–9 + Phase 3 closeout + Phase 5 1.0 surface + Phase 6 (security)
-+ Phase 7 (perf) tugallandi. ROADMAP.md endi **1.0 ga qadar nima qolgani
-uchun yagona manba**. Keyingi ish ustuvorligi:
+**Maqsad:** Joinsiz "ORM og'rig'ini o'ldirdik" da'vosi yarim. Bu Phase
+qolgan 80% holatda raw_sql fallback'iga muhtojlikni o'ldiradi.
+
+### 11.1 Join (FK orqali)
+- `select Post from db.Posts join db.Authors on Post.authorId = Author.id`
+- AST: `JoinClause { entity, on_expr, kind: Inner/Left }`
+- Validator: FK borligi, type mosligi, ambiguous column detection.
+- SQL gen: prepared statement + parameterised join.
+- Native AOT codegen mirror.
+
+### 11.2 Projection / shape
+- `select { id, title, author.email } from db.Posts join ...`
+- Shape — anonymous Record, mavjud `Value::Record` infrastruktura'sini ishlatadi.
+- HTTP response avtomatik bu shape'ni JSON qiladi.
+- Validator: tanlangan field'lar mavjud va accessible (visibility).
+
+### 11.3 Composable filter
+- `where Post.published and Author.role == "admin" and (Post.views > 100 or Post.featured)`
+- Joinda boshqa entity'lar field'lariga `where` clause'da murojaat.
+- Validator: short-circuit evaluation rules; parameter binding.
+
+### 11.4 Aggregation (minimal)
+- `count`, `sum`, `avg`, `min`, `max` — `group by` siz oddiy scalar agregatsiya.
+- `group by` — defer post-1.0 (over-scope qilmaslik uchun).
+
+### 11.5 Conformance + docs
+- `tests/conformance/cases/join/` — har bir SQL pattern uchun fixture.
+- `docs/docs/reference/queries.md` — to'liq surface, examplelar.
+
+---
+
+## Priority Timeline (qayta hisoblangan, Go-yo'liga moslab)
+
+Hozirgi holat: Phase 0–10 + Phase 6/7 yopildi. **Phase 11 (Query Layer)** —
+1.0 dan oldin yagona blocker. Boshqa hamma narsa — Non-goals yoki post-1.0.
 
 ```
-hozir    →  Phase 10.1 — real benchmark natijalari (bench-cs/bench.py/jmeter)
-1-2 oy   →  Phase 10.2 — tracing + OTel exporter
-2-3 oy   →  Phase 10.5 — typed-catch dispatch (Phase 2.3 yopiladi)
-3-4 oy   →  Phase 10.3/10.4 — stream `select` + SSE routes
-4-6 oy   →  Phase 3.1+ — LSP go-to-definition, autocomplete, semantic tokens
-6-8 oy   →  Phase 3.3 + 10.6 — `jwc fmt` + native cross-target build matrix
-6-8 oy   →  Phase 3.5 — `jwc-registry.1kb.uz` registry server (alohida repo)
-8-12 oy  →  Phase 3.4 v1.1 — `jwc publish` / `jwc login` (registry server ishga tushgandan keyin)
-12+ oy   →  Phase 4.1 (LLVM IR) + Phase 5 (wasm, Redis-backed cache, S3)
+hozir    →  Phase 11.1 — Join (FK, Inner/Left)
++2 hafta →  Phase 11.2 — Projection / shape
++3 hafta →  Phase 11.3 — Composable filter
++4 hafta →  Phase 11.4 — Aggregation (scalar)
++5 hafta →  Phase 11.5 — Conformance + docs
++6 hafta →  v0.5.0 release — Query Layer ready
++8 hafta →  v1.0.0-rc.1 — bake + 2 external pilots
++12 hafta → v1.0.0 — LTS statement
 ```
+
+Post-1.0 (xohlasak): jwc-registry server, jwc publish/login, qo'shimcha
+package ekotizimi. Hammasi opsional, north star fokusini buzmasligi shart.
 
 ---
 

@@ -1,6 +1,11 @@
 # Native AOT scope (`jwc build --native`)
 
-Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.7** (Phase 7 partial).
+Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.8**.
+
+> **Non-goals (declared, won't ship pre-1.0):** LLVM IR backend, cross-target
+> native build matrix (Windows-ARM, macOS-ARM, FreeBSD, …), WASM target.
+> Native AOT scope is intentionally **Linux x86_64 (glibc + musl) + Docker
+> amd64/arm64**. See [`ROADMAP.md` Non-goals](../../ROADMAP.md#non-goals-10-ga-qadar-va-undan-keyin-ham--qatiy-yoq) for the policy rationale.
 
 **Related spec docs**:
 [index](index.md) ·

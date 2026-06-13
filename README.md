@@ -1,10 +1,75 @@
 # JWC
 
-JWC is a small backend-focused language for building API + database applications with simple syntax.
+**Write web backends without hand-coding CRUD, without fighting an ORM, native-fast.**
 
-This README is a quick, practical guide. Latest release: **v0.4.8**.
+JWC is a small, Postgres-first backend language. The compiler reads your
+entity definitions and emits the routes, the SQL, and the migrations for
+you — there's no ORM layer, no DTO mapping, no repository boilerplate to
+maintain. What you'd hand-write across a controller, a service, a
+repository, a request DTO, a response DTO, and an AutoMapper profile is
+one entity + one `dbcontext` block in JWC.
+
+```jwc
+entity Note {
+    id:        Guid     primary_key
+    title:     string   max(200) required
+    body:      string
+    createdAt: DateTime default(now())
+}
+
+dbcontext AppDb {
+    Notes: Note
+    routes Notes
+}
+```
+
+`jwc run` boots a Postgres-backed HTTP server with full CRUD on `/notes`
+(GET/POST/PUT/DELETE, pagination, validation, JSON in/out). `jwc build
+--native` produces a single static binary.
+
+Latest release: **v0.4.8**. Status: production-ready for the maintainer's
+own workload; external pilots TBD.
+
+## Why JWC
+
+- **No ORM, no mapping** — entities compile to SQL directly. No
+  EF/Hibernate change-tracker, no AutoMapper, no repository pattern, no
+  DTO duplication.
+- **Postgres-honest** — every query the compiler emits is plain SQL you
+  can read in `jwc gen-sql`. No N+1, no lazy-loading surprises, no hidden
+  fetch plans.
+- **One language, one binary** — routes, entities, validation, JWT auth,
+  background jobs, migrations. `jwc build --native` → one static binary.
+- **Fast enough** — see [Performance](#performance) below; close to
+  `rust-axum`, ahead of `go-fiber` on JSON paths. Performance is a
+  *consequence* of the design, not the headline.
+
+## Where JWC fits — and where it doesn't
+
+**Fits well:**
+
+- CRUD-heavy services (admin backends, internal tools, line-of-business
+  APIs, prototype-to-prod webapps).
+- Postgres-only stacks where you already write SQL by hand or use a thin
+  layer like Dapper / sqlc / PostgREST.
+- Teams that want one engineer to ship a service end-to-end without
+  juggling a half-dozen frameworks.
+
+**Does NOT fit (by design):**
+
+- Rich-domain code with deep object graphs, polymorphism, or
+  change-tracking semantics (EF Core / Hibernate territory).
+- Multi-database portability — Postgres is the only supported driver
+  and that's a deliberate non-goal until 1.0.
+- Performance-critical hot paths where the last 10% of an axum/`fiber`
+  number matters — use axum/fiber.
+- Anything that needs a mature ecosystem (1000s of packages). JWC's
+  package count is small and curated. See [`docs/spec/ecosystem.md`](docs/spec/ecosystem.md).
 
 ## Performance
+
+"Fast enough" — close to axum, ahead of go-fiber on JSON-heavy paths. Not
+the selling point.
 
 Standalone HTTP bench against `rust-axum`, `go-fiber`, `dotnet-minimal`,
 `node-fastify`, `python-fastapi` and LiteAPI on the same machine:
