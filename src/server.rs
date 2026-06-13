@@ -330,7 +330,30 @@ struct AppState {
     ws_shutdown: watch::Receiver<bool>,
 }
 
+/// Whether the boot-time config table should print. `JWC_PRINT_CONFIG`
+/// defaults to ON — the table is cheap, ASCII, and the kind of thing
+/// an operator wants in `kubectl logs` after a deploy. Prod containers
+/// that want a silent first line can opt out with `=off`.
+fn config_print_enabled() -> bool {
+    match std::env::var("JWC_PRINT_CONFIG") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => true,
+    }
+}
+
 pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> {
+    // Fail fast on a typo in any known numeric var BEFORE we bind a
+    // socket — the operator should see the error in the boot log, not
+    // hours later when a request hits the bad code path.
+    crate::config::validate_or_bail()?;
+    if config_print_enabled() {
+        let rows = crate::config::snapshot();
+        println!("{}", crate::config::render(&rows));
+    }
+
     if std::env::var("DATABASE_URL").is_ok() || std::env::var("JWC_DATABASE_URL").is_ok() {
         engine::init_engine_from_env()?;
     }
@@ -399,6 +422,16 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
     println!();
 
     rt.block_on(async move {
+        // OTLP exporter wiring. The builder must run inside the tokio
+        // runtime context because the batch span processor spawns a
+        // background flush task. Held for the duration of `block_on` —
+        // `Drop` flushes any pending batch and shuts the tracer provider
+        // down so the last spans actually reach the collector before the
+        // runtime is torn down. `Ok(None)` is the common path:
+        // production opts in via `JWC_OTLP_ENDPOINT`, dev doesn't set it
+        // and pays nothing.
+        let _otlp_guard = crate::observability::otlp::init_otlp_from_env()?;
+
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
             .map_err(|e| anyhow!("Failed to bind to {addr}: {e}"))?;

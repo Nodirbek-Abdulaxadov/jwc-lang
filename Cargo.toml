@@ -62,6 +62,28 @@ tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4"
 tower-lsp = "0.20"
 url = "2"
 
+# Optional OTLP tracing exporter (Sprint 5B). Gated behind the `otlp`
+# Cargo feature so the default build doesn't pull these in. The runtime
+# trigger is the `JWC_OTLP_ENDPOINT` env var — feature `otlp` only
+# controls whether the code is compiled.
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "reqwest-client", "trace"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
+
+[features]
+default = []
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:tracing-opentelemetry",
+]
+
 [dev-dependencies]
 testcontainers = { version = "0.20", features = ["blocking"] }
 testcontainers-modules = { version = "0.8", features = ["postgres", "blocking"] }

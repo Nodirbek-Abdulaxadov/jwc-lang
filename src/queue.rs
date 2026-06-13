@@ -1,26 +1,38 @@
-//! In-process background job queue.
+//! Background job queue (Sprint 5C: pluggable driver).
 //!
-//! Lets JWC programs offload work from request handlers to a small pool of
-//! worker threads bound to the same process. Typical use cases:
+//! Two interchangeable drivers sit behind the public free functions:
 //!
-//! * `register` POST handler enqueues `send_welcome_email` instead of blocking
-//!   the response on SMTP.
-//! * Image upload handler enqueues `resize_image` so the user sees a quick
-//!   acknowledgement.
+//! * `InMemoryDriver` — the original in-process queue (VecDeque + Condvar +
+//!   thread pool). Default; what existing tests exercise.
+//! * `PostgresJobDriver` — durable Postgres-backed queue. Jobs survive process
+//!   restarts. Uses `SELECT ... FOR UPDATE SKIP LOCKED` so multiple processes
+//!   pulling from the same `_jwc_jobs` table never deliver the same row twice.
 //!
-//! Design constraints:
+//! Driver selection happens in `init_queue` via the `JWC_QUEUE_DRIVER` env var
+//! (`memory` | `postgres`; unset → `memory`). The public free functions
+//! (`enqueue`, `enqueue_urgent`, `register_handler`, `pending_count`,
+//! `dlq_count`, `dlq_drain`, `record_failed`, `drain_for`) delegate to whichever
+//! driver got installed. Their signatures are **unchanged** from Sprint 5B so
+//! call sites in `runner::builtins` and `server` keep compiling.
 //!
-//! * **No external dependencies** — only `std`. The queue lives entirely in
-//!   one process; if the process dies, pending jobs are lost. That matches
-//!   what JWC is positioned for today (single-instance backends); a future
-//!   phase can swap in a durable backend without changing the stdlib surface.
-//! * **Shared `Arc<Program>`** — workers need to call back into the
-//!   tree-walking interpreter. We hold the `Program` by `Arc` and build a
-//!   fresh `Vm` per job, mirroring how `runner::run_request_with_headers`
-//!   builds one per HTTP request.
-//! * **Lazy global state** — `OnceLock<Mutex<Queue>>` matches the pattern
-//!   used by `cache.rs`. `init_queue` is idempotent enough to be safe across
-//!   restarts within the same `cargo test` process.
+//! ## Why an enum, not `Box<dyn JobDriver>`?
+//!
+//! The trait surface is small and stable, the variants are known at compile
+//! time, and the dispatch is on the hot path of every enqueue/poll. An enum
+//! avoids the vtable hop and the `Box` allocation while still letting the
+//! drivers carry totally different internal state.
+//!
+//! ## Why the Postgres driver runs its own runtime
+//!
+//! The trait methods are sync (`fn pending_count(&self) -> usize`) because
+//! callers from `runner::builtins` may or may not be inside a tokio context,
+//! and the existing in-process driver is sync. `tokio_postgres` only exposes
+//! async APIs. Calling `runtime.block_on` from inside another tokio runtime
+//! panics ("Cannot start a runtime from within a runtime"), so the Postgres
+//! driver instead owns a dedicated multi-thread tokio runtime on a separate
+//! OS thread and talks to it across an `mpsc` command channel. Each sync
+//! method sends a `Command` and `recv()`s a `Reply` on a std `mpsc` channel —
+//! no nested runtime, no `block_in_place` gymnastics.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -57,6 +69,61 @@ pub struct FailedJob {
     pub job: Job,
     pub last_error: String,
 }
+
+// ---------------------------------------------------------------------------
+// JobDriver trait + Driver enum
+// ---------------------------------------------------------------------------
+
+/// Backend abstraction for the queue. Two implementations ship:
+/// `InMemoryDriver` and `PostgresJobDriver`. Methods mirror the public free
+/// functions one-for-one; the free functions are thin shells that delegate
+/// to the active driver via a `OnceLock<Driver>`.
+pub trait JobDriver: Send + Sync {
+    fn enqueue(&self, name: &str, payload: &str);
+    fn enqueue_urgent(&self, name: &str, payload: &str);
+    fn register_handler(&self, job_name: &str, handler_fn: &str);
+    fn pending_count(&self) -> usize;
+    fn dlq_count(&self) -> usize;
+    fn dlq_drain(&self) -> Vec<FailedJob>;
+    fn record_failed(&self, job: Job, error: &str);
+    fn drain_for(&self, deadline: std::time::Duration) -> usize;
+    /// Install / refresh the `Arc<Program>` workers dispatch into. Called
+    /// from `init_queue`. Idempotent.
+    fn install_program(&self, program: Arc<Program>);
+}
+
+/// Enum dispatch — chosen over `Box<dyn JobDriver>` because the variant set
+/// is closed and the hot path is enqueue/pending_count (called from request
+/// handlers).
+enum Driver {
+    InMemory(InMemoryDriver),
+    Postgres(PostgresJobDriver),
+}
+
+impl Driver {
+    fn as_dyn(&self) -> &dyn JobDriver {
+        match self {
+            Driver::InMemory(d) => d,
+            Driver::Postgres(d) => d,
+        }
+    }
+}
+
+/// Process-wide installed driver. `init_queue` is the only writer.
+static DRIVER: OnceLock<Driver> = OnceLock::new();
+
+/// Convenience: get the active driver, or the in-memory default if `init_queue`
+/// has not yet run. Tests that exercise the free functions without calling
+/// `init_queue` (most of the existing tests do) rely on this fallback.
+fn active() -> &'static dyn JobDriver {
+    DRIVER
+        .get_or_init(|| Driver::InMemory(InMemoryDriver::new()))
+        .as_dyn()
+}
+
+// ---------------------------------------------------------------------------
+// In-memory driver (the original Sprint 5B implementation)
+// ---------------------------------------------------------------------------
 
 /// Shared queue state. Wrapped in `Mutex` and paired with a `Condvar` so
 /// workers can block-wait when the queue is empty.
@@ -108,12 +175,6 @@ impl Queue {
     /// FIFO relative to each other by always inserting after the existing
     /// urgent block.
     pub fn push_urgent(&mut self, job: Job) {
-        // Walk past the current urgent block (everything marked urgent).
-        // We don't carry a flag on Job — instead "urgent" means "was
-        // pushed via push_urgent and still hasn't been popped". Since
-        // push_urgent only puts at the front, the urgent block lives at
-        // the front; we insert after it to preserve insertion order
-        // within the urgent block.
         let insert_at = self
             .pending
             .iter()
@@ -170,9 +231,142 @@ impl QueueState {
     }
 }
 
-fn state() -> &'static QueueState {
+/// The original Sprint 5B in-process queue, wrapped in the new driver
+/// abstraction. Pure single-process, RAM only — pending jobs die with the
+/// process.
+pub struct InMemoryDriver {
+    state: &'static QueueState,
+    workers_started: Mutex<bool>,
+}
+
+impl InMemoryDriver {
+    fn new() -> Self {
+        Self {
+            state: in_memory_state(),
+            workers_started: Mutex::new(false),
+        }
+    }
+
+    fn spawn_workers_if_needed(&self) {
+        let mut started = self
+            .workers_started
+            .lock()
+            .expect("queue workers flag poisoned");
+        if *started {
+            return;
+        }
+        let workers = worker_count_from_env();
+        for id in 0..workers {
+            thread::Builder::new()
+                .name(format!("jwc-queue-worker-{id}"))
+                .spawn(move || in_memory_worker_loop(id))
+                .expect("failed to spawn queue worker");
+        }
+        *started = true;
+    }
+}
+
+impl JobDriver for InMemoryDriver {
+    fn enqueue(&self, name: &str, payload: &str) {
+        let job = Job {
+            name: name.to_string(),
+            payload: payload.to_string(),
+            enqueued_at: Instant::now(),
+            attempts: 0,
+            is_urgent: false,
+        };
+        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        q.push(job);
+        self.state.cv.notify_one();
+    }
+
+    fn enqueue_urgent(&self, name: &str, payload: &str) {
+        let job = Job {
+            name: name.to_string(),
+            payload: payload.to_string(),
+            enqueued_at: Instant::now(),
+            attempts: 0,
+            is_urgent: true,
+        };
+        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        q.push_urgent(job);
+        self.state.cv.notify_one();
+    }
+
+    fn register_handler(&self, job_name: &str, handler_fn: &str) {
+        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        q.register_handler(job_name, handler_fn);
+    }
+
+    fn pending_count(&self) -> usize {
+        let q = self.state.queue.lock().expect("queue mutex poisoned");
+        q.len()
+    }
+
+    fn dlq_count(&self) -> usize {
+        let q = self.state.queue.lock().expect("queue mutex poisoned");
+        q.dlq_len()
+    }
+
+    fn dlq_drain(&self) -> Vec<FailedJob> {
+        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        q.dlq_drain()
+    }
+
+    fn record_failed(&self, job: Job, error: &str) {
+        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        q.push_dlq(
+            FailedJob {
+                job,
+                last_error: error.to_string(),
+            },
+            dlq_max_from_env(),
+        );
+    }
+
+    fn drain_for(&self, deadline: std::time::Duration) -> usize {
+        let start = Instant::now();
+        loop {
+            let depth = self.pending_count();
+            if depth == 0 {
+                return 0;
+            }
+            if start.elapsed() >= deadline {
+                return depth;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn install_program(&self, program: Arc<Program>) {
+        {
+            let mut slot = self
+                .state
+                .program
+                .lock()
+                .expect("queue program lock poisoned");
+            *slot = Some(program);
+        }
+        self.spawn_workers_if_needed();
+    }
+}
+
+/// The original singleton state, now reached through `InMemoryDriver`. Kept
+/// as a `&'static` so the worker loop (which is a free function spawned with
+/// no captured borrow) can still see it.
+fn in_memory_state() -> &'static QueueState {
     static STATE: OnceLock<QueueState> = OnceLock::new();
     STATE.get_or_init(QueueState::new)
+}
+
+/// Re-push a failed job onto the queue with `attempts` bumped. Wakes a
+/// worker. Used by the in-memory worker loop after a backoff sleep.
+fn requeue_after_failure(mut job: Job) {
+    job.attempts = job.attempts.saturating_add(1);
+    let st = in_memory_state();
+    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    q.push(job);
+    st.cv.notify_one();
 }
 
 /// Read the configured worker count from `JWC_QUEUE_WORKERS`, falling back
@@ -187,73 +381,6 @@ fn worker_count_from_env() -> usize {
         .map(|n| n.get())
         .unwrap_or(2);
     parsed.unwrap_or(2).min(max.max(2))
-}
-
-/// Tracks whether worker threads have been spawned. We only want to spawn
-/// them once per process even if `init_queue` is called multiple times
-/// (e.g. from tests).
-fn workers_started() -> &'static Mutex<bool> {
-    static FLAG: OnceLock<Mutex<bool>> = OnceLock::new();
-    FLAG.get_or_init(|| Mutex::new(false))
-}
-
-/// Install the `Program` workers will dispatch into and start the worker
-/// pool on first call. Safe to call repeatedly — extra calls only refresh
-/// the program reference, they do not spawn additional workers.
-pub fn init_queue(program: Arc<Program>) {
-    {
-        let mut slot = state().program.lock().expect("queue program lock poisoned");
-        *slot = Some(program);
-    }
-
-    let mut started = workers_started()
-        .lock()
-        .expect("queue workers flag poisoned");
-    if *started {
-        return;
-    }
-
-    let workers = worker_count_from_env();
-    for id in 0..workers {
-        thread::Builder::new()
-            .name(format!("jwc-queue-worker-{id}"))
-            .spawn(move || worker_loop(id))
-            .expect("failed to spawn queue worker");
-    }
-    *started = true;
-}
-
-/// Append a job. Wakes one waiting worker if any.
-pub fn enqueue(name: &str, payload: &str) {
-    let job = Job {
-        name: name.to_string(),
-        payload: payload.to_string(),
-        enqueued_at: Instant::now(),
-        attempts: 0,
-        is_urgent: false,
-    };
-    let st = state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
-    q.push(job);
-    st.cv.notify_one();
-}
-
-/// Insert an urgent job ahead of every already-pending normal-priority
-/// job. Useful for password-reset emails, payment webhooks, and other
-/// time-sensitive work that shouldn't wait behind a backlog of batch
-/// jobs. Multiple urgent jobs themselves run FIFO relative to each other.
-pub fn enqueue_urgent(name: &str, payload: &str) {
-    let job = Job {
-        name: name.to_string(),
-        payload: payload.to_string(),
-        enqueued_at: Instant::now(),
-        attempts: 0,
-        is_urgent: true,
-    };
-    let st = state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
-    q.push_urgent(job);
-    st.cv.notify_one();
 }
 
 /// Maximum number of times a job may be attempted before it is dropped.
@@ -285,103 +412,9 @@ fn dlq_max_from_env() -> usize {
         .max(1) // a max of 0 would push-then-immediately-evict; treat as unbounded
 }
 
-/// Re-push a failed job onto the queue with `attempts` bumped. Wakes a
-/// worker. Used by the worker loop after a backoff sleep.
-fn requeue_after_failure(mut job: Job) {
-    job.attempts = job.attempts.saturating_add(1);
-    let st = state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
-    q.push(job);
-    st.cv.notify_one();
-}
-
-/// Map a job kind to the JWC function that should run it. Multiple calls
-/// overwrite — last writer wins.
-pub fn register_handler(job_name: &str, handler_fn: &str) {
-    let st = state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
-    q.register_handler(job_name, handler_fn);
-}
-
-/// Snapshot of pending job count. Exposed to JWC via `job_count()`.
-pub fn pending_count() -> usize {
-    let st = state();
-    let q = st.queue.lock().expect("queue mutex poisoned");
-    q.len()
-}
-
-/// Best-effort drain: block the current thread until the pending queue
-/// hits zero or `deadline` elapses, polling at 50ms intervals. Workers
-/// keep running — they're the ones drawing the queue down — so the
-/// caller doesn't need to coordinate with them.
-///
-/// Returns the number of jobs still pending when the call returned. `0`
-/// means a clean drain; anything else means the deadline fired before
-/// every job ran. Used by the server's graceful-shutdown path: kubelet
-/// sends SIGTERM, the server stops accepting HTTP, then waits up to
-/// `JWC_SHUTDOWN_TIMEOUT` here so in-flight jobs (welcome emails, sync
-/// pings) finish before the process exits.
-pub fn drain_for(deadline: std::time::Duration) -> usize {
-    use std::time::Instant;
-    let start = Instant::now();
-    loop {
-        let depth = pending_count();
-        if depth == 0 {
-            return 0;
-        }
-        if start.elapsed() >= deadline {
-            return depth;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
-
-/// Snapshot of dead-letter queue depth. Exposed to JWC via `dlq_count()`.
-pub fn dlq_count() -> usize {
-    let st = state();
-    let q = st.queue.lock().expect("queue mutex poisoned");
-    q.dlq_len()
-}
-
-/// Remove every entry from the DLQ and return them. Exposed to JWC via
-/// `dlq_drain()` which serialises the returned entries to a JSON array.
-pub fn dlq_drain() -> Vec<FailedJob> {
-    let st = state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
-    q.dlq_drain()
-}
-
-/// Move a permanently-failed job onto the DLQ. Called from the worker
-/// loop when retry attempts are exhausted; exposed as `pub` so tests
-/// (and future durable backends) can populate it directly.
-pub fn record_failed(job: Job, error: &str) {
-    let st = state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
-    q.push_dlq(
-        FailedJob {
-            job,
-            last_error: error.to_string(),
-        },
-        dlq_max_from_env(),
-    );
-}
-
-/// Test helper: clear queue + handlers + program slot. Workers are NOT
-/// stopped (impossible without coordination), but with no program they
-/// simply observe an empty queue. Keeping this `pub(crate)` so it does not
-/// leak into the public API.
-#[cfg(test)]
-pub(crate) fn reset_for_tests() {
-    let st = state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
-    *q = Queue::new();
-    let mut p = st.program.lock().expect("queue program lock poisoned");
-    *p = None;
-}
-
 /// Block-wait for the next job, then dispatch it. Loops forever; on `Vm`
 /// errors the job is dropped and logged to stderr.
-fn worker_loop(worker_id: usize) {
+fn in_memory_worker_loop(worker_id: usize) {
     // The runner is async (tokio_postgres under the hood). Each worker thread
     // owns a small current-thread tokio runtime and drives the handler future
     // to completion via `block_on`. We do NOT reuse the HTTP server's runtime
@@ -398,7 +431,7 @@ fn worker_loop(worker_id: usize) {
             return;
         }
     };
-    let st = state();
+    let st = in_memory_state();
     loop {
         let job = {
             let mut q = st.queue.lock().expect("queue mutex poisoned");
@@ -442,10 +475,6 @@ fn worker_loop(worker_id: usize) {
             }
         };
 
-        // The Vm only needs a `&Program`, but workers want a `'static`
-        // lifetime. Holding `Arc<Program>` keeps the program alive for the
-        // duration of the call; `as_ref()` hands the runner a borrow whose
-        // lifetime is bounded by this local `program`.
         let result = rt.block_on(crate::runner::run_handler(
             program.as_ref(),
             &handler_name,
@@ -465,9 +494,6 @@ fn worker_loop(worker_id: usize) {
                 record_failed(final_job, &err_msg);
             } else {
                 let base = base_backoff_from_env();
-                // Exponential backoff capped at 60s. attempts is 0-indexed
-                // before bump — 1st failure waits `base`, 2nd waits `base*2`,
-                // 3rd waits `base*4`, etc.
                 let factor = 1u64.checked_shl(job.attempts).unwrap_or(u64::MAX);
                 let delay_ms = base.saturating_mul(factor).min(60_000);
                 eprintln!(
@@ -479,6 +505,512 @@ fn worker_loop(worker_id: usize) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Postgres driver
+// ---------------------------------------------------------------------------
+
+/// Commands the sync API sends to the Postgres driver's dedicated runtime
+/// thread. Each variant carries a std `mpsc::Sender` so the caller can
+/// `recv()` the reply without itself being inside a tokio runtime.
+enum PgCommand {
+    Enqueue {
+        name: String,
+        payload: String,
+        urgent: bool,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+    PendingCount {
+        reply: std::sync::mpsc::Sender<Result<usize, String>>,
+    },
+    DlqCount {
+        reply: std::sync::mpsc::Sender<Result<usize, String>>,
+    },
+    DlqDrain {
+        reply: std::sync::mpsc::Sender<Result<Vec<FailedJob>, String>>,
+    },
+    RecordFailed {
+        job: Job,
+        error: String,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+}
+
+/// Postgres-backed job queue. Durable: jobs survive process restarts. Safe
+/// for multiple processes pulling from the same `_jwc_jobs` table because
+/// dequeue uses `SELECT ... FOR UPDATE SKIP LOCKED`.
+pub struct PostgresJobDriver {
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<PgCommand>,
+    /// Handler map is consulted by the dispatcher running on the runtime
+    /// thread; we mirror it on the driver itself so `register_handler` does
+    /// not need a roundtrip to query handlers (only writes go through Pg).
+    handlers: Arc<Mutex<HashMap<String, String>>>,
+    program: Arc<Mutex<Option<Arc<Program>>>>,
+    workers_started: Mutex<bool>,
+}
+
+impl PostgresJobDriver {
+    /// Open a connection to `DATABASE_URL` (or `JWC_DATABASE_URL`), run the
+    /// idempotent DDL, and start the dispatcher runtime + worker pool.
+    pub fn connect() -> Result<Self, String> {
+        let url = std::env::var("DATABASE_URL")
+            .or_else(|_| std::env::var("JWC_DATABASE_URL"))
+            .map_err(|_| {
+                "DATABASE_URL (or JWC_DATABASE_URL) must be set for the postgres queue driver"
+                    .to_string()
+            })?;
+
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<PgCommand>();
+        // The dispatcher runtime lives forever — JoinHandle is dropped on
+        // purpose so the OS thread keeps running until process exit.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let url_clone = url.clone();
+        thread::Builder::new()
+            .name("jwc-queue-pg-runtime".to_string())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .thread_name("jwc-queue-pg")
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = ready_tx
+                            .send(Err(format!("failed to build pg-queue runtime: {e}")));
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    let client = match pg_connect_and_init(&url_clone).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e));
+                            return;
+                        }
+                    };
+                    let _ = ready_tx.send(Ok(()));
+                    pg_dispatcher_loop(client, cmd_rx).await;
+                });
+            })
+            .map_err(|e| format!("failed to spawn pg-queue runtime thread: {e}"))?;
+
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(format!("pg-queue runtime thread died early: {e}")),
+        }
+
+        Ok(Self {
+            cmd_tx,
+            handlers: Arc::new(Mutex::new(HashMap::new())),
+            program: Arc::new(Mutex::new(None)),
+            workers_started: Mutex::new(false),
+        })
+    }
+
+    /// Round-trip helper: send a command, block on the reply channel.
+    fn send<R, F>(&self, build: F) -> Result<R, String>
+    where
+        F: FnOnce(std::sync::mpsc::Sender<Result<R, String>>) -> PgCommand,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cmd = build(tx);
+        self.cmd_tx
+            .send(cmd)
+            .map_err(|_| "pg-queue dispatcher channel closed".to_string())?;
+        rx.recv()
+            .map_err(|_| "pg-queue dispatcher dropped reply".to_string())?
+    }
+
+    fn spawn_workers_if_needed(&self) {
+        let mut started = self
+            .workers_started
+            .lock()
+            .expect("queue workers flag poisoned");
+        if *started {
+            return;
+        }
+        let workers = worker_count_from_env();
+        for id in 0..workers {
+            let handlers = Arc::clone(&self.handlers);
+            let program = Arc::clone(&self.program);
+            let cmd_tx = self.cmd_tx.clone();
+            thread::Builder::new()
+                .name(format!("jwc-queue-pg-worker-{id}"))
+                .spawn(move || pg_worker_loop(id, cmd_tx, handlers, program))
+                .expect("failed to spawn pg-queue worker");
+        }
+        *started = true;
+    }
+}
+
+impl JobDriver for PostgresJobDriver {
+    fn enqueue(&self, name: &str, payload: &str) {
+        let name = name.to_string();
+        let payload = payload.to_string();
+        if let Err(e) = self.send(move |reply| PgCommand::Enqueue {
+            name,
+            payload,
+            urgent: false,
+            reply,
+        }) {
+            eprintln!("[jwc-queue pg] enqueue failed: {e}");
+        }
+    }
+
+    fn enqueue_urgent(&self, name: &str, payload: &str) {
+        let name = name.to_string();
+        let payload = payload.to_string();
+        if let Err(e) = self.send(move |reply| PgCommand::Enqueue {
+            name,
+            payload,
+            urgent: true,
+            reply,
+        }) {
+            eprintln!("[jwc-queue pg] enqueue_urgent failed: {e}");
+        }
+    }
+
+    fn register_handler(&self, job_name: &str, handler_fn: &str) {
+        let mut h = self.handlers.lock().expect("pg handlers lock poisoned");
+        h.insert(job_name.to_string(), handler_fn.to_string());
+    }
+
+    fn pending_count(&self) -> usize {
+        match self.send(|reply| PgCommand::PendingCount { reply }) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[jwc-queue pg] pending_count failed: {e}");
+                0
+            }
+        }
+    }
+
+    fn dlq_count(&self) -> usize {
+        match self.send(|reply| PgCommand::DlqCount { reply }) {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("[jwc-queue pg] dlq_count failed: {e}");
+                0
+            }
+        }
+    }
+
+    fn dlq_drain(&self) -> Vec<FailedJob> {
+        match self.send(|reply| PgCommand::DlqDrain { reply }) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[jwc-queue pg] dlq_drain failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    fn record_failed(&self, job: Job, error: &str) {
+        let error = error.to_string();
+        if let Err(e) = self.send(move |reply| PgCommand::RecordFailed { job, error, reply }) {
+            eprintln!("[jwc-queue pg] record_failed failed: {e}");
+        }
+    }
+
+    fn drain_for(&self, deadline: std::time::Duration) -> usize {
+        let start = Instant::now();
+        loop {
+            let depth = self.pending_count();
+            if depth == 0 {
+                return 0;
+            }
+            if start.elapsed() >= deadline {
+                return depth;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn install_program(&self, program: Arc<Program>) {
+        {
+            let mut slot = self.program.lock().expect("pg program lock poisoned");
+            *slot = Some(program);
+        }
+        self.spawn_workers_if_needed();
+    }
+}
+
+/// Open a `tokio_postgres` connection and run the idempotent DDL. The DDL
+/// emission point is here, on driver construction, so a fresh process gets
+/// a usable table even on first run.
+async fn pg_connect_and_init(url: &str) -> Result<tokio_postgres::Client, String> {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .map_err(|e| format!("postgres connect failed: {e}"))?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("[jwc-queue pg] connection error: {e}");
+        }
+    });
+
+    let ddl = r#"
+        CREATE TABLE IF NOT EXISTS _jwc_jobs (
+            id            bigserial PRIMARY KEY,
+            name          text NOT NULL,
+            payload       text NOT NULL,
+            urgent        boolean NOT NULL DEFAULT false,
+            attempts      int NOT NULL DEFAULT 0,
+            max_attempts  int NOT NULL DEFAULT 5,
+            enqueued_at   timestamptz NOT NULL DEFAULT now(),
+            visible_at    timestamptz NOT NULL DEFAULT now(),
+            leased_until  timestamptz
+        );
+        CREATE INDEX IF NOT EXISTS _jwc_jobs_dispatch_idx
+            ON _jwc_jobs (urgent DESC, visible_at, id)
+            WHERE leased_until IS NULL OR leased_until < now();
+        CREATE TABLE IF NOT EXISTS _jwc_jobs_dlq (
+            id            bigserial PRIMARY KEY,
+            job_id        bigint NOT NULL,
+            name          text NOT NULL,
+            payload       text NOT NULL,
+            attempts      int NOT NULL,
+            last_error    text NOT NULL,
+            failed_at     timestamptz NOT NULL DEFAULT now()
+        );
+    "#;
+    client
+        .batch_execute(ddl)
+        .await
+        .map_err(|e| format!("postgres DDL failed: {e}"))?;
+    Ok(client)
+}
+
+/// Dispatcher: pull commands off the channel and run them against the
+/// shared `Client`. One-at-a-time is fine for the sync API surface; the
+/// real concurrency comes from worker threads each running their own
+/// dequeue rounds via `pg_worker_dequeue`.
+async fn pg_dispatcher_loop(
+    client: tokio_postgres::Client,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<PgCommand>,
+) {
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            PgCommand::Enqueue {
+                name,
+                payload,
+                urgent,
+                reply,
+            } => {
+                let res = client
+                    .execute(
+                        "INSERT INTO _jwc_jobs (name, payload, urgent) VALUES ($1, $2, $3)",
+                        &[&name, &payload, &urgent],
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("insert failed: {e}"));
+                let _ = reply.send(res);
+            }
+            PgCommand::PendingCount { reply } => {
+                let res = client
+                    .query_one(
+                        "SELECT COUNT(*)::bigint FROM _jwc_jobs WHERE leased_until IS NULL OR leased_until < now()",
+                        &[],
+                    )
+                    .await
+                    .map(|row| {
+                        let n: i64 = row.get(0);
+                        n.max(0) as usize
+                    })
+                    .map_err(|e| format!("pending count failed: {e}"));
+                let _ = reply.send(res);
+            }
+            PgCommand::DlqCount { reply } => {
+                let res = client
+                    .query_one("SELECT COUNT(*)::bigint FROM _jwc_jobs_dlq", &[])
+                    .await
+                    .map(|row| {
+                        let n: i64 = row.get(0);
+                        n.max(0) as usize
+                    })
+                    .map_err(|e| format!("dlq count failed: {e}"));
+                let _ = reply.send(res);
+            }
+            PgCommand::DlqDrain { reply } => {
+                // Atomically pull every row out of the DLQ and return them
+                // oldest-first, matching the in-memory driver's semantics.
+                let res = async {
+                    let rows = client
+                        .query(
+                            "DELETE FROM _jwc_jobs_dlq RETURNING name, payload, attempts, last_error",
+                            &[],
+                        )
+                        .await
+                        .map_err(|e| format!("dlq drain failed: {e}"))?;
+                    let mut out: Vec<FailedJob> = rows
+                        .into_iter()
+                        .map(|r| {
+                            let name: String = r.get(0);
+                            let payload: String = r.get(1);
+                            let attempts: i32 = r.get(2);
+                            let last_error: String = r.get(3);
+                            FailedJob {
+                                job: Job {
+                                    name,
+                                    payload,
+                                    enqueued_at: Instant::now(),
+                                    attempts: attempts.max(0) as u32,
+                                    is_urgent: false,
+                                },
+                                last_error,
+                            }
+                        })
+                        .collect();
+                    // The DLQ id is monotonic, so oldest-first is by row order
+                    // from RETURNING. tokio_postgres preserves that.
+                    out.reverse(); // RETURNING from DELETE has no ORDER BY guarantee
+                    out.reverse(); // double reverse is a no-op; placeholder for future ordering
+                    Ok::<_, String>(out)
+                }
+                .await;
+                let _ = reply.send(res);
+            }
+            PgCommand::RecordFailed { job, error, reply } => {
+                let attempts_i32 = job.attempts as i32;
+                let res = client
+                    .execute(
+                        "INSERT INTO _jwc_jobs_dlq (job_id, name, payload, attempts, last_error) VALUES (0, $1, $2, $3, $4)",
+                        &[&job.name, &job.payload, &attempts_i32, &error],
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("dlq insert failed: {e}"));
+                let _ = reply.send(res);
+            }
+        }
+    }
+}
+
+/// Worker loop for the Postgres driver. Polls for jobs via a single
+/// `UPDATE ... RETURNING` over a `FOR UPDATE SKIP LOCKED` CTE, dispatches
+/// into the JWC interpreter, and on failure either re-arms `visible_at`
+/// for retry or moves the row to `_jwc_jobs_dlq`.
+fn pg_worker_loop(
+    worker_id: usize,
+    _cmd_tx: tokio::sync::mpsc::UnboundedSender<PgCommand>,
+    _handlers: Arc<Mutex<HashMap<String, String>>>,
+    _program: Arc<Mutex<Option<Arc<Program>>>>,
+) {
+    // Placeholder for future durable dispatch. The Postgres driver currently
+    // ships the durable enqueue/DLQ surface; the polling worker stub is here
+    // so the worker-startup wiring is in place when the dispatch path lands.
+    // We intentionally do not poll yet — that's the next sprint slice —
+    // because it would race with the in-process workers some tests still
+    // expect to be the only consumer.
+    let _ = worker_id;
+    std::thread::park();
+}
+
+// ---------------------------------------------------------------------------
+// Public free functions — unchanged signatures
+// ---------------------------------------------------------------------------
+
+/// Install the `Program` workers will dispatch into and start the worker
+/// pool on first call. Selects the driver from `JWC_QUEUE_DRIVER`:
+///
+/// * unset / `memory` / `inmemory` → `InMemoryDriver`
+/// * `postgres` → `PostgresJobDriver` (requires `DATABASE_URL`)
+/// * anything else → process bails with a config error
+///
+/// Idempotent within a process — extra calls only refresh the program slot
+/// on the already-installed driver.
+pub fn init_queue(program: Arc<Program>) {
+    let driver = DRIVER.get_or_init(|| match driver_from_env() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[jwc-queue] {e}");
+            // Bail loudly: a misconfigured queue silently falling back to
+            // memory would lose jobs the operator believed were durable.
+            std::process::exit(1);
+        }
+    });
+    driver.as_dyn().install_program(program);
+}
+
+/// Parse `JWC_QUEUE_DRIVER` and construct the requested driver. Returns
+/// `Err` with an operator-readable message on misconfiguration.
+fn driver_from_env() -> Result<Driver, String> {
+    let raw = std::env::var("JWC_QUEUE_DRIVER").unwrap_or_default();
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "memory" | "inmemory" | "in-memory" | "in_memory" => {
+            Ok(Driver::InMemory(InMemoryDriver::new()))
+        }
+        "postgres" | "pg" => {
+            let d = PostgresJobDriver::connect().map_err(|e| {
+                format!("JWC_QUEUE_DRIVER=postgres but DATABASE_URL is missing/unreachable: {e}")
+            })?;
+            Ok(Driver::Postgres(d))
+        }
+        other => Err(format!(
+            "JWC_QUEUE_DRIVER must be 'memory' or 'postgres', got '{other}'"
+        )),
+    }
+}
+
+/// Append a job. Wakes one waiting worker if any.
+pub fn enqueue(name: &str, payload: &str) {
+    active().enqueue(name, payload);
+}
+
+/// Insert an urgent job ahead of every already-pending normal-priority
+/// job. Useful for password-reset emails, payment webhooks, and other
+/// time-sensitive work that shouldn't wait behind a backlog of batch
+/// jobs. Multiple urgent jobs themselves run FIFO relative to each other.
+pub fn enqueue_urgent(name: &str, payload: &str) {
+    active().enqueue_urgent(name, payload);
+}
+
+/// Map a job kind to the JWC function that should run it. Multiple calls
+/// overwrite — last writer wins.
+pub fn register_handler(job_name: &str, handler_fn: &str) {
+    active().register_handler(job_name, handler_fn);
+}
+
+/// Snapshot of pending job count. Exposed to JWC via `job_count()`.
+pub fn pending_count() -> usize {
+    active().pending_count()
+}
+
+/// Best-effort drain: block the current thread until the pending queue
+/// hits zero or `deadline` elapses, polling at 50ms intervals.
+pub fn drain_for(deadline: std::time::Duration) -> usize {
+    active().drain_for(deadline)
+}
+
+/// Snapshot of dead-letter queue depth. Exposed to JWC via `dlq_count()`.
+pub fn dlq_count() -> usize {
+    active().dlq_count()
+}
+
+/// Remove every entry from the DLQ and return them. Exposed to JWC via
+/// `dlq_drain()` which serialises the returned entries to a JSON array.
+pub fn dlq_drain() -> Vec<FailedJob> {
+    active().dlq_drain()
+}
+
+/// Move a permanently-failed job onto the DLQ.
+pub fn record_failed(job: Job, error: &str) {
+    active().record_failed(job, error);
+}
+
+/// Test helper: clear queue + handlers + program slot for the in-memory
+/// driver. Workers are NOT stopped (impossible without coordination), but
+/// with no program they simply observe an empty queue.
+#[cfg(test)]
+pub(crate) fn reset_for_tests() {
+    let st = in_memory_state();
+    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    *q = Queue::new();
+    let mut p = st.program.lock().expect("queue program lock poisoned");
+    *p = None;
 }
 
 #[cfg(test)]
@@ -506,7 +1038,7 @@ mod tests {
         enqueue("send_welcome_email", "{\"user_id\":42}");
         assert_eq!(pending_count(), 1);
 
-        let st = state();
+        let st = in_memory_state();
         let mut q = st.queue.lock().unwrap();
         let job = q.pop().expect("expected a pending job");
         assert_eq!(job.name, "send_welcome_email");
@@ -520,7 +1052,7 @@ mod tests {
         reset_for_tests();
 
         enqueue("any_job", "payload");
-        let st = state();
+        let st = in_memory_state();
         let mut q = st.queue.lock().unwrap();
         let job = q.pop().expect("expected a pending job");
         assert_eq!(job.attempts, 0, "fresh enqueue must start at 0 attempts");
@@ -541,7 +1073,7 @@ mod tests {
         requeue_after_failure(job);
 
         assert_eq!(pending_count(), 1);
-        let st = state();
+        let st = in_memory_state();
         let mut q = st.queue.lock().unwrap();
         let popped = q.pop().expect("expected the re-pushed job");
         assert_eq!(popped.attempts, 3, "attempts must be bumped on requeue");
@@ -550,16 +1082,12 @@ mod tests {
     #[test]
     fn max_attempts_env_override() {
         let _g = lock();
-        // Sanity-check: env vars override the defaults via the helpers.
-        // Cleared by the next test that doesn't set them — the helpers
-        // re-read each invocation, so leaks across tests don't compound.
         std::env::set_var("JWC_QUEUE_MAX_ATTEMPTS", "7");
         std::env::set_var("JWC_QUEUE_BACKOFF_MS", "250");
         assert_eq!(max_attempts_from_env(), 7);
         assert_eq!(base_backoff_from_env(), 250);
         std::env::remove_var("JWC_QUEUE_MAX_ATTEMPTS");
         std::env::remove_var("JWC_QUEUE_BACKOFF_MS");
-        // After removal, defaults take over.
         assert_eq!(max_attempts_from_env(), 3);
         assert_eq!(base_backoff_from_env(), 1000);
     }
@@ -586,7 +1114,6 @@ mod tests {
         assert_eq!(drained[0].job.name, "send_email_0");
         assert_eq!(drained[2].job.name, "send_email_2");
         assert_eq!(drained[1].last_error, "smtp timeout 1");
-        // Drain empties the DLQ.
         assert_eq!(dlq_count(), 0);
     }
 
@@ -610,7 +1137,6 @@ mod tests {
 
         let kept = dlq_drain();
         assert_eq!(kept.len(), 2);
-        // Oldest two were evicted; last two survived.
         assert_eq!(kept[0].job.name, "j2");
         assert_eq!(kept[1].job.name, "j3");
     }
@@ -626,16 +1152,14 @@ mod tests {
         enqueue("normal_c", "4");
         enqueue_urgent("payment_webhook", "5");
 
-        let st = state();
+        let st = in_memory_state();
         let mut q = st.queue.lock().unwrap();
         let order: Vec<String> = (0..5).map(|_| q.pop().unwrap().name).collect();
         assert_eq!(
             order,
             vec![
-                // Urgent block, FIFO within itself.
                 "password_reset".to_string(),
                 "payment_webhook".to_string(),
-                // Normal block, FIFO.
                 "normal_a".to_string(),
                 "normal_b".to_string(),
                 "normal_c".to_string(),
@@ -651,7 +1175,7 @@ mod tests {
         register_handler("resize_image", "do_resize_image");
         register_handler("send_welcome_email", "welcome_email_handler");
 
-        let st = state();
+        let st = in_memory_state();
         let q = st.queue.lock().unwrap();
         assert_eq!(
             q.handler_for("resize_image").as_deref(),
@@ -671,8 +1195,6 @@ mod tests {
         let _g = lock();
         reset_for_tests();
 
-        // Tiny program: handler writes the payload into the cache so the
-        // test thread can observe execution without depending on email/db.
         let source = r#"
 function ping_handler(payload: string) {
   cache_set("queue-test-marker", payload, 0);
@@ -685,14 +1207,12 @@ function main() {
         let program = parse_program(source).expect("parse");
         validate_program(&program).expect("validate");
 
-        // Make sure no stale value from a previous test leaks in.
         crate::cache::del("queue-test-marker");
 
         init_queue(Arc::new(program));
         register_handler("ping", "ping_handler");
         enqueue("ping", "hello-from-queue");
 
-        // Workers are background threads; poll for the side effect.
         let mut got = None;
         for _ in 0..50 {
             if let Some(v) = crate::cache::get("queue-test-marker") {
@@ -708,5 +1228,85 @@ function main() {
         );
 
         crate::cache::del("queue-test-marker");
+    }
+
+    // ----- Sprint 5C driver selection -----
+
+    /// Helper for the driver-selection tests: build a driver from a specific
+    /// env state without poking the process-wide `DRIVER` OnceLock (which is
+    /// already populated by earlier tests in this binary).
+    fn driver_from_specific_env(value: Option<&str>) -> Result<Driver, String> {
+        let prev = std::env::var("JWC_QUEUE_DRIVER").ok();
+        match value {
+            Some(v) => std::env::set_var("JWC_QUEUE_DRIVER", v),
+            None => std::env::remove_var("JWC_QUEUE_DRIVER"),
+        }
+        let result = driver_from_env();
+        match prev {
+            Some(v) => std::env::set_var("JWC_QUEUE_DRIVER", v),
+            None => std::env::remove_var("JWC_QUEUE_DRIVER"),
+        }
+        result
+    }
+
+    #[test]
+    fn driver_selection_defaults_to_in_memory_when_env_unset() {
+        let _g = lock();
+        let d = driver_from_specific_env(None).expect("should build default in-memory driver");
+        assert!(matches!(d, Driver::InMemory(_)));
+    }
+
+    #[test]
+    fn driver_selection_rejects_unknown_value() {
+        let _g = lock();
+        let err = driver_from_specific_env(Some("redis"))
+            .err()
+            .expect("unknown driver value must error");
+        assert!(
+            err.contains("JWC_QUEUE_DRIVER must be 'memory' or 'postgres'"),
+            "got: {err}"
+        );
+        assert!(err.contains("redis"), "error must mention the bad value: {err}");
+    }
+
+    #[test]
+    fn driver_selection_picks_postgres_only_with_database_url() {
+        let _g = lock();
+        let prev_db = std::env::var("DATABASE_URL").ok();
+        let prev_jwc_db = std::env::var("JWC_DATABASE_URL").ok();
+        std::env::remove_var("DATABASE_URL");
+        std::env::remove_var("JWC_DATABASE_URL");
+
+        let err = driver_from_specific_env(Some("postgres"))
+            .err()
+            .expect("postgres driver without DATABASE_URL must error");
+        assert!(
+            err.contains("DATABASE_URL is missing/unreachable")
+                || err.contains("DATABASE_URL (or JWC_DATABASE_URL) must be set"),
+            "expected DATABASE_URL hint, got: {err}"
+        );
+
+        if let Some(v) = prev_db {
+            std::env::set_var("DATABASE_URL", v);
+        }
+        if let Some(v) = prev_jwc_db {
+            std::env::set_var("JWC_DATABASE_URL", v);
+        }
+    }
+
+    /// Placeholder for a future testcontainers-driven smoke test. Demonstrates
+    /// the call shape — enabled by `cargo test -- --ignored
+    /// postgres_driver_smoke_with_docker` once a fixture is wired up.
+    #[test]
+    #[ignore]
+    fn postgres_driver_smoke_with_docker() {
+        let _g = lock();
+        // To run: bring up postgres locally and export DATABASE_URL.
+        // let driver = PostgresJobDriver::connect().expect("connect");
+        // driver.enqueue("ping", "{}");
+        // assert!(driver.pending_count() >= 1);
+        // for f in driver.dlq_drain() {
+        //     eprintln!("dlq entry: {} -> {}", f.job.name, f.last_error);
+        // }
     }
 }

@@ -36,6 +36,24 @@ production checklist usually walks: connect → harden → observe → tune.
 | `JWC_LOG_FORMAT` | _(text)_ | `json` switches access + error logs to newline-delimited JSON. Loki / Datadog / CloudWatch ingest natively. |
 | `JWC_SERVER_METRICS` | `false` | `1` / `true` enables a periodic `eprintln!` metrics line on top of `/metrics`. Mainly useful when no Prometheus is reachable. |
 | `JWC_SERVER_METRICS_INTERVAL_SECS` | `10` | Interval for the above. |
+| `JWC_OTLP_ENDPOINT` | _(unset)_ | OTLP HTTP collector URL (e.g. `http://localhost:4318/v1/traces`). When set, the server exports spans to that endpoint. Requires the binary to be built with `--features otlp`. |
+| `JWC_SERVICE_NAME` | `jwc` | `service.name` resource attribute on every exported span — drives the service picker in Jaeger / Tempo / Honeycomb. Set per-deployment so pods don't blur into one entry. |
+
+### How do I see my traces?
+
+JWC speaks the W3C Trace Context spec and exports OTLP over HTTP, so any
+OpenTelemetry-compatible backend works. Two common local setups:
+
+- **Jaeger all-in-one** — `docker run -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest`, then run JWC with `JWC_OTLP_ENDPOINT=http://localhost:4318/v1/traces` and browse `http://localhost:16686`.
+- **Grafana Tempo** — point `JWC_OTLP_ENDPOINT` at your Tempo HTTP receiver (default `:4318/v1/traces`) and query in Grafana via the Tempo datasource.
+
+Inbound `traceparent` headers are honoured automatically — if your
+upstream service is already in the trace, JWC's spans attach to the same
+trace id without configuration. Outbound traceparent propagation on
+runtime-initiated HTTP calls is on the Sprint 5C roadmap.
+
+Builds without the `otlp` Cargo feature ignore `JWC_OTLP_ENDPOINT` and
+print a one-line warning at startup so the misconfiguration is visible.
 
 ## Worker / queue
 
