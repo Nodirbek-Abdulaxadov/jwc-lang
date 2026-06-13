@@ -58,7 +58,8 @@ run under `jwc run` but are rejected at native-build time.
 
 | Built-in | Args | Native | Description |
 |----------|------|--------|-------------|
-| `json(v)` | 1 | ✅ | JSON response. A **string** argument is passed through verbatim (no re-encode). |
+| `json(v)` | 1 | ✅ | JSON response. A **string** argument is validated (interpreter unconditionally; native AOT in debug builds) — a non-JSON string raises a runtime error with a `json_unchecked()` hint. Objects / arrays serialise via `value_to_json`. |
+| `json_unchecked(v)` | 1 | ✅ | Same as `json(v)` but skips the string-validation arm. Caller MUST guarantee the string is valid JSON. Used by hot paths that have already validated the payload (DB select results, `body()` strings known to be JSON). |
 | `text(body)` | 1 | ✅ | `text/plain; charset=utf-8` response. |
 | `html(body)` | 1 | ✅ | `text/html; charset=utf-8` response. |
 | `response(body, mime)` / `raw(body, mime)` | 2 | ✅ | Custom Content-Type; `text/*` gets `; charset=utf-8`. (v0.4.0) |

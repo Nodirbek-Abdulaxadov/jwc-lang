@@ -1241,6 +1241,31 @@ fn jwc_b_html(v: V) -> V {
 
 fn jwc_b_json(v: V) -> V {
     let body = jwc_to_json(&v);
+    // Phase 4 [1.0-blocker] — `json(s)` on a `V::Str` validates the string
+    // is well-formed JSON in DEBUG builds. Release skips the check (this is
+    // the production hot path); callers wanting unconditional skip use
+    // `json_unchecked()`. The dev-build interpreter does the unconditional
+    // check; this `cfg(debug_assertions)` mirror catches AOT-only regressions
+    // during development without ever costing on the production binary.
+    #[cfg(debug_assertions)]
+    if let V::Str(ref s) = v {
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(s.as_ref()) {
+            let preview: String = s.chars().take(40).collect();
+            let ellipsis = if s.chars().count() > 40 { "..." } else { "" };
+            panic!(
+                "json(): argument is not valid JSON — got '{preview}{ellipsis}' (use json_unchecked() to skip validation): {e}"
+            );
+        }
+    }
+    make_response(200, body, "application/json")
+}
+
+/// `json_unchecked(v)` — bypass the string-validation arm of `json(v)`.
+/// Caller MUST guarantee the string is valid JSON; the runtime trusts it
+/// without checking. Used by hot paths that have already validated the
+/// payload (DB select results, body() strings already known to be JSON).
+fn jwc_b_json_unchecked(v: V) -> V {
+    let body = jwc_to_json(&v);
     make_response(200, body, "application/json")
 }
 

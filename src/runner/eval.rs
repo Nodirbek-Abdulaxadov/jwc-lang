@@ -666,17 +666,44 @@ impl<'a> Vm<'a> {
                 }
 
                 // ── HTTP response helpers ──────────────────────────────────
-                if name.eq_ignore_ascii_case("json") {
+                //
+                // Phase 4 [1.0-blocker] — `json(s)` on a Value::Str validates
+                // the string is well-formed JSON before passthrough. The
+                // interpreter is the dev / debug runtime, so the cost is
+                // acceptable; the README footgun (a `Value::Str("not-json")`
+                // body silently shipping as a 200 with malformed bytes) is
+                // closed here. `json_unchecked(s)` keeps the old behaviour for
+                // callers that have already validated the payload (e.g. SELECT
+                // result fast path).
+                if name.eq_ignore_ascii_case("json")
+                    || name.eq_ignore_ascii_case("json_unchecked")
+                {
+                    let is_unchecked = name.eq_ignore_ascii_case("json_unchecked");
+                    let label = if is_unchecked { "json_unchecked" } else { "json" };
                     if args.len() != 1 {
-                        bail!("json(val) expects exactly 1 arg");
+                        bail!("{}(val) expects exactly 1 arg", label);
                     }
                     let val = self.eval_expr(&args[0], vars).await?;
-                    // Hot path: DB selects already return Value::Str(json_text).
-                    // Reuse it instead of cloning the (often-large) buffer.
                     return Ok(match val {
-                        Value::Str(_) => val,
-                        // Arrays serialize to a JSON array string.
-                        Value::Array(_) => Value::Str(value_to_json(&val).to_string()),
+                        Value::Str(s) => {
+                            if !is_unchecked {
+                                if let Err(e) = serde_json::from_str::<serde_json::Value>(&s) {
+                                    let preview: String =
+                                        s.chars().take(40).collect::<String>();
+                                    let ellipsis = if s.chars().count() > 40 { "..." } else { "" };
+                                    bail!(
+                                        "json(): argument is not valid JSON — got '{}{}' (use json_unchecked() to skip validation): {}",
+                                        preview,
+                                        ellipsis,
+                                        e
+                                    );
+                                }
+                            }
+                            Value::Str(s)
+                        }
+                        Value::Array(_) | Value::Record { .. } => {
+                            Value::Str(value_to_json(&val).to_string())
+                        }
                         other => Value::Str(other.as_string()),
                     });
                 }

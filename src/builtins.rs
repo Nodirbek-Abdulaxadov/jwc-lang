@@ -237,6 +237,17 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         max_args: Some(1),
         native: true,
     },
+    // Phase 4 [1.0-blocker] — `json_unchecked(s)` skips the string-validation
+    // path that `json(s)` now performs by default. Use only when the caller
+    // has already validated the payload (e.g. a SELECT result or a `body()`
+    // string known to be JSON).
+    BuiltinDef {
+        name: "json_unchecked",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
     BuiltinDef {
         name: "text",
         aliases: &[],

@@ -530,7 +530,7 @@
             route GET "/items" {
                 let limit = query_param("limit");
                 let q = query_param("q");
-                return json("limit=" + limit + ",q=" + q);
+                return text("limit=" + limit + ",q=" + q);
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -548,7 +548,7 @@
         let src = r#"
             route GET "/items" {
                 let limit = query_param("limit", "20");
-                return json("limit=" + limit);
+                return text("limit=" + limit);
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1098,7 +1098,7 @@
 
             route GET "boom" {
                 let x = undefined_var;
-                return json("nope");
+                return text("nope");
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1117,7 +1117,7 @@
             }
 
             route GET "ok" {
-                return json("hello");
+                return text("hello");
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1295,7 +1295,7 @@
             }
 
             route GET "/secret" use AuthMw {
-                return json("payload");
+                return text("payload");
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1322,7 +1322,7 @@
             }
 
             route GET "/me" use UserMw {
-                return json("user=" + context("userId"));
+                return text("user=" + context("userId"));
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1336,7 +1336,7 @@
     async fn unknown_middleware_fails_at_validation() {
         let src = r#"
             route GET "/x" use MissingMw {
-                return json("hi");
+                return text("hi");
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1388,7 +1388,7 @@
                     name: required, minLength(2);
                     age: min(0), max(150);
                 }
-                return json("ok");
+                return text("ok");
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1410,7 +1410,7 @@
                     name: required, minLength(2), maxLength(10);
                     age: min(0), max(150);
                 }
-                return json("ok");
+                return text("ok");
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1434,7 +1434,7 @@
                 validate body {
                     value: min(0), max(100);
                 }
-                return json("ok");
+                return text("ok");
             }
         "#;
         let program = parse_program(src).unwrap();
@@ -1500,6 +1500,60 @@
             .unwrap_err()
             .to_string();
         assert!(err.contains("expects bytes"));
+    }
+
+    // ── Sprint 4C [1.0-blocker] — json() validates strings ────────────────
+
+    #[tokio::test]
+    async fn json_rejects_non_json_string_in_interpreter() {
+        let src = r#"
+            route GET "/x" { return json("not-json-at-all"); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let err = run_request(&program, "GET", "/x", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not valid JSON"),
+            "expected validation message, got: {err}"
+        );
+        assert!(
+            err.contains("json_unchecked"),
+            "expected hint about json_unchecked(), got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_accepts_well_formed_object_literal() {
+        // The Phase 1 Record path goes through value_to_json, so a literal
+        // object is always serialised as valid JSON — no validation
+        // needed. Regression guard that Sprint 4C didn't break this path.
+        let src = r#"
+            route GET "/x" { return json({ id: 1, name: "x" }); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/x", None).await.unwrap();
+        assert_eq!(status, 200);
+        assert!(body.contains("\"id\""));
+        assert!(body.contains("\"name\""));
+    }
+
+    #[tokio::test]
+    async fn json_unchecked_bypasses_string_validation() {
+        // Caller-asserted contract: the string is JSON. Runtime trusts it.
+        // We use a string the interpreter would reject under json() so the
+        // contrast is clear.
+        let src = r#"
+            route GET "/x" { return json_unchecked("definitely-not-json"); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let (status, body) = run_request(&program, "GET", "/x", None).await.unwrap();
+        assert_eq!(status, 200);
+        assert!(body.contains("definitely-not-json"));
     }
 
     // ------------------------------------------------------------------
