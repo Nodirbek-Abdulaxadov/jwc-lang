@@ -383,7 +383,8 @@ impl LanguageServer for Backend {
 
         // Validate the new identifier shape — reject early so the editor
         // surfaces a useful error message instead of corrupting the source.
-        let ident_re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").map_err(|_| LspError::internal_error())?;
+        let ident_re =
+            Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").map_err(|_| LspError::internal_error())?;
         if !ident_re.is_match(&new_name) {
             return Err(invalid_request(format!(
                 "'{new_name}' is not a valid identifier"
@@ -447,16 +448,17 @@ impl LanguageServer for Backend {
         }))
     }
 
-    async fn completion(
-        &self,
-        params: CompletionParams,
-    ) -> LspResult<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> LspResult<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
         let text = match self.documents.read().await.get(&uri).cloned() {
             Some(t) => t,
-            None => return Ok(Some(CompletionResponse::Array(default_completion_items(&[])))),
+            None => {
+                return Ok(Some(CompletionResponse::Array(default_completion_items(
+                    &[],
+                ))))
+            }
         };
         let index = self
             .indices
@@ -984,7 +986,11 @@ const JWC_KEYWORDS: &[&str] = &[
 /// the AST doesn't expose entity field offsets in a way we can resolve from
 /// the cursor alone yet, and the validator's column check is the source of
 /// truth that should drive it.
-fn completion_items_for(text: &str, position: Position, index: &SymbolIndex) -> Vec<CompletionItem> {
+fn completion_items_for(
+    text: &str,
+    position: Position,
+    index: &SymbolIndex,
+) -> Vec<CompletionItem> {
     let line = text.lines().nth(position.line as usize).unwrap_or("");
     let col = (position.character as usize).min(line.len());
     let prefix = &line[..col];
@@ -1270,10 +1276,7 @@ async function doStuff() { return null; }
         let items = completion_items_for(src, pos, &idx);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"DbError"), "labels: {labels:?}");
-        assert!(
-            labels.contains(&"HttpError.NotFound"),
-            "labels: {labels:?}"
-        );
+        assert!(labels.contains(&"HttpError.NotFound"), "labels: {labels:?}");
         // The catch context must NOT emit JWC keywords like `function`.
         assert!(!labels.contains(&"function"), "labels: {labels:?}");
     }

@@ -334,7 +334,10 @@ impl<'a> Parser<'a> {
 
     /// Parse the rest of `name: List<Target> via Target.col;` or
     /// `name: Target via Target.col;` after the `:` has been consumed.
-    pub(super) fn parse_navigation_remainder(&mut self, field_name: &str) -> Result<NavigationField> {
+    pub(super) fn parse_navigation_remainder(
+        &mut self,
+        field_name: &str,
+    ) -> Result<NavigationField> {
         let head = self.expect_ident("expected target type after ':'")?;
         let (kind, target_entity) = if head.eq_ignore_ascii_case("List") {
             self.expect_symbol('<')?;

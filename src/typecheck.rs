@@ -149,7 +149,11 @@ impl FnTable {
             let params = f
                 .params
                 .iter()
-                .map(|p| p.ty.as_deref().map(Ty::parse_declared).unwrap_or(Ty::Dynamic))
+                .map(|p| {
+                    p.ty.as_deref()
+                        .map(Ty::parse_declared)
+                        .unwrap_or(Ty::Dynamic)
+                })
                 .collect::<Vec<_>>();
             let ret = f.return_type.as_deref().map(Ty::parse_declared);
             by_short
@@ -272,7 +276,9 @@ fn check_function(f: &FunctionDecl, fns: &FnTable) -> Result<()> {
         let Expr::Call { name, args } = expr else {
             continue;
         };
-        let Some(sig) = fns.unique(name) else { continue };
+        let Some(sig) = fns.unique(name) else {
+            continue;
+        };
 
         // E019: arity must match exactly. User functions in JWC don't
         // support defaults or rest params today, so any mismatch is a

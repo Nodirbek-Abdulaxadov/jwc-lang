@@ -51,7 +51,10 @@ fn collect_all(roots: &[PathBuf]) -> Vec<PathBuf> {
 fn is_skipped(path: &Path, src: &str) -> bool {
     let first_line = src.lines().next().unwrap_or("").trim();
     if first_line == "// FMT: skip" {
-        eprintln!("fmt_idempotency: skipping {} (// FMT: skip)", path.display());
+        eprintln!(
+            "fmt_idempotency: skipping {} (// FMT: skip)",
+            path.display()
+        );
         return true;
     }
     false

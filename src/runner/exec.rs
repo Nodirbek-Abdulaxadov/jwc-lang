@@ -189,8 +189,14 @@ impl<'a> Vm<'a> {
                     // (shape Arc stays shared). If it's a new field, the shape
                     // would have to grow — fall through to the JSON-string
                     // path below by re-serializing.
-                    Value::Record { field_names, values } => {
-                        if let Some(idx) = field_names.iter().position(|f| f.as_ref() == field.as_str()) {
+                    Value::Record {
+                        field_names,
+                        values,
+                    } => {
+                        if let Some(idx) = field_names
+                            .iter()
+                            .position(|f| f.as_ref() == field.as_str())
+                        {
                             let mut new_values = values.clone();
                             let slot = Arc::make_mut(&mut new_values);
                             slot[idx] = new_val;
@@ -205,8 +211,10 @@ impl<'a> Vm<'a> {
                             // New field — convert to JSON and reuse the
                             // existing string-path semantics so shape grow is
                             // a single code path.
-                            let mut doc =
-                                value_to_json(&Value::Record { field_names, values });
+                            let mut doc = value_to_json(&Value::Record {
+                                field_names,
+                                values,
+                            });
                             if let Some(obj) = doc.as_object_mut() {
                                 obj.insert(field.clone(), value_to_json(&new_val));
                             }

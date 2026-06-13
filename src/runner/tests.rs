@@ -6,17 +6,17 @@
 
 #![cfg(test)]
 
-    use super::*;
-    use crate::parser::{parse_program, validate_program};
+use super::*;
+use crate::parser::{parse_program, validate_program};
 
-    // Phase 1 [1.0-blocker]: Value::Record foundation unit tests live in
-    // `crates/jwc-runtime/src/lib.rs` since that's where the type now
-    // lives. The high-level runner tests below exercise the same
-    // machinery through `parse_program` → `run_main` end-to-end.
+// Phase 1 [1.0-blocker]: Value::Record foundation unit tests live in
+// `crates/jwc-runtime/src/lib.rs` since that's where the type now
+// lives. The high-level runner tests below exercise the same
+// machinery through `parse_program` → `run_main` end-to-end.
 
-    #[tokio::test]
-    async fn runs_main_and_prints_output() {
-        let src = r#"
+#[tokio::test]
+async fn runs_main_and_prints_output() {
+    let src = r#"
             function main() {
                 let name = "JWC";
                 print("Hello " + name);
@@ -24,40 +24,40 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "Hello JWC\n7\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "Hello JWC\n7\n");
+}
 
-    #[tokio::test]
-    async fn module_const_is_visible_in_main() {
-        let src = r#"
+#[tokio::test]
+async fn module_const_is_visible_in_main() {
+    let src = r#"
             const GREETING = "hi";
             function main() { print(GREETING); }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "hi\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "hi\n");
+}
 
-    #[tokio::test]
-    async fn const_can_reference_other_const() {
-        let src = r#"
+#[tokio::test]
+async fn const_can_reference_other_const() {
+    let src = r#"
             const A = 2;
             const B = A * 10;
             function main() { print(B); }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "20\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "20\n");
+}
 
-    #[tokio::test]
-    async fn supports_function_call_and_return() {
-        let src = r#"
+#[tokio::test]
+async fn supports_function_call_and_return() {
+    let src = r#"
             function add(a, b) {
                 return a + b;
             }
@@ -68,15 +68,15 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "42\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "42\n");
+}
 
-    #[tokio::test]
-    async fn supports_float_literals_and_arithmetic() {
-        let src = r#"
+#[tokio::test]
+async fn supports_float_literals_and_arithmetic() {
+    let src = r#"
             function main() {
                 let a = 0.2;
                 let b = 0.1;
@@ -85,15 +85,15 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "0.3\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "0.3\n");
+}
 
-    #[tokio::test]
-    async fn supports_if_while_break_continue() {
-        let src = r#"
+#[tokio::test]
+async fn supports_if_while_break_continue() {
+    let src = r#"
             function main() {
                 let i = 0;
                 while (i < 6) {
@@ -109,15 +109,15 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "1\n3\n4\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "1\n3\n4\n");
+}
 
-    #[tokio::test]
-    async fn supports_logical_ops() {
-        let src = r#"
+#[tokio::test]
+async fn supports_logical_ops() {
+    let src = r#"
             function main() {
                 if (true and (1 < 2) or false) {
                     print("ok");
@@ -127,15 +127,15 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "ok\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "ok\n");
+}
 
-    #[tokio::test]
-    async fn supports_declarative_routes_with_dispatch() {
-        let src = r#"
+#[tokio::test]
+async fn supports_declarative_routes_with_dispatch() {
+    let src = r#"
             route GET "/health" {
                 print("GET /health -> 200 OK");
             }
@@ -146,18 +146,18 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(
             out.output,
             "GET /health -> 200 OK\n{\"status\":404,\"error\":\"Not Found\",\"method\":\"GET\",\"path\":\"/unknown\"}\n"
         );
-    }
+}
 
-    #[tokio::test]
-    async fn supports_route_path_params() {
-        let src = r#"
+#[tokio::test]
+async fn supports_route_path_params() {
+    let src = r#"
             route GET "/todos/{id}" {
                 let id = path_param("id");
                 print("todo=" + id);
@@ -168,15 +168,15 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "todo=42\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "todo=42\n");
+}
 
-    #[tokio::test]
-    async fn dispatch_outputs_json_from_route_return() {
-        let src = r#"
+#[tokio::test]
+async fn dispatch_outputs_json_from_route_return() {
+    let src = r#"
             route GET "/todos" {
                 return "{\"items\":[]}";
             }
@@ -186,15 +186,15 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "{\"items\":[]}\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "{\"items\":[]}\n");
+}
 
-    #[tokio::test]
-    async fn supports_new_entity_and_field_ops() {
-        let src = r#"
+#[tokio::test]
+async fn supports_new_entity_and_field_ops() {
+    let src = r#"
             function main() {
                 let car = new CarEntity();
                 car.model = "Tesla";
@@ -205,21 +205,21 @@
                 print(y);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap();
-        assert_eq!(out.output, "Tesla\n2024\n");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "Tesla\n2024\n");
+}
 
-    #[tokio::test]
-    async fn after_middleware_block_sees_response_status() {
-        // The pre-handler middleware runs first; the route returns
-        // statusCode(202, ...); the `after` block reads
-        // response_status() and writes it to a process-wide spot via
-        // print. Without after-phase support, every project hardcoded
-        // status=200 / latency=0 because nothing else was reachable
-        // from pre-handler context.
-        let src = r#"
+#[tokio::test]
+async fn after_middleware_block_sees_response_status() {
+    // The pre-handler middleware runs first; the route returns
+    // statusCode(202, ...); the `after` block reads
+    // response_status() and writes it to a process-wide spot via
+    // print. Without after-phase support, every project hardcoded
+    // status=200 / latency=0 because nothing else was reachable
+    // from pre-handler context.
+    let src = r#"
             middleware Logger {
                 let _ = "before";
             } after {
@@ -231,25 +231,25 @@
                 return statusCode(202, "accepted");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let result = run_request(&program, "GET", "/ping", None).await.unwrap();
-        assert_eq!(result.0, 202);
-        // The after-block ran AFTER the handler returned 202 — visible
-        // via the captured stdout. We can't easily peek stdout from a
-        // tokio test without redirecting, so just assert the dispatch
-        // status came back unchanged (proving after-body didn't
-        // overwrite it accidentally).
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let result = run_request(&program, "GET", "/ping", None).await.unwrap();
+    assert_eq!(result.0, 202);
+    // The after-block ran AFTER the handler returned 202 — visible
+    // via the captured stdout. We can't easily peek stdout from a
+    // tokio test without redirecting, so just assert the dispatch
+    // status came back unchanged (proving after-body didn't
+    // overwrite it accidentally).
+}
 
-    #[tokio::test]
-    async fn after_middleware_response_duration_reads_back() {
-        // response_duration_ms() returns the milliseconds since the
-        // dispatch started. Outside an `after` block the runner
-        // doesn't expose it specially — it just reads
-        // current_request_started which is set at dispatch entry, so
-        // the measurement is valid throughout the request.
-        let src = r#"
+#[tokio::test]
+async fn after_middleware_response_duration_reads_back() {
+    // response_duration_ms() returns the milliseconds since the
+    // dispatch started. Outside an `after` block the runner
+    // doesn't expose it specially — it just reads
+    // current_request_started which is set at dispatch entry, so
+    // the measurement is valid throughout the request.
+    let src = r#"
             route GET "/x" {
                 let ms = response_duration_ms();
                 if (ms == null) { return "null"; }
@@ -257,19 +257,19 @@
                 return "ok";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let result = run_request(&program, "GET", "/x", None).await.unwrap();
-        assert_eq!(result.0, 200);
-        assert_eq!(result.1, "ok");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let result = run_request(&program, "GET", "/x", None).await.unwrap();
+    assert_eq!(result.0, 200);
+    assert_eq!(result.1, "ok");
+}
 
-    #[tokio::test]
-    async fn middleware_without_after_block_still_works() {
-        // The after_body is Option<Vec<Stmt>>; a middleware that omits
-        // `after { ... }` must keep behaving exactly like before this
-        // slice landed. No-op smoke test.
-        let src = r#"
+#[tokio::test]
+async fn middleware_without_after_block_still_works() {
+    // The after_body is Option<Vec<Stmt>>; a middleware that omits
+    // `after { ... }` must keep behaving exactly like before this
+    // slice landed. No-op smoke test.
+    let src = r#"
             middleware Plain {
                 let _ = "before only";
             }
@@ -278,192 +278,192 @@
                 return "ok";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let result = run_request(&program, "GET", "/x", None).await.unwrap();
-        assert_eq!(result.0, 200);
-        assert_eq!(result.1, "ok");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let result = run_request(&program, "GET", "/x", None).await.unwrap();
+    assert_eq!(result.0, 200);
+    assert_eq!(result.1, "ok");
+}
 
-    #[tokio::test]
-    async fn request_id_is_visible_when_server_stamps_one() {
-        let src = r#"
+#[tokio::test]
+async fn request_id_is_visible_when_server_stamps_one() {
+    let src = r#"
             route GET "/x" {
                 let rid = request_id();
                 if (rid == null) { return "{\"rid\":null}"; }
                 return "{\"rid\":\"" + rid + "\"}";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let headers = std::collections::HashMap::new();
-        let (status, body, _ct, _extra) = run_request_with_headers_and_id(
-            &program,
-            "GET",
-            "/x",
-            None,
-            headers,
-            Some("abc12345".to_string()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "{\"rid\":\"abc12345\"}");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let headers = std::collections::HashMap::new();
+    let (status, body, _ct, _extra) = run_request_with_headers_and_id(
+        &program,
+        "GET",
+        "/x",
+        None,
+        headers,
+        Some("abc12345".to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "{\"rid\":\"abc12345\"}");
+}
 
-    #[tokio::test]
-    async fn request_id_returns_null_when_unstamped() {
-        // Calling `run_request_with_headers` (the legacy entry point)
-        // doesn't stamp an id; `request_id()` must surface that cleanly
-        // as null instead of panicking or returning the empty string.
-        let src = r#"
+#[tokio::test]
+async fn request_id_returns_null_when_unstamped() {
+    // Calling `run_request_with_headers` (the legacy entry point)
+    // doesn't stamp an id; `request_id()` must surface that cleanly
+    // as null instead of panicking or returning the empty string.
+    let src = r#"
             route GET "/x" {
                 let rid = request_id();
                 if (rid == null) { return "null"; }
                 return rid;
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let headers = std::collections::HashMap::new();
-        let (status, body, _ct, _extra) =
-            run_request_with_headers(&program, "GET", "/x", None, headers)
-                .await
-                .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "null");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let headers = std::collections::HashMap::new();
+    let (status, body, _ct, _extra) =
+        run_request_with_headers(&program, "GET", "/x", None, headers)
+            .await
+            .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "null");
+}
 
-    /// Serializes every test that reads/writes `JWC_TRUSTED_PROXIES` so
-    /// concurrent tokio tests don't see a partial state. Without this
-    /// the two client_ip tests race on the shared env var, since
-    /// cargo runs `#[tokio::test]` cases in parallel.
-    static TRUSTED_PROXIES_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Serializes every test that reads/writes `JWC_TRUSTED_PROXIES` so
+/// concurrent tokio tests don't see a partial state. Without this
+/// the two client_ip tests race on the shared env var, since
+/// cargo runs `#[tokio::test]` cases in parallel.
+static TRUSTED_PROXIES_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[tokio::test]
-    async fn client_ip_returns_rightmost_untrusted_entry() {
-        // Default JWC_TRUSTED_PROXIES is empty — no proxy is trusted,
-        // so the rightmost entry of the chain is the closest hop's view
-        // of the source. That's the only header value we can rely on
-        // without an explicit trust list.
-        let _g = TRUSTED_PROXIES_GUARD
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
-        std::env::remove_var("JWC_TRUSTED_PROXIES");
-        let src = r#"
+#[tokio::test]
+async fn client_ip_returns_rightmost_untrusted_entry() {
+    // Default JWC_TRUSTED_PROXIES is empty — no proxy is trusted,
+    // so the rightmost entry of the chain is the closest hop's view
+    // of the source. That's the only header value we can rely on
+    // without an explicit trust list.
+    let _g = TRUSTED_PROXIES_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
+    std::env::remove_var("JWC_TRUSTED_PROXIES");
+    let src = r#"
             route GET "/whoami" {
                 let ip = client_ip();
                 if (ip == null) { return "{\"ip\":null}"; }
                 return "{\"ip\":\"" + ip + "\"}";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let mut headers = std::collections::HashMap::new();
-        headers.insert(
-            "x-forwarded-for".to_string(),
-            "1.2.3.4, 10.0.0.5".to_string(),
-        );
-        let (status, body, _ct, _extra) =
-            run_request_with_headers(&program, "GET", "/whoami", None, headers)
-                .await
-                .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "{\"ip\":\"10.0.0.5\"}");
-        if let Some(v) = prev {
-            std::env::set_var("JWC_TRUSTED_PROXIES", v);
-        }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let mut headers = std::collections::HashMap::new();
+    headers.insert(
+        "x-forwarded-for".to_string(),
+        "1.2.3.4, 10.0.0.5".to_string(),
+    );
+    let (status, body, _ct, _extra) =
+        run_request_with_headers(&program, "GET", "/whoami", None, headers)
+            .await
+            .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "{\"ip\":\"10.0.0.5\"}");
+    if let Some(v) = prev {
+        std::env::set_var("JWC_TRUSTED_PROXIES", v);
     }
+}
 
-    #[tokio::test]
-    async fn client_ip_peels_trusted_proxies_off_the_chain() {
-        // With JWC_TRUSTED_PROXIES="10." the trailing 10.x hop is a
-        // known forwarder and gets peeled off, leaving 1.2.3.4 — the
-        // real client. Exact semantics nginx + go's net/http use.
-        let _g = TRUSTED_PROXIES_GUARD
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
-        std::env::set_var("JWC_TRUSTED_PROXIES", "10.");
-        let src = r#"
+#[tokio::test]
+async fn client_ip_peels_trusted_proxies_off_the_chain() {
+    // With JWC_TRUSTED_PROXIES="10." the trailing 10.x hop is a
+    // known forwarder and gets peeled off, leaving 1.2.3.4 — the
+    // real client. Exact semantics nginx + go's net/http use.
+    let _g = TRUSTED_PROXIES_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("JWC_TRUSTED_PROXIES").ok();
+    std::env::set_var("JWC_TRUSTED_PROXIES", "10.");
+    let src = r#"
             route GET "/whoami" {
                 let ip = client_ip();
                 if (ip == null) { return "{\"ip\":null}"; }
                 return "{\"ip\":\"" + ip + "\"}";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let mut headers = std::collections::HashMap::new();
-        headers.insert(
-            "x-forwarded-for".to_string(),
-            "1.2.3.4, 10.0.0.5".to_string(),
-        );
-        let (status, body, _ct, _extra) =
-            run_request_with_headers(&program, "GET", "/whoami", None, headers)
-                .await
-                .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "{\"ip\":\"1.2.3.4\"}");
-        match prev {
-            Some(v) => std::env::set_var("JWC_TRUSTED_PROXIES", v),
-            None => std::env::remove_var("JWC_TRUSTED_PROXIES"),
-        }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let mut headers = std::collections::HashMap::new();
+    headers.insert(
+        "x-forwarded-for".to_string(),
+        "1.2.3.4, 10.0.0.5".to_string(),
+    );
+    let (status, body, _ct, _extra) =
+        run_request_with_headers(&program, "GET", "/whoami", None, headers)
+            .await
+            .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "{\"ip\":\"1.2.3.4\"}");
+    match prev {
+        Some(v) => std::env::set_var("JWC_TRUSTED_PROXIES", v),
+        None => std::env::remove_var("JWC_TRUSTED_PROXIES"),
     }
+}
 
-    #[tokio::test]
-    async fn client_ip_returns_null_when_header_absent() {
-        let src = r#"
+#[tokio::test]
+async fn client_ip_returns_null_when_header_absent() {
+    let src = r#"
             route GET "/whoami" {
                 let ip = client_ip();
                 if (ip == null) { return "null"; }
                 return ip;
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let headers = std::collections::HashMap::new();
-        let (status, body, _ct, _extra) =
-            run_request_with_headers(&program, "GET", "/whoami", None, headers)
-                .await
-                .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "null");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let headers = std::collections::HashMap::new();
+    let (status, body, _ct, _extra) =
+        run_request_with_headers(&program, "GET", "/whoami", None, headers)
+            .await
+            .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "null");
+}
 
-    #[tokio::test]
-    async fn run_request_dispatches_route() {
-        let src = r#"
+#[tokio::test]
+async fn run_request_dispatches_route() {
+    let src = r#"
             route GET "/ping" {
                 return "{\"ok\":true}";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/ping", None).await.unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "{\"ok\":true}");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/ping", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "{\"ok\":true}");
+}
 
-    #[tokio::test]
-    async fn run_request_returns_404_for_unknown_route() {
-        let src = r#"
+#[tokio::test]
+async fn run_request_returns_404_for_unknown_route() {
+    let src = r#"
             route GET "/ping" {
                 return "pong";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, _body) = run_request(&program, "GET", "/missing", None)
-            .await
-            .unwrap();
-        assert_eq!(status, 404);
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, _body) = run_request(&program, "GET", "/missing", None)
+        .await
+        .unwrap();
+    assert_eq!(status, 404);
+}
 
-    #[tokio::test]
-    async fn body_is_auto_parsed_for_typed_class_param() {
-        let src = r#"
+#[tokio::test]
+async fn body_is_auto_parsed_for_typed_class_param() {
+    let src = r#"
             class BrandInput {
                 id int;
                 name string;
@@ -479,25 +479,25 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
 
-        let (status, body) = run_request(
-            &program,
-            "POST",
-            "/brands",
-            Some("{\"id\":1,\"name\":\"Acme\"}".to_string()),
-        )
-        .await
-        .unwrap();
+    let (status, body) = run_request(
+        &program,
+        "POST",
+        "/brands",
+        Some("{\"id\":1,\"name\":\"Acme\"}".to_string()),
+    )
+    .await
+    .unwrap();
 
-        assert_eq!(status, 200);
-        assert_eq!(body, "{\"id\":1,\"name\":\"Acme\"}");
-    }
+    assert_eq!(status, 200);
+    assert_eq!(body, "{\"id\":1,\"name\":\"Acme\"}");
+}
 
-    #[tokio::test]
-    async fn body_parse_fails_when_typed_class_missing_required_field() {
-        let src = r#"
+#[tokio::test]
+async fn body_parse_fails_when_typed_class_missing_required_field() {
+    let src = r#"
             class BrandInput {
                 id int;
                 name string;
@@ -513,54 +513,54 @@
             }
         "#;
 
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
 
-        let err = run_request(&program, "POST", "/brands", Some("{\"id\":1}".to_string()))
-            .await
-            .unwrap_err()
-            .to_string();
+    let err = run_request(&program, "POST", "/brands", Some("{\"id\":1}".to_string()))
+        .await
+        .unwrap_err()
+        .to_string();
 
-        assert!(err.contains("expects field 'name'"));
-    }
+    assert!(err.contains("expects field 'name'"));
+}
 
-    #[tokio::test]
-    async fn query_param_reads_value_from_url() {
-        let src = r#"
+#[tokio::test]
+async fn query_param_reads_value_from_url() {
+    let src = r#"
             route GET "/items" {
                 let limit = query_param("limit");
                 let q = query_param("q");
                 return text("limit=" + limit + ",q=" + q);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/items?limit=10&q=hello", None)
-            .await
-            .unwrap();
-        assert_eq!(status, 200);
-        assert!(body.contains("limit=10"));
-        assert!(body.contains("q=hello"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/items?limit=10&q=hello", None)
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert!(body.contains("limit=10"));
+    assert!(body.contains("q=hello"));
+}
 
-    #[tokio::test]
-    async fn query_param_default_used_when_missing() {
-        let src = r#"
+#[tokio::test]
+async fn query_param_default_used_when_missing() {
+    let src = r#"
             route GET "/items" {
                 let limit = query_param("limit", "20");
                 return text("limit=" + limit);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/items", None).await.unwrap();
-        assert_eq!(status, 200);
-        assert!(body.contains("limit=20"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/items", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert!(body.contains("limit=20"));
+}
 
-    #[tokio::test]
-    async fn uuid_type_accepts_valid_string_and_rejects_invalid() {
-        let src = r#"
+#[tokio::test]
+async fn uuid_type_accepts_valid_string_and_rejects_invalid() {
+    let src = r#"
             function take(id: uuid): uuid {
                 return id;
             }
@@ -570,24 +570,24 @@
                 print(good);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert!(out.contains("550e8400-e29b-41d4-a716-446655440000"));
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert!(out.contains("550e8400-e29b-41d4-a716-446655440000"));
 
-        let bad_src = r#"
+    let bad_src = r#"
             function take(id: uuid): uuid { return id; }
             function main() { take("not-a-uuid"); }
         "#;
-        let bad_program = parse_program(bad_src).unwrap();
-        validate_program(&bad_program).unwrap();
-        let err = run_main(&bad_program).await.unwrap_err().to_string();
-        assert!(err.contains("uuid"));
-    }
+    let bad_program = parse_program(bad_src).unwrap();
+    validate_program(&bad_program).unwrap();
+    let err = run_main(&bad_program).await.unwrap_err().to_string();
+    assert!(err.contains("uuid"));
+}
 
-    #[tokio::test]
-    async fn datetime_type_accepts_iso_string() {
-        let src = r#"
+#[tokio::test]
+async fn datetime_type_accepts_iso_string() {
+    let src = r#"
             function take(at: datetime): datetime {
                 return at;
             }
@@ -597,15 +597,15 @@
                 print(v);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert!(out.contains("2026-05-19"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert!(out.contains("2026-05-19"));
+}
 
-    #[tokio::test]
-    async fn nullable_type_marker_allows_null_value() {
-        let src = r#"
+#[tokio::test]
+async fn nullable_type_marker_allows_null_value() {
+    let src = r#"
             function take(name: string?): string? {
                 return name;
             }
@@ -615,15 +615,15 @@
                 print(v);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert_eq!(out.trim(), "null");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "null");
+}
 
-    #[tokio::test]
-    async fn optional_wrapper_is_equivalent_to_nullable_marker() {
-        let src = r#"
+#[tokio::test]
+async fn optional_wrapper_is_equivalent_to_nullable_marker() {
+    let src = r#"
             function take(x: Optional<int>): Optional<int> {
                 return x;
             }
@@ -633,15 +633,15 @@
                 print(v);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert_eq!(out.trim(), "null");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "null");
+}
 
-    #[tokio::test]
-    async fn list_of_int_validates_each_element() {
-        let src = r#"
+#[tokio::test]
+async fn list_of_int_validates_each_element() {
+    let src = r#"
             function take(xs: List<int>): List<int> {
                 return xs;
             }
@@ -651,24 +651,24 @@
                 print(v);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert!(out.contains("[1,2,3]") || out.contains("[1, 2, 3]"));
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert!(out.contains("[1,2,3]") || out.contains("[1, 2, 3]"));
 
-        let bad_src = r#"
+    let bad_src = r#"
             function take(xs: List<int>): List<int> { return xs; }
             function main() { take("[1, \"two\", 3]"); }
         "#;
-        let bad = parse_program(bad_src).unwrap();
-        validate_program(&bad).unwrap();
-        let err = run_main(&bad).await.unwrap_err().to_string();
-        assert!(err.contains("List<int>"));
-    }
+    let bad = parse_program(bad_src).unwrap();
+    validate_program(&bad).unwrap();
+    let err = run_main(&bad).await.unwrap_err().to_string();
+    assert!(err.contains("List<int>"));
+}
 
-    #[tokio::test]
-    async fn try_catch_swallows_runtime_error() {
-        let src = r#"
+#[tokio::test]
+async fn try_catch_swallows_runtime_error() {
+    let src = r#"
             function risky() {
                 let x = undefined_var;
             }
@@ -683,18 +683,18 @@
                 print("after");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert!(out.contains("caught:"));
-        assert!(out.contains("Undefined variable"));
-        assert!(out.contains("after"));
-        assert!(!out.contains("unreachable"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert!(out.contains("caught:"));
+    assert!(out.contains("Undefined variable"));
+    assert!(out.contains("after"));
+    assert!(!out.contains("unreachable"));
+}
 
-    #[tokio::test]
-    async fn try_catch_returns_from_catch_block() {
-        let src = r#"
+#[tokio::test]
+async fn try_catch_returns_from_catch_block() {
+    let src = r#"
             function broken(): int {
                 let x = 0;
                 return x / 0;
@@ -709,15 +709,15 @@
                 }
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert_eq!(out.trim(), "recovered");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "recovered");
+}
 
-    #[tokio::test]
-    async fn try_catch_lets_success_pass_through() {
-        let src = r#"
+#[tokio::test]
+async fn try_catch_lets_success_pass_through() {
+    let src = r#"
             function safe(): int {
                 return 7;
             }
@@ -731,58 +731,58 @@
                 }
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert_eq!(out.trim(), "7");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "7");
+}
 
-    /// Tests that mutate process env need to be serialised — cargo runs
-    /// tests in parallel by default and `setConnectionString(...)` writes
-    /// to `DATABASE_URL`. One shared mutex keeps the three env-touching
-    /// tests below from racing each other.
-    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-    }
+/// Tests that mutate process env need to be serialised — cargo runs
+/// tests in parallel by default and `setConnectionString(...)` writes
+/// to `DATABASE_URL`. One shared mutex keeps the three env-touching
+/// tests below from racing each other.
+fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
 
-    #[tokio::test]
-    async fn set_connection_string_accepts_url_form() {
-        let _g = env_test_lock();
-        let key = "DATABASE_URL";
-        let backup = std::env::var(key).ok();
-        std::env::remove_var(key);
+#[tokio::test]
+async fn set_connection_string_accepts_url_form() {
+    let _g = env_test_lock();
+    let key = "DATABASE_URL";
+    let backup = std::env::var(key).ok();
+    std::env::remove_var(key);
 
-        let src = r#"
+    let src = r#"
             function main() {
                 setConnectionString("postgresql://postgres:secret@127.0.0.1:5432/myapp");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        run_main(&program).await.unwrap();
-        assert_eq!(
-            std::env::var(key).unwrap(),
-            "postgresql://postgres:secret@127.0.0.1:5432/myapp"
-        );
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    run_main(&program).await.unwrap();
+    assert_eq!(
+        std::env::var(key).unwrap(),
+        "postgresql://postgres:secret@127.0.0.1:5432/myapp"
+    );
 
-        if let Some(v) = backup {
-            std::env::set_var(key, v);
-        } else {
-            std::env::remove_var(key);
-        }
-    }
-
-    #[tokio::test]
-    async fn set_connection_string_accepts_object_literal_form() {
-        let _g = env_test_lock();
-        let key = "DATABASE_URL";
-        let backup = std::env::var(key).ok();
+    if let Some(v) = backup {
+        std::env::set_var(key, v);
+    } else {
         std::env::remove_var(key);
+    }
+}
 
-        let src = r#"
+#[tokio::test]
+async fn set_connection_string_accepts_object_literal_form() {
+    let _g = env_test_lock();
+    let key = "DATABASE_URL";
+    let backup = std::env::var(key).ok();
+    std::env::remove_var(key);
+
+    let src = r#"
             function main() {
                 setConnectionString({
                     host:     "db.example.com",
@@ -793,53 +793,53 @@
                 });
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        run_main(&program).await.unwrap();
-        assert_eq!(
-            std::env::var(key).unwrap(),
-            "postgresql://app:topsecret@db.example.com:5433/prod"
-        );
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    run_main(&program).await.unwrap();
+    assert_eq!(
+        std::env::var(key).unwrap(),
+        "postgresql://app:topsecret@db.example.com:5433/prod"
+    );
 
-        if let Some(v) = backup {
-            std::env::set_var(key, v);
-        } else {
-            std::env::remove_var(key);
-        }
+    if let Some(v) = backup {
+        std::env::set_var(key, v);
+    } else {
+        std::env::remove_var(key);
     }
+}
 
-    #[tokio::test]
-    async fn set_connection_string_no_args_reads_from_env() {
-        let _g = env_test_lock();
-        let backup = std::env::var("DATABASE_URL").ok();
-        std::env::set_var(
-            "DATABASE_URL",
-            "postgresql://envuser:envpw@envhost:5400/envdb",
-        );
+#[tokio::test]
+async fn set_connection_string_no_args_reads_from_env() {
+    let _g = env_test_lock();
+    let backup = std::env::var("DATABASE_URL").ok();
+    std::env::set_var(
+        "DATABASE_URL",
+        "postgresql://envuser:envpw@envhost:5400/envdb",
+    );
 
-        let src = r#"
+    let src = r#"
             function main() {
                 setConnectionString();
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        run_main(&program).await.unwrap();
-        assert_eq!(
-            std::env::var("DATABASE_URL").unwrap(),
-            "postgresql://envuser:envpw@envhost:5400/envdb"
-        );
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    run_main(&program).await.unwrap();
+    assert_eq!(
+        std::env::var("DATABASE_URL").unwrap(),
+        "postgresql://envuser:envpw@envhost:5400/envdb"
+    );
 
-        if let Some(v) = backup {
-            std::env::set_var("DATABASE_URL", v);
-        } else {
-            std::env::remove_var("DATABASE_URL");
-        }
+    if let Some(v) = backup {
+        std::env::set_var("DATABASE_URL", v);
+    } else {
+        std::env::remove_var("DATABASE_URL");
     }
+}
 
-    #[tokio::test]
-    async fn uuid_builtin_is_v4_and_never_collides_on_a_tight_loop() {
-        let src = r#"
+#[tokio::test]
+async fn uuid_builtin_is_v4_and_never_collides_on_a_tight_loop() {
+    let src = r#"
             function main() {
                 let a = uuid();
                 let b = uuid();
@@ -849,96 +849,96 @@
                 print(c);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 3);
-        // All three must be distinct — v4 should never collide here.
-        assert!(lines[0] != lines[1]);
-        assert!(lines[1] != lines[2]);
-        assert!(lines[0] != lines[2]);
-        // And every one is a proper RFC 4122 v4: version nibble is '4' at
-        // the 14th hex digit (index 14, position [14..15] in the dashed form).
-        for line in &lines {
-            assert_eq!(
-                line.as_bytes()[14],
-                b'4',
-                "expected v4 version nibble in {line}"
-            );
-        }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3);
+    // All three must be distinct — v4 should never collide here.
+    assert!(lines[0] != lines[1]);
+    assert!(lines[1] != lines[2]);
+    assert!(lines[0] != lines[2]);
+    // And every one is a proper RFC 4122 v4: version nibble is '4' at
+    // the 14th hex digit (index 14, position [14..15] in the dashed form).
+    for line in &lines {
+        assert_eq!(
+            line.as_bytes()[14],
+            b'4',
+            "expected v4 version nibble in {line}"
+        );
     }
+}
 
-    #[tokio::test]
-    async fn ws_path_params_reach_the_handler() {
-        // Smoke check that the runtime path-params plumbing accepts a
-        // pre-populated map exactly the way `server.rs::handle_ws` will
-        // hand it over. We exercise it by calling `run_ws_request`
-        // directly and watching the value land in `path_param(...)`.
-        let src = r#"
+#[tokio::test]
+async fn ws_path_params_reach_the_handler() {
+    // Smoke check that the runtime path-params plumbing accepts a
+    // pre-populated map exactly the way `server.rs::handle_ws` will
+    // hand it over. We exercise it by calling `run_ws_request`
+    // directly and watching the value land in `path_param(...)`.
+    let src = r#"
             route WS "/chat/{room}" {
                 let r = path_param("room");
                 ws_send(r);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
 
-        let (tx_to_vm, rx_to_vm) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let (tx_from_vm, mut rx_from_vm) = tokio::sync::mpsc::unbounded_channel::<String>();
-        // No inbound messages, so the handler runs ws_send then exits.
-        drop(tx_to_vm);
+    let (tx_to_vm, rx_to_vm) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx_from_vm, mut rx_from_vm) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // No inbound messages, so the handler runs ws_send then exits.
+    drop(tx_to_vm);
 
-        let mut params = HashMap::new();
-        params.insert("room".to_string(), "general".to_string());
+    let mut params = HashMap::new();
+    params.insert("room".to_string(), "general".to_string());
 
-        run_ws_request(
-            &program,
-            "/chat/{room}",
-            params,
-            HashMap::new(),
-            rx_to_vm,
-            tx_from_vm,
-        )
-        .await
-        .unwrap();
+    run_ws_request(
+        &program,
+        "/chat/{room}",
+        params,
+        HashMap::new(),
+        rx_to_vm,
+        tx_from_vm,
+    )
+    .await
+    .unwrap();
 
-        let received = rx_from_vm.try_recv().expect("ws_send fired");
-        assert_eq!(received, "general");
-    }
+    let received = rx_from_vm.try_recv().expect("ws_send fired");
+    assert_eq!(received, "general");
+}
 
-    #[tokio::test]
-    async fn ws_route_parses_with_protocol_marker() {
-        let src = r#"
+#[tokio::test]
+async fn ws_route_parses_with_protocol_marker() {
+    let src = r#"
             route WS "/chat/{room}" {
                 let msg = ws_recv();
                 ws_send(msg);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        assert_eq!(program.routes.len(), 1);
-        assert_eq!(program.routes[0].method, "WS");
-        assert_eq!(program.routes[0].path, "/chat/{room}");
-        assert_eq!(program.routes[0].protocol, crate::ast::RouteProtocol::Ws);
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    assert_eq!(program.routes.len(), 1);
+    assert_eq!(program.routes[0].method, "WS");
+    assert_eq!(program.routes[0].path, "/chat/{room}");
+    assert_eq!(program.routes[0].protocol, crate::ast::RouteProtocol::Ws);
+}
 
-    #[tokio::test]
-    async fn ws_builtins_error_outside_a_ws_handler() {
-        let src = r#"
+#[tokio::test]
+async fn ws_builtins_error_outside_a_ws_handler() {
+    let src = r#"
             function main() {
                 ws_send("hi");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let err = run_main(&program).await.unwrap_err().to_string();
-        assert!(err.contains("only valid inside a WS route"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let err = run_main(&program).await.unwrap_err().to_string();
+    assert!(err.contains("only valid inside a WS route"));
+}
 
-    #[tokio::test]
-    async fn string_helpers_basic_shapes() {
-        let src = r#"
+#[tokio::test]
+async fn string_helpers_basic_shapes() {
+    let src = r#"
             function main() {
                 print(lower("HELLO"));
                 print(upper("Najim"));
@@ -953,26 +953,26 @@
                 print(length(parts));
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert!(out.contains("hello"));
-        assert!(out.contains("NAJIM"));
-        assert!(out.contains("\nok\n"));
-        assert!(out.contains("a/b/c"));
-        assert!(out.contains("true\ntrue\ntrue\n5\n"));
-        assert!(out.contains("[\"a\",\"b\",\"c\"]"));
-        // length(parts) — array of 3 strings → 3.
-        let lines: Vec<&str> = out.lines().collect();
-        assert!(
-            lines.last().map(|l| l.trim() == "3").unwrap_or(false),
-            "{out}"
-        );
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert!(out.contains("hello"));
+    assert!(out.contains("NAJIM"));
+    assert!(out.contains("\nok\n"));
+    assert!(out.contains("a/b/c"));
+    assert!(out.contains("true\ntrue\ntrue\n5\n"));
+    assert!(out.contains("[\"a\",\"b\",\"c\"]"));
+    // length(parts) — array of 3 strings → 3.
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines.last().map(|l| l.trim() == "3").unwrap_or(false),
+        "{out}"
+    );
+}
 
-    #[tokio::test]
-    async fn for_in_iterates_json_array() {
-        let src = r#"
+#[tokio::test]
+async fn for_in_iterates_json_array() {
+    let src = r#"
             function main() {
                 let xs = "[1, 2, 3, 4]";
                 let sum = 0;
@@ -983,15 +983,15 @@
                 print(sum);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert_eq!(out.trim(), "6");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "6");
+}
 
-    #[tokio::test]
-    async fn for_in_continue_skips_iteration() {
-        let src = r#"
+#[tokio::test]
+async fn for_in_continue_skips_iteration() {
+    let src = r#"
             function main() {
                 let xs = "[1, 2, 3, 4, 5]";
                 let kept = 0;
@@ -1002,15 +1002,15 @@
                 print(kept);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert_eq!(out.trim(), "4");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "4");
+}
 
-    #[tokio::test]
-    async fn substring_slices_chars_with_clamping() {
-        let src = r#"
+#[tokio::test]
+async fn substring_slices_chars_with_clamping() {
+    let src = r#"
             function main() {
                 print(substring("hello world", 0, 5));
                 print(substring("hello world", 6, 5));
@@ -1020,21 +1020,21 @@
                 print(substring("ko'p", 0, 4));
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "hello");
-        assert_eq!(lines[1], "world");
-        assert_eq!(lines[2], "");
-        assert_eq!(lines[3], "");
-        assert_eq!(lines[4], "cdef");
-        assert_eq!(lines[5], "ko'p");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "hello");
+    assert_eq!(lines[1], "world");
+    assert_eq!(lines[2], "");
+    assert_eq!(lines[3], "");
+    assert_eq!(lines[4], "cdef");
+    assert_eq!(lines[5], "ko'p");
+}
 
-    #[tokio::test]
-    async fn take_returns_prefix_of_string() {
-        let src = r#"
+#[tokio::test]
+async fn take_returns_prefix_of_string() {
+    let src = r#"
             function main() {
                 print(take("hello", 3));
                 print(take("hi", 10));
@@ -1042,19 +1042,19 @@
                 print(take("xx", -5));
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "hel");
-        assert_eq!(lines[1], "hi");
-        assert_eq!(lines[2], "");
-        assert_eq!(lines[3], "");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "hel");
+    assert_eq!(lines[1], "hi");
+    assert_eq!(lines[2], "");
+    assert_eq!(lines[3], "");
+}
 
-    #[tokio::test]
-    async fn first_last_return_array_endpoints() {
-        let src = r#"
+#[tokio::test]
+async fn first_last_return_array_endpoints() {
+    let src = r#"
             function main() {
                 let xs = "[10, 20, 30]";
                 print(first(xs));
@@ -1063,18 +1063,18 @@
                 print(first(empty));
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "10");
-        assert_eq!(lines[1], "30");
-        assert_eq!(lines[2], "null");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "10");
+    assert_eq!(lines[1], "30");
+    assert_eq!(lines[2], "null");
+}
 
-    #[tokio::test]
-    async fn json_parse_then_stringify_roundtrip() {
-        let src = r#"
+#[tokio::test]
+async fn json_parse_then_stringify_roundtrip() {
+    let src = r#"
             function main() {
                 let parsed = json_parse("{\"a\":1,\"b\":\"x\"}");
                 print(parsed);
@@ -1082,16 +1082,16 @@
                 print(back);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert!(out.contains("\"a\":1"));
-        assert!(out.contains("\"b\":\"x\""));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert!(out.contains("\"a\":1"));
+    assert!(out.contains("\"b\":\"x\""));
+}
 
-    #[tokio::test]
-    async fn error_handler_catches_uncaught_route_error() {
-        let src = r#"
+#[tokio::test]
+async fn error_handler_catches_uncaught_route_error() {
+    let src = r#"
             errorHandler (e) {
                 return internalError(e.message);
             }
@@ -1101,17 +1101,17 @@
                 return text("nope");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
 
-        let (status, body) = run_request(&program, "GET", "/boom", None).await.unwrap();
-        assert_eq!(status, 500);
-        assert!(body.contains("Undefined variable"), "body: {body}");
-    }
+    let (status, body) = run_request(&program, "GET", "/boom", None).await.unwrap();
+    assert_eq!(status, 500);
+    assert!(body.contains("Undefined variable"), "body: {body}");
+}
 
-    #[tokio::test]
-    async fn error_handler_does_not_intercept_normal_responses() {
-        let src = r#"
+#[tokio::test]
+async fn error_handler_does_not_intercept_normal_responses() {
+    let src = r#"
             errorHandler (e) {
                 return internalError(e.message);
             }
@@ -1120,42 +1120,42 @@
                 return text("hello");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
 
-        let (status, body) = run_request(&program, "GET", "/ok", None).await.unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "hello");
-    }
+    let (status, body) = run_request(&program, "GET", "/ok", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "hello");
+}
 
-    #[tokio::test]
-    async fn object_literal_serializes_to_json_with_nested_embedding() {
-        let src = r#"
+#[tokio::test]
+async fn object_literal_serializes_to_json_with_nested_embedding() {
+    let src = r#"
             function main() {
                 let inner = "[1,2,3]";
                 let payload = { name: "Najim", count: 5, items: inner, ok: true };
                 print(payload);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        let trimmed = out.trim_end();
-        // Order isn't guaranteed by serde_json::Map (insertion order preserved
-        // since 1.0.79 with preserve_order disabled defaults to BTreeMap-like),
-        // so check field presence instead of exact text.
-        assert!(trimmed.contains("\"name\":\"Najim\""), "got: {trimmed}");
-        assert!(trimmed.contains("\"count\":5"), "got: {trimmed}");
-        assert!(
-            trimmed.contains("\"items\":[1,2,3]"),
-            "nested JSON should embed raw, got: {trimmed}"
-        );
-        assert!(trimmed.contains("\"ok\":true"), "got: {trimmed}");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    let trimmed = out.trim_end();
+    // Order isn't guaranteed by serde_json::Map (insertion order preserved
+    // since 1.0.79 with preserve_order disabled defaults to BTreeMap-like),
+    // so check field presence instead of exact text.
+    assert!(trimmed.contains("\"name\":\"Najim\""), "got: {trimmed}");
+    assert!(trimmed.contains("\"count\":5"), "got: {trimmed}");
+    assert!(
+        trimmed.contains("\"items\":[1,2,3]"),
+        "nested JSON should embed raw, got: {trimmed}"
+    );
+    assert!(trimmed.contains("\"ok\":true"), "got: {trimmed}");
+}
 
-    #[tokio::test]
-    async fn unary_not_inverts_bool() {
-        let src = r#"
+#[tokio::test]
+async fn unary_not_inverts_bool() {
+    let src = r#"
             function main() {
                 let ok = false;
                 if (!ok) { print("flipped"); }
@@ -1163,37 +1163,37 @@
                 if (!!n) { print("doubled"); }
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        assert!(out.contains("flipped"));
-        assert!(out.contains("doubled"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert!(out.contains("flipped"));
+    assert!(out.contains("doubled"));
+}
 
-    #[tokio::test]
-    async fn now_built_in_returns_iso_8601() {
-        let src = r#"
+#[tokio::test]
+async fn now_built_in_returns_iso_8601() {
+    let src = r#"
             function main() {
                 let ts = now();
                 print(ts);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let out = run_main(&program).await.unwrap().output;
-        let trimmed = out.trim_end();
-        // 2026-05-19T12:00:00.000Z shape — 4 digits, dashes, T, ms, Z.
-        let bytes = trimmed.as_bytes();
-        assert!(bytes.len() >= 20, "too short: {trimmed}");
-        assert_eq!(bytes[4], b'-');
-        assert_eq!(bytes[7], b'-');
-        assert_eq!(bytes[10], b'T');
-        assert_eq!(bytes[trimmed.len() - 1], b'Z');
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    let trimmed = out.trim_end();
+    // 2026-05-19T12:00:00.000Z shape — 4 digits, dashes, T, ms, Z.
+    let bytes = trimmed.as_bytes();
+    assert!(bytes.len() >= 20, "too short: {trimmed}");
+    assert_eq!(bytes[4], b'-');
+    assert_eq!(bytes[7], b'-');
+    assert_eq!(bytes[10], b'T');
+    assert_eq!(bytes[trimmed.len() - 1], b'Z');
+}
 
-    #[tokio::test]
-    async fn at_var_field_shortcut_in_where_clause() {
-        let src = r#"
+#[tokio::test]
+async fn at_var_field_shortcut_in_where_clause() {
+    let src = r#"
             dbcontext AppDb : Postgres;
             entity User of AppDb {
                 id uuid pk;
@@ -1206,63 +1206,63 @@
                 return u;
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
 
-        match &program.functions[0].body[0] {
-            crate::ast::Stmt::Let { value, .. } => match value {
-                crate::ast::Expr::DbSelect { where_clause, .. } => {
-                    let wc = where_clause.as_ref().unwrap();
-                    let atom = match wc.as_ref() {
-                        crate::ast::WhereExpr::Atom(a) => a,
-                        _ => panic!("expected atom"),
-                    };
-                    match &atom.rhs {
-                        crate::ast::Expr::FieldGet { var, field } => {
-                            assert_eq!(var, "req");
-                            assert_eq!(field, "username");
-                        }
-                        other => panic!("expected FieldGet, got {:?}", other),
+    match &program.functions[0].body[0] {
+        crate::ast::Stmt::Let { value, .. } => match value {
+            crate::ast::Expr::DbSelect { where_clause, .. } => {
+                let wc = where_clause.as_ref().unwrap();
+                let atom = match wc.as_ref() {
+                    crate::ast::WhereExpr::Atom(a) => a,
+                    _ => panic!("expected atom"),
+                };
+                match &atom.rhs {
+                    crate::ast::Expr::FieldGet { var, field } => {
+                        assert_eq!(var, "req");
+                        assert_eq!(field, "username");
                     }
+                    other => panic!("expected FieldGet, got {:?}", other),
                 }
-                _ => panic!("expected DbSelect"),
-            },
-            _ => panic!("expected Let stmt"),
-        }
+            }
+            _ => panic!("expected DbSelect"),
+        },
+        _ => panic!("expected Let stmt"),
     }
+}
 
-    #[tokio::test]
-    async fn unknown_function_suggests_closest_match() {
-        let src = r#"
+#[tokio::test]
+async fn unknown_function_suggests_closest_match() {
+    let src = r#"
             function getAllUsers() { return 1; }
             function main() {
                 let v = getAllUser();
                 print(v);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let err = run_main(&program).await.unwrap_err().to_string();
-        assert!(err.contains("Did you mean 'getallusers'"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let err = run_main(&program).await.unwrap_err().to_string();
+    assert!(err.contains("Did you mean 'getallusers'"));
+}
 
-    #[tokio::test]
-    async fn undefined_variable_suggests_closest_match() {
-        let src = r#"
+#[tokio::test]
+async fn undefined_variable_suggests_closest_match() {
+    let src = r#"
             function main() {
                 let userName = "x";
                 print(usrName);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let err = run_main(&program).await.unwrap_err().to_string();
-        assert!(err.contains("Did you mean 'username'"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let err = run_main(&program).await.unwrap_err().to_string();
+    assert!(err.contains("Did you mean 'username'"));
+}
 
-    #[tokio::test]
-    async fn async_function_and_await_keyword_parse_and_run() {
-        let src = r#"
+#[tokio::test]
+async fn async_function_and_await_keyword_parse_and_run() {
+    let src = r#"
             async function fetch(): int {
                 return 42;
             }
@@ -1272,21 +1272,21 @@
                 print(v);
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        assert!(program
-            .functions
-            .iter()
-            .find(|f| f.name == "fetch")
-            .map(|f| f.is_async)
-            .unwrap_or(false));
-        let out = run_main(&program).await.unwrap().output;
-        assert_eq!(out.trim(), "42");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    assert!(program
+        .functions
+        .iter()
+        .find(|f| f.name == "fetch")
+        .map(|f| f.is_async)
+        .unwrap_or(false));
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "42");
+}
 
-    #[tokio::test]
-    async fn middleware_short_circuits_route_when_returning() {
-        let src = r#"
+#[tokio::test]
+async fn middleware_short_circuits_route_when_returning() {
+    let src = r#"
             middleware AuthMw {
                 let token = header("authorization");
                 if (token == null) {
@@ -1298,25 +1298,25 @@
                 return text("payload");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
 
-        let (status, _body) = run_request(&program, "GET", "/secret", None).await.unwrap();
-        assert_eq!(status, 401);
+    let (status, _body) = run_request(&program, "GET", "/secret", None).await.unwrap();
+    assert_eq!(status, 401);
 
-        let mut headers = HashMap::new();
-        headers.insert("authorization".into(), "Bearer xyz".into());
-        let (status_ok, body_ok, _ct, _headers) =
-            run_request_with_headers(&program, "GET", "/secret", None, headers)
-                .await
-                .unwrap();
-        assert_eq!(status_ok, 200);
-        assert_eq!(body_ok, "payload");
-    }
+    let mut headers = HashMap::new();
+    headers.insert("authorization".into(), "Bearer xyz".into());
+    let (status_ok, body_ok, _ct, _headers) =
+        run_request_with_headers(&program, "GET", "/secret", None, headers)
+            .await
+            .unwrap();
+    assert_eq!(status_ok, 200);
+    assert_eq!(body_ok, "payload");
+}
 
-    #[tokio::test]
-    async fn middleware_can_share_context_with_route_handler() {
-        let src = r#"
+#[tokio::test]
+async fn middleware_can_share_context_with_route_handler() {
+    let src = r#"
             middleware UserMw {
                 setContext("userId", "u-1");
             }
@@ -1325,64 +1325,64 @@
                 return text("user=" + context("userId"));
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/me", None).await.unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "user=u-1");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/me", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "user=u-1");
+}
 
-    #[tokio::test]
-    async fn unknown_middleware_fails_at_validation() {
-        let src = r#"
+#[tokio::test]
+async fn unknown_middleware_fails_at_validation() {
+    let src = r#"
             route GET "/x" use MissingMw {
                 return text("hi");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        let err = validate_program(&program).unwrap_err().to_string();
-        assert!(err.contains("unknown middleware"));
-    }
+    let program = parse_program(src).unwrap();
+    let err = validate_program(&program).unwrap_err().to_string();
+    assert!(err.contains("unknown middleware"));
+}
 
-    #[tokio::test]
-    async fn typed_route_handler_receives_path_param() {
-        let src = r#"
+#[tokio::test]
+async fn typed_route_handler_receives_path_param() {
+    let src = r#"
             function getUser(id: int) {
                 return "user=" + id;
             }
 
             route GET "/users/{id}" -> getUser;
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/users/42", None)
-            .await
-            .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "user=42");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/users/42", None)
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "user=42");
+}
 
-    #[tokio::test]
-    async fn typed_route_handler_receives_query_param_fallback() {
-        let src = r#"
+#[tokio::test]
+async fn typed_route_handler_receives_query_param_fallback() {
+    let src = r#"
             function search(q: string) {
                 return "q=" + q;
             }
 
             route GET "/search" -> search;
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/search?q=jwc", None)
-            .await
-            .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "q=jwc");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/search?q=jwc", None)
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "q=jwc");
+}
 
-    #[tokio::test]
-    async fn validate_body_returns_400_on_missing_required_field() {
-        let src = r#"
+#[tokio::test]
+async fn validate_body_returns_400_on_missing_required_field() {
+    let src = r#"
             route POST "/users" {
                 validate body {
                     name: required, minLength(2);
@@ -1391,20 +1391,19 @@
                 return text("ok");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) =
-            run_request(&program, "POST", "/users", Some("{\"age\":10}".to_string()))
-                .await
-                .unwrap();
-        assert_eq!(status, 400);
-        assert!(body.contains("\"errors\""));
-        assert!(body.contains("\"name\""));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "POST", "/users", Some("{\"age\":10}".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(status, 400);
+    assert!(body.contains("\"errors\""));
+    assert!(body.contains("\"name\""));
+}
 
-    #[tokio::test]
-    async fn validate_body_passes_when_all_rules_satisfied() {
-        let src = r#"
+#[tokio::test]
+async fn validate_body_passes_when_all_rules_satisfied() {
+    let src = r#"
             route POST "/users" {
                 validate body {
                     name: required, minLength(2), maxLength(10);
@@ -1413,23 +1412,23 @@
                 return text("ok");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(
-            &program,
-            "POST",
-            "/users",
-            Some("{\"name\":\"Najim\",\"age\":25}".to_string()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "ok");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(
+        &program,
+        "POST",
+        "/users",
+        Some("{\"name\":\"Najim\",\"age\":25}".to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "ok");
+}
 
-    #[tokio::test]
-    async fn validate_body_min_max_bound_violation() {
-        let src = r#"
+#[tokio::test]
+async fn validate_body_min_max_bound_violation() {
+    let src = r#"
             route POST "/score" {
                 validate body {
                     value: min(0), max(100);
@@ -1437,266 +1436,266 @@
                 return text("ok");
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(
-            &program,
-            "POST",
-            "/score",
-            Some("{\"value\":250}".to_string()),
-        )
-        .await
-        .unwrap();
-        assert_eq!(status, 400);
-        assert!(body.contains("max(100)"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(
+        &program,
+        "POST",
+        "/score",
+        Some("{\"value\":250}".to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 400);
+    assert!(body.contains("max(100)"));
+}
 
-    #[tokio::test]
-    async fn query_string_does_not_break_route_matching() {
-        let src = r#"
+#[tokio::test]
+async fn query_string_does_not_break_route_matching() {
+    let src = r#"
             route GET "/ping" {
                 return "{\"ok\":true}";
             }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/ping?ignored=1", None)
-            .await
-            .unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, "{\"ok\":true}");
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/ping?ignored=1", None)
+        .await
+        .unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(body, "{\"ok\":true}");
+}
 
-    #[test]
-    fn check_typed_value_accepts_base64_for_bytes() {
-        // Empty program — no models / functions needed; we only exercise
-        // the type-name dispatch inside `check_typed_value`.
-        let program = Program::default();
-        let vm = Vm::new(&program);
+#[test]
+fn check_typed_value_accepts_base64_for_bytes() {
+    // Empty program — no models / functions needed; we only exercise
+    // the type-name dispatch inside `check_typed_value`.
+    let program = Program::default();
+    let vm = Vm::new(&program);
 
-        // "hello" base64-encoded == "aGVsbG8=". Valid standard base64.
-        let ok = vm
-            .check_typed_value("p", "bytes", Value::Str("aGVsbG8=".to_string()))
-            .expect("valid base64 should pass");
-        assert_eq!(ok, Value::Str("aGVsbG8=".to_string()));
+    // "hello" base64-encoded == "aGVsbG8=". Valid standard base64.
+    let ok = vm
+        .check_typed_value("p", "bytes", Value::Str("aGVsbG8=".to_string()))
+        .expect("valid base64 should pass");
+    assert_eq!(ok, Value::Str("aGVsbG8=".to_string()));
 
-        // `byte[]` alias should behave the same way.
-        vm.check_typed_value("p", "byte[]", Value::Str("aGVsbG8=".to_string()))
-            .expect("byte[] alias accepts base64");
+    // `byte[]` alias should behave the same way.
+    vm.check_typed_value("p", "byte[]", Value::Str("aGVsbG8=".to_string()))
+        .expect("byte[] alias accepts base64");
 
-        // Non-base64 (`!` is not in the standard alphabet) must fail.
-        let err = vm
-            .check_typed_value("p", "bytes", Value::Str("not!base64".to_string()))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("expects bytes"),
-            "expected bytes type-error, got: {err}"
-        );
+    // Non-base64 (`!` is not in the standard alphabet) must fail.
+    let err = vm
+        .check_typed_value("p", "bytes", Value::Str("not!base64".to_string()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("expects bytes"),
+        "expected bytes type-error, got: {err}"
+    );
 
-        // Wrong shape (Int) must also fail.
-        let err = vm
-            .check_typed_value("p", "bytes", Value::Int(1))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("expects bytes"));
-    }
+    // Wrong shape (Int) must also fail.
+    let err = vm
+        .check_typed_value("p", "bytes", Value::Int(1))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("expects bytes"));
+}
 
-    // ── Sprint 4C [1.0-blocker] — json() validates strings ────────────────
+// ── Sprint 4C [1.0-blocker] — json() validates strings ────────────────
 
-    #[tokio::test]
-    async fn json_rejects_non_json_string_in_interpreter() {
-        let src = r#"
+#[tokio::test]
+async fn json_rejects_non_json_string_in_interpreter() {
+    let src = r#"
             route GET "/x" { return json("not-json-at-all"); }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let err = run_request(&program, "GET", "/x", None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("not valid JSON"),
-            "expected validation message, got: {err}"
-        );
-        assert!(
-            err.contains("json_unchecked"),
-            "expected hint about json_unchecked(), got: {err}"
-        );
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let err = run_request(&program, "GET", "/x", None)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not valid JSON"),
+        "expected validation message, got: {err}"
+    );
+    assert!(
+        err.contains("json_unchecked"),
+        "expected hint about json_unchecked(), got: {err}"
+    );
+}
 
-    #[tokio::test]
-    async fn json_accepts_well_formed_object_literal() {
-        // The Phase 1 Record path goes through value_to_json, so a literal
-        // object is always serialised as valid JSON — no validation
-        // needed. Regression guard that Sprint 4C didn't break this path.
-        let src = r#"
+#[tokio::test]
+async fn json_accepts_well_formed_object_literal() {
+    // The Phase 1 Record path goes through value_to_json, so a literal
+    // object is always serialised as valid JSON — no validation
+    // needed. Regression guard that Sprint 4C didn't break this path.
+    let src = r#"
             route GET "/x" { return json({ id: 1, name: "x" }); }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/x", None).await.unwrap();
-        assert_eq!(status, 200);
-        assert!(body.contains("\"id\""));
-        assert!(body.contains("\"name\""));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/x", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert!(body.contains("\"id\""));
+    assert!(body.contains("\"name\""));
+}
 
-    #[tokio::test]
-    async fn json_unchecked_bypasses_string_validation() {
-        // Caller-asserted contract: the string is JSON. Runtime trusts it.
-        // We use a string the interpreter would reject under json() so the
-        // contrast is clear.
-        let src = r#"
+#[tokio::test]
+async fn json_unchecked_bypasses_string_validation() {
+    // Caller-asserted contract: the string is JSON. Runtime trusts it.
+    // We use a string the interpreter would reject under json() so the
+    // contrast is clear.
+    let src = r#"
             route GET "/x" { return json_unchecked("definitely-not-json"); }
         "#;
-        let program = parse_program(src).unwrap();
-        validate_program(&program).unwrap();
-        let (status, body) = run_request(&program, "GET", "/x", None).await.unwrap();
-        assert_eq!(status, 200);
-        assert!(body.contains("definitely-not-json"));
-    }
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/x", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert!(body.contains("definitely-not-json"));
+}
 
-    // ------------------------------------------------------------------
-    // Sprint 3A: typed-catch dispatch with dotted-path subtypes.
-    // ------------------------------------------------------------------
-    //
-    // We can't fabricate a real `tokio_postgres::Error` with a specific
-    // SQLSTATE from outside the crate (every `Error::*` constructor is
-    // `pub(crate)`), so subtype detection on PG errors is exercised
-    // indirectly: when `classify_jwc_error` can't downcast to a PG error,
-    // it falls back to the substring scan and returns the parent kind
-    // `"DbError"` only. That fallback IS reachable from user-land errors
-    // and is what the production code path will see whenever someone
-    // raises a "looks like a DB problem" `anyhow!` without an underlying
-    // tokio_postgres source — which is precisely the gap Sprint 3A wants
-    // to keep honest.
+// ------------------------------------------------------------------
+// Sprint 3A: typed-catch dispatch with dotted-path subtypes.
+// ------------------------------------------------------------------
+//
+// We can't fabricate a real `tokio_postgres::Error` with a specific
+// SQLSTATE from outside the crate (every `Error::*` constructor is
+// `pub(crate)`), so subtype detection on PG errors is exercised
+// indirectly: when `classify_jwc_error` can't downcast to a PG error,
+// it falls back to the substring scan and returns the parent kind
+// `"DbError"` only. That fallback IS reachable from user-land errors
+// and is what the production code path will see whenever someone
+// raises a "looks like a DB problem" `anyhow!` without an underlying
+// tokio_postgres source — which is precisely the gap Sprint 3A wants
+// to keep honest.
 
-    #[test]
-    fn catch_type_matches_none_catches_everything() {
-        for &kind in JWC_ERROR_KINDS {
-            assert!(
-                catch_type_matches(None, kind),
-                "untyped catch must catch every kind, missed: {kind}"
-            );
-        }
+#[test]
+fn catch_type_matches_none_catches_everything() {
+    for &kind in JWC_ERROR_KINDS {
+        assert!(
+            catch_type_matches(None, kind),
+            "untyped catch must catch every kind, missed: {kind}"
+        );
     }
+}
 
-    #[test]
-    fn catch_type_matches_error_super_kind_catches_everything() {
-        for &kind in JWC_ERROR_KINDS {
-            assert!(
-                catch_type_matches(Some("Error"), kind),
-                "`catch (e: Error)` must catch every kind, missed: {kind}"
-            );
-        }
+#[test]
+fn catch_type_matches_error_super_kind_catches_everything() {
+    for &kind in JWC_ERROR_KINDS {
+        assert!(
+            catch_type_matches(Some("Error"), kind),
+            "`catch (e: Error)` must catch every kind, missed: {kind}"
+        );
     }
+}
 
-    #[test]
-    fn catch_type_matches_parent_catches_child() {
-        // `catch (e: DbError)` MUST match a kind of "DbError.UniqueViolation".
-        assert!(catch_type_matches(
-            Some("DbError"),
-            "DbError.UniqueViolation"
-        ));
-        assert!(catch_type_matches(
-            Some("DbError"),
-            "DbError.ForeignKeyViolation"
-        ));
-        assert!(catch_type_matches(
-            Some("HttpError"),
-            "HttpError.NotFound"
-        ));
-        assert!(catch_type_matches(Some("JwtError"), "JwtError.InvalidSignature"));
-        // Parent also matches its own bare kind.
-        assert!(catch_type_matches(Some("DbError"), "DbError"));
-    }
+#[test]
+fn catch_type_matches_parent_catches_child() {
+    // `catch (e: DbError)` MUST match a kind of "DbError.UniqueViolation".
+    assert!(catch_type_matches(
+        Some("DbError"),
+        "DbError.UniqueViolation"
+    ));
+    assert!(catch_type_matches(
+        Some("DbError"),
+        "DbError.ForeignKeyViolation"
+    ));
+    assert!(catch_type_matches(Some("HttpError"), "HttpError.NotFound"));
+    assert!(catch_type_matches(
+        Some("JwtError"),
+        "JwtError.InvalidSignature"
+    ));
+    // Parent also matches its own bare kind.
+    assert!(catch_type_matches(Some("DbError"), "DbError"));
+}
 
-    #[test]
-    fn catch_type_matches_specific_subtype_does_not_match_sibling() {
-        // UniqueViolation must NOT catch ForeignKeyViolation, even though
-        // both are dotted children of DbError.
-        assert!(!catch_type_matches(
-            Some("DbError.UniqueViolation"),
-            "DbError.ForeignKeyViolation"
-        ));
-        assert!(!catch_type_matches(
-            Some("DbError.UniqueViolation"),
-            "DbError"
-        ));
-        assert!(!catch_type_matches(
-            Some("HttpError.NotFound"),
-            "HttpError.Unauthorized"
-        ));
-    }
+#[test]
+fn catch_type_matches_specific_subtype_does_not_match_sibling() {
+    // UniqueViolation must NOT catch ForeignKeyViolation, even though
+    // both are dotted children of DbError.
+    assert!(!catch_type_matches(
+        Some("DbError.UniqueViolation"),
+        "DbError.ForeignKeyViolation"
+    ));
+    assert!(!catch_type_matches(
+        Some("DbError.UniqueViolation"),
+        "DbError"
+    ));
+    assert!(!catch_type_matches(
+        Some("HttpError.NotFound"),
+        "HttpError.Unauthorized"
+    ));
+}
 
-    #[test]
-    fn catch_type_matches_specific_subtype_matches_exact() {
-        assert!(catch_type_matches(
-            Some("DbError.UniqueViolation"),
-            "DbError.UniqueViolation"
-        ));
-        assert!(catch_type_matches(
-            Some("HttpError.NotFound"),
-            "HttpError.NotFound"
-        ));
-    }
+#[test]
+fn catch_type_matches_specific_subtype_matches_exact() {
+    assert!(catch_type_matches(
+        Some("DbError.UniqueViolation"),
+        "DbError.UniqueViolation"
+    ));
+    assert!(catch_type_matches(
+        Some("HttpError.NotFound"),
+        "HttpError.NotFound"
+    ));
+}
 
-    #[test]
-    fn catch_type_matches_rejects_bare_prefix_overlap() {
-        // "Db" is not a real kind, but defensively: `catch (e: Db)` must
-        // NOT silently catch a "DbError.*" kind just because the string
-        // starts with "Db". The match boundary is the literal dot.
-        assert!(!catch_type_matches(Some("Db"), "DbError"));
-        assert!(!catch_type_matches(Some("Db"), "DbError.UniqueViolation"));
-        assert!(!catch_type_matches(Some("Http"), "HttpError.NotFound"));
-    }
+#[test]
+fn catch_type_matches_rejects_bare_prefix_overlap() {
+    // "Db" is not a real kind, but defensively: `catch (e: Db)` must
+    // NOT silently catch a "DbError.*" kind just because the string
+    // starts with "Db". The match boundary is the literal dot.
+    assert!(!catch_type_matches(Some("Db"), "DbError"));
+    assert!(!catch_type_matches(Some("Db"), "DbError.UniqueViolation"));
+    assert!(!catch_type_matches(Some("Http"), "HttpError.NotFound"));
+}
 
-    #[test]
-    fn classify_jwc_error_falls_back_to_dberror_when_subtype_not_detectable() {
-        // No real `tokio_postgres::Error` on the chain — just a plain
-        // anyhow!() message that smells like DB. We must NOT invent a
-        // subtype; the contract is "fall back to the parent kind".
-        let e = anyhow::anyhow!("Postgres pool exhausted: no connection");
-        let kind = classify_jwc_error(&e);
-        assert_eq!(kind, "DbError");
-        // And the parent kind matches a `catch (e: DbError)`.
-        assert!(catch_type_matches(Some("DbError"), kind));
-        // But NOT a specific subtype.
-        assert!(!catch_type_matches(Some("DbError.UniqueViolation"), kind));
-    }
+#[test]
+fn classify_jwc_error_falls_back_to_dberror_when_subtype_not_detectable() {
+    // No real `tokio_postgres::Error` on the chain — just a plain
+    // anyhow!() message that smells like DB. We must NOT invent a
+    // subtype; the contract is "fall back to the parent kind".
+    let e = anyhow::anyhow!("Postgres pool exhausted: no connection");
+    let kind = classify_jwc_error(&e);
+    assert_eq!(kind, "DbError");
+    // And the parent kind matches a `catch (e: DbError)`.
+    assert!(catch_type_matches(Some("DbError"), kind));
+    // But NOT a specific subtype.
+    assert!(!catch_type_matches(Some("DbError.UniqueViolation"), kind));
+}
 
-    #[test]
-    fn classify_jwc_error_detects_jwt_invalid_signature() {
-        // Real `crate::jwt::verify_hs256` failure — its message is
-        // "jwt_verify: signature mismatch", which our substring scan
-        // routes to the InvalidSignature subtype.
-        let token = crate::jwt::sign_hs256(r#"{"a":1}"#, "right").unwrap();
-        let err = crate::jwt::verify_hs256(&token, "wrong").unwrap_err();
-        let kind = classify_jwc_error(&err);
-        assert_eq!(kind, "JwtError.InvalidSignature");
-        // Parent JwtError catches it.
-        assert!(catch_type_matches(Some("JwtError"), kind));
-        // And the catch-all `Error` does too.
-        assert!(catch_type_matches(Some("Error"), kind));
-        // But an unrelated subtype does not.
-        assert!(!catch_type_matches(Some("DbError.UniqueViolation"), kind));
-    }
+#[test]
+fn classify_jwc_error_detects_jwt_invalid_signature() {
+    // Real `crate::jwt::verify_hs256` failure — its message is
+    // "jwt_verify: signature mismatch", which our substring scan
+    // routes to the InvalidSignature subtype.
+    let token = crate::jwt::sign_hs256(r#"{"a":1}"#, "right").unwrap();
+    let err = crate::jwt::verify_hs256(&token, "wrong").unwrap_err();
+    let kind = classify_jwc_error(&err);
+    assert_eq!(kind, "JwtError.InvalidSignature");
+    // Parent JwtError catches it.
+    assert!(catch_type_matches(Some("JwtError"), kind));
+    // And the catch-all `Error` does too.
+    assert!(catch_type_matches(Some("Error"), kind));
+    // But an unrelated subtype does not.
+    assert!(!catch_type_matches(Some("DbError.UniqueViolation"), kind));
+}
 
-    #[test]
-    fn classify_jwc_error_falls_back_to_error_for_unknown_shape() {
-        let e = anyhow::anyhow!("something nobody recognises");
-        let kind = classify_jwc_error(&e);
-        assert_eq!(kind, "Error");
-    }
+#[test]
+fn classify_jwc_error_falls_back_to_error_for_unknown_shape() {
+    let e = anyhow::anyhow!("something nobody recognises");
+    let kind = classify_jwc_error(&e);
+    assert_eq!(kind, "Error");
+}
 
-    #[test]
-    fn classify_jwc_error_detects_validation_error_message_shape() {
-        let e = anyhow::anyhow!("validate body: field 'name' is required");
-        assert_eq!(classify_jwc_error(&e), "ValidationError");
-    }
+#[test]
+fn classify_jwc_error_detects_validation_error_message_shape() {
+    let e = anyhow::anyhow!("validate body: field 'name' is required");
+    assert_eq!(classify_jwc_error(&e), "ValidationError");
+}
 
-    #[test]
-    fn classify_jwc_error_detects_timeout_error_message_shape() {
-        let e = anyhow::anyhow!("request timeout: deadline elapsed");
-        assert_eq!(classify_jwc_error(&e), "TimeoutError");
-    }
+#[test]
+fn classify_jwc_error_detects_timeout_error_message_shape() {
+    let e = anyhow::anyhow!("request timeout: deadline elapsed");
+    assert_eq!(classify_jwc_error(&e), "TimeoutError");
+}

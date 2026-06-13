@@ -18,7 +18,10 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Result};
 
-use crate::ast::{Expr, FunctionDecl, ImportDecl, ModelKind, NavigationField, Program, Stmt, Visibility, WhereExpr};
+use crate::ast::{
+    Expr, FunctionDecl, ImportDecl, ModelKind, NavigationField, Program, Stmt, Visibility,
+    WhereExpr,
+};
 use crate::diag::SourceMap;
 
 use super::validate_walk::{
@@ -653,19 +656,9 @@ fn check_visibility(program: &Program) -> Result<()> {
     // calls resolve against the namespace the route was DECLARED in.
     // Handler refs (`route GET "/x" -> someFn;`) are an implicit call site.
     for route in &program.routes {
-        let label = format!(
-            "Route {} {}",
-            route.method.to_ascii_uppercase(),
-            route.path
-        );
+        let label = format!("Route {} {}", route.method.to_ascii_uppercase(), route.path);
         if let Some(handler) = &route.handler {
-            check_handler_visibility(
-                handler,
-                &route.namespace,
-                &fn_table,
-                &imports_by_ns,
-                &label,
-            )?;
+            check_handler_visibility(handler, &route.namespace, &fn_table, &imports_by_ns, &label)?;
         } else {
             check_visibility_in_stmts(
                 &route.body,
@@ -680,21 +673,9 @@ fn check_visibility(program: &Program) -> Result<()> {
     // Middlewares — caller_ns = the declaring namespace of the middleware.
     for mw in &program.middlewares {
         let label = format!("Middleware '{}'", mw.name);
-        check_visibility_in_stmts(
-            &mw.body,
-            &mw.namespace,
-            &fn_table,
-            &imports_by_ns,
-            &label,
-        )?;
+        check_visibility_in_stmts(&mw.body, &mw.namespace, &fn_table, &imports_by_ns, &label)?;
         if let Some(after) = &mw.after_body {
-            check_visibility_in_stmts(
-                after,
-                &mw.namespace,
-                &fn_table,
-                &imports_by_ns,
-                &label,
-            )?;
+            check_visibility_in_stmts(after, &mw.namespace, &fn_table, &imports_by_ns, &label)?;
         }
     }
 

@@ -241,8 +241,7 @@ mod tests {
         // entry — else the user sees a code they can't look up.
         // Update this list when wiring a new bail to a code.
         let parser_emitted = [
-            "E011", "E012", "E013", "E014", "E015", "E016", "E017", "E018", "E019", "E020",
-            "E021",
+            "E011", "E012", "E013", "E014", "E015", "E016", "E017", "E018", "E019", "E020", "E021",
         ];
         for code in parser_emitted {
             assert!(

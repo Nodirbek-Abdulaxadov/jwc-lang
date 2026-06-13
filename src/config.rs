@@ -302,14 +302,7 @@ pub const REGISTRY: &[EnvVar] = &[
 ];
 
 /// Names whose rendered value must be masked.
-const REDACT_NEEDLES: &[&str] = &[
-    "PASSWORD",
-    "SECRET",
-    "TOKEN",
-    "KEY",
-    "JWT",
-    "DATABASE_URL",
-];
+const REDACT_NEEDLES: &[&str] = &["PASSWORD", "SECRET", "TOKEN", "KEY", "JWT", "DATABASE_URL"];
 
 fn name_is_secret(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();

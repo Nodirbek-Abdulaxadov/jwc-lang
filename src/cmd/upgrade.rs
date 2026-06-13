@@ -78,11 +78,7 @@ pub fn upgrade(paths: Vec<PathBuf>, dry_run: bool) -> Result<()> {
                 if let Some(updated) = rule.apply_to_file(&path, &current) {
                     if updated != current {
                         any_rule_applied = true;
-                        println!(
-                            "  [{}] {}",
-                            rule.id(),
-                            path.display(),
-                        );
+                        println!("  [{}] {}", rule.id(), path.display(),);
                         current = updated;
                     }
                 }
@@ -100,13 +96,9 @@ pub fn upgrade(paths: Vec<PathBuf>, dry_run: bool) -> Result<()> {
     }
 
     if dry_run {
-        println!(
-            "jwc upgrade --dry-run: {rewritten}/{total_files} file(s) would change.",
-        );
+        println!("jwc upgrade --dry-run: {rewritten}/{total_files} file(s) would change.",);
     } else {
-        println!(
-            "jwc upgrade: {rewritten}/{total_files} file(s) rewritten.",
-        );
+        println!("jwc upgrade: {rewritten}/{total_files} file(s) rewritten.",);
     }
     Ok(())
 }
@@ -115,16 +107,18 @@ fn walk_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let meta = std::fs::metadata(&path)
-            .with_context(|| format!("stat {}", path.display()))?;
+        let meta = std::fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
         if meta.is_dir() {
             // Skip build / dependency caches.
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if matches!(name, ".jwc-build" | "target" | "node_modules" | ".git" | "bin" | "obj") {
+            if matches!(
+                name,
+                ".jwc-build" | "target" | "node_modules" | ".git" | "bin" | "obj"
+            ) {
                 continue;
             }
-            for entry in std::fs::read_dir(&path)
-                .with_context(|| format!("read_dir {}", path.display()))?
+            for entry in
+                std::fs::read_dir(&path).with_context(|| format!("read_dir {}", path.display()))?
             {
                 let entry = entry?;
                 stack.push(entry.path());

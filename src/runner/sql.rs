@@ -14,9 +14,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_recursion::async_recursion;
 use tokio_postgres::types::ToSql;
 
-use crate::ast::{
-    AggregateKind, DbOrderBy, Expr, ModelDecl, NavigationKind, SortDir, WhereExpr,
-};
+use crate::ast::{AggregateKind, DbOrderBy, Expr, ModelDecl, NavigationKind, SortDir, WhereExpr};
 
 use super::util::{looks_like_datetime, looks_like_uuid};
 use super::{format_float, value_to_json, Value, Vm};

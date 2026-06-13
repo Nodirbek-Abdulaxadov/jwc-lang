@@ -189,6 +189,6 @@ Columns:
   **Native** is ✅. Interpreter-only builtins still run under `jwc run` but are
   rejected at `jwc build --native` time — preferred over silent miscompilation.
 - For per-builtin contract (semantics, error modes, examples), see
-  [`docs/spec/builtins.md`](../../spec/builtins.md).
+  [`docs/spec/builtins.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/builtins.md).
 - New builtin? Edit `src/builtins.rs::BUILTIN_DEFS`, regenerate this file via
   the command at the top, then add the runtime + AOT impls per the module docs.

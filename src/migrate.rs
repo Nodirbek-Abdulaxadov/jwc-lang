@@ -223,7 +223,11 @@ pub async fn apply_pending_migrations(
     // Rows with a NULL checksum are legacy (predate Sprint 4A); backfill
     // them with the on-disk SHA on this pass when not dry-run.
     for file in &migration_files {
-        let Some(name) = file.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        let Some(name) = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
             bail!("Invalid migration file name: {}", file.display());
         };
         let Some(stored) = applied.get(&name) else {

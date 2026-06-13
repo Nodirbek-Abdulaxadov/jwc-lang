@@ -577,8 +577,8 @@ impl PostgresJobDriver {
                 {
                     Ok(rt) => rt,
                     Err(e) => {
-                        let _ = ready_tx
-                            .send(Err(format!("failed to build pg-queue runtime: {e}")));
+                        let _ =
+                            ready_tx.send(Err(format!("failed to build pg-queue runtime: {e}")));
                         return;
                     }
                 };
@@ -1266,7 +1266,10 @@ function main() {
             err.contains("JWC_QUEUE_DRIVER must be 'memory' or 'postgres'"),
             "got: {err}"
         );
-        assert!(err.contains("redis"), "error must mention the bad value: {err}");
+        assert!(
+            err.contains("redis"),
+            "error must mention the bad value: {err}"
+        );
     }
 
     #[test]

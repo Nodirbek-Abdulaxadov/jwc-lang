@@ -359,13 +359,10 @@ pub fn is_transient_error(err: &anyhow::Error) -> bool {
                 }
             }
         }
-        if let Some(pool_err) =
-            cause.downcast_ref::<deadpool_postgres::PoolError>()
-        {
+        if let Some(pool_err) = cause.downcast_ref::<deadpool_postgres::PoolError>() {
             return matches!(
                 pool_err,
-                deadpool_postgres::PoolError::Backend(_)
-                    | deadpool_postgres::PoolError::Timeout(_)
+                deadpool_postgres::PoolError::Backend(_) | deadpool_postgres::PoolError::Timeout(_)
             );
         }
     }
@@ -498,9 +495,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         || name.chars().next().is_some_and(|c| c.is_ascii_digit())
     {
         bail!(
@@ -944,9 +939,7 @@ mod tests {
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Always-transient error: PoolError::Timeout(Wait).
             let pool_err: deadpool_postgres::PoolError =
-                deadpool_postgres::PoolError::Timeout(
-                    deadpool_postgres::TimeoutType::Wait,
-                );
+                deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait);
             Err(anyhow::Error::new(pool_err))
         })
         .await;
@@ -987,7 +980,12 @@ mod tests {
         // `available <= size`, which is what the `/metrics` consumers
         // rely on to chart pool saturation correctly.
         if let Some(s) = pool_status() {
-            assert!(s.size <= s.max_size, "size {} > max_size {}", s.size, s.max_size);
+            assert!(
+                s.size <= s.max_size,
+                "size {} > max_size {}",
+                s.size,
+                s.max_size
+            );
             assert!(
                 s.available <= s.size,
                 "available {} > size {}",

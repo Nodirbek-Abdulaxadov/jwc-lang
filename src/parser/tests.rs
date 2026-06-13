@@ -1142,7 +1142,10 @@ fn catch_type_single_ident_preserved() {
         }
     "#;
     let program = parse_program(src).unwrap();
-    assert_eq!(try_catch_type_of(&program, "f"), Some("DbError".to_string()));
+    assert_eq!(
+        try_catch_type_of(&program, "f"),
+        Some("DbError".to_string())
+    );
     validate_program(&program).unwrap();
 }
 
@@ -1286,7 +1289,9 @@ fn nested_transaction_rejected_at_parse_time_with_e016() {
             }
         }
     "#;
-    let err = parse_program(src).expect_err("nested transaction must fail").to_string();
+    let err = parse_program(src)
+        .expect_err("nested transaction must fail")
+        .to_string();
     assert!(
         err.contains("E016"),
         "expected E016 code in error, got: {err}"

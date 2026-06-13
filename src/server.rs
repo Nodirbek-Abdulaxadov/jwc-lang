@@ -535,14 +535,10 @@ async fn handle_metrics(State(state): State<AppState>) -> Response {
         );
         body.push_str("# TYPE jwc_db_pool_size gauge\n");
         body.push_str(&format!("jwc_db_pool_size {}\n", pool.size));
-        body.push_str(
-            "# HELP jwc_db_pool_available Idle connections immediately checkout-able.\n",
-        );
+        body.push_str("# HELP jwc_db_pool_available Idle connections immediately checkout-able.\n");
         body.push_str("# TYPE jwc_db_pool_available gauge\n");
         body.push_str(&format!("jwc_db_pool_available {}\n", pool.available));
-        body.push_str(
-            "# HELP jwc_db_pool_max_size Configured pool ceiling (JWC_DB_POOL_SIZE).\n",
-        );
+        body.push_str("# HELP jwc_db_pool_max_size Configured pool ceiling (JWC_DB_POOL_SIZE).\n");
         body.push_str("# TYPE jwc_db_pool_max_size gauge\n");
         body.push_str(&format!("jwc_db_pool_max_size {}\n", pool.max_size));
         body.push_str(

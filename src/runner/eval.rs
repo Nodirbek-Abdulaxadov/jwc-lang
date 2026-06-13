@@ -676,11 +676,14 @@ impl<'a> Vm<'a> {
                 // closed here. `json_unchecked(s)` keeps the old behaviour for
                 // callers that have already validated the payload (e.g. SELECT
                 // result fast path).
-                if name.eq_ignore_ascii_case("json")
-                    || name.eq_ignore_ascii_case("json_unchecked")
+                if name.eq_ignore_ascii_case("json") || name.eq_ignore_ascii_case("json_unchecked")
                 {
                     let is_unchecked = name.eq_ignore_ascii_case("json_unchecked");
-                    let label = if is_unchecked { "json_unchecked" } else { "json" };
+                    let label = if is_unchecked {
+                        "json_unchecked"
+                    } else {
+                        "json"
+                    };
                     if args.len() != 1 {
                         bail!("{}(val) expects exactly 1 arg", label);
                     }
@@ -689,8 +692,7 @@ impl<'a> Vm<'a> {
                         Value::Str(s) => {
                             if !is_unchecked {
                                 if let Err(e) = serde_json::from_str::<serde_json::Value>(&s) {
-                                    let preview: String =
-                                        s.chars().take(40).collect::<String>();
+                                    let preview: String = s.chars().take(40).collect::<String>();
                                     let ellipsis = if s.chars().count() > 40 { "..." } else { "" };
                                     bail!(
                                         "json(): argument is not valid JSON — got '{}{}' (use json_unchecked() to skip validation): {}",

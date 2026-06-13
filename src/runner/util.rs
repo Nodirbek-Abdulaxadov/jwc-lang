@@ -304,8 +304,8 @@ pub(super) fn check_url_allowlisted(url: &str) -> Result<()> {
         return Ok(());
     }
 
-    let parsed = url::Url::parse(url)
-        .map_err(|e| anyhow!("http allowlist: invalid URL '{url}': {e}"))?;
+    let parsed =
+        url::Url::parse(url).map_err(|e| anyhow!("http allowlist: invalid URL '{url}': {e}"))?;
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow!("http allowlist: URL '{url}' has no host"))?

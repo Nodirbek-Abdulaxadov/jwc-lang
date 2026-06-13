@@ -355,9 +355,7 @@ fn collect_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
                 collect_calls(body, out);
                 collect_calls(catch_body, out);
             }
-            Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
-                collect_calls(body, out)
-            }
+            Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => collect_calls(body, out),
             Stmt::ForIn { iter, body, .. } => {
                 collect_calls_expr(iter, out);
                 collect_calls(body, out);

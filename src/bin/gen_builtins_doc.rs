@@ -39,20 +39,30 @@ pub fn render_builtins_doc(defs: &[BuiltinDef]) -> String {
     out.push_str("sidebar_position: 1\n");
     out.push_str("---\n\n");
     out.push_str("# Built-in functions\n\n");
-    out.push_str("> **Auto-generated** from `src/builtins.rs::BUILTIN_DEFS`. To regenerate after adding\n");
+    out.push_str(
+        "> **Auto-generated** from `src/builtins.rs::BUILTIN_DEFS`. To regenerate after adding\n",
+    );
     out.push_str("> or editing a builtin, run:\n");
     out.push_str(">\n");
     out.push_str("> ```bash\n");
     out.push_str("> cargo run --bin gen-builtins-doc > docs/docs/reference/builtins.md\n");
     out.push_str("> ```\n");
     out.push_str(">\n");
-    out.push_str("> CI verifies this file matches the registry via `tests/builtins_doc_sync.rs`;\n");
+    out.push_str(
+        "> CI verifies this file matches the registry via `tests/builtins_doc_sync.rs`;\n",
+    );
     out.push_str("> PRs that add a builtin without regenerating the doc fail.\n\n");
 
     out.push_str("Columns:\n\n");
-    out.push_str("- **Args** — `min..max` argument count enforced by the runtime. `*` = variadic.\n");
-    out.push_str("- **Native** — ✅ if `jwc build --native` accepts the call; — if interpreter-only.\n");
-    out.push_str("- **Aliases** — additional names the interpreter dispatches case-insensitively.\n\n");
+    out.push_str(
+        "- **Args** — `min..max` argument count enforced by the runtime. `*` = variadic.\n",
+    );
+    out.push_str(
+        "- **Native** — ✅ if `jwc build --native` accepts the call; — if interpreter-only.\n",
+    );
+    out.push_str(
+        "- **Aliases** — additional names the interpreter dispatches case-insensitively.\n\n",
+    );
 
     // The defs already flow in category order in src/builtins.rs (string
     // helpers → HTTP request → response helpers → DB → WS → async I/O →
@@ -89,12 +99,18 @@ pub fn render_builtins_doc(defs: &[BuiltinDef]) -> String {
 
     out.push_str("## Notes\n\n");
     out.push_str("- The native AOT whitelist is the set of every `Name` + every `Alias` where\n");
-    out.push_str("  **Native** is ✅. Interpreter-only builtins still run under `jwc run` but are\n");
-    out.push_str("  rejected at `jwc build --native` time — preferred over silent miscompilation.\n");
+    out.push_str(
+        "  **Native** is ✅. Interpreter-only builtins still run under `jwc run` but are\n",
+    );
+    out.push_str(
+        "  rejected at `jwc build --native` time — preferred over silent miscompilation.\n",
+    );
     out.push_str("- For per-builtin contract (semantics, error modes, examples), see\n");
-    out.push_str("  [`docs/spec/builtins.md`](../../spec/builtins.md).\n");
+    out.push_str("  [`docs/spec/builtins.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/builtins.md).\n");
     out.push_str("- New builtin? Edit `src/builtins.rs::BUILTIN_DEFS`, regenerate this file via\n");
-    out.push_str("  the command at the top, then add the runtime + AOT impls per the module docs.\n");
+    out.push_str(
+        "  the command at the top, then add the runtime + AOT impls per the module docs.\n",
+    );
 
     out
 }
@@ -132,12 +148,7 @@ const GROUPS: &[Group] = &[
     },
     Group {
         title: "JSON",
-        predicate: |d| {
-            matches!(
-                d.name,
-                "json_parse" | "json_stringify" | "set_json_field"
-            )
-        },
+        predicate: |d| matches!(d.name, "json_parse" | "json_stringify" | "set_json_field"),
     },
     Group {
         title: "HTTP request",
@@ -200,12 +211,7 @@ const GROUPS: &[Group] = &[
     },
     Group {
         title: "Async I/O",
-        predicate: |d| {
-            matches!(
-                d.name,
-                "sleep_ms" | "http_get" | "http_post" | "fetch_json"
-            )
-        },
+        predicate: |d| matches!(d.name, "sleep_ms" | "http_get" | "http_post" | "fetch_json"),
     },
     Group {
         title: "Environment + coercion",
@@ -217,7 +223,12 @@ const GROUPS: &[Group] = &[
     },
     Group {
         title: "Cache (in-memory)",
-        predicate: |d| matches!(d.name, "cache_get" | "cache_set" | "cache_del" | "cache_clear"),
+        predicate: |d| {
+            matches!(
+                d.name,
+                "cache_get" | "cache_set" | "cache_del" | "cache_clear"
+            )
+        },
     },
     Group {
         title: "Arrays",
@@ -245,7 +256,12 @@ const GROUPS: &[Group] = &[
     },
     Group {
         title: "Request context",
-        predicate: |d| matches!(d.name, "context" | "setContext" | "set_context" | "dispatch"),
+        predicate: |d| {
+            matches!(
+                d.name,
+                "context" | "setContext" | "set_context" | "dispatch"
+            )
+        },
     },
     Group {
         title: "Background jobs",

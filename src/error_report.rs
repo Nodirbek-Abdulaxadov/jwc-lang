@@ -246,9 +246,8 @@ mod tests {
         // Synthesise an anyhow error chain that embeds a postgres URL with
         // creds and pipe it through `to_single_line` (the last-pass
         // scrubber the HTTP layer uses to ship a body back to the client).
-        let inner = anyhow::anyhow!(
-            "connect failed for postgres://alice:hunter2@db.internal:5432/app"
-        );
+        let inner =
+            anyhow::anyhow!("connect failed for postgres://alice:hunter2@db.internal:5432/app");
         let outer: anyhow::Error = inner.context("DB ping (SELECT 1) failed");
         let line = to_single_line(&outer);
         assert!(line.contains("alice:***@db.internal"), "got: {line}");

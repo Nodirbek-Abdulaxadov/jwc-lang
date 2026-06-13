@@ -19,12 +19,12 @@ use crate::ast::Expr;
 // alias, and the private free helper functions (`http_client`, etc.) defined
 // in the parent `runner` module. A child module may name private items of
 // its ancestors.
-use super::*;
 use super::sql::{boxed_params_to_refs, json_value_to_sql_param};
 use super::util::{
     apply_headers_reqwest, assemble_url_from_pg_env, check_url_allowlisted,
     connection_string_from_arg, http_response_to_json_string,
 };
+use super::*;
 
 impl<'a> Vm<'a> {
     pub(super) async fn eval_path_param_call(
@@ -812,7 +812,9 @@ impl<'a> Vm<'a> {
             // **Phase 1** — object literals now come in as Record; render to
             // JSON once so the existing string-form parser stays the only
             // schema-validating code path.
-            Value::Record { .. } => connection_string_from_arg(&super::value_to_json(&value).to_string())?,
+            Value::Record { .. } => {
+                connection_string_from_arg(&super::value_to_json(&value).to_string())?
+            }
             other => bail!(
                 "setConnectionString(arg): arg must be a URL string or an object literal, got {}",
                 other.type_name()
@@ -1366,8 +1368,15 @@ impl<'a> Vm<'a> {
         //     Record-grow code path here, and field-add-after-construction
         //     is the rare case (almost all `set_json_field` callers patch an
         //     existing field on a request body / config).
-        if let Value::Record { field_names, values } = obj {
-            if let Some(idx) = field_names.iter().position(|f| f.as_ref() == field.as_str()) {
+        if let Value::Record {
+            field_names,
+            values,
+        } = obj
+        {
+            if let Some(idx) = field_names
+                .iter()
+                .position(|f| f.as_ref() == field.as_str())
+            {
                 let mut new_values = values;
                 let values_mut = Arc::make_mut(&mut new_values);
                 values_mut[idx] = value;
@@ -1379,7 +1388,11 @@ impl<'a> Vm<'a> {
             // New field on a Record — re-route through the V::Str fallback
             // by materialising the Record as JSON. Cheap: a 2-10 field
             // record's JSON form is small, and this branch is rare.
-            let json_str = value_to_json(&Value::Record { field_names, values }).to_string();
+            let json_str = value_to_json(&Value::Record {
+                field_names,
+                values,
+            })
+            .to_string();
             return self
                 .set_json_field_via_string(json_str, field, value)
                 .map(Value::Str);

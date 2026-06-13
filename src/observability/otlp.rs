@@ -82,13 +82,10 @@ fn init_with_endpoint(endpoint: &str) -> Result<Option<OtlpGuard>> {
     use anyhow::Context;
     use opentelemetry::{global, KeyValue};
     use opentelemetry_otlp::{SpanExporter, WithExportConfig};
-    use opentelemetry_sdk::{
-        propagation::TraceContextPropagator, trace::TracerProvider, Resource,
-    };
+    use opentelemetry_sdk::{propagation::TraceContextPropagator, trace::TracerProvider, Resource};
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-    let service_name =
-        std::env::var("JWC_SERVICE_NAME").unwrap_or_else(|_| "jwc".to_string());
+    let service_name = std::env::var("JWC_SERVICE_NAME").unwrap_or_else(|_| "jwc".to_string());
 
     // Install the W3C Trace Context propagator globally. The server
     // already extracts the `trace-id` from inbound `traceparent` headers

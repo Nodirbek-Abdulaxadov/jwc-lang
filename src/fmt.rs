@@ -41,11 +41,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::ast::{
-    AggregateKind, ConstDecl, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr,
-    FieldDecl, FieldReference, FunctionDecl, ImportDecl, MiddlewareDecl, ModelDecl, ModelKind,
-    MountDecl, NavigationField, NavigationKind, OnDeleteAction, Program, RouteDecl,
-    RouteProtocol, SortDir, Stmt, TypeSpec, TypedParam, ValidateField, ValidateRule, Visibility,
-    WhereExpr,
+    AggregateKind, ConstDecl, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
+    FieldReference, FunctionDecl, ImportDecl, MiddlewareDecl, ModelDecl, ModelKind, MountDecl,
+    NavigationField, NavigationKind, OnDeleteAction, Program, RouteDecl, RouteProtocol, SortDir,
+    Stmt, TypeSpec, TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
 };
 
 const INDENT: &str = "    ";

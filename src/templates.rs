@@ -298,7 +298,11 @@ mod tests {
 
         // Manifest filename uses the project name.
         let proj = dir.join("myapp.jwcproj");
-        assert!(proj.is_file(), "expected myapp.jwcproj at {}", proj.display());
+        assert!(
+            proj.is_file(),
+            "expected myapp.jwcproj at {}",
+            proj.display()
+        );
 
         // Contents-side substitution: the JSON should carry "name": "myapp".
         let manifest = std::fs::read_to_string(&proj).unwrap();
@@ -309,7 +313,10 @@ mod tests {
         );
         // The placeholder must not survive the swap anywhere in the tree.
         let env_ex = std::fs::read_to_string(dir.join(".env.example")).unwrap();
-        assert!(!env_ex.contains("{{name}}"), "{{name}} leaked into .env.example");
+        assert!(
+            !env_ex.contains("{{name}}"),
+            "{{name}} leaked into .env.example"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

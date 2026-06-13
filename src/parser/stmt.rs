@@ -37,9 +37,7 @@ impl<'a> Parser<'a> {
                 // lexer already restricts idents to this charset; we just
                 // re-assert here so codegen never sees a savepoint name
                 // it can't safely interpolate. Defence in depth.
-                if !name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     || name.chars().next().is_some_and(|c| c.is_ascii_digit())
                 {
                     anyhow::bail!(

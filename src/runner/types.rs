@@ -22,12 +22,7 @@ impl<'a> Vm<'a> {
         self.check_typed_value(&format!("parameter '{}'", param.name), ty, value)
     }
 
-    pub(super) fn check_typed_value(
-        &self,
-        subject: &str,
-        ty: &str,
-        value: Value,
-    ) -> Result<Value> {
+    pub(super) fn check_typed_value(&self, subject: &str, ty: &str, value: Value) -> Result<Value> {
         // Strip trailing `?` nullable marker
         let (base, nullable_marker) = match ty.strip_suffix('?') {
             Some(stripped) => (stripped, true),
