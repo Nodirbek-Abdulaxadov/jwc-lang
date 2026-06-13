@@ -1,0 +1,6 @@
+// Conformance: object literal -> json_stringify -> json_parse -> field read.
+function main() {
+    let s = json_stringify({ a: 1, b: 2 });
+    let r = json_parse(s);
+    print(r.a + r.b);
+}

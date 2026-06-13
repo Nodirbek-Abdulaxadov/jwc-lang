@@ -1170,21 +1170,57 @@ impl<'a> Vm<'a> {
                     .cloned()
                     .ok_or_else(|| anyhow!("FieldAssign: variable '{}' not found", var))?;
                 let new_val = self.eval_expr(value, vars).await?;
-                let json_str = match current {
-                    Value::Str(s) => s,
-                    Value::Null => "{}".to_string(),
+                match current {
+                    // **Phase 1** — Record CoW mutation. If the field exists,
+                    // write in place via `Arc::make_mut` on the values Arc
+                    // (shape Arc stays shared). If it's a new field, the shape
+                    // would have to grow — fall through to the JSON-string
+                    // path below by re-serializing.
+                    Value::Record { field_names, values } => {
+                        if let Some(idx) = field_names.iter().position(|f| f.as_ref() == field.as_str()) {
+                            let mut new_values = values.clone();
+                            let slot = Arc::make_mut(&mut new_values);
+                            slot[idx] = new_val;
+                            vars.insert(
+                                key.clone(),
+                                Value::Record {
+                                    field_names,
+                                    values: new_values,
+                                },
+                            );
+                        } else {
+                            // New field — convert to JSON and reuse the
+                            // existing string-path semantics so shape grow is
+                            // a single code path.
+                            let mut doc =
+                                value_to_json(&Value::Record { field_names, values });
+                            if let Some(obj) = doc.as_object_mut() {
+                                obj.insert(field.clone(), value_to_json(&new_val));
+                            }
+                            vars.insert(key.clone(), Value::Str(doc.to_string()));
+                        }
+                    }
+                    Value::Str(s) => {
+                        let mut doc: serde_json::Value = serde_json::from_str(&s)
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        if let Some(obj) = doc.as_object_mut() {
+                            obj.insert(field.clone(), value_to_json(&new_val));
+                        }
+                        vars.insert(key.clone(), Value::Str(doc.to_string()));
+                    }
+                    Value::Null => {
+                        let mut doc = serde_json::Value::Object(Default::default());
+                        if let Some(obj) = doc.as_object_mut() {
+                            obj.insert(field.clone(), value_to_json(&new_val));
+                        }
+                        vars.insert(key.clone(), Value::Str(doc.to_string()));
+                    }
                     other => bail!(
                         "FieldAssign: '{}' is not an object, got {}",
                         var,
                         other.type_name()
                     ),
-                };
-                let mut doc: serde_json::Value = serde_json::from_str(&json_str)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
-                if let Some(obj) = doc.as_object_mut() {
-                    obj.insert(field.clone(), value_to_json(&new_val));
                 }
-                vars.insert(key.clone(), Value::Str(doc.to_string()));
                 self.dirty_fields
                     .entry(key)
                     .or_default()
@@ -1496,6 +1532,13 @@ impl<'a> Vm<'a> {
                     .cloned()
                     .ok_or_else(|| anyhow!("Undefined variable: {var}"))?;
                 match obj_val {
+                    // **Phase 1** — Record fast path: O(N) name lookup, no JSON
+                    // parse, no string allocation. Returns Null for unknown
+                    // fields to match the V::Str arm's `None`/`Null` behavior.
+                    Value::Record { .. } => Ok(obj_val
+                        .record_field(field.as_str())
+                        .cloned()
+                        .unwrap_or(Value::Null)),
                     Value::Str(s) => {
                         let doc: serde_json::Value = serde_json::from_str(&s)
                             .with_context(|| format!("FieldGet: '{}' is not valid JSON", var))?;
@@ -2313,12 +2356,16 @@ impl<'a> Vm<'a> {
                 ),
             },
             Expr::ObjectLit(fields) => {
-                let mut obj = serde_json::Map::with_capacity(fields.len());
+                // **Phase 1 [1.0-blocker]** — static-shape object literal emits
+                // a typed `Value::Record` (keys are AST `String` literals, so
+                // shape is known at construction). Field access then skips the
+                // JSON parse round-trip entirely on this path.
+                let mut pairs: Vec<(String, Value)> = Vec::with_capacity(fields.len());
                 for (key, expr) in fields {
                     let value = self.eval_expr(expr, vars).await?;
-                    obj.insert(key.clone(), value_to_json_smart(&value));
+                    pairs.push((key.clone(), value));
                 }
-                Ok(Value::Str(serde_json::Value::Object(obj).to_string()))
+                Ok(Value::record_from_pairs(pairs))
             }
             Expr::ArrayLit(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -3702,8 +3749,15 @@ fn assemble_url_from_pg_env() -> Option<String> {
 }
 
 /// Convert a parsed JSON value back into the runtime's untagged Value enum.
-/// Objects and arrays round-trip through their serialised form because the
-/// runtime carries nested shapes as JSON strings.
+///
+/// **Phase 1 [1.0-blocker] update**: `JsonValue::Object` now becomes a
+/// `Value::Record` (typed fast path) instead of a `Value::Str(json_string)`.
+/// The recursion is consistent — nested objects inside arrays, and arrays
+/// inside objects, each take the matching `Record` / `Array` arm here, so a
+/// `json_parse(s)` round-trip rehydrates a fully structured value tree
+/// rather than a single top-level shape with JSON-string leaves. Field-name
+/// `Arc<str>`s are allocated per call (no shape interning for dynamic JSON);
+/// the per-record `Arc<Vec<...>>` wrappers keep clones cheap downstream.
 fn json_to_value(value: &JsonValue) -> Value {
     match value {
         JsonValue::Null => Value::Null,
@@ -3719,9 +3773,15 @@ fn json_to_value(value: &JsonValue) -> Value {
         }
         JsonValue::String(s) => Value::Str(s.clone()),
         // JSON arrays map to the in-language array Value (recursively); JSON
-        // objects stay carried as their JSON string (no object Value variant).
+        // objects map to Value::Record, also recursively via json_to_value.
         JsonValue::Array(items) => Value::Array(items.iter().map(json_to_value).collect()),
-        JsonValue::Object(_) => Value::Str(value.to_string()),
+        JsonValue::Object(map) => {
+            let pairs: Vec<(String, Value)> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect();
+            Value::record_from_pairs(pairs)
+        }
     }
 }
 

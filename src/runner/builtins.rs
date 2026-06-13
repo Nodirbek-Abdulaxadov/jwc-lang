@@ -7,6 +7,7 @@
 //! behaviour is identical to when these lived inside `runner/mod.rs`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value as JsonValue;
@@ -801,6 +802,10 @@ impl<'a> Vm<'a> {
         let value = self.eval_expr(&args[0], vars).await?;
         let url_string = match value {
             Value::Str(s) => connection_string_from_arg(&s)?,
+            // **Phase 1** — object literals now come in as Record; render to
+            // JSON once so the existing string-form parser stays the only
+            // schema-validating code path.
+            Value::Record { .. } => connection_string_from_arg(&super::value_to_json(&value).to_string())?,
             other => bail!(
                 "setConnectionString(arg): arg must be a URL string or an object literal, got {}",
                 other.type_name()
@@ -1328,13 +1333,7 @@ impl<'a> Vm<'a> {
             bail!("set_json_field(obj_json, field, value) expects 3 args");
         }
 
-        let source = match self.eval_expr(&args[0], vars).await? {
-            Value::Str(v) => v,
-            other => bail!(
-                "set_json_field: first arg must be string json, got {}",
-                other.type_name()
-            ),
-        };
+        let obj = self.eval_expr(&args[0], vars).await?;
         let field = match self.eval_expr(&args[1], vars).await? {
             Value::Str(v) => v,
             other => bail!(
@@ -1344,15 +1343,67 @@ impl<'a> Vm<'a> {
         };
         let value = self.eval_expr(&args[2], vars).await?;
 
+        // **Phase 1 [1.0-blocker]** — Record fast path. When the first arg
+        // already arrives as a `Value::Record` (object literal, json_parse
+        // output, future entity instance) we skip the parse/mutate/stringify
+        // round-trip entirely:
+        //   - Existing field: CoW the `values` Arc via `Arc::make_mut` and
+        //     overwrite the slot at the field's position. The shared
+        //     `field_names` Arc is reused as-is (refcount bump).
+        //   - New field: fall back to the V::Str JSON path below by
+        //     serialising the Record to its JSON form first. Growing a
+        //     Record means allocating a NEW `field_names` Arc (the old one
+        //     may be shared across thousands of rows of the same shape), and
+        //     the V::Str path already handles the dynamic-shape case
+        //     correctly — keeping a single fallback is simpler than a second
+        //     Record-grow code path here, and field-add-after-construction
+        //     is the rare case (almost all `set_json_field` callers patch an
+        //     existing field on a request body / config).
+        if let Value::Record { field_names, values } = obj {
+            if let Some(idx) = field_names.iter().position(|f| f.as_ref() == field.as_str()) {
+                let mut new_values = values;
+                let values_mut = Arc::make_mut(&mut new_values);
+                values_mut[idx] = value;
+                return Ok(Value::Record {
+                    field_names,
+                    values: new_values,
+                });
+            }
+            // New field on a Record — re-route through the V::Str fallback
+            // by materialising the Record as JSON. Cheap: a 2-10 field
+            // record's JSON form is small, and this branch is rare.
+            let json_str = value_to_json(&Value::Record { field_names, values }).to_string();
+            return self
+                .set_json_field_via_string(json_str, field, value)
+                .map(Value::Str);
+        }
+
+        let source = match obj {
+            Value::Str(v) => v,
+            other => bail!(
+                "set_json_field: first arg must be string json, got {}",
+                other.type_name()
+            ),
+        };
+        let json_str = self.set_json_field_via_string(source, field, value)?;
+        Ok(Value::Str(json_str))
+    }
+
+    /// Shared JSON parse/mutate/stringify path used by both the V::Str
+    /// branch and the Record-grow fallback in `eval_set_json_field_call`.
+    fn set_json_field_via_string(
+        &self,
+        source: String,
+        field: String,
+        value: Value,
+    ) -> Result<String> {
         let mut json_value: JsonValue = serde_json::from_str(&source)
             .with_context(|| "set_json_field: invalid json in first arg")?;
         let object = json_value
             .as_object_mut()
             .ok_or_else(|| anyhow!("set_json_field: first arg must be a json object"))?;
-
         object.insert(field, value_to_json(&value));
-
-        Ok(Value::Str(json_value.to_string()))
+        Ok(json_value.to_string())
     }
 }
 

@@ -257,6 +257,25 @@ const CASES: &[Case] = &[
         expected_output: "6\n",
         expected_emit_contains: &["fn jwc_const_pi", "fn jwc_const_tau", "jwc_const_tau()"],
     },
+    // Stage 2C parity check: an object literal with field reads must
+    // produce identical stdout under both the interpreter and the native
+    // codegen. Mirrors the `object_literal_field_read` conformance case
+    // but additionally verifies that the emitted Rust source contains
+    // the field-read shape (`jwc_print(` for each access). Pins the
+    // Value::Record migration: regardless of which backing store the
+    // construction sites use, the observable output stays identical.
+    Case {
+        name: "object_literal_via_native_codegen_matches_interpreter",
+        source: r#"
+            function main() {
+                let b = { id: 1, name: "Brand" };
+                print(b.id);
+                print(b.name);
+            }
+        "#,
+        expected_output: "1\nBrand\n",
+        expected_emit_contains: &["jwc_print(", "\"Brand\""],
+    },
 ];
 
 #[tokio::test]

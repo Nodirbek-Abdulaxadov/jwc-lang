@@ -198,7 +198,12 @@ const REGISTERED_CASES: &[&str] = &[
     "case_json_helpers",
     "case_literals",
     "case_misc_helpers",
+    "case_nested_object_literal",
     "case_now_smoke",
+    "case_object_array_loop",
+    "case_object_literal_field_read",
+    "case_object_literal_field_write",
+    "case_object_literal_json_round_trip",
     "case_raw_string",
     "case_strings",
     "case_substring",
@@ -264,7 +269,12 @@ mod cases {
     conformance_test!(case_json_helpers);
     conformance_test!(case_literals);
     conformance_test!(case_misc_helpers);
+    conformance_test!(case_nested_object_literal);
     conformance_test!(case_now_smoke);
+    conformance_test!(case_object_array_loop);
+    conformance_test!(case_object_literal_field_read);
+    conformance_test!(case_object_literal_field_write);
+    conformance_test!(case_object_literal_json_round_trip);
     conformance_test!(case_raw_string);
     conformance_test!(case_strings);
     conformance_test!(case_substring);
