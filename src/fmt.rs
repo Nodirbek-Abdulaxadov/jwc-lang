@@ -465,7 +465,17 @@ fn render_field_reference(r: &FieldReference) -> String {
 fn render_navigation(w: &mut Writer, n: &NavigationField) {
     let ty = match n.kind {
         NavigationKind::OneToMany => format!("List<{}>", n.target_entity),
-        NavigationKind::OneToOne => n.target_entity.clone(),
+        NavigationKind::OneToOne | NavigationKind::BelongsTo => n.target_entity.clone(),
+    };
+    let proj = if n.projection.is_empty() {
+        String::new()
+    } else {
+        format!(" {{ {} }}", n.projection.join(", "))
+    };
+    // belongs-to prints a bare local column; has-many/one print `Target.col`.
+    let via = match n.kind {
+        NavigationKind::BelongsTo => n.target_field.clone(),
+        _ => format!("{}.{}", n.target_entity, n.target_field),
     };
     let order = match &n.order_by {
         Some(o) => match o.dir {
@@ -474,10 +484,7 @@ fn render_navigation(w: &mut Writer, n: &NavigationField) {
         },
         None => String::new(),
     };
-    w.line(&format!(
-        "{}: {} via {}.{}{};",
-        n.name, ty, n.target_entity, n.target_field, order
-    ));
+    w.line(&format!("{}: {}{} via {}{};", n.name, ty, proj, via, order));
 }
 
 fn render_type(t: &TypeSpec) -> String {

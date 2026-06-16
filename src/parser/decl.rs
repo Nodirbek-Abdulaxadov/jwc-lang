@@ -345,13 +345,30 @@ impl<'a> Parser<'a> {
         field_name: &str,
     ) -> Result<NavigationField> {
         let head = self.expect_ident("expected target type after ':'")?;
-        let (kind, target_entity) = if head.eq_ignore_ascii_case("List") {
+        let (is_list, target_entity) = if head.eq_ignore_ascii_case("List") {
             self.expect_symbol('<')?;
             let inner = self.expect_ident("expected entity name inside List<...>")?;
             self.expect_symbol('>')?;
-            (NavigationKind::OneToMany, inner)
+            (true, inner)
         } else {
-            (NavigationKind::OneToOne, head)
+            (false, head)
+        };
+
+        // optional column subset: `{ col, col, ... }`
+        let projection = if self.check_symbol('{') {
+            self.expect_symbol('{')?;
+            let mut cols = Vec::new();
+            if !self.check_symbol('}') {
+                cols.push(self.expect_ident("expected column name in navigation projection")?);
+                while self.check_symbol(',') {
+                    self.expect_symbol(',')?;
+                    cols.push(self.expect_ident("expected column name in navigation projection")?);
+                }
+            }
+            self.expect_symbol('}')?;
+            cols
+        } else {
+            Vec::new()
         };
 
         let via_kw = self.expect_ident("expected 'via' in navigation declaration")?;
@@ -359,14 +376,31 @@ impl<'a> Parser<'a> {
             return Err(self.error_here("expected 'via' in navigation declaration"));
         }
 
-        let target = self.expect_ident("expected target entity name after 'via'")?;
-        self.expect_symbol('.')?;
-        let target_col = self.expect_ident("expected target column name after '.'")?;
-        if !target.eq_ignore_ascii_case(&target_entity) {
-            return Err(self.error_here(
-                "navigation 'via' must reference the same entity declared on the left side",
-            ));
-        }
+        // `via Target.col` (dotted) → the target holds the FK (has-many / has-one).
+        // `via local_col`   (bare)   → this entity holds the FK (belongs-to).
+        let first = self.expect_ident("expected column or entity name after 'via'")?;
+        let (kind, target_field) = if self.check_symbol('.') {
+            self.expect_symbol('.')?;
+            let col = self.expect_ident("expected target column name after '.'")?;
+            if !first.eq_ignore_ascii_case(&target_entity) {
+                return Err(self.error_here(
+                    "navigation 'via Target.col' must reference the same entity declared on the left side",
+                ));
+            }
+            let kind = if is_list {
+                NavigationKind::OneToMany
+            } else {
+                NavigationKind::OneToOne
+            };
+            (kind, col)
+        } else {
+            if is_list {
+                return Err(self.error_here(
+                    "List<...> navigation needs 'via Target.fk' (the target holds the FK); a bare column is a belongs-to (single) relation",
+                ));
+            }
+            (NavigationKind::BelongsTo, first)
+        };
 
         // optional `orderby <target col> [asc|desc]` — orders the materialised
         // collection (`json_agg(... ORDER BY ...)`). Bare column or `Target.col`.
@@ -392,7 +426,8 @@ impl<'a> Parser<'a> {
             name: field_name.to_string(),
             kind,
             target_entity,
-            target_field: target_col,
+            target_field,
+            projection,
             order_by,
         })
     }

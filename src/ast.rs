@@ -196,10 +196,14 @@ pub struct ModelDecl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavigationKind {
-    /// `name: List<Other> via Other.fk_col;`
+    /// `name: List<Other> via Other.fk_col;` — the target holds the FK.
     OneToMany,
-    /// `name: Other via Other.fk_col;` — at most one matching row.
+    /// `name: Other via Other.fk_col;` — the target holds the FK, at most one row.
     OneToOne,
+    /// `name: Parent via local_fk_col;` — *this* entity holds the FK that
+    /// points at the parent's PK (belongs-to). Materialises as a single nested
+    /// object. Distinguished from `OneToOne` by a bare (undotted) `via` column.
+    BelongsTo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,8 +211,14 @@ pub struct NavigationField {
     pub name: String,
     pub kind: NavigationKind,
     pub target_entity: String,
-    /// The FK column on the target entity that points back at this entity's PK.
+    /// The join FK column. For `OneToMany`/`OneToOne` it is the FK column *on
+    /// the target* that points back at this entity's PK. For `BelongsTo` it is
+    /// the FK column *on this entity* that points at the target's PK.
     pub target_field: String,
+    /// Optional column subset for the materialised nav (`author: User { id,
+    /// name } via authorId`). Empty = the whole row. Lets an eager-loaded
+    /// relation hide sensitive columns (e.g. `passwordHash`).
+    pub projection: Vec<String>,
     /// Optional ordering for the materialised collection
     /// (`... via T.fk order by T.col [asc|desc]`). Applied inside the
     /// `json_agg(... ORDER BY ...)` so a `OneToMany` nav comes back in a

@@ -3274,6 +3274,22 @@ fn emit_db_select(
                 return;
             }
         };
+        // belongs-to / projected / ordered navigations are interpreter-only for
+        // now — the native eager-load helper (jwc_db_eager_load) groups full
+        // rows by FK and has no projection / ordering / reverse-FK path yet.
+        if matches!(nav.kind, crate::ast::NavigationKind::BelongsTo)
+            || !nav.projection.is_empty()
+            || nav.order_by.is_some()
+        {
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                format!(
+                    "native AOT does not yet support belongs-to / projected / ordered navigation `{}` on `{}` — use the interpreter (`jwc run`/`serve`)",
+                    rel, meta.table
+                ),
+            ));
+            return;
+        }
         let target = match ctx.entities.get(&nav.target_entity) {
             Some(m) => m,
             None => {

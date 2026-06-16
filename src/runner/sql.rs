@@ -540,8 +540,12 @@ pub(super) struct NavigationSubquery {
     name: String,
     kind: NavigationKind,
     target_table: String,
-    target_fk_col: String,
-    source_pk_col: String,
+    /// Column on the target (`c`) side of the join.
+    join_target_col: String,
+    /// Column on the source (`t`) side of the join.
+    join_source_col: String,
+    /// Column subset (empty = whole row).
+    projection: Vec<String>,
     /// Optional `(column, direction)` to order the materialised collection.
     order_by: Option<(String, SortDir)>,
 }
@@ -553,24 +557,42 @@ fn sort_dir_sql(dir: SortDir) -> &'static str {
     }
 }
 
+/// The per-row JSON value for a nav subquery: the whole row, or a
+/// `json_build_object` of the projected columns (hides the rest).
+fn nav_json_value(projection: &[String]) -> String {
+    if projection.is_empty() {
+        "row_to_json(c)".to_string()
+    } else {
+        let pairs: Vec<String> = projection
+            .iter()
+            .map(|col| format!("'{}', c.\"{}\"", col, col))
+            .collect();
+        format!("json_build_object({})", pairs.join(", "))
+    }
+}
+
 impl NavigationSubquery {
     fn alias(&self) -> &str {
         &self.name
     }
 
     fn sql_fragment(&self, source_alias: &str) -> String {
+        let val = nav_json_value(&self.projection);
         let order = match &self.order_by {
             Some((col, dir)) => format!(" ORDER BY c.\"{}\" {}", col, sort_dir_sql(*dir)),
             None => String::new(),
         };
         match self.kind {
             NavigationKind::OneToMany => format!(
-                "COALESCE((SELECT json_agg(row_to_json(c){}) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"), '[]'::json)",
-                order, self.target_table, self.target_fk_col, source_alias, self.source_pk_col
+                "COALESCE((SELECT json_agg({}{}) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"), '[]'::json)",
+                val, order, self.target_table, self.join_target_col, source_alias, self.join_source_col
             ),
-            NavigationKind::OneToOne => format!(
-                "(SELECT row_to_json(c) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"{} LIMIT 1)",
-                self.target_table, self.target_fk_col, source_alias, self.source_pk_col, order
+            // OneToOne (target holds FK) and BelongsTo (source holds FK) both
+            // materialise a single nested object; only the join direction —
+            // captured in join_target_col / join_source_col — differs.
+            NavigationKind::OneToOne | NavigationKind::BelongsTo => format!(
+                "(SELECT {} FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"{} LIMIT 1)",
+                val, self.target_table, self.join_target_col, source_alias, self.join_source_col, order
             ),
         }
     }
@@ -607,12 +629,25 @@ pub(super) fn build_navigation_subqueries(
             .iter()
             .find(|n| n.name.to_lowercase() == rel_key)
             .ok_or_else(|| anyhow!("entity '{}' has no navigation '{}'", entity, rel))?;
+        let (join_target_col, join_source_col) = match nav.kind {
+            // belongs-to: this entity holds the FK → join target PK = source FK
+            NavigationKind::BelongsTo => {
+                let target_pk = pk_by_table
+                    .get(&nav.target_entity.to_lowercase())
+                    .and_then(|v| v.first().cloned())
+                    .unwrap_or_else(|| "id".to_string());
+                (target_pk, nav.target_field.clone())
+            }
+            // has-many / has-one: target holds the FK → join target FK = source PK
+            _ => (nav.target_field.clone(), source_pk_col.clone()),
+        };
         out.push(NavigationSubquery {
             name: nav.name.clone(),
             kind: nav.kind,
             target_table: crate::sql::to_snake_case(&nav.target_entity),
-            target_fk_col: nav.target_field.clone(),
-            source_pk_col: source_pk_col.clone(),
+            join_target_col,
+            join_source_col,
+            projection: nav.projection.clone(),
             order_by: nav
                 .order_by
                 .as_ref()

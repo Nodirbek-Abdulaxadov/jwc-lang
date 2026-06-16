@@ -213,8 +213,14 @@ pub fn validate_program(program: &Program) -> Result<()> {
                         nav.target_entity
                     )
                 })?;
+            // The join FK column lives on the target for has-many/has-one, but
+            // on *this* entity for belongs-to (this entity holds the FK).
+            let (fk_owner, fk_owner_name) = match nav.kind {
+                crate::ast::NavigationKind::BelongsTo => (model, model.name.as_str()),
+                _ => (target, nav.target_entity.as_str()),
+            };
             let field_key = nav.target_field.to_lowercase();
-            if !target
+            if !fk_owner
                 .fields
                 .iter()
                 .any(|f| f.name.to_lowercase() == field_key)
@@ -223,9 +229,26 @@ pub fn validate_program(program: &Program) -> Result<()> {
                     "Entity '{}' navigation '{}' references unknown column '{}.{}'",
                     model.name,
                     nav.name,
-                    nav.target_entity,
+                    fk_owner_name,
                     nav.target_field
                 );
+            }
+            // Projected nav columns must exist on the target entity.
+            for col in &nav.projection {
+                let col_key = col.to_lowercase();
+                if !target
+                    .fields
+                    .iter()
+                    .any(|f| f.name.to_lowercase() == col_key)
+                {
+                    bail!(
+                        "Entity '{}' navigation '{}' projection references unknown column '{}.{}'",
+                        model.name,
+                        nav.name,
+                        nav.target_entity,
+                        col
+                    );
+                }
             }
         }
     }
