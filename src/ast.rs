@@ -361,6 +361,19 @@ pub enum AggregateKind {
     Avg,
     Min,
     Max,
+    /// `count(*)` — only valid in an aliased grouped projection.
+    Count,
+}
+
+/// One aliased aggregate term in a grouped projection
+/// (`select { status, total: count(*) } ... group by status`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggProj {
+    /// Result key in the row JSON (the part before `:`).
+    pub alias: String,
+    pub kind: AggregateKind,
+    /// Aggregated column path, or `*` for `count(*)`.
+    pub col: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -565,6 +578,10 @@ pub enum Expr {
         /// Column-name subset to project (`select User { name, email } ...`).
         /// Empty vec means `SELECT *` — every column from the source table.
         projection: Vec<String>,
+        /// Aliased aggregate terms in the projection (`{ total: count(*) }`).
+        /// Combined with `group_by` this is grouped aggregation; the SELECT
+        /// list is `projection` columns + these `<fn>(col) AS alias` terms.
+        aggregates: Vec<AggProj>,
         /// `group by Entity.col [, ...]` — column paths to GROUP BY at the
         /// SQL layer. Each entry is a `field` string in the same shape as
         /// `where Entity.col`. Empty vec when no `group by` was written.

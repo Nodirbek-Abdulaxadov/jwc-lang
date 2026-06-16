@@ -14,7 +14,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_recursion::async_recursion;
 use tokio_postgres::types::ToSql;
 
-use crate::ast::{AggregateKind, DbOrderBy, Expr, ModelDecl, NavigationKind, SortDir, WhereExpr};
+use crate::ast::{
+    AggProj, AggregateKind, DbOrderBy, Expr, ModelDecl, NavigationKind, SortDir, WhereExpr,
+};
 
 use super::util::{looks_like_datetime, looks_like_uuid};
 use super::{format_float, value_to_json, Value, Vm};
@@ -396,6 +398,7 @@ pub(super) async fn build_select_sql(
     first: bool,
     nav_subqueries: &[NavigationSubquery],
     projection: &[String],
+    aggregates: &[AggProj],
     group_by: &[String],
     having: Option<&WhereExpr>,
     vars: &mut HashMap<String, Value>,
@@ -478,28 +481,39 @@ pub(super) async fn build_select_sql(
     // - Explicit `{ col1, col2 }` → only those columns from the source table.
     // - `with rel` → always include the named columns (or `t.*`) plus a
     //   correlated json subquery per relation.
-    let base_cols: Vec<String> = if projection.is_empty() {
-        Vec::new()
-    } else {
-        projection.iter().map(|c| format!("t.\"{}\"", c)).collect()
-    };
-    let inner_projection = if nav_subqueries.is_empty() && base_cols.is_empty() {
+    // Explicit projection (named columns and/or aliased aggregates) suppresses
+    // the `t.*` / `*` fallback — required for grouped aggregation, where a bare
+    // `SELECT *` under GROUP BY is invalid SQL.
+    let explicit = !projection.is_empty() || !aggregates.is_empty();
+    let mut bits: Vec<String> = Vec::new();
+    if explicit {
+        for c in projection {
+            bits.push(format!("t.\"{}\"", c));
+        }
+        for agg in aggregates {
+            bits.push(agg_select_sql(agg));
+        }
+    } else if !nav_subqueries.is_empty() {
+        bits.push("t.*".to_string());
+    }
+    for nav in nav_subqueries {
+        bits.push(format!("{} AS \"{}\"", nav.sql_fragment("t"), nav.alias()));
+    }
+    if !projection.is_empty() {
+        shape_bits.push(format!("project:{}", projection.join(",")));
+        cache_bits.push(format!("project:{}", projection.join(",")));
+    }
+    for agg in aggregates {
+        shape_bits.push(format!("agg:{}:{:?}:{}", agg.alias, agg.kind, agg.col));
+        cache_bits.push(format!("agg:{}:{:?}:{}", agg.alias, agg.kind, agg.col));
+    }
+    for nav in nav_subqueries {
+        shape_bits.push(format!("with:{}", nav.alias()));
+        cache_bits.push(format!("with:{}", nav.alias()));
+    }
+    let inner_projection = if bits.is_empty() {
         "*".to_string()
     } else {
-        let mut bits: Vec<String> = if base_cols.is_empty() {
-            vec!["t.*".to_string()]
-        } else {
-            base_cols.clone()
-        };
-        if !projection.is_empty() {
-            shape_bits.push(format!("project:{}", projection.join(",")));
-            cache_bits.push(format!("project:{}", projection.join(",")));
-        }
-        for nav in nav_subqueries {
-            bits.push(format!("{} AS \"{}\"", nav.sql_fragment("t"), nav.alias()));
-            shape_bits.push(format!("with:{}", nav.alias()));
-            cache_bits.push(format!("with:{}", nav.alias()));
-        }
         bits.join(", ")
     };
 
@@ -557,6 +571,23 @@ fn sort_dir_sql(dir: SortDir) -> &'static str {
         SortDir::Asc => "ASC",
         SortDir::Desc => "DESC",
     }
+}
+
+/// A `<fn>(...) AS "alias"` term for an aliased aggregate projection.
+fn agg_select_sql(agg: &AggProj) -> String {
+    let func = match agg.kind {
+        AggregateKind::Count => return format!("count(*) AS \"{}\"", agg.alias),
+        AggregateKind::Sum => "sum",
+        AggregateKind::Avg => "avg",
+        AggregateKind::Min => "min",
+        AggregateKind::Max => "max",
+    };
+    format!(
+        "{}(t.\"{}\") AS \"{}\"",
+        func,
+        field_path_to_col(&agg.col),
+        agg.alias
+    )
 }
 
 /// The per-row JSON value for a nav subquery: the whole row, or a
@@ -901,12 +932,16 @@ pub(super) fn aggregate_sql_op(kind: AggregateKind, col: &str) -> (String, &'sta
         AggregateKind::Avg => format!("AVG(\"{}\")", col),
         AggregateKind::Min => format!("MIN(\"{}\")", col),
         AggregateKind::Max => format!("MAX(\"{}\")", col),
+        // Count only appears in aliased grouped projections (handled in
+        // build_select_sql); the scalar DbCount path uses count(*) directly.
+        AggregateKind::Count => "COUNT(*)".to_string(),
     };
     let tag = match kind {
         AggregateKind::Sum => "sum",
         AggregateKind::Avg => "avg",
         AggregateKind::Min => "min",
         AggregateKind::Max => "max",
+        AggregateKind::Count => "count",
     };
     (agg_sql, tag)
 }

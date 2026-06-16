@@ -13,7 +13,7 @@
 
 use anyhow::Result;
 
-use crate::ast::{AggregateKind, DbOrderBy, DbWhere, Expr, SortDir, WhereExpr};
+use crate::ast::{AggProj, AggregateKind, DbOrderBy, DbWhere, Expr, SortDir, WhereExpr};
 use crate::lexer::{Keyword, TemplatePart, TokenKind};
 
 use super::{parse_template_hole, Parser};
@@ -426,30 +426,46 @@ impl<'a> Parser<'a> {
             self.expect_ident("expected entity name or '*' after 'select'")?
         };
 
-        // optional `{ col1, col2, ... }` projection
-        let projection = if self.check_symbol('{') {
+        // optional `{ col1, alias: count(*), ... }` projection — plain columns
+        // and/or aliased aggregate terms.
+        let mut projection: Vec<String> = Vec::new();
+        let mut aggregates: Vec<AggProj> = Vec::new();
+        if self.check_symbol('{') {
             self.expect_symbol('{')?;
             if entity == "*" {
                 return Err(
                     self.error_here("projection `{ ... }` requires a named entity, not '*'")
                 );
             }
-            let mut cols = Vec::new();
             if !self.check_symbol('}') {
-                cols.push(self.expect_ident("expected column name in projection")?);
-                while self.check_symbol(',') {
-                    self.expect_symbol(',')?;
-                    cols.push(self.expect_ident("expected column name after ','")?);
+                loop {
+                    let name =
+                        self.expect_ident("expected column name or aggregate alias in projection")?;
+                    if self.check_symbol(':') {
+                        self.expect_symbol(':')?;
+                        let (kind, col) = self.parse_proj_aggregate()?;
+                        aggregates.push(AggProj {
+                            alias: name,
+                            kind,
+                            col,
+                        });
+                    } else {
+                        projection.push(name);
+                    }
+                    if self.check_symbol(',') {
+                        self.expect_symbol(',')?;
+                        continue;
+                    }
+                    break;
                 }
             }
             self.expect_symbol('}')?;
-            if cols.is_empty() {
-                return Err(self.error_here("projection `{ ... }` must list at least one column"));
+            if projection.is_empty() && aggregates.is_empty() {
+                return Err(self.error_here(
+                    "projection `{ ... }` must list at least one column or aggregate",
+                ));
             }
-            cols
-        } else {
-            Vec::new()
-        };
+        }
 
         // optional `with rel1, rel2, ...`
         let with_relations = if self.check_ident_eq("with") {
@@ -563,9 +579,40 @@ impl<'a> Parser<'a> {
             first,
             with_relations,
             projection,
+            aggregates,
             group_by,
             having,
         })
+    }
+
+    /// Parse the aggregate after `alias:` in a projection — `count(*)` or
+    /// `sum|avg|min|max(Entity.col)`. Returns `(kind, col)` where `col` is
+    /// `*` for `count(*)`.
+    fn parse_proj_aggregate(&mut self) -> Result<(AggregateKind, String)> {
+        let fname = self.expect_ident("expected aggregate function (count/sum/avg/min/max)")?;
+        self.expect_symbol('(')?;
+        let result = if fname.eq_ignore_ascii_case("count") {
+            self.expect_symbol('*')?;
+            (AggregateKind::Count, "*".to_string())
+        } else {
+            let kind = if fname.eq_ignore_ascii_case("sum") {
+                AggregateKind::Sum
+            } else if fname.eq_ignore_ascii_case("avg") {
+                AggregateKind::Avg
+            } else if fname.eq_ignore_ascii_case("min") {
+                AggregateKind::Min
+            } else if fname.eq_ignore_ascii_case("max") {
+                AggregateKind::Max
+            } else {
+                return Err(self.error_here(
+                    "unknown aggregate in projection; expected count/sum/avg/min/max",
+                ));
+            };
+            let col = self.parse_field_path()?;
+            (kind, col)
+        };
+        self.expect_symbol(')')?;
+        Ok(result)
     }
 
     pub(super) fn parse_where_or(&mut self) -> Result<WhereExpr> {

@@ -3143,20 +3143,28 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             offset,
             with_relations,
             projection,
+            aggregates,
             ..
         } => {
-            emit_db_select(
-                out,
-                table,
-                *first,
-                where_clause.as_deref(),
-                order_by.as_ref(),
-                limit.as_deref(),
-                offset.as_deref(),
-                with_relations,
-                projection,
-                ctx,
-            );
+            if aggregates.is_empty() {
+                emit_db_select(
+                    out,
+                    table,
+                    *first,
+                    where_clause.as_deref(),
+                    order_by.as_ref(),
+                    limit.as_deref(),
+                    offset.as_deref(),
+                    with_relations,
+                    projection,
+                    ctx,
+                );
+            } else {
+                out.push_str(&format!(
+                    "{{ compile_error!({:?}); V::Null }}",
+                    "native AOT does not support aggregate projection (count/sum/avg/min/max) — use the interpreter (`jwc run`/`serve`)"
+                ));
+            }
         }
         Expr::DbCount {
             table,
@@ -3492,6 +3500,7 @@ fn emit_db_aggregate(
         AggregateKind::Avg => "avg",
         AggregateKind::Min => "min",
         AggregateKind::Max => "max",
+        AggregateKind::Count => "count",
     };
     let mut sql = format!(
         "SELECT {}(\"{}\") AS __agg FROM \"{}\"",

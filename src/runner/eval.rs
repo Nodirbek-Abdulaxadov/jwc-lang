@@ -225,6 +225,7 @@ impl<'a> Vm<'a> {
                 first,
                 with_relations,
                 projection,
+                aggregates,
                 group_by,
                 having,
             } => {
@@ -245,6 +246,7 @@ impl<'a> Vm<'a> {
                     *first,
                     &nav_subqueries,
                     projection,
+                    aggregates,
                     group_by,
                     having.as_deref(),
                     vars,

@@ -834,6 +834,7 @@ fn render_expr(e: &Expr) -> String {
                 AggregateKind::Avg => "avg",
                 AggregateKind::Min => "min",
                 AggregateKind::Max => "max",
+                AggregateKind::Count => "count",
             };
             let mut s = format!("select {}({}) from {}.{}", kw, field, context_var, table);
             if let Some(wc) = where_clause {
@@ -853,14 +854,26 @@ fn render_expr(e: &Expr) -> String {
             first,
             with_relations,
             projection,
+            aggregates,
             group_by,
             having,
         } => {
             let mut s = String::from("select ");
             s.push_str(entity);
-            if !projection.is_empty() {
+            if !projection.is_empty() || !aggregates.is_empty() {
+                let mut items: Vec<String> = projection.clone();
+                for a in aggregates {
+                    let inner = match a.kind {
+                        AggregateKind::Count => "count(*)".to_string(),
+                        AggregateKind::Sum => format!("sum({})", a.col),
+                        AggregateKind::Avg => format!("avg({})", a.col),
+                        AggregateKind::Min => format!("min({})", a.col),
+                        AggregateKind::Max => format!("max({})", a.col),
+                    };
+                    items.push(format!("{}: {}", a.alias, inner));
+                }
                 s.push_str(" { ");
-                s.push_str(&projection.join(", "));
+                s.push_str(&items.join(", "));
                 s.push_str(" }");
             }
             if !with_relations.is_empty() {

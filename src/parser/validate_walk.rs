@@ -398,6 +398,7 @@ fn validate_expr(
             // a separate walk that has access to `entity_navigations`.
             with_relations: _,
             projection,
+            aggregates,
             group_by,
             having,
         } => {
@@ -470,6 +471,24 @@ fn validate_expr(
                         bail!(
                             "error[E004]: Unknown column '{}' in GROUP BY of {}.{}{}",
                             col,
+                            context_var,
+                            table,
+                            suggest_column(&col, fields),
+                        );
+                    }
+                }
+                // Aggregated columns (`sum(col)` etc.) must exist; `count(*)`
+                // carries `*` and is skipped.
+                for agg in aggregates {
+                    if agg.col == "*" {
+                        continue;
+                    }
+                    let col = strip_entity_prefix(&agg.col);
+                    if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
+                        bail!(
+                            "Unknown column '{}' in aggregate '{}' of {}.{}{}",
+                            col,
+                            agg.alias,
                             context_var,
                             table,
                             suggest_column(&col, fields),

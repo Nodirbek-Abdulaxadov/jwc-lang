@@ -18,6 +18,10 @@ publish = false
 [lints.clippy]
 unwrap_used = "allow"
 expect_used = "allow"
+# The AST `Expr`/`WhereExpr` enums have inherently large variants (DbSelect
+# carries the full query shape). Boxing every variant would hurt readability of
+# the tree without a measured win; allow the size-difference lint here.
+large_enum_variant = "allow"
 
 [lib]
 name = "jwc"
