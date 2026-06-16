@@ -467,9 +467,16 @@ fn render_navigation(w: &mut Writer, n: &NavigationField) {
         NavigationKind::OneToMany => format!("List<{}>", n.target_entity),
         NavigationKind::OneToOne => n.target_entity.clone(),
     };
+    let order = match &n.order_by {
+        Some(o) => match o.dir {
+            SortDir::Asc => format!(" orderby {}", o.col),
+            SortDir::Desc => format!(" orderby {} desc", o.col),
+        },
+        None => String::new(),
+    };
     w.line(&format!(
-        "{}: {} via {}.{};",
-        n.name, ty, n.target_entity, n.target_field
+        "{}: {} via {}.{}{};",
+        n.name, ty, n.target_entity, n.target_field, order
     ));
 }
 

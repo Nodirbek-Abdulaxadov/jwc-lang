@@ -542,6 +542,15 @@ pub(super) struct NavigationSubquery {
     target_table: String,
     target_fk_col: String,
     source_pk_col: String,
+    /// Optional `(column, direction)` to order the materialised collection.
+    order_by: Option<(String, SortDir)>,
+}
+
+fn sort_dir_sql(dir: SortDir) -> &'static str {
+    match dir {
+        SortDir::Asc => "ASC",
+        SortDir::Desc => "DESC",
+    }
 }
 
 impl NavigationSubquery {
@@ -550,14 +559,18 @@ impl NavigationSubquery {
     }
 
     fn sql_fragment(&self, source_alias: &str) -> String {
+        let order = match &self.order_by {
+            Some((col, dir)) => format!(" ORDER BY c.\"{}\" {}", col, sort_dir_sql(*dir)),
+            None => String::new(),
+        };
         match self.kind {
             NavigationKind::OneToMany => format!(
-                "COALESCE((SELECT json_agg(row_to_json(c)) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"), '[]'::json)",
-                self.target_table, self.target_fk_col, source_alias, self.source_pk_col
+                "COALESCE((SELECT json_agg(row_to_json(c){}) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"), '[]'::json)",
+                order, self.target_table, self.target_fk_col, source_alias, self.source_pk_col
             ),
             NavigationKind::OneToOne => format!(
-                "(SELECT row_to_json(c) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\" LIMIT 1)",
-                self.target_table, self.target_fk_col, source_alias, self.source_pk_col
+                "(SELECT row_to_json(c) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"{} LIMIT 1)",
+                self.target_table, self.target_fk_col, source_alias, self.source_pk_col, order
             ),
         }
     }
@@ -600,6 +613,10 @@ pub(super) fn build_navigation_subqueries(
             target_table: crate::sql::to_snake_case(&nav.target_entity),
             target_fk_col: nav.target_field.clone(),
             source_pk_col: source_pk_col.clone(),
+            order_by: nav
+                .order_by
+                .as_ref()
+                .map(|o| (field_path_to_col(&o.col), o.dir)),
         });
     }
     Ok(out)

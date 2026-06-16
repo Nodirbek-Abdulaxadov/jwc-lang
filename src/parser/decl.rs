@@ -9,8 +9,8 @@ use anyhow::Result;
 
 use crate::ast::{
     ConstDecl, DbContextDecl, FieldDecl, FieldReference, FunctionDecl, MiddlewareDecl, ModelDecl,
-    ModelKind, NavigationField, NavigationKind, OnDeleteAction, Program, RouteDecl, RouteProtocol,
-    TypeSpec, TypedParam, Visibility,
+    ModelKind, NavOrder, NavigationField, NavigationKind, OnDeleteAction, Program, RouteDecl,
+    RouteProtocol, SortDir, TypeSpec, TypedParam, Visibility,
 };
 use crate::lexer::{Keyword, TokenKind};
 
@@ -367,6 +367,25 @@ impl<'a> Parser<'a> {
                 "navigation 'via' must reference the same entity declared on the left side",
             ));
         }
+
+        // optional `orderby <target col> [asc|desc]` — orders the materialised
+        // collection (`json_agg(... ORDER BY ...)`). Bare column or `Target.col`.
+        let order_by = if self.check_ident_eq("orderby") {
+            self.bump()?;
+            let field = self.parse_field_path()?;
+            let dir = if self.check_ident_eq("desc") {
+                self.bump()?;
+                SortDir::Desc
+            } else if self.check_ident_eq("asc") {
+                self.bump()?;
+                SortDir::Asc
+            } else {
+                SortDir::Asc
+            };
+            Some(NavOrder { col: field, dir })
+        } else {
+            None
+        };
         self.expect_symbol(';')?;
 
         Ok(NavigationField {
@@ -374,6 +393,7 @@ impl<'a> Parser<'a> {
             kind,
             target_entity,
             target_field: target_col,
+            order_by,
         })
     }
 

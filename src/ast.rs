@@ -209,6 +209,18 @@ pub struct NavigationField {
     pub target_entity: String,
     /// The FK column on the target entity that points back at this entity's PK.
     pub target_field: String,
+    /// Optional ordering for the materialised collection
+    /// (`... via T.fk order by T.col [asc|desc]`). Applied inside the
+    /// `json_agg(... ORDER BY ...)` so a `OneToMany` nav comes back in a
+    /// deterministic order instead of arbitrary `json_agg` order.
+    pub order_by: Option<NavOrder>,
+}
+
+/// Ordering for a navigation collection: a target column + direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavOrder {
+    pub col: String,
+    pub dir: SortDir,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
