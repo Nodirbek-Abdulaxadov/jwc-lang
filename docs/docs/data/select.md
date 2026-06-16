@@ -82,8 +82,13 @@ let avg_score  = select avg(Post.score) from AppDb.Post where Post.published == 
 
 ## group by + having
 
+`group by` / `having` filter which rows the query returns; the result is still
+a list of the selected entity. Arbitrary-shape aggregate projection
+(`select { user_id, total: count(*) }` with aliases) is **not** implemented —
+the projection list accepts plain column names only (see Projection above).
+
 ```jwc
-let stats = select { user_id: Post.user_id, total: count(*) } from AppDb.Post
+let popular = select Post from AppDb.Post
     group by Post.user_id
     having count(*) > 10;
 ```

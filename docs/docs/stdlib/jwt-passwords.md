@@ -8,7 +8,7 @@ sidebar_position: 4
 
 ```jwc
 let token = jwt_sign(
-    json_stringify({ sub: user.id, role: "admin", exp: now_epoch() + 3600 }),
+    json_stringify({ sub: user.id, role: "admin", exp: unix_timestamp() + 3600 }),
     env("JWT_SECRET")
 );
 
@@ -20,7 +20,7 @@ if (claims == null) { return unauthorized(); }
 | Built-in | Returns | Notes |
 |---|---|---|
 | `jwt_sign(payload_json, secret)` | `string` | HS256 (HMAC + SHA-256). Header is fixed `{"alg":"HS256","typ":"JWT"}`. |
-| `jwt_verify(token, secret)` | `any?` | Decoded claims, or `null` on bad signature / `exp` expired. |
+| `jwt_verify(token, secret)` | `any?` | Decoded claims, or `null` on bad signature / `exp` expired. An optional `Bearer ` prefix (case-insensitive) is stripped, so you can pass `header("authorization")` straight through. |
 
 RS256 / ES256 + JWKS verification land with the OIDC sprint.
 

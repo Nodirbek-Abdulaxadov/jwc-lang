@@ -23,7 +23,7 @@ Drops the `jwc` binary into `%LOCALAPPDATA%\jwc\bin` (Windows) or `~/.jwc/bin` (
 ## Verify
 
 ```bash
-jwc --version    # → jwc 0.4.8 (or newer)
+jwc --version    # → jwc 0.4.9 (or newer)
 jwc --help
 ```
 

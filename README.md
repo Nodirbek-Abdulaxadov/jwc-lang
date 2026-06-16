@@ -27,7 +27,7 @@ dbcontext AppDb {
 (GET/POST/PUT/DELETE, pagination, validation, JSON in/out). `jwc build
 --native` produces a single static binary.
 
-Latest release: **v0.4.8**. Status: production-ready for the maintainer's
+Latest release: **v0.4.9**. Status: production-ready for the maintainer's
 own workload; external pilots TBD.
 
 ## Why JWC
@@ -417,8 +417,8 @@ route GET "users/{id}" {
 ```
 
 - `path_param(name)` reads a `{name}` placeholder from the route path.
-- `query_param(name)` reads `?name=...` from the URL. Returns `null` if missing,
-  or the provided default when a 2nd argument is given.
+- `query_param(name)` reads `?name=...` from the URL. Returns `""` (empty
+  string) if missing, or the provided default when a 2nd argument is given.
 
 ### Typed handler routes
 
@@ -755,7 +755,7 @@ dependency).
 
 ## SQL Clauses
 
-`select` supports `where` (with `and`/`or`/parens), `orderby`, `limit`, `offset`, and `first`:
+`select` supports `where` (with `and`/`or`/parens), `orderby`, `limit`, `offset`, `group by` / `having`, and `first`:
 
 ```jwc
 function listAdults(country, min) {
@@ -1010,9 +1010,6 @@ entity Post of AppDbContext {
 
 Supported actions: `on delete cascade`, `on delete restrict`, `on delete set null`.
 If omitted, the database default (`NO ACTION`) applies.
-
-> Navigation properties and an auto-JOIN `select User with posts ...` syntax
-> are tracked for a follow-up iteration.
 
 ## Compile-Time DB Validation
 

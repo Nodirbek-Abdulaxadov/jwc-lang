@@ -46,7 +46,7 @@ let n   = int(path_param("page"));           // coerced
 ## Query string
 
 ```jwc
-let q     = query_param("q");                // null if missing
+let q     = query_param("q");                // "" (empty string) if missing
 let limit = int(query_param("limit", "20")); // default "20" → coerced to int
 ```
 
