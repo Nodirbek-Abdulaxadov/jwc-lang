@@ -603,6 +603,60 @@ fn extract_traceparent_trace_id(value: &str) -> Option<String> {
     Some(trace_id.to_string())
 }
 
+/// Whether the built-in `/openapi.json` + `/docs` endpoints are served.
+/// On by default (like `/metrics`); `JWC_DISABLE_OPENAPI=1` hides them for
+/// deployments that don't want the API surface advertised.
+fn openapi_docs_enabled() -> bool {
+    !matches!(
+        std::env::var("JWC_DISABLE_OPENAPI").ok().as_deref(),
+        Some("1") | Some("true")
+    )
+}
+
+/// Serve the OpenAPI 3.0.3 spec generated live from the running `Program`.
+/// Same builder as the `jwc openapi` CLI, so the served doc and the
+/// file-emitted doc are byte-identical — and neither can drift from the
+/// actual routes, since both read the in-memory AST.
+async fn handle_openapi(State(state): State<AppState>) -> Response {
+    let doc = crate::cmd::openapi::build_openapi_value(&state.program);
+    let body = serde_json::to_string(&doc).unwrap_or_else(|_| "{}".to_string());
+    let mut resp = Response::new(body.into());
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut().insert(
+        "content-type",
+        "application/json"
+            .parse()
+            .expect("INVARIANT: 'application/json' is a valid HeaderValue"),
+    );
+    resp
+}
+
+/// Swagger UI shell that renders `/openapi.json`. Pulls the viewer assets
+/// from the unpkg CDN so the runtime ships no bundled UI — the page is a
+/// few hundred bytes and offline use is a non-goal for a dev/docs endpoint.
+async fn handle_docs() -> Response {
+    let body = concat!(
+        "<!doctype html><html><head><meta charset=\"utf-8\">",
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        "<title>JWC API — Swagger UI</title>",
+        "<link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist/swagger-ui.css\">",
+        "</head><body><div id=\"swagger-ui\"></div>",
+        "<script src=\"https://unpkg.com/swagger-ui-dist/swagger-ui-bundle.js\" crossorigin></script>",
+        "<script>window.ui=SwaggerUIBundle({url:'/openapi.json',dom_id:'#swagger-ui'});</script>",
+        "</body></html>"
+    )
+    .to_string();
+    let mut resp = Response::new(body.into());
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut().insert(
+        "content-type",
+        "text/html; charset=utf-8"
+            .parse()
+            .expect("INVARIANT: 'text/html' is a valid HeaderValue"),
+    );
+    resp
+}
+
 fn readyz_db_failure(detail: String) -> Response {
     let escaped = detail.replace('"', "'");
     let body = format!("{{\"status\":\"not_ready\",\"db\":\"{escaped}\"}}");
@@ -632,6 +686,21 @@ fn build_router(state: AppState) -> Router {
     }
     if !route_owned_by_user(&state.program, "/metrics") {
         router = router.route("/metrics", get(handle_metrics));
+    }
+
+    // Live, drift-free API docs. The spec is generated from the same
+    // `Program` the server routes against, so it can never diverge from the
+    // running routes the way a hand-maintained `openapi.json` does. Both are
+    // overridable by a user route of the same path and globally opt-out-able
+    // via `JWC_DISABLE_OPENAPI` for deployments that don't want the API
+    // surface advertised publicly.
+    if openapi_docs_enabled() {
+        if !route_owned_by_user(&state.program, "/openapi.json") {
+            router = router.route("/openapi.json", get(handle_openapi));
+        }
+        if !route_owned_by_user(&state.program, "/docs") {
+            router = router.route("/docs", get(handle_docs));
+        }
     }
 
     // Each WS route gets its own axum entry. JWC path placeholders
@@ -1084,6 +1153,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn openapi_handler_serves_generated_spec() {
+        // The live `/openapi.json` is built from the same `Program` the
+        // server routes against — Epic 3b's drift-free docs guarantee. Pin
+        // that it returns a JSON OpenAPI doc whose paths reflect the routes.
+        let (_tx, rx) = watch::channel(false);
+        let state = AppState {
+            program: Arc::new(make_program_with_route("/widgets/{id}")),
+            request_logging: false,
+            metrics: Arc::new(ServerMetrics::new()),
+            ws_shutdown: rx,
+        };
+        let resp = handle_openapi(State(state)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("openapi body should drain");
+        let doc: serde_json::Value =
+            serde_json::from_slice(&body).expect("openapi body is valid JSON");
+        assert_eq!(doc["openapi"], "3.0.3");
+        assert!(
+            doc["paths"]["/widgets/{id}"]["get"].is_object(),
+            "served spec must reflect the program's routes:\n{doc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn docs_handler_serves_swagger_ui_pointing_at_spec() {
+        let resp = handle_docs().await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("docs body should drain");
+        let html = String::from_utf8(body.to_vec()).expect("docs body is utf-8");
+        assert!(html.contains("swagger-ui"), "must mount Swagger UI");
+        assert!(
+            html.contains("/openapi.json"),
+            "Swagger UI must load the live spec"
+        );
+    }
+
+    #[test]
+    fn openapi_docs_opt_out_respects_env() {
+        // Default on; `JWC_DISABLE_OPENAPI=1` (or `true`) hides the docs
+        // endpoints for deployments that don't want the API surface public.
+        with_env("JWC_DISABLE_OPENAPI", None, || {
+            assert!(openapi_docs_enabled());
+        });
+        with_env("JWC_DISABLE_OPENAPI", Some("1"), || {
+            assert!(!openapi_docs_enabled());
+        });
+        with_env("JWC_DISABLE_OPENAPI", Some("true"), || {
+            assert!(!openapi_docs_enabled());
+        });
     }
 
     #[test]
