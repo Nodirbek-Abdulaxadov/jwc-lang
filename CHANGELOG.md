@@ -3,6 +3,19 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — Release pipeline fixes
+
+No language or runtime changes from v0.5.0 — this release just gets the
+publish pipeline green.
+
+- **Docker image build is amd64-only.** The multi-arch build compiled the Rust
+  release for arm64 under QEMU emulation and effectively hung (30+ min). arm64
+  can return later via a native ARM runner + manifest merge.
+- **VS Code extension renamed** `jwc-lang` → `jwc-language`. The Marketplace
+  name `jwc-lang` is taken by another publisher, which failed the v0.5.0
+  Marketplace publish; the bundled `.vsix` and the publish now use the new id
+  `Nodirbek-Abdulaxadov.jwc-language`.
+
 ## [0.5.0] — Query Layer: relation loading + grouped aggregation
 
 The first slice of the Query Layer (ROADMAP Phase 11). Navigations now

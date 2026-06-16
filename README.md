@@ -27,7 +27,7 @@ dbcontext AppDb {
 (GET/POST/PUT/DELETE, pagination, validation, JSON in/out). `jwc build
 --native` produces a single static binary.
 
-Latest release: **v0.5.0**. Status: production-ready for the maintainer's
+Latest release: **v0.5.1**. Status: production-ready for the maintainer's
 own workload; external pilots TBD.
 
 ## Why JWC

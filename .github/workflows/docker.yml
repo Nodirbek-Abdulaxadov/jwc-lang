@@ -50,11 +50,6 @@ jobs:
           fi
           echo "label=${label}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU (multi-arch)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
-
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -82,8 +77,11 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          # amd64-only: the arm64 leg compiled the Rust release under QEMU
+          # emulation and effectively hung (30+ min). Re-add arm64 via a native
+          # ARM runner (ubuntu-*-arm) + manifest merge if/when it's needed.
           file: ${{ matrix.image.dockerfile }}
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
