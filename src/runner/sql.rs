@@ -546,6 +546,8 @@ pub(super) struct NavigationSubquery {
     join_source_col: String,
     /// Column subset (empty = whole row).
     projection: Vec<String>,
+    /// `(join_table, near_col, far_col)` for a ManyToMany nav; `None` otherwise.
+    join: Option<(String, String, String)>,
     /// Optional `(column, direction)` to order the materialised collection.
     order_by: Option<(String, SortDir)>,
 }
@@ -594,6 +596,18 @@ impl NavigationSubquery {
                 "(SELECT {} FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"{} LIMIT 1)",
                 val, self.target_table, self.join_target_col, source_alias, self.join_source_col, order
             ),
+            // ManyToMany: target rows reached through the link table.
+            // join_target_col = target PK, join_source_col = source PK.
+            NavigationKind::ManyToMany => {
+                let (jt, near, far) = self
+                    .join
+                    .as_ref()
+                    .expect("ManyToMany navigation must carry join-table coordinates");
+                format!(
+                    "COALESCE((SELECT json_agg({}{}) FROM \"{}\" c JOIN \"{}\" j ON j.\"{}\" = c.\"{}\" WHERE j.\"{}\" = {}.\"{}\"), '[]'::json)",
+                    val, order, self.target_table, jt, far, self.join_target_col, near, source_alias, self.join_source_col
+                )
+            }
         }
     }
 }
@@ -629,18 +643,25 @@ pub(super) fn build_navigation_subqueries(
             .iter()
             .find(|n| n.name.to_lowercase() == rel_key)
             .ok_or_else(|| anyhow!("entity '{}' has no navigation '{}'", entity, rel))?;
+        let target_pk = pk_by_table
+            .get(&nav.target_entity.to_lowercase())
+            .and_then(|v| v.first().cloned())
+            .unwrap_or_else(|| "id".to_string());
         let (join_target_col, join_source_col) = match nav.kind {
             // belongs-to: this entity holds the FK → join target PK = source FK
-            NavigationKind::BelongsTo => {
-                let target_pk = pk_by_table
-                    .get(&nav.target_entity.to_lowercase())
-                    .and_then(|v| v.first().cloned())
-                    .unwrap_or_else(|| "id".to_string());
-                (target_pk, nav.target_field.clone())
-            }
+            NavigationKind::BelongsTo => (target_pk, nav.target_field.clone()),
+            // m2m: join via link table on both PKs.
+            NavigationKind::ManyToMany => (target_pk, source_pk_col.clone()),
             // has-many / has-one: target holds the FK → join target FK = source PK
             _ => (nav.target_field.clone(), source_pk_col.clone()),
         };
+        let join = nav.join.as_ref().map(|j| {
+            (
+                crate::sql::to_snake_case(&j.table),
+                j.near_col.clone(),
+                j.far_col.clone(),
+            )
+        });
         out.push(NavigationSubquery {
             name: nav.name.clone(),
             kind: nav.kind,
@@ -648,6 +669,7 @@ pub(super) fn build_navigation_subqueries(
             join_target_col,
             join_source_col,
             projection: nav.projection.clone(),
+            join,
             order_by: nav
                 .order_by
                 .as_ref()

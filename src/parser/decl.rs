@@ -9,8 +9,8 @@ use anyhow::Result;
 
 use crate::ast::{
     ConstDecl, DbContextDecl, FieldDecl, FieldReference, FunctionDecl, MiddlewareDecl, ModelDecl,
-    ModelKind, NavOrder, NavigationField, NavigationKind, OnDeleteAction, Program, RouteDecl,
-    RouteProtocol, SortDir, TypeSpec, TypedParam, Visibility,
+    ModelKind, NavJoin, NavOrder, NavigationField, NavigationKind, OnDeleteAction, Program,
+    RouteDecl, RouteProtocol, SortDir, TypeSpec, TypedParam, Visibility,
 };
 use crate::lexer::{Keyword, TokenKind};
 
@@ -376,10 +376,31 @@ impl<'a> Parser<'a> {
             return Err(self.error_here("expected 'via' in navigation declaration"));
         }
 
-        // `via Target.col` (dotted) → the target holds the FK (has-many / has-one).
-        // `via local_col`   (bare)   → this entity holds the FK (belongs-to).
-        let first = self.expect_ident("expected column or entity name after 'via'")?;
-        let (kind, target_field) = if self.check_symbol('.') {
+        // `via JoinTable(near, far)` → many-to-many through a link table.
+        // `via Target.col`  (dotted)  → the target holds the FK (has-many / has-one).
+        // `via local_col`   (bare)    → this entity holds the FK (belongs-to).
+        let first = self.expect_ident("expected column, entity, or join table after 'via'")?;
+        let (kind, target_field, join) = if self.check_symbol('(') {
+            self.expect_symbol('(')?;
+            let near = self.expect_ident("expected near column in 'via JoinTable(near, far)'")?;
+            self.expect_symbol(',')?;
+            let far = self.expect_ident("expected far column in 'via JoinTable(near, far)'")?;
+            self.expect_symbol(')')?;
+            if !is_list {
+                return Err(self.error_here(
+                    "many-to-many navigation 'via JoinTable(near, far)' must be declared as List<...>",
+                ));
+            }
+            (
+                NavigationKind::ManyToMany,
+                far.clone(),
+                Some(NavJoin {
+                    table: first,
+                    near_col: near,
+                    far_col: far,
+                }),
+            )
+        } else if self.check_symbol('.') {
             self.expect_symbol('.')?;
             let col = self.expect_ident("expected target column name after '.'")?;
             if !first.eq_ignore_ascii_case(&target_entity) {
@@ -392,14 +413,14 @@ impl<'a> Parser<'a> {
             } else {
                 NavigationKind::OneToOne
             };
-            (kind, col)
+            (kind, col, None)
         } else {
             if is_list {
                 return Err(self.error_here(
-                    "List<...> navigation needs 'via Target.fk' (the target holds the FK); a bare column is a belongs-to (single) relation",
+                    "List<...> navigation needs 'via Target.fk' (the target holds the FK) or 'via JoinTable(near, far)' (many-to-many); a bare column is a belongs-to (single) relation",
                 ));
             }
-            (NavigationKind::BelongsTo, first)
+            (NavigationKind::BelongsTo, first, None)
         };
 
         // optional `orderby <target col> [asc|desc]` — orders the materialised
@@ -428,6 +449,7 @@ impl<'a> Parser<'a> {
             target_entity,
             target_field,
             projection,
+            join,
             order_by,
         })
     }

@@ -213,25 +213,62 @@ pub fn validate_program(program: &Program) -> Result<()> {
                         nav.target_entity
                     )
                 })?;
-            // The join FK column lives on the target for has-many/has-one, but
-            // on *this* entity for belongs-to (this entity holds the FK).
-            let (fk_owner, fk_owner_name) = match nav.kind {
-                crate::ast::NavigationKind::BelongsTo => (model, model.name.as_str()),
-                _ => (target, nav.target_entity.as_str()),
-            };
-            let field_key = nav.target_field.to_lowercase();
-            if !fk_owner
-                .fields
-                .iter()
-                .any(|f| f.name.to_lowercase() == field_key)
-            {
-                bail!(
-                    "Entity '{}' navigation '{}' references unknown column '{}.{}'",
-                    model.name,
-                    nav.name,
-                    fk_owner_name,
-                    nav.target_field
-                );
+            if let crate::ast::NavigationKind::ManyToMany = nav.kind {
+                // m2m: the near/far FK columns live on the join table.
+                let j = nav
+                    .join
+                    .as_ref()
+                    .expect("ManyToMany navigation must carry join-table coordinates");
+                let jt_key = j.table.to_lowercase();
+                let join_tbl = program
+                    .models
+                    .iter()
+                    .find(|m| m.kind == ModelKind::Entity && m.name.to_lowercase() == jt_key)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Entity '{}' navigation '{}' references unknown join table '{}'",
+                            model.name,
+                            nav.name,
+                            j.table
+                        )
+                    })?;
+                for (col, which) in [(&j.near_col, "near"), (&j.far_col, "far")] {
+                    if !join_tbl
+                        .fields
+                        .iter()
+                        .any(|f| f.name.eq_ignore_ascii_case(col))
+                    {
+                        bail!(
+                            "Entity '{}' navigation '{}': join table '{}' has no {} column '{}'",
+                            model.name,
+                            nav.name,
+                            j.table,
+                            which,
+                            col
+                        );
+                    }
+                }
+            } else {
+                // The join FK column lives on the target for has-many/has-one,
+                // but on *this* entity for belongs-to (this entity holds the FK).
+                let (fk_owner, fk_owner_name) = match nav.kind {
+                    crate::ast::NavigationKind::BelongsTo => (model, model.name.as_str()),
+                    _ => (target, nav.target_entity.as_str()),
+                };
+                let field_key = nav.target_field.to_lowercase();
+                if !fk_owner
+                    .fields
+                    .iter()
+                    .any(|f| f.name.to_lowercase() == field_key)
+                {
+                    bail!(
+                        "Entity '{}' navigation '{}' references unknown column '{}.{}'",
+                        model.name,
+                        nav.name,
+                        fk_owner_name,
+                        nav.target_field
+                    );
+                }
             }
             // Projected nav columns must exist on the target entity.
             for col in &nav.projection {

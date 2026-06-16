@@ -464,7 +464,9 @@ fn render_field_reference(r: &FieldReference) -> String {
 
 fn render_navigation(w: &mut Writer, n: &NavigationField) {
     let ty = match n.kind {
-        NavigationKind::OneToMany => format!("List<{}>", n.target_entity),
+        NavigationKind::OneToMany | NavigationKind::ManyToMany => {
+            format!("List<{}>", n.target_entity)
+        }
         NavigationKind::OneToOne | NavigationKind::BelongsTo => n.target_entity.clone(),
     };
     let proj = if n.projection.is_empty() {
@@ -472,8 +474,13 @@ fn render_navigation(w: &mut Writer, n: &NavigationField) {
     } else {
         format!(" {{ {} }}", n.projection.join(", "))
     };
-    // belongs-to prints a bare local column; has-many/one print `Target.col`.
+    // m2m prints `JoinTable(near, far)`; belongs-to prints a bare local column;
+    // has-many/one print `Target.col`.
     let via = match n.kind {
+        NavigationKind::ManyToMany => match &n.join {
+            Some(j) => format!("{}({}, {})", j.table, j.near_col, j.far_col),
+            None => format!("{}.{}", n.target_entity, n.target_field),
+        },
         NavigationKind::BelongsTo => n.target_field.clone(),
         _ => format!("{}.{}", n.target_entity, n.target_field),
     };

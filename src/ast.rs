@@ -204,6 +204,20 @@ pub enum NavigationKind {
     /// points at the parent's PK (belongs-to). Materialises as a single nested
     /// object. Distinguished from `OneToOne` by a bare (undotted) `via` column.
     BelongsTo,
+    /// `name: List<Other> via JoinTable(near_col, far_col);` — many-to-many
+    /// through a join (link) table. Materialises as an array.
+    ManyToMany,
+}
+
+/// Join-table coordinates for a `ManyToMany` navigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavJoin {
+    /// The join (link) table entity.
+    pub table: String,
+    /// Join-table column pointing at *this* entity's PK.
+    pub near_col: String,
+    /// Join-table column pointing at the *target* entity's PK.
+    pub far_col: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +233,8 @@ pub struct NavigationField {
     /// name } via authorId`). Empty = the whole row. Lets an eager-loaded
     /// relation hide sensitive columns (e.g. `passwordHash`).
     pub projection: Vec<String>,
+    /// Join-table coordinates for a `ManyToMany` nav; `None` for the others.
+    pub join: Option<NavJoin>,
     /// Optional ordering for the materialised collection
     /// (`... via T.fk order by T.col [asc|desc]`). Applied inside the
     /// `json_agg(... ORDER BY ...)` so a `OneToMany` nav comes back in a
