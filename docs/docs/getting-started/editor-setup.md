@@ -34,7 +34,7 @@ go-to-definition, rename, smart completion).
 
 ## VS Code
 
-Install [JWC Language](https://marketplace.visualstudio.com/items?itemName=Nodirbek-Abdulaxadov.jwc-lang)
+Install [JWC Language](https://marketplace.visualstudio.com/items?itemName=Nodirbek-Abdulaxadov.jwc-language)
 from the Marketplace. The extension auto-launches `jwc-lsp` if it is on
 your `PATH`; otherwise point it at the binary in extension settings.
 
@@ -49,7 +49,7 @@ project's `.vscode/settings.json`:
 {
     "editor.formatOnSave": true,
     "[jwc]": {
-        "editor.defaultFormatter": "Nodirbek-Abdulaxadov.jwc-lang"
+        "editor.defaultFormatter": "Nodirbek-Abdulaxadov.jwc-language"
     }
 }
 ```

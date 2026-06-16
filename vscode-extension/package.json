@@ -1,5 +1,5 @@
 {
-  "name": "jwc-lang",
+  "name": "jwc-language",
   "displayName": "JWC Language",
   "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and LSP-powered diagnostics for the JWC backend language.",
   "version": "0.4.7",
