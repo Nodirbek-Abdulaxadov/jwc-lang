@@ -313,6 +313,8 @@ async fn jwc_db_eager_load(
     pk_kind: JwcPkKind,
     nav_name: &str,
     one_to_one: bool,
+    order_col: &str,
+    order_desc: bool,
 ) {
     if parents.is_empty() {
         return;
@@ -337,12 +339,21 @@ async fn jwc_db_eager_load(
         return;
     }
     let placeholders: Vec<String> = (1..=keys.len()).map(|i| format!("${}", i)).collect();
-    let sql = format!(
+    let mut sql = format!(
         "SELECT * FROM \"{}\" WHERE \"{}\" IN ({})",
         target_table,
         fk_col,
         placeholders.join(", "),
     );
+    // Ordered collection: a global ORDER BY the nav column. Grouping below is a
+    // stable partition by FK, so each collection inherits the column order.
+    if !order_col.is_empty() {
+        sql.push_str(&format!(
+            " ORDER BY \"{}\" {}",
+            order_col,
+            if order_desc { "DESC" } else { "ASC" }
+        ));
+    }
     let params: DbParams = match pk_kind {
         JwcPkKind::Smallint => keys.into_iter().map(jwc_param_smallint).collect(),
         JwcPkKind::Int => keys.into_iter().map(jwc_param_int).collect(),

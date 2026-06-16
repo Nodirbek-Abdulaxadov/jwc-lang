@@ -3300,12 +3300,11 @@ fn emit_db_select(
             nav.kind,
             crate::ast::NavigationKind::BelongsTo | crate::ast::NavigationKind::ManyToMany
         ) || !nav.projection.is_empty()
-            || nav.order_by.is_some()
         {
             out.push_str(&format!(
                 "{{ compile_error!({:?}); V::Null }}",
                 format!(
-                    "native AOT does not yet support belongs-to / m2m / projected / ordered navigation `{}` on `{}` — use the interpreter (`jwc run`/`serve`)",
+                    "native AOT does not yet support belongs-to / m2m / projected navigation `{}` on `{}` — use the interpreter (`jwc run`/`serve`)",
                     rel, meta.table
                 ),
             ));
@@ -3452,14 +3451,27 @@ fn emit_db_select(
             PgKind::Float | PgKind::Bool | PgKind::Timestamp | PgKind::Str => "JwcPkKind::Str",
         };
         let one_to_one = matches!(plan.nav.kind, crate::ast::NavigationKind::OneToOne);
+        // Ordered nav collection (`... via T.fk orderby col [asc|desc]`): the
+        // eager-load query sorts by the column so each grouped collection comes
+        // back deterministically — matches the interpreter's
+        // `json_agg(... ORDER BY ...)`. Empty order_col = unordered (legacy).
+        let (order_col, order_desc) = match &plan.nav.order_by {
+            Some(o) => {
+                let col = o.col.rsplit('.').next().unwrap_or(o.col.as_str());
+                (col.to_string(), matches!(o.dir, crate::ast::SortDir::Desc))
+            }
+            None => (String::new(), false),
+        };
         out.push_str(&format!(
-            " jwc_db_eager_load(&mut __rows, \"{pk}\", \"{tgt}\", \"{fk}\", {pk_kind}, \"{nav}\", {oto}).await;",
+            " jwc_db_eager_load(&mut __rows, \"{pk}\", \"{tgt}\", \"{fk}\", {pk_kind}, \"{nav}\", {oto}, \"{ocol}\", {odesc}).await;",
             pk = plan.parent_pk.name,
             tgt = plan.target.table,
             fk = plan.nav.target_field,
             pk_kind = pk_kind_token,
             nav = plan.nav.name,
             oto = one_to_one,
+            ocol = order_col,
+            odesc = order_desc,
         ));
     }
 

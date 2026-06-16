@@ -43,6 +43,52 @@ fn emit_rust_source_writes_to_expected_path_with_header() {
 }
 
 #[test]
+fn emit_rust_source_supports_ordered_one_to_many_nav() {
+    // Native AOT parity (Epic 4, step 1): an ordered OneToMany eager-load
+    // (`posts: ... orderby createdAt desc`) must codegen the eager-load helper
+    // call carrying the order column + direction, NOT a compile_error rejection.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity User of AppDb {
+            id int pk;
+            name varchar(64);
+            posts: List<Post> via Post.userId orderby createdAt desc;
+        }
+        entity Post of AppDb {
+            id int pk;
+            userId int;
+            createdAt datetime;
+        }
+        function load() { return select User with posts from AppDb.User; }
+        function main() { load(); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, root, "orderednav", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    assert!(
+        body.contains("jwc_db_eager_load"),
+        "expected an eager-load call in generated source"
+    );
+    // Order column + DESC flag threaded into the helper call.
+    assert!(
+        body.contains("\"createdAt\", true)"),
+        "ordered nav must pass (order_col, order_desc); got nearby:\n{}",
+        body.lines()
+            .filter(|l| l.contains("jwc_db_eager_load"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // The ordered nav must no longer be rejected.
+    assert!(
+        !body.contains("does not yet support"),
+        "ordered OneToMany nav should no longer hit the native rejection"
+    );
+}
+
+#[test]
 fn emit_rust_source_respects_release_profile_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
