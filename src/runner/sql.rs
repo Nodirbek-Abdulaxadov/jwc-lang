@@ -372,6 +372,59 @@ pub(super) fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync + Send> {
     }
 }
 
+/// Bind a runtime array as a real Postgres array param (for `col = ANY($N)`).
+/// Element type is inferred from the (homogeneous) first element: int → int4[]
+/// (or int8[] when a value exceeds i32), string → text[]. Empty → int4[].
+pub(super) fn array_to_sql_param(items: &[Value]) -> Result<Box<dyn ToSql + Sync + Send>> {
+    match items.first() {
+        None => Ok(Box::new(Vec::<i32>::new())),
+        Some(Value::Int(_)) => {
+            if !items.iter().all(|x| matches!(x, Value::Int(_))) {
+                bail!("in (<list>): array must be all-int or all-string");
+            }
+            let fits_i32 = items.iter().all(
+                |x| matches!(x, Value::Int(n) if (i32::MIN as i64..=i32::MAX as i64).contains(n)),
+            );
+            if fits_i32 {
+                let v: Vec<i32> = items
+                    .iter()
+                    .map(|x| match x {
+                        Value::Int(n) => *n as i32,
+                        _ => 0,
+                    })
+                    .collect();
+                Ok(Box::new(v))
+            } else {
+                let v: Vec<i64> = items
+                    .iter()
+                    .map(|x| match x {
+                        Value::Int(n) => *n,
+                        _ => 0,
+                    })
+                    .collect();
+                Ok(Box::new(v))
+            }
+        }
+        Some(Value::Str(_)) => {
+            if !items.iter().all(|x| matches!(x, Value::Str(_))) {
+                bail!("in (<list>): array must be all-int or all-string");
+            }
+            let v: Vec<String> = items
+                .iter()
+                .map(|x| match x {
+                    Value::Str(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .collect();
+            Ok(Box::new(v))
+        }
+        Some(other) => bail!(
+            "in (<list>): unsupported array element type {}",
+            other.type_name()
+        ),
+    }
+}
+
 pub(super) fn value_to_cache_fragment(val: &Value) -> String {
     match val {
         Value::Int(n) => format!("int:{n}"),
@@ -773,6 +826,23 @@ pub(super) async fn build_where_sql(
             if values.is_empty() {
                 bail!("WHERE 'in (...)' must have at least one value");
             }
+            // Dynamic-length list: `where X.id in (@ids)` where @ids is a runtime
+            // array → bind the whole array as one param and emit `= ANY($N)`.
+            // A single scalar keeps the `IN ($N)` shape.
+            if values.len() == 1 {
+                let v = vm.eval_expr(&values[0], vars).await?;
+                if let Value::Array(items) = &v {
+                    params.push(array_to_sql_param(items)?);
+                    shape.push(format!("where:{col}:any"));
+                    cache.push(format!("where:{col}:any[{}]", value_to_cache_fragment(&v)));
+                    return Ok(format!("\"{}\" = ANY(${})", col, params.len()));
+                }
+                params.push(value_to_sql_param(&v));
+                shape.push(format!("where:{col}:in(1)"));
+                cache.push(format!("where:{col}:in[{}]", value_to_cache_fragment(&v)));
+                return Ok(format!("\"{}\" IN (${})", col, params.len()));
+            }
+            // Fixed-arity literal/param list → IN ($1, $2, ...).
             let mut placeholders = Vec::with_capacity(values.len());
             let mut cache_parts = Vec::with_capacity(values.len());
             for value_expr in values {
