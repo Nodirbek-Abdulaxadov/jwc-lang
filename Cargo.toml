@@ -90,3 +90,11 @@ otlp = [
 testcontainers = { version = "0.20", features = ["blocking"] }
 testcontainers-modules = { version = "0.8", features = ["postgres", "blocking"] }
 tempfile = "3"
+
+# musl release builds pull openssl-sys transitively (native-tls /
+# postgres-native-tls drive DB TLS in engine.rs). musl has no system openssl,
+# so the release pipeline's `x86_64-unknown-linux-musl` build failed at
+# `openssl-sys` since v0.4.8. Vendor openssl from source for the musl target
+# only — gnu / windows / dev builds are unaffected.
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
