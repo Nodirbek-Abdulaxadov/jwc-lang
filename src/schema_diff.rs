@@ -107,6 +107,14 @@ pub enum DiffOp {
         table: String,
         column_name: String,
     },
+    AddUnique {
+        table: String,
+        column_name: String,
+    },
+    DropUnique {
+        table: String,
+        column_name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +537,39 @@ fn apply_alter_statements(sql: &str, tables: &mut [TableSnapshot]) {
             }
         }
     }
+
+    // ALTER TABLE "t" ADD CONSTRAINT "..." UNIQUE ("c"); → mark column unique.
+    let add_uniq_re = Regex::new(
+        r#"(?is)ALTER\s+TABLE\s+"([A-Za-z_][A-Za-z0-9_]*)"\s+ADD\s+CONSTRAINT\s+"[^"]+"\s+UNIQUE\s*\(\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\)\s*;"#,
+    )
+    .expect("static regex compiles");
+    for cap in add_uniq_re.captures_iter(sql) {
+        let table = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+        let col = cap.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+        if let Some(t) = tables.iter_mut().find(|t| t.name == table) {
+            if let Some(c) = t.columns.iter_mut().find(|c| c.name == col) {
+                c.is_unique = true;
+            }
+        }
+    }
+
+    // ALTER TABLE "t" DROP CONSTRAINT [IF EXISTS] "t_c_key"; → clear unique on
+    // the column whose default constraint name matches.
+    let drop_uniq_re = Regex::new(
+        r#"(?is)ALTER\s+TABLE\s+"([A-Za-z_][A-Za-z0-9_]*)"\s+DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?"([^"]+)"\s*;"#,
+    )
+    .expect("static regex compiles");
+    for cap in drop_uniq_re.captures_iter(sql) {
+        let table = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+        let cname = cap.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+        if let Some(t) = tables.iter_mut().find(|t| t.name == table) {
+            for c in t.columns.iter_mut() {
+                if cname == format!("{}_{}_key", table, c.name) {
+                    c.is_unique = false;
+                }
+            }
+        }
+    }
 }
 
 /// Replay `DROP TABLE` statements onto the running snapshot.
@@ -612,6 +653,19 @@ pub fn compute_diff(old: &[TableSnapshot], new: &[TableSnapshot]) -> Vec<DiffOp>
                             column_name: new_col.name.clone(),
                         });
                     }
+                    // A `unique` modifier added to / removed from an existing
+                    // column → ADD / DROP a UNIQUE constraint (pain log 2 #6).
+                    if !old_col.is_unique && new_col.is_unique {
+                        ops.push(DiffOp::AddUnique {
+                            table: new_table.name.clone(),
+                            column_name: new_col.name.clone(),
+                        });
+                    } else if old_col.is_unique && !new_col.is_unique {
+                        ops.push(DiffOp::DropUnique {
+                            table: new_table.name.clone(),
+                            column_name: new_col.name.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -681,6 +735,18 @@ pub fn diff_to_sql(diff: &[DiffOp]) -> String {
                 out.push_str(&format!(
                     "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" DROP NOT NULL;\n",
                     table, column_name
+                ));
+            }
+            DiffOp::AddUnique { table, column_name } => {
+                out.push_str(&format!(
+                    "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}_{}_key\" UNIQUE (\"{}\");\n",
+                    table, table, column_name, column_name
+                ));
+            }
+            DiffOp::DropUnique { table, column_name } => {
+                out.push_str(&format!(
+                    "ALTER TABLE \"{}\" DROP CONSTRAINT IF EXISTS \"{}_{}_key\";\n",
+                    table, table, column_name
                 ));
             }
         }
