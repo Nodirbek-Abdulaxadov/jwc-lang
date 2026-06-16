@@ -221,6 +221,9 @@ pub struct FieldDecl {
     /// in DDL and lets Postgres pick an id when the value is omitted from
     /// the insert payload.
     pub is_auto_increment: bool,
+    /// `email varchar(120) unique;` — emits a column-level `UNIQUE` constraint
+    /// in the generated DDL / migration diff.
+    pub is_unique: bool,
     pub references: Option<FieldReference>,
 }
 

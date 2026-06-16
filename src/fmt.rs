@@ -440,6 +440,9 @@ fn render_field(w: &mut Writer, f: &FieldDecl) {
     if f.is_auto_increment {
         parts.push("autoincrement".to_string());
     }
+    if f.is_unique {
+        parts.push("unique".to_string());
+    }
     if f.is_nullable {
         parts.push("nullable".to_string());
     }

@@ -382,7 +382,7 @@ impl<'a> Vm<'a> {
                 let errors = run_validation_rules(fields, &parsed);
                 if !errors.is_empty() {
                     let mut error_doc = serde_json::Map::new();
-                    error_doc.insert("status".into(), json!(400));
+                    error_doc.insert("__jwc_status__".into(), json!(400));
                     error_doc.insert("errors".into(), JsonValue::Object(errors));
                     return Ok(Flow::Return(Some(Value::Str(
                         JsonValue::Object(error_doc).to_string(),
@@ -398,7 +398,12 @@ impl<'a> Vm<'a> {
             } => {
                 let json_str = get_var_as_json(var, vars)?;
                 let table_name = crate::sql::to_snake_case(table);
-                let (sql, boxed_params) = build_insert_sql(&table_name, &json_str)?;
+                let col_types = self
+                    .models
+                    .get(&table.to_lowercase())
+                    .map(|m| super::sql::column_types_for_fields(&m.fields))
+                    .unwrap_or_default();
+                let (sql, boxed_params) = build_insert_sql(&table_name, &json_str, &col_types)?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let returned = engine::query_text(&sql, &param_refs).await?;
                 if !returned.is_empty() && returned != "null" {
@@ -417,8 +422,18 @@ impl<'a> Vm<'a> {
                 let pk_fields = self.resolve_pk_fields(table);
                 let key = var.to_lowercase();
                 let dirty_snapshot = self.dirty_fields.get(&key).cloned();
-                let (sql, boxed_params) =
-                    build_update_sql(&table_name, &json_str, &pk_fields, dirty_snapshot.as_ref())?;
+                let col_types = self
+                    .models
+                    .get(&table.to_lowercase())
+                    .map(|m| super::sql::column_types_for_fields(&m.fields))
+                    .unwrap_or_default();
+                let (sql, boxed_params) = build_update_sql(
+                    &table_name,
+                    &json_str,
+                    &pk_fields,
+                    dirty_snapshot.as_ref(),
+                    &col_types,
+                )?;
                 let param_refs = boxed_params_to_refs(&boxed_params);
                 let returned = engine::query_text(&sql, &param_refs).await?;
                 if !returned.is_empty() && returned != "null" {

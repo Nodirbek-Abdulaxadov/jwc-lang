@@ -81,7 +81,10 @@ impl<'a> Vm<'a> {
         match (value, args.get(1)) {
             (Some(v), _) => Ok(Value::Str(v)),
             (None, Some(default_expr)) => self.eval_expr(default_expr, vars).await,
-            (None, None) => Ok(Value::Null),
+            // Absent and no explicit default → empty string, matching
+            // `path_param` / `env`. Returning null here forced every caller to
+            // null-check before feeding a typed `string` parameter (pain log).
+            (None, None) => Ok(Value::Str(String::new())),
         }
     }
 
@@ -229,6 +232,8 @@ impl<'a> Vm<'a> {
                 other.type_name()
             ),
         };
+        // verify_hs256 tolerates a `Bearer ` prefix, so a handler can pass
+        // `header("authorization")` straight through.
         Ok(Value::Str(crate::jwt::verify_hs256(&token, &secret)?))
     }
 

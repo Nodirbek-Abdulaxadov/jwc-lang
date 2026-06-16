@@ -3,6 +3,45 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.9] — Runtime correctness fixes (pain-log root causes)
+
+Fixes a cluster of dogfooding-surfaced bugs at their root, each guarded by a
+regression test (341 unit tests green).
+
+**Response model**: a body key named `status` is no longer swallowed — the HTTP
+status now travels through an internal `__jwc_status__` sentinel (mirroring
+`__jwc_content_type__`/`__jwc_body__`), so `json({ status: ... })` and entities
+with a `status` column round-trip intact.
+
+**Value model unified**: a row from `select ... first` (a `Record`) is now
+accepted by `update <var> in`, `insert`/`delete <var>`, entity-typed function
+returns, and entity-typed parameters. The canonical
+`let x = select…; x.f = …; update x in T;` pattern — including across a function
+boundary — works.
+
+**Schema-aware parameter binding**: `insert`/`update` bind by the column's
+declared type instead of guessing from value shape. An ISO-date *string* into a
+`varchar` column stays text; a JSON *object* into a `jsonb` column binds as real
+`jsonb`.
+
+**Partial / PATCH**: a typed `class` parameter no longer requires every declared
+field to be present (presence stays the job of `validate body { … required }`),
+so partial PATCH payloads validate.
+
+**Auth**: `jwt_verify` strips an optional `Bearer ` scheme prefix, so handlers
+can pass `header("authorization")` straight through.
+
+**Entities**: `unique` column modifier is now honoured end-to-end (DDL +
+migration-diff round-trip).
+
+**Pagination**: dynamic `limit`/`offset` values are bound parameters, fixing a
+SQL-compile-cache collision that made `offset` silently no-op.
+
+**Ergonomics**: `query_param(name)` returns `""` (not `null`) when absent,
+matching `path_param`/`env`. Docs corrected (`for x in xs` has no parentheses;
+entity columns use `<name> <type> <modifiers>` with `nullable`/`autoincrement`,
+not colon/`?`/`auto`).
+
 ## [0.4.8] — Phase 8 developer experience + ecosystem close-out
 
 Bundles the full Phase 8 dev-experience surface from

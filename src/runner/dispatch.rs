@@ -136,18 +136,15 @@ impl<'a> Vm<'a> {
         };
         let body = response_str.unwrap_or_else(|| "null".to_string());
 
-        // Derive HTTP status from a "status" field in JSON, default 200.
-        // Then strip the internal "status" field before sending to client.
-        //
-        // Built-ins like `html(...)` / `text(...)` mark their output with two
-        // sentinel keys — `__jwc_content_type__` and `__jwc_body__` — that
-        // travel inside the same JSON envelope so the existing status-field
-        // strip pass still applies. Both keys are removed here and the raw
-        // body string is returned as-is (no JSON re-encoding).
+        // Derive HTTP status from the internal `__jwc_status__` sentinel,
+        // default 200, then strip it before sending to the client. The HTTP
+        // status travels through a reserved sentinel key (like
+        // `__jwc_content_type__` / `__jwc_body__`) so a plain user body key
+        // named `status` is sacred and passes through to the client untouched.
         let (status, clean_body, content_type, extra_headers) =
             if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&body) {
                 let code = doc
-                    .get("status")
+                    .get("__jwc_status__")
                     .and_then(|s| s.as_u64())
                     .and_then(|s| u16::try_from(s).ok())
                     .filter(|s| *s >= 100 && *s < 600)
@@ -156,7 +153,7 @@ impl<'a> Vm<'a> {
                 let mut raw_body: Option<String> = None;
                 let mut headers: Vec<(String, String)> = Vec::new();
                 if let Some(obj) = doc.as_object_mut() {
-                    obj.remove("status");
+                    obj.remove("__jwc_status__");
                     if let Some(JsonValue::String(s)) = obj.remove("__jwc_content_type__") {
                         ct = Some(s);
                     }
@@ -533,7 +530,7 @@ pub(super) fn normalize_content_type(mime: &str) -> String {
 /// keys are recognised and stripped by `dispatch_route`.
 pub(super) fn content_type_response(body: String, mime: &str) -> Value {
     let envelope = json!({
-        "status": 200,
+        "__jwc_status__": 200,
         "__jwc_content_type__": normalize_content_type(mime),
         "__jwc_body__": body,
     });

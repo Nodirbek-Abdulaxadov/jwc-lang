@@ -279,12 +279,17 @@ impl<'a> Parser<'a> {
             let mut is_nullable = false;
             let mut is_primary_key = false;
             let mut is_auto_increment = false;
+            let mut is_unique = false;
             let mut references: Option<FieldReference> = None;
 
             loop {
                 match self.current.kind.clone() {
                     TokenKind::Ident(v) if v.eq_ignore_ascii_case("nullable") => {
                         is_nullable = true;
+                        self.bump()?;
+                    }
+                    TokenKind::Ident(v) if v.eq_ignore_ascii_case("unique") => {
+                        is_unique = true;
                         self.bump()?;
                     }
                     TokenKind::Ident(v) if v.eq_ignore_ascii_case("pk") => {
@@ -314,6 +319,7 @@ impl<'a> Parser<'a> {
                 is_nullable,
                 is_primary_key,
                 is_auto_increment,
+                is_unique,
                 references,
             });
         }

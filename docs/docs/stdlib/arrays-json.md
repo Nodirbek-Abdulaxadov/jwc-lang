@@ -48,18 +48,18 @@ Nested objects, arrays, and primitives mix freely.
 
 ```jwc
 let nums = [1, 2, 3];
-for (n in nums) {
+for n in nums {
     print(n);
 }
 ```
 
-`for ... in` accepts both arrays and JSON-array-strings (auto-parsed). `break` / `continue` / `return` all work.
+`for ... in` (no parentheses) accepts both arrays and JSON-array-strings (auto-parsed). `break` / `continue` / `return` all work.
 
 ## Building arrays
 
 ```jwc
 let squares = [];
-for (n in range(5)) {           // 0, 1, 2, 3, 4
+for n in range(5) {             // 0, 1, 2, 3, 4
     push(squares, n * n);       // mutates `squares` in place
 }
 let csv = join(squares, ",");   // "0,1,4,9,16"
