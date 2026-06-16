@@ -286,9 +286,7 @@ pub(super) fn json_value_to_sql_param_typed(
 /// Build a `column-name → lower-cased Postgres type` map for an entity, used to
 /// drive schema-aware parameter binding in insert / update. Columns whose type
 /// can't be mapped are simply omitted (the binder falls back to shape-based).
-pub(super) fn column_types_for_fields(
-    fields: &[crate::ast::FieldDecl],
-) -> HashMap<String, String> {
+pub(super) fn column_types_for_fields(fields: &[crate::ast::FieldDecl]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for f in fields {
         if let Ok((ty, _)) = crate::sql::map_type_postgres(&f.ty, &f.name) {

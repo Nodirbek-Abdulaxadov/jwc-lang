@@ -575,9 +575,7 @@ async fn response_body_status_key_is_preserved() {
     let program = parse_program(src).unwrap();
     validate_program(&program).unwrap();
 
-    let (status, body) = run_request(&program, "GET", "/health", None)
-        .await
-        .unwrap();
+    let (status, body) = run_request(&program, "GET", "/health", None).await.unwrap();
 
     assert_eq!(status, 200);
     assert!(

@@ -149,7 +149,7 @@ impl<'a> Vm<'a> {
             },
             model_ty => {
                 let model = match self.models.get(&model_ty.to_lowercase()) {
-                    Some(m) => m.clone(),
+                    Some(m) => (*m).clone(),
                     None => return Ok(value),
                 };
 
