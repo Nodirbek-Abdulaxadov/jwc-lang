@@ -124,6 +124,7 @@ impl<'a> Vm<'a> {
                         &mut cache_bits,
                         vars,
                         self,
+                        None,
                     )
                     .await?;
                     format!(" WHERE {}", s)
@@ -176,6 +177,7 @@ impl<'a> Vm<'a> {
                         &mut cache_bits,
                         vars,
                         self,
+                        None,
                     )
                     .await?;
                     format!(" WHERE {}", s)
@@ -226,6 +228,8 @@ impl<'a> Vm<'a> {
                 with_relations,
                 projection,
                 aggregates,
+                aliased_cols,
+                joins,
                 group_by,
                 having,
             } => {
@@ -239,6 +243,7 @@ impl<'a> Vm<'a> {
                 )?;
                 let (sql, boxed_params, shape_key, cache_key) = build_select_sql(
                     table_name,
+                    entity,
                     where_clause.as_deref(),
                     order_by.as_ref(),
                     limit.as_deref(),
@@ -247,6 +252,8 @@ impl<'a> Vm<'a> {
                     &nav_subqueries,
                     projection,
                     aggregates,
+                    aliased_cols,
+                    joins,
                     group_by,
                     having.as_deref(),
                     vars,

@@ -376,6 +376,26 @@ pub struct AggProj {
     pub col: String,
 }
 
+/// An aliased plain column in a projection, used to surface a column from a
+/// joined entity (`{ columnName: Column.name }`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasedCol {
+    /// Result key in the row JSON.
+    pub alias: String,
+    /// Source field path, e.g. `Column.name`.
+    pub field: String,
+}
+
+/// `join Entity on <field> == <field>` — an explicit equi-join to another
+/// entity in the same dbcontext. Both `left` / `right` are field paths
+/// (`Entity.col`); the SQL builder resolves them to table aliases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinClause {
+    pub entity: String,
+    pub left: String,
+    pub right: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbOrderBy {
     /// Column path, e.g. `"Entity.created_at"` or `"created_at"`.
@@ -582,6 +602,11 @@ pub enum Expr {
         /// Combined with `group_by` this is grouped aggregation; the SELECT
         /// list is `projection` columns + these `<fn>(col) AS alias` terms.
         aggregates: Vec<AggProj>,
+        /// Aliased plain columns (`{ columnName: Column.name }`) — surfaces a
+        /// column from a joined entity under a result key.
+        aliased_cols: Vec<AliasedCol>,
+        /// Explicit `join Entity on a == b` clauses (cross-entity queries).
+        joins: Vec<JoinClause>,
         /// `group by Entity.col [, ...]` — column paths to GROUP BY at the
         /// SQL layer. Each entry is a `field` string in the same shape as
         /// `where Entity.col`. Empty vec when no `group by` was written.

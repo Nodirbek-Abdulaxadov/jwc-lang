@@ -399,6 +399,8 @@ fn validate_expr(
             with_relations: _,
             projection,
             aggregates,
+            aliased_cols: _,
+            joins,
             group_by,
             having,
         } => {
@@ -437,8 +439,11 @@ fn validate_expr(
             validate_table_in_context(&ctx_key, table, db_tables)?;
 
             // Compile-time column existence check for WHERE / ORDER BY / projection.
+            // Skipped for JOIN queries — they reference columns across several
+            // entities, which this single-entity check can't resolve; Postgres
+            // validates those at prepare time.
             let fields = lookup_table_fields(&ctx_key, table, entity_fields_by_table);
-            if let Some(fields) = fields {
+            if let Some(fields) = fields.filter(|_| joins.is_empty()) {
                 if let Some(wc) = where_clause {
                     check_where_columns(wc, fields, context_var, table)?;
                 }

@@ -855,13 +855,18 @@ fn render_expr(e: &Expr) -> String {
             with_relations,
             projection,
             aggregates,
+            aliased_cols,
+            joins,
             group_by,
             having,
         } => {
             let mut s = String::from("select ");
             s.push_str(entity);
-            if !projection.is_empty() || !aggregates.is_empty() {
+            if !projection.is_empty() || !aggregates.is_empty() || !aliased_cols.is_empty() {
                 let mut items: Vec<String> = projection.clone();
+                for ac in aliased_cols {
+                    items.push(format!("{}: {}", ac.alias, ac.field));
+                }
                 for a in aggregates {
                     let inner = match a.kind {
                         AggregateKind::Count => "count(*)".to_string(),
@@ -881,6 +886,9 @@ fn render_expr(e: &Expr) -> String {
                 s.push_str(&with_relations.join(", "));
             }
             s.push_str(&format!(" from {}.{}", context_var, table));
+            for j in joins {
+                s.push_str(&format!(" join {} on {} == {}", j.entity, j.left, j.right));
+            }
             if let Some(wc) = where_clause {
                 s.push_str(" where ");
                 s.push_str(&render_where(wc));

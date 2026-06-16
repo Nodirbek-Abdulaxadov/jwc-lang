@@ -474,6 +474,7 @@ impl<'a> Vm<'a> {
                     &mut cache_bits,
                     vars,
                     self,
+                    None,
                 )
                 .await?;
                 let sql = format!("DELETE FROM \"{}\" WHERE {};", table_name, where_sql);
@@ -536,6 +537,7 @@ impl<'a> Vm<'a> {
             &mut cache_bits,
             vars,
             self,
+            None,
         )
         .await?;
         let sql = format!(

@@ -15,7 +15,8 @@ use async_recursion::async_recursion;
 use tokio_postgres::types::ToSql;
 
 use crate::ast::{
-    AggProj, AggregateKind, DbOrderBy, Expr, ModelDecl, NavigationKind, SortDir, WhereExpr,
+    AggProj, AggregateKind, AliasedCol, DbOrderBy, Expr, JoinClause, ModelDecl, NavigationKind,
+    SortDir, WhereExpr,
 };
 
 use super::util::{looks_like_datetime, looks_like_uuid};
@@ -444,6 +445,7 @@ pub(super) fn value_to_cache_fragment(val: &Value) -> String {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn build_select_sql(
     table_name: String,
+    main_entity: &str,
     where_clause: Option<&WhereExpr>,
     order_by: Option<&DbOrderBy>,
     limit: Option<&Expr>,
@@ -452,6 +454,8 @@ pub(super) async fn build_select_sql(
     nav_subqueries: &[NavigationSubquery],
     projection: &[String],
     aggregates: &[AggProj],
+    aliased_cols: &[AliasedCol],
+    joins: &[JoinClause],
     group_by: &[String],
     having: Option<&WhereExpr>,
     vars: &mut HashMap<String, Value>,
@@ -462,9 +466,31 @@ pub(super) async fn build_select_sql(
     let mut cache_bits: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
 
+    // Alias map for JOIN queries: main entity → "t", each join → "j{i}". When
+    // there are no joins, `alias_opt` is None and every column stays unqualified
+    // (byte-identical to the historical single-table SQL).
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    aliases.insert(main_entity.to_lowercase(), "t".to_string());
+    for (i, j) in joins.iter().enumerate() {
+        aliases.insert(j.entity.to_lowercase(), format!("j{}", i));
+    }
+    let alias_opt = if joins.is_empty() {
+        None
+    } else {
+        Some(&aliases)
+    };
+
     if let Some(wc) = where_clause {
-        let where_sql =
-            build_where_sql(wc, &mut params, &mut shape_bits, &mut cache_bits, vars, vm).await?;
+        let where_sql = build_where_sql(
+            wc,
+            &mut params,
+            &mut shape_bits,
+            &mut cache_bits,
+            vars,
+            vm,
+            alias_opt,
+        )
+        .await?;
         sql_where = format!(" WHERE {}", where_sql);
     }
 
@@ -473,19 +499,28 @@ pub(super) async fn build_select_sql(
     // collide in the prepared-statement cache.
     let mut sql_group = String::new();
     if !group_by.is_empty() {
+        let key_cols: Vec<String> = group_by.iter().map(|f| field_path_to_col(f)).collect();
         let cols: Vec<String> = group_by
             .iter()
-            .map(|f| format!("\"{}\"", field_path_to_col(f)))
+            .map(|f| where_col_sql(f, alias_opt))
             .collect();
         sql_group = format!(" GROUP BY {}", cols.join(", "));
-        shape_bits.push(format!("group:{}", cols.join(",")));
-        cache_bits.push(format!("group:{}", cols.join(",")));
+        shape_bits.push(format!("group:{}", key_cols.join(",")));
+        cache_bits.push(format!("group:{}", key_cols.join(",")));
     }
 
     let mut sql_having = String::new();
     if let Some(hv) = having {
-        let having_sql =
-            build_where_sql(hv, &mut params, &mut shape_bits, &mut cache_bits, vars, vm).await?;
+        let having_sql = build_where_sql(
+            hv,
+            &mut params,
+            &mut shape_bits,
+            &mut cache_bits,
+            vars,
+            vm,
+            alias_opt,
+        )
+        .await?;
         sql_having = format!(" HAVING {}", having_sql);
     }
 
@@ -496,7 +531,7 @@ pub(super) async fn build_select_sql(
             SortDir::Asc => "ASC",
             SortDir::Desc => "DESC",
         };
-        sql_order = format!(" ORDER BY \"{}\" {}", col, dir);
+        sql_order = format!(" ORDER BY {} {}", where_col_sql(&ob.field, alias_opt), dir);
         shape_bits.push(format!("orderby:{col}:{dir}"));
         cache_bits.push(format!("orderby:{col}:{dir}"));
     }
@@ -537,14 +572,21 @@ pub(super) async fn build_select_sql(
     // Explicit projection (named columns and/or aliased aggregates) suppresses
     // the `t.*` / `*` fallback — required for grouped aggregation, where a bare
     // `SELECT *` under GROUP BY is invalid SQL.
-    let explicit = !projection.is_empty() || !aggregates.is_empty();
+    let explicit = !projection.is_empty() || !aggregates.is_empty() || !aliased_cols.is_empty();
     let mut bits: Vec<String> = Vec::new();
     if explicit {
         for c in projection {
             bits.push(format!("t.\"{}\"", c));
         }
+        for ac in aliased_cols {
+            bits.push(format!(
+                "{} AS \"{}\"",
+                where_col_sql(&ac.field, alias_opt),
+                ac.alias
+            ));
+        }
         for agg in aggregates {
-            bits.push(agg_select_sql(agg));
+            bits.push(agg_select_sql(agg, alias_opt));
         }
     } else if !nav_subqueries.is_empty() {
         bits.push("t.*".to_string());
@@ -555,6 +597,10 @@ pub(super) async fn build_select_sql(
     if !projection.is_empty() {
         shape_bits.push(format!("project:{}", projection.join(",")));
         cache_bits.push(format!("project:{}", projection.join(",")));
+    }
+    for ac in aliased_cols {
+        shape_bits.push(format!("acol:{}:{}", ac.alias, ac.field));
+        cache_bits.push(format!("acol:{}:{}", ac.alias, ac.field));
     }
     for agg in aggregates {
         shape_bits.push(format!("agg:{}:{:?}:{}", agg.alias, agg.kind, agg.col));
@@ -570,9 +616,24 @@ pub(super) async fn build_select_sql(
         bits.join(", ")
     };
 
+    // FROM with optional JOINs — each joined entity aliased as j{i}.
+    let mut from_sql = format!("\"{}\" t", table_name);
+    for (i, j) in joins.iter().enumerate() {
+        let jt = crate::sql::to_snake_case(&j.entity);
+        from_sql.push_str(&format!(
+            " JOIN \"{}\" j{} ON {} = {}",
+            jt,
+            i,
+            where_col_sql(&j.left, Some(&aliases)),
+            where_col_sql(&j.right, Some(&aliases)),
+        ));
+        shape_bits.push(format!("join:{}", jt));
+        cache_bits.push(format!("join:{}", jt));
+    }
+
     let inner_sql = format!(
-        "SELECT {} FROM \"{}\" t{}{}{}{}{}",
-        inner_projection, table_name, sql_where, sql_group, sql_having, sql_order, sql_limit_offset
+        "SELECT {} FROM {}{}{}{}{}{}",
+        inner_projection, from_sql, sql_where, sql_group, sql_having, sql_order, sql_limit_offset
     );
 
     let sql = if first {
@@ -627,7 +688,7 @@ fn sort_dir_sql(dir: SortDir) -> &'static str {
 }
 
 /// A `<fn>(...) AS "alias"` term for an aliased aggregate projection.
-fn agg_select_sql(agg: &AggProj) -> String {
+fn agg_select_sql(agg: &AggProj, aliases: Option<&HashMap<String, String>>) -> String {
     let func = match agg.kind {
         AggregateKind::Count => return format!("count(*) AS \"{}\"", agg.alias),
         AggregateKind::Sum => "sum",
@@ -635,12 +696,11 @@ fn agg_select_sql(agg: &AggProj) -> String {
         AggregateKind::Min => "min",
         AggregateKind::Max => "max",
     };
-    format!(
-        "{}(t.\"{}\") AS \"{}\"",
-        func,
-        field_path_to_col(&agg.col),
-        agg.alias
-    )
+    let col_sql = match aliases {
+        None => format!("t.\"{}\"", field_path_to_col(&agg.col)),
+        Some(m) => where_col_sql(&agg.col, Some(m)),
+    };
+    format!("{}({}) AS \"{}\"", func, col_sql, agg.alias)
 }
 
 /// The per-row JSON value for a nav subquery: the whole row, or a
@@ -763,6 +823,24 @@ pub(super) fn build_navigation_subqueries(
     Ok(out)
 }
 
+/// The SQL column reference for a WHERE field. Without an alias map (single
+/// table) it's the bare quoted column — byte-identical to the historical
+/// output. With a map (JOIN query) it's qualified by the entity's table alias:
+/// `Entity.col` → `<alias>."col"`, bare/unknown → the main alias `t`.
+fn where_col_sql(field: &str, aliases: Option<&HashMap<String, String>>) -> String {
+    match aliases {
+        None => format!("\"{}\"", field_path_to_col(field)),
+        Some(map) => {
+            if let Some((ent, c)) = field.split_once('.') {
+                if let Some(a) = map.get(&ent.to_lowercase()) {
+                    return format!("{}.\"{}\"", a, c);
+                }
+            }
+            format!("t.\"{}\"", field_path_to_col(field))
+        }
+    }
+}
+
 #[async_recursion]
 pub(super) async fn build_where_sql(
     expr: &WhereExpr,
@@ -771,10 +849,12 @@ pub(super) async fn build_where_sql(
     cache: &mut Vec<String>,
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm<'_>,
+    aliases: Option<&HashMap<String, String>>,
 ) -> Result<String> {
     match expr {
         WhereExpr::Atom(wc) => {
             let col = field_path_to_col(&wc.field);
+            let csql = where_col_sql(&wc.field, aliases);
             // `==?` / `like?` etc. — an optional predicate: if the value is "" or
             // null at runtime, the term is dropped (no value → no filter). Lets a
             // single static query serve optional filters without in-code branching.
@@ -796,11 +876,11 @@ pub(super) async fn build_where_sql(
                     if op == "!=" {
                         shape.push(format!("where:{col}:is_not_null"));
                         cache.push(format!("where:{col}:is_not_null"));
-                        format!("\"{}\" IS NOT NULL", col)
+                        format!("{} IS NOT NULL", csql)
                     } else {
                         shape.push(format!("where:{col}:is_null"));
                         cache.push(format!("where:{col}:is_null"));
-                        format!("\"{}\" IS NULL", col)
+                        format!("{} IS NULL", csql)
                     }
                 }
                 other => {
@@ -811,12 +891,13 @@ pub(super) async fn build_where_sql(
                         "where:{col}:{op}:{}",
                         value_to_cache_fragment(&other)
                     ));
-                    format!("\"{}\" {} ${}", col, op, idx)
+                    format!("{} {} ${}", csql, op, idx)
                 }
             })
         }
         WhereExpr::Between { field, low, high } => {
             let col = field_path_to_col(field);
+            let csql = where_col_sql(field, aliases);
             let low_v = vm.eval_expr(low, vars).await?;
             let high_v = vm.eval_expr(high, vars).await?;
             params.push(value_to_sql_param(&low_v));
@@ -829,13 +910,11 @@ pub(super) async fn build_where_sql(
                 value_to_cache_fragment(&low_v),
                 value_to_cache_fragment(&high_v)
             ));
-            Ok(format!(
-                "\"{}\" BETWEEN ${} AND ${}",
-                col, low_idx, high_idx
-            ))
+            Ok(format!("{} BETWEEN ${} AND ${}", csql, low_idx, high_idx))
         }
         WhereExpr::InList { field, values } => {
             let col = field_path_to_col(field);
+            let csql = where_col_sql(field, aliases);
             if values.is_empty() {
                 bail!("WHERE 'in (...)' must have at least one value");
             }
@@ -848,12 +927,12 @@ pub(super) async fn build_where_sql(
                     params.push(array_to_sql_param(items)?);
                     shape.push(format!("where:{col}:any"));
                     cache.push(format!("where:{col}:any[{}]", value_to_cache_fragment(&v)));
-                    return Ok(format!("\"{}\" = ANY(${})", col, params.len()));
+                    return Ok(format!("{} = ANY(${})", csql, params.len()));
                 }
                 params.push(value_to_sql_param(&v));
                 shape.push(format!("where:{col}:in(1)"));
                 cache.push(format!("where:{col}:in[{}]", value_to_cache_fragment(&v)));
-                return Ok(format!("\"{}\" IN (${})", col, params.len()));
+                return Ok(format!("{} IN (${})", csql, params.len()));
             }
             // Fixed-arity literal/param list → IN ($1, $2, ...).
             let mut placeholders = Vec::with_capacity(values.len());
@@ -866,20 +945,20 @@ pub(super) async fn build_where_sql(
             }
             shape.push(format!("where:{col}:in({})", values.len()));
             cache.push(format!("where:{col}:in[{}]", cache_parts.join(",")));
-            Ok(format!("\"{}\" IN ({})", col, placeholders.join(", ")))
+            Ok(format!("{} IN ({})", csql, placeholders.join(", ")))
         }
         WhereExpr::And(l, r) => {
-            let ls = build_where_sql(l, params, shape, cache, vars, vm).await?;
+            let ls = build_where_sql(l, params, shape, cache, vars, vm, aliases).await?;
             shape.push("AND".to_string());
             cache.push("AND".to_string());
-            let rs = build_where_sql(r, params, shape, cache, vars, vm).await?;
+            let rs = build_where_sql(r, params, shape, cache, vars, vm, aliases).await?;
             Ok(format!("({} AND {})", ls, rs))
         }
         WhereExpr::Or(l, r) => {
-            let ls = build_where_sql(l, params, shape, cache, vars, vm).await?;
+            let ls = build_where_sql(l, params, shape, cache, vars, vm, aliases).await?;
             shape.push("OR".to_string());
             cache.push("OR".to_string());
-            let rs = build_where_sql(r, params, shape, cache, vars, vm).await?;
+            let rs = build_where_sql(r, params, shape, cache, vars, vm, aliases).await?;
             Ok(format!("({} OR {})", ls, rs))
         }
     }

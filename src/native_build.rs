@@ -3144,9 +3144,11 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             with_relations,
             projection,
             aggregates,
+            aliased_cols,
+            joins,
             ..
         } => {
-            if aggregates.is_empty() {
+            if aggregates.is_empty() && joins.is_empty() && aliased_cols.is_empty() {
                 emit_db_select(
                     out,
                     table,
@@ -3162,7 +3164,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             } else {
                 out.push_str(&format!(
                     "{{ compile_error!({:?}); V::Null }}",
-                    "native AOT does not support aggregate projection (count/sum/avg/min/max) — use the interpreter (`jwc run`/`serve`)"
+                    "native AOT does not support aggregate projection / JOIN / aliased columns — use the interpreter (`jwc run`/`serve`)"
                 ));
             }
         }
