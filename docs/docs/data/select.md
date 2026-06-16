@@ -80,18 +80,23 @@ let max_age    = select max(User.age) from AppDb.User;
 let avg_score  = select avg(Post.score) from AppDb.Post where Post.published == true;
 ```
 
-## group by + having
+## group by / having — not usable yet
 
-`group by` / `having` filter which rows the query returns; the result is still
-a list of the selected entity. Arbitrary-shape aggregate projection
-(`select { user_id, total: count(*) }` with aliases) is **not** implemented —
-the projection list accepts plain column names only (see Projection above).
+`group by` and `having` are accepted by the parser, but the feature is **not
+functional end-to-end**:
 
-```jwc
-let popular = select Post from AppDb.Post
-    group by Post.user_id
-    having count(*) > 10;
-```
+- A whole-entity `select Post ... group by Post.user_id` emits `SELECT t.* ...
+  GROUP BY ...`, which Postgres rejects (`column "t.id" must appear in the
+  GROUP BY clause`).
+- `having` only parses a plain column comparison — an aggregate such as
+  `having count(*) > 10` is a parse error.
+- Arbitrary-shape aggregate projection (`select { user_id, total: count(*) }`)
+  is not implemented; the projection list accepts plain column names only.
+
+For grouped aggregation today, drop to [`raw_sql`](../reference/builtins.md)
+(wrap the rows in `json_agg(...)::text` and `json_parse` the result). Scalar
+aggregates over the whole query — `select count(*) from ...` etc. (see above) —
+do work.
 
 ## with — eager nav loading
 

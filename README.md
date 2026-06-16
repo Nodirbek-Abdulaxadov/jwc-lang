@@ -755,7 +755,7 @@ dependency).
 
 ## SQL Clauses
 
-`select` supports `where` (with `and`/`or`/parens), `orderby`, `limit`, `offset`, `group by` / `having`, and `first`:
+`select` supports `where` (with `and`/`or`/parens), `orderby`, `limit`, `offset`, and `first`:
 
 ```jwc
 function listAdults(country, min) {
