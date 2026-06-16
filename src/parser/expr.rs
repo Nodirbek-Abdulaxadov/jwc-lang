@@ -719,6 +719,14 @@ impl<'a> Parser<'a> {
         } else {
             self.parse_cmp_op()?
         };
+        // `op?` — optional predicate: dropped at runtime when the value is "" /
+        // null, so one static query serves an optional filter (e.g. `status ==? @s`).
+        let op = if self.check_symbol('?') {
+            self.expect_symbol('?')?;
+            format!("{}?", op)
+        } else {
+            op
+        };
 
         let rhs = self.parse_at_or_expr()?;
         Ok(WhereExpr::Atom(DbWhere { field, op, rhs }))

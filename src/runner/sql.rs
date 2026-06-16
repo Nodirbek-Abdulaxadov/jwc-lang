@@ -775,8 +775,21 @@ pub(super) async fn build_where_sql(
     match expr {
         WhereExpr::Atom(wc) => {
             let col = field_path_to_col(&wc.field);
-            let op = normalize_sql_op(&wc.op);
+            // `==?` / `like?` etc. — an optional predicate: if the value is "" or
+            // null at runtime, the term is dropped (no value → no filter). Lets a
+            // single static query serve optional filters without in-code branching.
+            let optional = wc.op.ends_with('?');
+            let raw_op = wc.op.trim_end_matches('?');
             let rhs_val = vm.eval_expr(&wc.rhs, vars).await?;
+            if optional
+                && (matches!(rhs_val, Value::Null | Value::Void)
+                    || matches!(&rhs_val, Value::Str(s) if s.is_empty()))
+            {
+                shape.push(format!("where:{col}:opt_skip"));
+                cache.push(format!("where:{col}:opt_skip"));
+                return Ok("TRUE".to_string());
+            }
+            let op = normalize_sql_op(raw_op);
 
             Ok(match rhs_val {
                 Value::Null | Value::Void => {
