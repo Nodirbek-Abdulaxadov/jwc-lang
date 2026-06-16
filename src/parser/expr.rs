@@ -280,7 +280,18 @@ impl<'a> Parser<'a> {
         let mut fields: Vec<(String, Expr)> = Vec::new();
         if !self.check_symbol('}') {
             loop {
-                let key = self.expect_ident("expected key in object literal")?;
+                // Key is an identifier (`name:`) or a string literal
+                // (`"X-Total-Count":`) — the latter lets an object literal carry
+                // arbitrary JSON keys (hyphens, spaces, etc.).
+                let key = match self.current.kind.clone() {
+                    TokenKind::String(s) => {
+                        self.bump()?;
+                        s
+                    }
+                    _ => {
+                        self.expect_ident("expected key (identifier or string) in object literal")?
+                    }
+                };
                 self.expect_symbol(':')?;
                 let value = self.parse_expr()?;
                 fields.push((key, value));

@@ -913,7 +913,14 @@ fn render_expr(e: &Expr) -> String {
         Expr::ObjectLit(fields) => {
             let parts: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{}: {}", k, render_expr(v)))
+                .map(|(k, v)| {
+                    let key = if is_ident_key(k) {
+                        k.clone()
+                    } else {
+                        format!("\"{}\"", escape_string(k))
+                    };
+                    format!("{}: {}", key, render_expr(v))
+                })
                 .collect();
             format!("{{ {} }}", parts.join(", "))
         }
@@ -974,6 +981,17 @@ fn escape_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// True when an object-literal key can be emitted bare (a valid JWC
+/// identifier); otherwise the formatter quotes it.
+fn is_ident_key(k: &str) -> bool {
+    let mut chars = k.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn vis_prefix(v: Visibility) -> &'static str {
