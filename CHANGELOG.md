@@ -3,6 +3,51 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — Query Layer: relation loading + grouped aggregation
+
+The first slice of the Query Layer (ROADMAP Phase 11). Navigations now
+materialise related rows in a single query, and single-entity grouped
+aggregation projects typed result rows. The dogfooding app (task-tracker) was
+rewritten on top: read-path N+1 dropped to **zero** and the stats `raw_sql` for
+status counts is gone.
+
+**Eager loading via `with`** — a navigation pulls related rows into the result
+as a nested JSON value, in one correlated query:
+
+- `posts: List<Post> via Post.userId orderby createdAt desc;` — one-to-many,
+  optionally ordered (`json_agg(... ORDER BY ...)`).
+- `author: User { id, name } via authorId;` — belongs-to (this entity holds the
+  FK; distinguished by a bare, undotted `via` column), with an optional column
+  projection so an eager-loaded relation can hide sensitive columns
+  (e.g. `passwordHash`).
+- `labels: List<Label> via TaskLabel(taskId, labelId);` — many-to-many through a
+  join table.
+
+`select Entity with rel1, rel2 from Ctx.Table` returns each row with the
+relations nested.
+
+**Grouped aggregation** — an aliased aggregate projection drives the SELECT list,
+so `select Task { status, total: count(*) } from Ctx.Task group by status`
+returns typed `{ status, total }` rows. `count(*)` / `sum` / `avg` / `min` /
+`max`.
+
+**Migrations** — `jwc migrate new` now emits `ALTER TABLE … ADD/DROP CONSTRAINT
+… UNIQUE` when a `unique` modifier is added to (or removed from) an existing
+column; previously only a fresh `CREATE TABLE` honoured it.
+
+**Release & CI** — the `x86_64-unknown-linux-musl` release build vendors OpenSSL
+for that target (it had failed at `openssl-sys` since v0.4.8); the VS Code
+extension lockfile is back in sync (`npm ci`); and the runner code is
+rustfmt/clippy-clean, so `main` CI is green again.
+
+**Docs** — README/docs corrected to the real implementation: `unix_timestamp()`
+(not `now_epoch()`), `query_param` returns `""` when absent, `jwt_verify` strips
+an optional `Bearer ` prefix, and the `group by` / `having` section reflects what
+actually runs.
+
+**Interpreter-only** — the new nav/aggregate query forms run under `jwc run` /
+`serve`; `jwc build --native` rejects them with a clear compile error for now.
+
 ## [0.4.9] — Runtime correctness fixes (pain-log root causes)
 
 Fixes a cluster of dogfooding-surfaced bugs at their root, each guarded by a
