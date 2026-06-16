@@ -1555,15 +1555,36 @@ fn check_with_relations_in_expr(
                 let entity_key = entity.to_lowercase();
                 let nav_map = entity_navigations.get(&entity_key);
                 for rel in with_relations {
-                    let rel_key = rel.to_lowercase();
-                    let known = nav_map.map(|m| m.contains_key(&rel_key)).unwrap_or(false);
-                    if !known {
-                        bail!(
+                    // Dotted `with parent.child` validates the head on this
+                    // entity, then the tail on the head nav's target entity.
+                    let (head, tail) = match rel.split_once('.') {
+                        Some((h, t)) => (h, Some(t)),
+                        None => (rel.as_str(), None),
+                    };
+                    let head_nav = nav_map.and_then(|m| m.get(&head.to_lowercase()));
+                    let head_nav = match head_nav {
+                        Some(n) => n,
+                        None => bail!(
                             "Entity '{}' has no navigation property '{}' (used in 'select ... with {}')",
                             entity,
-                            rel,
+                            head,
                             rel
-                        );
+                        ),
+                    };
+                    if let Some(child) = tail {
+                        let target_key = head_nav.target_entity.to_lowercase();
+                        let known = entity_navigations
+                            .get(&target_key)
+                            .map(|m| m.contains_key(&child.to_lowercase()))
+                            .unwrap_or(false);
+                        if !known {
+                            bail!(
+                                "Entity '{}' has no navigation property '{}' (used in 'select ... with {}')",
+                                head_nav.target_entity,
+                                child,
+                                rel
+                            );
+                        }
                     }
                 }
             }

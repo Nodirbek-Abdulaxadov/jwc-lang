@@ -592,7 +592,11 @@ pub(super) async fn build_select_sql(
         bits.push("t.*".to_string());
     }
     for nav in nav_subqueries {
-        bits.push(format!("{} AS \"{}\"", nav.sql_fragment("t"), nav.alias()));
+        bits.push(format!(
+            "{} AS \"{}\"",
+            nav.sql_fragment("t", 0),
+            nav.alias()
+        ));
     }
     if !projection.is_empty() {
         shape_bits.push(format!("project:{}", projection.join(",")));
@@ -607,8 +611,16 @@ pub(super) async fn build_select_sql(
         cache_bits.push(format!("agg:{}:{:?}:{}", agg.alias, agg.kind, agg.col));
     }
     for nav in nav_subqueries {
-        shape_bits.push(format!("with:{}", nav.alias()));
-        cache_bits.push(format!("with:{}", nav.alias()));
+        // Flat navs keep the historical `with:<name>` key (no cache regression);
+        // a nested nav appends its children so `with boards` and
+        // `with boards.columns` never share a prepared-statement / result entry.
+        let mut key = format!("with:{}", nav.alias());
+        if !nav.children.is_empty() {
+            let kids: Vec<&str> = nav.children.iter().map(|c| c.alias()).collect();
+            key.push_str(&format!(".{}", kids.join("+")));
+        }
+        shape_bits.push(key.clone());
+        cache_bits.push(key);
     }
     let inner_projection = if bits.is_empty() {
         "*".to_string()
@@ -668,6 +680,8 @@ pub(super) struct NavigationSubquery {
     name: String,
     kind: NavigationKind,
     target_table: String,
+    /// Entity (model) name of the target — used to resolve nested children.
+    target_entity: String,
     /// Column on the target (`c`) side of the join.
     join_target_col: String,
     /// Column on the source (`t`) side of the join.
@@ -678,6 +692,10 @@ pub(super) struct NavigationSubquery {
     join: Option<(String, String, String)>,
     /// Optional `(column, direction)` to order the materialised collection.
     order_by: Option<(String, SortDir)>,
+    /// Nested `with parent.child` navs loaded one level deeper, correlated to
+    /// this nav's own rows. Empty for a flat (single-level) nav, in which case
+    /// the emitted SQL stays byte-for-byte identical to the pre-nesting form.
+    children: Vec<NavigationSubquery>,
 }
 
 fn sort_dir_sql(dir: SortDir) -> &'static str {
@@ -703,42 +721,81 @@ fn agg_select_sql(agg: &AggProj, aliases: Option<&HashMap<String, String>>) -> S
     format!("{}({}) AS \"{}\"", func, col_sql, agg.alias)
 }
 
-/// The per-row JSON value for a nav subquery: the whole row, or a
-/// `json_build_object` of the projected columns (hides the rest).
-fn nav_json_value(projection: &[String]) -> String {
-    if projection.is_empty() {
-        "row_to_json(c)".to_string()
-    } else {
-        let pairs: Vec<String> = projection
-            .iter()
-            .map(|col| format!("'{}', c.\"{}\"", col, col))
-            .collect();
-        format!("json_build_object({})", pairs.join(", "))
-    }
-}
-
 impl NavigationSubquery {
     fn alias(&self) -> &str {
         &self.name
     }
 
-    fn sql_fragment(&self, source_alias: &str) -> String {
-        let val = nav_json_value(&self.projection);
+    /// The per-row JSON value for this nav's target rows (aliased `row_alias`):
+    /// the whole row, or a `json_build_object` of the projected columns. When
+    /// the nav has nested children the row is widened to `jsonb` and each child
+    /// key is merged in with `||` via a correlated sub-subquery one level
+    /// deeper. Without children this is the legacy `row_to_json` /
+    /// `json_build_object` form, byte-for-byte.
+    fn json_value(&self, row_alias: &str, depth: usize) -> String {
+        let base = if self.projection.is_empty() {
+            if self.children.is_empty() {
+                format!("row_to_json({})", row_alias)
+            } else {
+                format!("to_jsonb({})", row_alias)
+            }
+        } else {
+            let builder = if self.children.is_empty() {
+                "json_build_object"
+            } else {
+                "jsonb_build_object"
+            };
+            let pairs: Vec<String> = self
+                .projection
+                .iter()
+                .map(|col| format!("'{}', {}.\"{}\"", col, row_alias, col))
+                .collect();
+            format!("{}({})", builder, pairs.join(", "))
+        };
+        if self.children.is_empty() {
+            return base;
+        }
+        let mut merged = base;
+        for child in &self.children {
+            merged = format!(
+                "{} || jsonb_build_object('{}', {})",
+                merged,
+                child.alias(),
+                child.sql_fragment(row_alias, depth + 1)
+            );
+        }
+        format!("({})", merged)
+    }
+
+    /// Render the correlated subquery for this nav. `source_alias` is the outer
+    /// row this nav joins back to (`t` at the top level, the parent nav's row
+    /// alias when nested). Row/link aliases are depth-derived so nested levels
+    /// never collide; depth 0 keeps the historical `c` / `j` aliases so flat
+    /// navs emit unchanged SQL.
+    fn sql_fragment(&self, source_alias: &str, depth: usize) -> String {
+        let row_alias = if depth == 0 {
+            "c".to_string()
+        } else {
+            format!("c{}", depth)
+        };
+        let val = self.json_value(&row_alias, depth);
         let order = match &self.order_by {
-            Some((col, dir)) => format!(" ORDER BY c.\"{}\" {}", col, sort_dir_sql(*dir)),
+            Some((col, dir)) => {
+                format!(" ORDER BY {}.\"{}\" {}", row_alias, col, sort_dir_sql(*dir))
+            }
             None => String::new(),
         };
         match self.kind {
             NavigationKind::OneToMany => format!(
-                "COALESCE((SELECT json_agg({}{}) FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"), '[]'::json)",
-                val, order, self.target_table, self.join_target_col, source_alias, self.join_source_col
+                "COALESCE((SELECT json_agg({}{}) FROM \"{}\" {} WHERE {}.\"{}\" = {}.\"{}\"), '[]'::json)",
+                val, order, self.target_table, row_alias, row_alias, self.join_target_col, source_alias, self.join_source_col
             ),
             // OneToOne (target holds FK) and BelongsTo (source holds FK) both
             // materialise a single nested object; only the join direction —
             // captured in join_target_col / join_source_col — differs.
             NavigationKind::OneToOne | NavigationKind::BelongsTo => format!(
-                "(SELECT {} FROM \"{}\" c WHERE c.\"{}\" = {}.\"{}\"{} LIMIT 1)",
-                val, self.target_table, self.join_target_col, source_alias, self.join_source_col, order
+                "(SELECT {} FROM \"{}\" {} WHERE {}.\"{}\" = {}.\"{}\"{} LIMIT 1)",
+                val, self.target_table, row_alias, row_alias, self.join_target_col, source_alias, self.join_source_col, order
             ),
             // ManyToMany: target rows reached through the link table.
             // join_target_col = target PK, join_source_col = source PK.
@@ -747,13 +804,77 @@ impl NavigationSubquery {
                     .join
                     .as_ref()
                     .expect("ManyToMany navigation must carry join-table coordinates");
+                let link_alias = if depth == 0 {
+                    "j".to_string()
+                } else {
+                    format!("j{}", depth)
+                };
                 format!(
-                    "COALESCE((SELECT json_agg({}{}) FROM \"{}\" c JOIN \"{}\" j ON j.\"{}\" = c.\"{}\" WHERE j.\"{}\" = {}.\"{}\"), '[]'::json)",
-                    val, order, self.target_table, jt, far, self.join_target_col, near, source_alias, self.join_source_col
+                    "COALESCE((SELECT json_agg({}{}) FROM \"{}\" {} JOIN \"{}\" {} ON {}.\"{}\" = {}.\"{}\" WHERE {}.\"{}\" = {}.\"{}\"), '[]'::json)",
+                    val, order, self.target_table, row_alias, jt, link_alias, link_alias, far, row_alias, self.join_target_col, link_alias, near, source_alias, self.join_source_col
                 )
             }
         }
     }
+}
+
+/// Build a single (flat) nav subquery for `rel` on `source_entity`. Nested
+/// children are attached by the caller. Shared by the top-level list and the
+/// recursive `with parent.child` resolution.
+fn build_one_nav(
+    source_entity: &str,
+    rel: &str,
+    models: &HashMap<String, &ModelDecl>,
+    pk_by_table: &HashMap<String, Vec<String>>,
+) -> Result<NavigationSubquery> {
+    let entity_key = source_entity.to_lowercase();
+    let model = models
+        .get(&entity_key)
+        .ok_or_else(|| anyhow!("unknown entity '{}' for 'with' clause", source_entity))?;
+    let source_pk_col = pk_by_table
+        .get(&entity_key)
+        .and_then(|v| v.first().cloned())
+        .unwrap_or_else(|| "id".to_string());
+    let rel_key = rel.to_lowercase();
+    let nav = model
+        .navigations
+        .iter()
+        .find(|n| n.name.to_lowercase() == rel_key)
+        .ok_or_else(|| anyhow!("entity '{}' has no navigation '{}'", source_entity, rel))?;
+    let target_pk = pk_by_table
+        .get(&nav.target_entity.to_lowercase())
+        .and_then(|v| v.first().cloned())
+        .unwrap_or_else(|| "id".to_string());
+    let (join_target_col, join_source_col) = match nav.kind {
+        // belongs-to: this entity holds the FK → join target PK = source FK
+        NavigationKind::BelongsTo => (target_pk, nav.target_field.clone()),
+        // m2m: join via link table on both PKs.
+        NavigationKind::ManyToMany => (target_pk, source_pk_col.clone()),
+        // has-many / has-one: target holds the FK → join target FK = source PK
+        _ => (nav.target_field.clone(), source_pk_col.clone()),
+    };
+    let join = nav.join.as_ref().map(|j| {
+        (
+            crate::sql::to_snake_case(&j.table),
+            j.near_col.clone(),
+            j.far_col.clone(),
+        )
+    });
+    Ok(NavigationSubquery {
+        name: nav.name.clone(),
+        kind: nav.kind,
+        target_table: crate::sql::to_snake_case(&nav.target_entity),
+        target_entity: nav.target_entity.clone(),
+        join_target_col,
+        join_source_col,
+        projection: nav.projection.clone(),
+        join,
+        order_by: nav
+            .order_by
+            .as_ref()
+            .map(|o| (field_path_to_col(&o.col), o.dir)),
+        children: Vec::new(),
+    })
 }
 
 pub(super) fn build_navigation_subqueries(
@@ -769,56 +890,38 @@ pub(super) fn build_navigation_subqueries(
     if entity == "*" {
         bail!("'with' clause requires a named entity, not '*'");
     }
-    let entity_key = entity.to_lowercase();
-    let model = models
-        .get(&entity_key)
-        .ok_or_else(|| anyhow!("unknown entity '{}' for 'with' clause", entity))?;
 
-    let source_pk_col = pk_by_table
-        .get(&entity_key)
-        .and_then(|v| v.first().cloned())
-        .unwrap_or_else(|| "id".to_string());
-
-    let mut out = Vec::with_capacity(requested.len());
+    // Group dotted entries (`with boards.columns, boards.x`) by their top-level
+    // nav, preserving first-appearance order. Each head becomes one nav; its
+    // tails become nested children resolved against the head's target entity.
+    let mut order: Vec<String> = Vec::new();
+    let mut child_names: HashMap<String, Vec<String>> = HashMap::new();
     for rel in requested {
-        let rel_key = rel.to_lowercase();
-        let nav = model
-            .navigations
-            .iter()
-            .find(|n| n.name.to_lowercase() == rel_key)
-            .ok_or_else(|| anyhow!("entity '{}' has no navigation '{}'", entity, rel))?;
-        let target_pk = pk_by_table
-            .get(&nav.target_entity.to_lowercase())
-            .and_then(|v| v.first().cloned())
-            .unwrap_or_else(|| "id".to_string());
-        let (join_target_col, join_source_col) = match nav.kind {
-            // belongs-to: this entity holds the FK → join target PK = source FK
-            NavigationKind::BelongsTo => (target_pk, nav.target_field.clone()),
-            // m2m: join via link table on both PKs.
-            NavigationKind::ManyToMany => (target_pk, source_pk_col.clone()),
-            // has-many / has-one: target holds the FK → join target FK = source PK
-            _ => (nav.target_field.clone(), source_pk_col.clone()),
+        let (head, tail) = match rel.split_once('.') {
+            Some((h, t)) => (h.to_string(), Some(t.to_string())),
+            None => (rel.clone(), None),
         };
-        let join = nav.join.as_ref().map(|j| {
-            (
-                crate::sql::to_snake_case(&j.table),
-                j.near_col.clone(),
-                j.far_col.clone(),
-            )
-        });
-        out.push(NavigationSubquery {
-            name: nav.name.clone(),
-            kind: nav.kind,
-            target_table: crate::sql::to_snake_case(&nav.target_entity),
-            join_target_col,
-            join_source_col,
-            projection: nav.projection.clone(),
-            join,
-            order_by: nav
-                .order_by
-                .as_ref()
-                .map(|o| (field_path_to_col(&o.col), o.dir)),
-        });
+        if !child_names.contains_key(&head) {
+            order.push(head.clone());
+            child_names.insert(head.clone(), Vec::new());
+        }
+        if let Some(t) = tail {
+            child_names
+                .get_mut(&head)
+                .expect("head key just inserted")
+                .push(t);
+        }
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for head in &order {
+        let mut nav = build_one_nav(entity, head, models, pk_by_table)?;
+        let child_entity = nav.target_entity.clone();
+        for child in &child_names[head] {
+            nav.children
+                .push(build_one_nav(&child_entity, child, models, pk_by_table)?);
+        }
+        out.push(nav);
     }
     Ok(out)
 }
@@ -1106,4 +1209,128 @@ pub(super) fn aggregate_sql_op(kind: AggregateKind, col: &str) -> (String, &'sta
         AggregateKind::Count => "count",
     };
     (agg_sql, tag)
+}
+
+#[cfg(test)]
+mod nav_sql_tests {
+    use super::*;
+    use crate::parser::parse_program;
+
+    const SCHEMA: &str = r#"
+        dbcontext AppDb : Postgres;
+        entity Project of AppDb {
+            id int pk;
+            name varchar(64);
+            boards: List<Board> via Board.projectId;
+        }
+        entity Board of AppDb {
+            id int pk;
+            projectId int;
+            lanes: List<Lane> via Lane.boardId;
+        }
+        entity Lane of AppDb {
+            id int pk;
+            boardId int;
+            name varchar(64);
+        }
+    "#;
+
+    /// Parse `SCHEMA` and build the `(models, pk_by_table)` maps the nav
+    /// builder expects — both keyed by lowercased entity name.
+    fn maps() -> (
+        HashMap<String, &'static ModelDecl>,
+        HashMap<String, Vec<String>>,
+    ) {
+        // Leak the parsed program so the borrowed `&ModelDecl`s outlive this
+        // helper — fine for a test, keeps the call sites readable.
+        let program = Box::leak(Box::new(parse_program(SCHEMA).expect("schema parses")));
+        let models = program
+            .models
+            .iter()
+            .map(|m| (m.name.to_lowercase(), m))
+            .collect();
+        let mut pk_by_table = HashMap::new();
+        for m in &program.models {
+            let pks = m
+                .fields
+                .iter()
+                .filter(|f| f.is_primary_key)
+                .map(|f| f.name.clone())
+                .collect();
+            pk_by_table.insert(m.name.to_lowercase(), pks);
+        }
+        (models, pk_by_table)
+    }
+
+    #[test]
+    fn flat_nav_sql_is_unchanged_legacy_form() {
+        let (models, pk) = maps();
+        let navs = build_navigation_subqueries(
+            "Project",
+            "project",
+            &["boards".to_string()],
+            &models,
+            &pk,
+        )
+        .expect("flat nav builds");
+        assert_eq!(navs.len(), 1);
+        assert!(navs[0].children.is_empty());
+        let sql = navs[0].sql_fragment("t", 0);
+        // Byte-for-byte the historical single-level form: row_to_json + json,
+        // no jsonb widening anywhere.
+        assert_eq!(
+            sql,
+            "COALESCE((SELECT json_agg(row_to_json(c)) FROM \"board\" c WHERE c.\"projectId\" = t.\"id\"), '[]'::json)"
+        );
+    }
+
+    #[test]
+    fn nested_nav_merges_child_one_level_deeper() {
+        let (models, pk) = maps();
+        let navs = build_navigation_subqueries(
+            "Project",
+            "project",
+            &["boards.lanes".to_string()],
+            &models,
+            &pk,
+        )
+        .expect("nested nav builds");
+        assert_eq!(navs.len(), 1, "one head nav");
+        assert_eq!(navs[0].children.len(), 1, "one nested child");
+        assert_eq!(navs[0].children[0].alias(), "lanes");
+        let sql = navs[0].sql_fragment("t", 0);
+        // Parent row widened to jsonb so the child key can be merged in.
+        assert!(sql.contains("to_jsonb(c)"), "parent widened: {sql}");
+        assert!(
+            sql.contains("|| jsonb_build_object('lanes',"),
+            "child merged as a key: {sql}"
+        );
+        // Child correlates to the parent row alias `c` via a fresh `c1` alias.
+        assert!(
+            sql.contains("FROM \"lane\" c1 WHERE c1.\"boardId\" = c.\"id\""),
+            "child correlated one level deeper: {sql}"
+        );
+        // Outer board still correlates to the top-level `t`.
+        assert!(
+            sql.contains("FROM \"board\" c WHERE c.\"projectId\" = t.\"id\""),
+            "parent correlated to outer query: {sql}"
+        );
+    }
+
+    #[test]
+    fn dotted_entries_merge_under_one_head() {
+        // `boards.lanes, boards` collapses to a single boards nav carrying the
+        // lanes child — not two colliding boards keys.
+        let (models, pk) = maps();
+        let navs = build_navigation_subqueries(
+            "Project",
+            "project",
+            &["boards.lanes".to_string(), "boards".to_string()],
+            &models,
+            &pk,
+        )
+        .expect("builds");
+        assert_eq!(navs.len(), 1);
+        assert_eq!(navs[0].children.len(), 1);
+    }
 }

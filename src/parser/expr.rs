@@ -515,12 +515,15 @@ impl<'a> Parser<'a> {
         }
 
         // optional `with rel1, rel2, ...`
+        // Each relation is a nav name, optionally dotted for one level of
+        // nesting (`with boards.columns`). `parse_field_path` already accepts
+        // the `a.b` shape, so reuse it.
         let with_relations = if self.check_ident_eq("with") {
             self.bump()?;
-            let mut rels = vec![self.expect_ident("expected navigation name after 'with'")?];
+            let mut rels = vec![self.parse_field_path()?];
             while self.check_symbol(',') {
                 self.expect_symbol(',')?;
-                rels.push(self.expect_ident("expected navigation name after ','")?);
+                rels.push(self.parse_field_path()?);
             }
             rels
         } else {

@@ -3270,6 +3270,15 @@ fn emit_db_select(
     }
     let mut plans: Vec<NavPlan> = Vec::new();
     for rel in with_relations {
+        // Nested `with parent.child` eager-load is interpreter-only; the native
+        // eager-load helper has no recursive-nesting path yet.
+        if rel.contains('.') {
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                format!("nested `with {}` eager-load is interpreter-only", rel),
+            ));
+            return;
+        }
         let nav = match meta
             .navigations
             .iter()
