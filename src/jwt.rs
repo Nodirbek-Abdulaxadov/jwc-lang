@@ -41,9 +41,24 @@ pub fn sign_hs256(payload_json: &str, secret: &str) -> Result<String> {
     Ok(format!("{signing_input}.{signature_b64}"))
 }
 
+/// Strip an optional, case-insensitive `Bearer ` scheme prefix (with any
+/// surrounding whitespace) from an `Authorization` header value, returning the
+/// bare token. A raw token without the prefix passes through unchanged.
+pub fn strip_bearer_prefix(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("bearer ") {
+        trimmed[7..].trim_start()
+    } else {
+        trimmed
+    }
+}
+
 /// Verify an HS256 JWT against the given secret. On success returns the decoded
 /// payload JSON string. Rejects unsupported algorithms.
 pub fn verify_hs256(token: &str, secret: &str) -> Result<String> {
+    // Tolerate a full `Authorization` header value — strip an optional
+    // `Bearer ` scheme prefix so callers can pass the header straight through.
+    let token = strip_bearer_prefix(token);
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         bail!("jwt_verify: token must have 3 segments");
@@ -165,6 +180,25 @@ mod tests {
         // `exp` far in the future — must verify clean.
         let token = sign_hs256(r#"{"sub":"u","exp":9999999999}"#, "k").unwrap();
         let decoded = verify_hs256(&token, "k").unwrap();
+        let decoded_json: JsonValue = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(decoded_json["sub"], "u");
+    }
+
+    #[test]
+    fn strip_bearer_prefix_handles_variants() {
+        assert_eq!(strip_bearer_prefix("Bearer abc.def.ghi"), "abc.def.ghi");
+        assert_eq!(strip_bearer_prefix("bearer abc.def.ghi"), "abc.def.ghi");
+        assert_eq!(strip_bearer_prefix("  Bearer   abc  "), "abc");
+        // A raw token (no scheme) passes through untouched.
+        assert_eq!(strip_bearer_prefix("abc.def.ghi"), "abc.def.ghi");
+    }
+
+    #[test]
+    fn jwt_verify_accepts_authorization_header_with_bearer() {
+        // The canonical middleware passes `header("authorization")` straight in;
+        // verify must tolerate the `Bearer ` scheme prefix.
+        let token = sign_hs256(r#"{"sub":"u"}"#, "k").unwrap();
+        let decoded = verify_hs256(&format!("Bearer {token}"), "k").unwrap();
         let decoded_json: JsonValue = serde_json::from_str(&decoded).unwrap();
         assert_eq!(decoded_json["sub"], "u");
     }

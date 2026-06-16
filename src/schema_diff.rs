@@ -53,6 +53,10 @@ pub struct ColumnSnapshot {
     /// Round-tripped from prior migrations by `parse_column_line` so
     /// `migrate new` doesn't pretend to re-add identity columns.
     pub is_auto_increment: bool,
+    /// A table-level `UNIQUE ("col")` constraint was emitted for this column
+    /// (from `entity X { col ... unique; }`). Round-tripped from prior
+    /// migrations so `migrate new` doesn't re-add the constraint.
+    pub is_unique: bool,
     /// Foreign-key target for `entity X { col uuid references Y.id ... }`.
     /// Populated by `entity_to_snapshot`; the DDL parser does NOT extract
     /// FK constraints from prior migrations (FK diff is intentionally
@@ -137,6 +141,9 @@ pub fn entity_to_snapshot(model: &ModelDecl) -> Result<TableSnapshot> {
             is_nullable: field.is_nullable,
             is_primary_key: field.is_primary_key,
             is_auto_increment: field.is_auto_increment,
+            // A PK is already unique and the DDL skips a separate UNIQUE for
+            // it, so mirror that here to stay diff-stable with the SQL parser.
+            is_unique: field.is_unique && !field.is_primary_key,
             fk,
         });
     }
@@ -239,6 +246,7 @@ fn parse_create_tables(sql: &str) -> Vec<TableSnapshot> {
         let entries = split_top_level_commas(body);
         let mut columns: Vec<ColumnSnapshot> = Vec::new();
         let mut pk_cols: Vec<String> = Vec::new();
+        let mut unique_cols: Vec<String> = Vec::new();
 
         for entry in entries {
             let entry = entry.trim();
@@ -250,6 +258,17 @@ fn parse_create_tables(sql: &str) -> Vec<TableSnapshot> {
             if let Some(rest) = strip_prefix_ci(entry, "PRIMARY KEY") {
                 for col in extract_quoted_idents(rest) {
                     pk_cols.push(col);
+                }
+                continue;
+            }
+
+            // UNIQUE ("col") — table-level single-column unique we emit for
+            // `unique` fields. (Composite UNIQUE is captured but only the
+            // single-column form round-trips to a column `is_unique` flag.)
+            if let Some(rest) = strip_prefix_ci(entry, "UNIQUE") {
+                let cols = extract_quoted_idents(rest);
+                if cols.len() == 1 {
+                    unique_cols.push(cols[0].clone());
                 }
                 continue;
             }
@@ -268,10 +287,15 @@ fn parse_create_tables(sql: &str) -> Vec<TableSnapshot> {
             }
         }
 
-        // Mark PK columns now that the trailing PRIMARY KEY clause is known.
+        // Mark PK / UNIQUE columns now that the trailing constraint clauses
+        // are known. A PK column never carries a separate UNIQUE flag (the
+        // DDL doesn't emit one), keeping it consistent with entity_to_snapshot.
         for col in &mut columns {
             if pk_cols.iter().any(|p| p == &col.name) {
                 col.is_primary_key = true;
+            }
+            if !col.is_primary_key && unique_cols.iter().any(|u| u == &col.name) {
+                col.is_unique = true;
             }
         }
 
@@ -319,6 +343,7 @@ fn parse_column_line(entry: &str) -> Option<ColumnSnapshot> {
         is_nullable,
         is_primary_key: false, // PRIMARY KEY clause sets this in a later pass
         is_auto_increment,
+        is_unique: false, // UNIQUE clause sets this in a later pass
         fk: None,
     })
 }
@@ -430,6 +455,7 @@ fn apply_alter_statements(sql: &str, tables: &mut [TableSnapshot]) {
                 is_nullable,
                 is_primary_key: false,
                 is_auto_increment,
+                is_unique: false,
                 fk: None,
             });
         }
@@ -670,6 +696,7 @@ pub fn diff_to_sql(diff: &[DiffOp]) -> String {
 fn render_create_table(snapshot: &TableSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
     let mut pk_cols: Vec<&str> = Vec::new();
+    let mut unique_lines: Vec<String> = Vec::new();
     let mut fk_lines: Vec<String> = Vec::new();
 
     for col in &snapshot.columns {
@@ -685,6 +712,9 @@ fn render_create_table(snapshot: &TableSnapshot) -> String {
         ));
         if col.is_primary_key {
             pk_cols.push(&col.name);
+        }
+        if col.is_unique && !col.is_primary_key {
+            unique_lines.push(format!("    UNIQUE (\"{}\")", col.name));
         }
         if let Some(fk) = &col.fk {
             let mut clause = format!(
@@ -709,6 +739,7 @@ fn render_create_table(snapshot: &TableSnapshot) -> String {
             .join(", ");
         lines.push(format!("    PRIMARY KEY ({})", quoted));
     }
+    lines.extend(unique_lines);
     lines.extend(fk_lines);
 
     let mut out = String::new();
@@ -737,6 +768,7 @@ mod tests {
             is_nullable: nullable,
             is_primary_key: pk,
             is_auto_increment: false,
+            is_unique: false,
             fk: None,
         }
     }

@@ -426,13 +426,13 @@ impl<'a> Vm<'a> {
 
                 if name.eq_ignore_ascii_case("unauthorized") {
                     return Ok(Value::Str(
-                        r#"{"status":401,"error":"Unauthorized"}"#.to_string(),
+                        r#"{"__jwc_status__":401,"error":"Unauthorized"}"#.to_string(),
                     ));
                 }
 
                 if name.eq_ignore_ascii_case("forbidden") {
                     return Ok(Value::Str(
-                        r#"{"status":403,"error":"Forbidden"}"#.to_string(),
+                        r#"{"__jwc_status__":403,"error":"Forbidden"}"#.to_string(),
                     ));
                 }
 
@@ -757,13 +757,13 @@ impl<'a> Vm<'a> {
                     {
                         match doc.as_object_mut() {
                             Some(obj) => {
-                                obj.insert("status".into(), json!(201));
+                                obj.insert("__jwc_status__".into(), json!(201));
                                 doc.to_string()
                             }
-                            None => format!(r#"{{"status":201,"data":{s}}}"#),
+                            None => format!(r#"{{"__jwc_status__":201,"data":{s}}}"#),
                         }
                     } else {
-                        format!(r#"{{"status":201,"data":{s:?}}}"#)
+                        format!(r#"{{"__jwc_status__":201,"data":{s:?}}}"#)
                     };
                     return Ok(Value::Str(result));
                 }
@@ -775,32 +775,32 @@ impl<'a> Vm<'a> {
                     let s = if let Some(arg) = args.first() {
                         self.eval_expr(arg, vars).await?.as_string()
                     } else {
-                        return Ok(Value::Str(r#"{"status":200}"#.to_string()));
+                        return Ok(Value::Str(r#"{"__jwc_status__":200}"#.to_string()));
                     };
                     let result = if let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&s)
                     {
                         match doc.as_object_mut() {
                             Some(obj) => {
-                                obj.insert("status".into(), json!(200));
+                                obj.insert("__jwc_status__".into(), json!(200));
                                 doc.to_string()
                             }
-                            None => format!(r#"{{"status":200,"data":{s}}}"#),
+                            None => format!(r#"{{"__jwc_status__":200,"data":{s}}}"#),
                         }
                     } else {
-                        format!(r#"{{"status":200,"data":{s:?}}}"#)
+                        format!(r#"{{"__jwc_status__":200,"data":{s:?}}}"#)
                     };
                     return Ok(Value::Str(result));
                 }
 
                 if name.eq_ignore_ascii_case("notFound") || name.eq_ignore_ascii_case("not_found") {
                     return Ok(Value::Str(
-                        r#"{"status":404,"error":"Not Found"}"#.to_string(),
+                        r#"{"__jwc_status__":404,"error":"Not Found"}"#.to_string(),
                     ));
                 }
 
                 if name.eq_ignore_ascii_case("noContent") || name.eq_ignore_ascii_case("no_content")
                 {
-                    return Ok(Value::Str(r#"{"status":204}"#.to_string()));
+                    return Ok(Value::Str(r#"{"__jwc_status__":204}"#.to_string()));
                 }
 
                 if name.eq_ignore_ascii_case("internalError")
@@ -813,7 +813,7 @@ impl<'a> Vm<'a> {
                     };
                     let escaped = msg.replace('"', "\\\"");
                     return Ok(Value::Str(format!(
-                        r#"{{"status":500,"error":"{escaped}"}}"#
+                        r#"{{"__jwc_status__":500,"error":"{escaped}"}}"#
                     )));
                 }
 
@@ -827,7 +827,7 @@ impl<'a> Vm<'a> {
                     };
                     let escaped = msg.replace('"', "\\\"");
                     return Ok(Value::Str(format!(
-                        r#"{{"status":400,"error":"{escaped}"}}"#
+                        r#"{{"__jwc_status__":400,"error":"{escaped}"}}"#
                     )));
                 }
 
@@ -859,7 +859,7 @@ impl<'a> Vm<'a> {
                             if let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(s)
                             {
                                 let envelope = json!({
-                                    "status": status,
+                                    "__jwc_status__": status,
                                     "__jwc_headers__": JsonValue::Object(map),
                                     "__jwc_content_type__": "text/html; charset=utf-8",
                                     "__jwc_body__": "",
@@ -871,12 +871,12 @@ impl<'a> Vm<'a> {
                     let body_str = body_val.map(|v| v.as_string()).unwrap_or_default();
                     if let Ok(mut doc) = serde_json::from_str::<JsonValue>(&body_str) {
                         if let Some(obj) = doc.as_object_mut() {
-                            obj.insert("status".into(), json!(status));
+                            obj.insert("__jwc_status__".into(), json!(status));
                             return Ok(Value::Str(doc.to_string()));
                         }
                     }
                     let envelope = json!({
-                        "status": status,
+                        "__jwc_status__": status,
                         "__jwc_content_type__": "text/plain; charset=utf-8",
                         "__jwc_body__": body_str,
                     });

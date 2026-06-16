@@ -11,7 +11,7 @@ use serde_json::Value as JsonValue;
 use crate::ast::{ModelDecl, TypedParam};
 
 use super::util::{looks_like_base64, looks_like_datetime, looks_like_uuid, strip_generic_wrapper};
-use super::{format_float, Value, Vm};
+use super::{format_float, value_to_json, Value, Vm};
 
 impl<'a> Vm<'a> {
     pub(super) fn check_param_type(&self, param: &TypedParam, value: Value) -> Result<Value> {
@@ -148,10 +148,10 @@ impl<'a> Vm<'a> {
                 ),
             },
             model_ty => {
-                let model = self.models.get(&model_ty.to_lowercase());
-                if model.is_none() {
-                    return Ok(value);
-                }
+                let model = match self.models.get(&model_ty.to_lowercase()) {
+                    Some(m) => m.clone(),
+                    None => return Ok(value),
+                };
 
                 match value {
                     Value::Null => Ok(Value::Null),
@@ -160,12 +160,18 @@ impl<'a> Vm<'a> {
                             anyhow!("Type error: {subject} expects {model_ty}, got non-json string")
                         })?;
 
-                        self.validate_json_against_model(
-                            subject,
-                            model.expect("INVARIANT: model.is_none() returned early above (line 157), so model is Some here"),
-                            &parsed,
-                        )?;
+                        self.validate_json_against_model(subject, &model, &parsed)?;
                         Ok(Value::Str(parsed.to_string()))
+                    }
+                    // A row loaded by `select` is a `Value::Record`; an entity
+                    // collection is a `Value::Array`. Validate against the model
+                    // shape but keep the original (fast-path) representation so a
+                    // typed function return / parameter accepts a `select` result
+                    // directly — no JSON-string round-trip required.
+                    Value::Record { .. } | Value::Array(_) => {
+                        let parsed = value_to_json(&value);
+                        self.validate_json_against_model(subject, &model, &parsed)?;
+                        Ok(value)
                     }
                     other => bail!(
                         "Type error: {subject} expects {}, got {}",
@@ -241,14 +247,12 @@ impl<'a> Vm<'a> {
 
         for field in &model.fields {
             let Some(v) = obj.get(&field.name) else {
-                if field.is_nullable {
-                    continue;
-                }
-                bail!(
-                    "Type error: {subject} expects field '{}' for {}",
-                    field.name,
-                    model.name
-                );
+                // A missing field is allowed: field *presence* is enforced by
+                // the explicit `validate body { ... required }` block, not by
+                // the structural type. Allowing absent fields here lets a typed
+                // parameter (`req: UpdateXRequest`) accept a partial / PATCH
+                // payload instead of forcing every declared field to be sent.
+                continue;
             };
 
             if v.is_null() {

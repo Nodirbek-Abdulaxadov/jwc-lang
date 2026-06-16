@@ -36,11 +36,12 @@ Iterates a JSON array:
 
 ```jwc
 let items = ["a", "b", "c"];
-for (item in items) {
+for item in items {
     print(item);
 }
 ```
 
+The loop header has **no parentheses** — `for <var> in <iterable> { ... }`.
 `break` / `continue` / `return` all work inside the body. The iterable is evaluated **once** at loop start; items round-trip through JSON.
 
 ## try / catch

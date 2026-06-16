@@ -29,7 +29,7 @@ let parts = json_parse(split(lower_email, "@"));   // ["ali", "example.com"]
 `split` returns a JSON-array string so the result can flow through `for ... in` without an explicit parse:
 
 ```jwc
-for (part in json_parse(split(s, ","))) {
+for part in json_parse(split(s, ",")) {
     print(part);
 }
 ```

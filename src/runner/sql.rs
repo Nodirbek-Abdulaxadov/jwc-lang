@@ -43,10 +43,19 @@ pub(super) fn normalize_sql_op(op: &str) -> &str {
     }
 }
 
-/// Get a variable value as a JSON string, or error
+/// Get a variable value as a JSON object string for an `insert` / `update` /
+/// `delete <var>` statement.
+///
+/// A row loaded by `select ... first` is a `Value::Record`, and one built by
+/// `new Entity()` (after field assignments) may be a `Value::Record` or a
+/// JSON-string `Value::Str`. Both — plus a `Value::Array` of rows — are valid
+/// object inputs here: render them through the shared `value_to_json`
+/// serializer so the canonical `let x = select...; x.f = ..; update x in`
+/// pattern works regardless of which representation the row arrived as.
 pub(super) fn get_var_as_json(var: &str, vars: &HashMap<String, Value>) -> Result<String> {
-    match vars.get(&var.to_lowercase()).cloned() {
-        Some(Value::Str(s)) => Ok(s),
+    match vars.get(&var.to_lowercase()) {
+        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(v @ (Value::Record { .. } | Value::Array(_))) => Ok(v.as_string()),
         Some(other) => bail!("'{}' must be a JSON object, got {}", var, other.type_name()),
         None => bail!("variable '{}' not found", var),
     }
@@ -57,6 +66,7 @@ pub(super) fn get_var_as_json(var: &str, vars: &HashMap<String, Value>) -> Resul
 pub(super) fn build_insert_sql(
     table: &str,
     json_str: &str,
+    col_types: &HashMap<String, String>,
 ) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "insert: value is not valid JSON")?;
@@ -75,7 +85,7 @@ pub(super) fn build_insert_sql(
     let placeholders: Vec<String> = (1..=filtered.len()).map(|i| format!("${}", i)).collect();
     let params: Vec<Box<dyn ToSql + Sync + Send>> = filtered
         .iter()
-        .map(|(_, v)| json_value_to_sql_param(v))
+        .map(|(k, v)| json_value_to_sql_param_typed(v, col_types.get(*k).map(|s| s.as_str())))
         .collect();
     Ok((format!(
         "WITH _ins AS (INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING *) SELECT row_to_json(t)::text FROM _ins t;",
@@ -97,6 +107,7 @@ pub(super) fn build_update_sql(
     json_str: &str,
     pk_fields: &[String],
     dirty_fields: Option<&HashSet<String>>,
+    col_types: &HashMap<String, String>,
 ) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
     let doc: serde_json::Value =
         serde_json::from_str(json_str).with_context(|| "update: value is not valid JSON")?;
@@ -145,11 +156,14 @@ pub(super) fn build_update_sql(
 
     let mut params: Vec<Box<dyn ToSql + Sync + Send>> = updates
         .iter()
-        .map(|(_, v)| json_value_to_sql_param(v))
+        .map(|(k, v)| json_value_to_sql_param_typed(v, col_types.get(*k).map(|s| s.as_str())))
         .collect();
     let mut where_parts = Vec::with_capacity(pk_fields.len());
     for (idx, pk) in pk_fields.iter().enumerate() {
-        params.push(json_value_to_sql_param(pk_values[idx]));
+        params.push(json_value_to_sql_param_typed(
+            pk_values[idx],
+            col_types.get(pk).map(|s| s.as_str()),
+        ));
         where_parts.push(format!("\"{}\" = ${}", pk, params.len()));
     }
 
@@ -224,6 +238,72 @@ pub(super) fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql 
         serde_json::Value::String(s) => string_to_sql_param(s),
         other => Box::new(other.to_string()),
     }
+}
+
+/// Schema-aware variant of [`json_value_to_sql_param`]: bind a value according
+/// to the **declared column type** rather than guessing from the value's shape.
+///
+/// This fixes two value-shape-vs-schema mismatches:
+/// - a datetime-looking *string* destined for a `varchar`/`text` column was
+///   bound as `timestamptz` (Postgres rejected it) — now it binds as text;
+/// - a JSON *object* destined for a `jsonb` column was bound as text (rejected)
+///   — now it binds as real `jsonb`.
+///
+/// `target` is the lower-cased Postgres type from the entity schema (e.g.
+/// `"varchar(120)"`, `"timestamptz"`, `"jsonb"`, `"uuid"`). When `None` (column
+/// not found / ad-hoc table) it falls back to the shape-based binder.
+pub(super) fn json_value_to_sql_param_typed(
+    val: &serde_json::Value,
+    target: Option<&str>,
+) -> Box<dyn ToSql + Sync + Send> {
+    if let Some(t) = target {
+        // jsonb / json columns take the value verbatim as JSON (serde_json's
+        // ToSql maps to jsonb). NULL falls through to the generic binder.
+        if t.contains("json") && !val.is_null() {
+            return Box::new(val.clone());
+        }
+        if let serde_json::Value::String(s) = val {
+            if is_text_column_type(t) {
+                // Plain text: never reinterpret an ISO-date-looking string as a
+                // timestamp just because of its shape.
+                return Box::new(s.clone());
+            }
+            if is_timestamp_column_type(t) {
+                if let Some(ts) = parse_rfc3339(s) {
+                    return Box::new(ts);
+                }
+            }
+            if t.contains("uuid") {
+                if let Ok(u) = uuid::Uuid::parse_str(s) {
+                    return Box::new(u);
+                }
+            }
+        }
+    }
+    json_value_to_sql_param(val)
+}
+
+/// Build a `column-name → lower-cased Postgres type` map for an entity, used to
+/// drive schema-aware parameter binding in insert / update. Columns whose type
+/// can't be mapped are simply omitted (the binder falls back to shape-based).
+pub(super) fn column_types_for_fields(
+    fields: &[crate::ast::FieldDecl],
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for f in fields {
+        if let Ok((ty, _)) = crate::sql::map_type_postgres(&f.ty, &f.name) {
+            map.insert(f.name.clone(), ty.to_ascii_lowercase());
+        }
+    }
+    map
+}
+
+fn is_text_column_type(t: &str) -> bool {
+    t.starts_with("varchar") || t.starts_with("char") || t == "text" || t == "citext"
+}
+
+fn is_timestamp_column_type(t: &str) -> bool {
+    t.starts_with("timestamp") || t == "date" || t.starts_with("time")
 }
 
 /// Postgres rejects plain `String` against `uuid` / `timestamptz` columns —
@@ -369,11 +449,17 @@ pub(super) async fn build_select_sql(
 
     let mut sql_limit_offset = String::new();
 
+    // LIMIT / OFFSET are *bound parameters*, not baked literals. Baking the
+    // value as a literal collides in the SQL-compile cache (the shape key only
+    // recorded `limit:literal`, not the value), so the first compiled
+    // LIMIT/OFFSET would stick and later dynamic values were silently ignored.
+    // A `$N` placeholder keeps the shape constant and the value per-call.
     if let Some(limit_expr) = limit {
         let v = vm.eval_expr(limit_expr, vars).await?;
         let n = value_to_positive_int(&v, "limit")?;
-        sql_limit_offset.push_str(&format!(" LIMIT {n}"));
-        shape_bits.push("limit:literal".to_string());
+        params.push(Box::new(n));
+        sql_limit_offset.push_str(&format!(" LIMIT ${}", params.len()));
+        shape_bits.push("limit:param".to_string());
         cache_bits.push(format!("limit:{n}"));
     } else if first {
         sql_limit_offset.push_str(" LIMIT 1");
@@ -382,8 +468,9 @@ pub(super) async fn build_select_sql(
     if let Some(offset_expr) = offset {
         let v = vm.eval_expr(offset_expr, vars).await?;
         let n = value_to_positive_int(&v, "offset")?;
-        sql_limit_offset.push_str(&format!(" OFFSET {n}"));
-        shape_bits.push("offset:literal".to_string());
+        params.push(Box::new(n));
+        sql_limit_offset.push_str(&format!(" OFFSET ${}", params.len()));
+        shape_bits.push("offset:param".to_string());
         cache_bits.push(format!("offset:{n}"));
     }
 

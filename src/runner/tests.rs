@@ -494,7 +494,11 @@ async fn body_is_auto_parsed_for_typed_class_param() {
 }
 
 #[tokio::test]
-async fn body_parse_fails_when_typed_class_missing_required_field() {
+async fn typed_class_param_accepts_partial_payload() {
+    // Phase 1C: a typed class parameter no longer forces every declared field
+    // to be present. Field *presence* is enforced by `validate body { required }`,
+    // not by the structural type — which is what makes partial / PATCH payloads
+    // (`{ "name": "x" }` against a multi-field DTO) work.
     let src = r#"
             class BrandInput {
                 id int;
@@ -514,12 +518,97 @@ async fn body_parse_fails_when_typed_class_missing_required_field() {
     let program = parse_program(src).unwrap();
     validate_program(&program).unwrap();
 
-    let err = run_request(&program, "POST", "/brands", Some("{\"id\":1}".to_string()))
+    let (status, body) = run_request(&program, "POST", "/brands", Some("{\"id\":1}".to_string()))
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-    assert!(err.contains("expects field 'name'"));
+    assert_eq!(status, 200);
+    assert_eq!(body, "{\"id\":1}");
+}
+
+#[tokio::test]
+async fn typed_class_param_still_rejects_wrong_field_type() {
+    // The relaxed presence rule must NOT weaken type checking: a field that IS
+    // present must still match its declared type.
+    let src = r#"
+            class BrandInput {
+                id int;
+                name string;
+            }
+
+            function createBrand(input: BrandInput) {
+                return input;
+            }
+
+            route POST "/brands" {
+                let payload = createBrand(body());
+                return json(payload);
+            }
+        "#;
+
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+
+    let err = run_request(
+        &program,
+        "POST",
+        "/brands",
+        Some("{\"id\":\"not-an-int\",\"name\":\"Acme\"}".to_string()),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("invalid type") || err.contains("id"));
+}
+
+#[tokio::test]
+async fn response_body_status_key_is_preserved() {
+    // Phase 0.1: a user body key named `status` must survive to the client —
+    // the HTTP status now travels through a reserved `__jwc_status__` sentinel,
+    // so `json({ status: ... })` no longer loses the field.
+    let src = r#"
+            route GET "/health" {
+                return json({ status: "ok", code: 1 });
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+
+    let (status, body) = run_request(&program, "GET", "/health", None)
+        .await
+        .unwrap();
+
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("\"status\":\"ok\""),
+        "status body key was stripped: {body}"
+    );
+    assert!(body.contains("\"code\":1"));
+}
+
+#[tokio::test]
+async fn created_sets_201_and_keeps_body_status_key() {
+    // `created(...)` sets HTTP 201 via the sentinel while leaving a body
+    // `status` field intact.
+    let src = r#"
+            route POST "/things" {
+                return created(json({ status: "active" }));
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+
+    let (status, body) = run_request(&program, "POST", "/things", None)
+        .await
+        .unwrap();
+
+    assert_eq!(status, 201);
+    assert!(
+        body.contains("\"status\":\"active\""),
+        "status body key was stripped by created(): {body}"
+    );
+    assert!(!body.contains("__jwc_status__"), "sentinel leaked: {body}");
 }
 
 #[tokio::test]

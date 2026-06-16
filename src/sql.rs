@@ -97,6 +97,11 @@ pub(crate) fn generate_postgres_table_sql(entity: &ModelDecl) -> Result<String> 
         if field.is_primary_key {
             constraints.push(format!("PRIMARY KEY (\"{}\")", field.name));
         }
+        // A primary key is already unique; only emit a separate UNIQUE for
+        // non-PK columns marked `unique`.
+        if field.is_unique && !field.is_primary_key {
+            constraints.push(format!("UNIQUE (\"{}\")", field.name));
+        }
         if let Some(reference) = &field.references {
             let target_table = to_snake_case(&reference.entity);
             let mut fk = format!(
