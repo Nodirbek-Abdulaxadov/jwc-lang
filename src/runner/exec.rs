@@ -525,9 +525,11 @@ impl<'a> Vm<'a> {
         let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
         let mut set_fragments = Vec::with_capacity(assignments.len());
         for (col, rhs) in assignments {
-            let col_lc = col.to_ascii_lowercase();
+            // Preserve the column's declared case — JWC columns are quoted
+            // as-written (e.g. `columnId`), so lowercasing here would emit
+            // `"columnid"` and fail to prepare against a camelCase column.
             let rhs_sql = build_set_rhs_sql(rhs, &mut params, vars, self).await?;
-            set_fragments.push(format!("\"{}\" = {}", col_lc, rhs_sql));
+            set_fragments.push(format!("\"{}\" = {}", col, rhs_sql));
         }
         let set_clause = set_fragments.join(", ");
         let where_sql = build_where_sql(

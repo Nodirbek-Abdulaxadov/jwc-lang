@@ -1139,7 +1139,9 @@ fn build_set_rhs_sql_sync(
                 params.push(value_to_sql_param(&v));
                 return format!("${}", params.len());
             }
-            format!("\"{}\"", key)
+            // Bare identifier that isn't a host var = a column self-reference
+            // (`position + 1`). Quote it as-written so camelCase columns match.
+            format!("\"{}\"", name)
         }
         Expr::Add(a, b) => {
             let ls = build_set_rhs_sql_sync(a, params, vars, values);
