@@ -4,7 +4,10 @@
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
 >
-> Joriy holat: **v0.4.8** — Sprint 1–5 + Phase 6 + Phase 7 partial + Phase 8 yopildi.
+> Joriy holat: **v0.6.1** — Phase 0–10 + **Phase 11 (Query Layer) yopildi**
+> (Query Layer v3: Epic 1–5) + native query-layer parity. 1.0-blocker'lar
+> ketdi. Qolgan kamchiliklar pastdagi **Phase 11** va **Sprint Tracker**
+> (Sprint 8 — native parity) bo'limlarida ro'yxatlangan.
 > Sprint Tracker (pastda) yangi 1.0 yo'l xaritasini ("1.0 Readiness Plan")
 > aks ettiradi.
 
@@ -46,7 +49,7 @@ Ushbu band'lar uchun PR'lar yopiladi yoki forka tavsiya etiladi.
 | Phase 1 — MVP Core | ✅ Done (Sprint 1 closeout) |
 | Phase 2 — Language Completeness | ✅ Done (Sprint 2A/2B/2C code-health audit yopildi) |
 | Phase 3 — Developer Experience | ✅ Done (Sprint 3: typed catch + dotted subtypes + gradual type checker + AOT visibility) |
-| Phase 4 — Real Compiler (Native) | ✅ Done for 1.0 scope (native AOT via Rust codegen + cargo; migrate safety/savepoint/json_unchecked/pool resilience/chaos stub ✅). LLVM IR + cross-target → **Non-goals** |
+| Phase 4 — Real Compiler (Native) | ✅ Done for 1.0 scope (native AOT via Rust codegen + cargo). Query-layer native parity ✅ v0.6.x (nav eager-load/grouped agg/JOIN/op? + camelCase call-resolution fix). Kamchilik: auth/crypto builtinlar (`jwt_verify`/`jwt_sign`/`verify_password`/`hash_password`/`env`) native'da hali yo'q → real auth-app native build bloklanadi (Sprint 8 davomi). LLVM IR + cross-target → **Non-goals** |
 | Phase 5 — Ecosystem | ✅ Done for 1.0 surface (config registry + OTLP + persistent queue + DLQ + soak harness ✅; 72h soak real run = ops) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 | Phase 6 (security) — SECURITY.md + cargo audit + threat model + SSRF allowlist + JWT exp + secrets redaction | ✅ Done (external review = ops) |
@@ -55,7 +58,7 @@ Ushbu band'lar uchun PR'lar yopiladi yoki forka tavsiya etiladi.
 | Phase 8 — Background jobs + LSP + dev-experience close-out | ✅ Done (queue + jwc-lsp go-to-def/rename/completion + WebSocket + Docker/musl/templates/fmt/upgrade/Marketplace/autogen) |
 | Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
 | Phase 10 — Observability (kichiroq scope) | ✅ Done for 1.0 surface (typed-catch dispatch ✅; OTLP exporter ✅ behind `otlp` feature). Stream `select` / `route SSE v2` / cross-target → **Non-goals** |
-| **Phase 11 — Query Layer (1.0-blocker)** | ⏳ Planned: join + projection + composable filter. Joinsiz "ORM og'rig'ini o'ldirdik" da'vosi yarim qoladi |
+| **Phase 11 — Query Layer (1.0-blocker)** | ✅ Done (v0.5.0→v0.6.1): explicit JOIN + grouped agg over JOIN (0 raw_sql) + nav eager-load (belongs-to/has-many/one/m2m/2-level nested) + projection + `op?` optional filter + dynamic in-list (`= ANY`) + atomic `update set`/reorder + jonli `/openapi.json`. Native query-layer parity ✅. Kamchiliklar: pastdagi Phase 11 bo'limiga qarang |
 
 ---
 
@@ -564,53 +567,87 @@ streaming/SSE va cross-target **Non-goals** ga ko'chdi.
 
 ---
 
-## Phase 11 — Query Layer ⬜ 1.0-blocker
+## Phase 11 — Query Layer ✅ Done (v0.5.0 → v0.6.1)
 
-**Maqsad:** Joinsiz "ORM og'rig'ini o'ldirdik" da'vosi yarim. Bu Phase
-qolgan 80% holatda raw_sql fallback'iga muhtojlikni o'ldiradi.
+**Maqsad (bajarildi):** Joinsiz "ORM og'rig'ini o'ldirdik" da'vosi yarim edi.
+Bu Phase qolgan ~80% holatda raw_sql fallback'iga muhtojlikni o'ldirdi.
+Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
+(PAIN_LOG2/3/4). Reja: `jwc-query-layer-plan-v2.md` + `jwc-plan-v3.md`.
 
-### 11.1 Join (FK orqali)
-- `select Post from db.Posts join db.Authors on Post.authorId = Author.id`
-- AST: `JoinClause { entity, on_expr, kind: Inner/Left }`
-- Validator: FK borligi, type mosligi, ambiguous column detection.
-- SQL gen: prepared statement + parameterised join.
-- Native AOT codegen mirror.
+### 11.1 Join (FK orqali) ✅
+- `select Task { columnId, columnName: Column.name, total: count(*) } from
+  AppDb.Task join Column on Column.id == Task.columnId group by …` — explicit
+  multi-entity equi-join, `j{i}` alias bilan kvalifikatsiya. SQL gen +
+  prepared statement + native AOT codegen mirror ✅.
+- (Cheklov) faqat Inner equi-join (`a == b`); LEFT/outer join — post-1.0.
 
-### 11.2 Projection / shape
-- `select { id, title, author.email } from db.Posts join ...`
-- Shape — anonymous Record, mavjud `Value::Record` infrastruktura'sini ishlatadi.
-- HTTP response avtomatik bu shape'ni JSON qiladi.
-- Validator: tanlangan field'lar mavjud va accessible (visibility).
+### 11.2 Projection / shape ✅
+- `select Entity { col, alias: Other.col, total: count(*) }` — aliased plain
+  ustun (joined entity'dan) + aliased aggregate. Nav projection
+  (`author: User { id, name }`) parolni yashiradi. HTTP response avto-JSON.
 
-### 11.3 Composable filter
-- `where Post.published and Author.role == "admin" and (Post.views > 100 or Post.featured)`
-- Joinda boshqa entity'lar field'lariga `where` clause'da murojaat.
-- Validator: short-circuit evaluation rules; parameter binding.
+### 11.3 Composable filter ✅
+- `and`/`or` + qavslar; joined entity field'lariga `where`'da murojaat.
+- **`op?` optional predicate** (`status ==? @s`): qiymat bo'sh/null bo'lsa shart
+  tushadi — bitta statik query barcha filter kombinatsiyasiga xizmat qiladi
+  (in-code shoxlanish o'ldi).
+- **Dynamic in-list** (`where id in (@arr)` → `= ANY($1)`): runtime massiv param.
 
-### 11.4 Aggregation (minimal)
-- `count`, `sum`, `avg`, `min`, `max` — `group by` siz oddiy scalar agregatsiya.
-- `group by` — defer post-1.0 (over-scope qilmaslik uchun).
+### 11.4 Aggregation ✅
+- `count`/`sum`/`avg`/`min`/`max` scalar **va** `group by` + `having` bilan
+  grouped aggregation (1.0 scope'dan oshib bajarildi). JOIN ustidan grouped
+  agg ham.
 
-### 11.5 Conformance + docs
-- `tests/conformance/cases/join/` — har bir SQL pattern uchun fixture.
-- `docs/docs/reference/queries.md` — to'liq surface, examplelar.
+### 11.5 Eager-load + nav + boshqa (v3) ✅
+- **`with`** eager-load: belongs-to, has-many/one, m2m (join-jadval orqali),
+  **ikki-bosqichli nested** (`with boards.columns`) — barchasi korrelyatsiyali
+  `json_agg` subquery, bitta query. Nav ordering (`orderby` nav-decl'da).
+- **Atomik `update CTX.T set col = expr where …`** (D3) — read'siz partial
+  update + reorder (`position = position ± 1`); lost-update oynasi yo'q.
+- **Jonli `/openapi.json` + `/docs`** — runtime'da route'lardan generatsiya,
+  drift mumkin emas.
+- **`schema_diff`** mavjud ustunga qo'shilgan `unique`ni `ALTER` qiladi (D1).
+- **Native AOT query-layer parity**: yuqoridagi nav/agg/JOIN/op? formalari
+  native codegen'da (interpreter SQL'ini qayta ishlatadi) + camelCase
+  funksiya-chaqiruv rezolyutsiya bug fix.
+
+### 11.6 Conformance + docs ✅ qisman
+- `tests/group_by.rs`, `tests/nested_with.rs`, `tests/native_emit.rs` +
+  runner `nav_sql_tests` unit testlari ✅. `docs/.../queries.md` to'liq surface
+  — qoldi.
+
+### Phase 11 — qolgan kamchiliklar (halol)
+1. **🟡 Native: auth/crypto builtinlar yo'q.** `jwt_verify`/`jwt_sign`/
+   `verify_password`/`hash_password`/`env` native AOT'da rad etiladi →
+   auth ishlatadigan real app `jwc build --native` qila olmaydi (query-layer
+   o'tadi, auth o'tmaydi). Interpreter'da hammasi ishlaydi. → Sprint 8 davomi.
+2. **🟡 Native: dinamik in-list (`= ANY`) interpreter-only.** Massiv-param
+   binding native'da yo'q (runtime coverage Linux/CI). Statik `in (a,b,c)` ✅.
+3. **🟡 Native: JOIN where faqat asosiy entity ustuni.** WHERE/HAVING bind
+   tipi asosiy entity'dan resolve bo'ladi; joined-entity ustuni bo'yicha WHERE
+   native'da interpreter-only (struktura/SELECT/ON to'liq qo'llanadi).
+4. **🟢 Faqat Inner equi-join.** LEFT/outer + non-equi ON — post-1.0.
+5. **🟢 `group by`/`having` interpreter'da to'liq; arbitrary projection-agg
+   aralashmasi** ba'zi holatda raw_sql talab qiladi (kam uchraydi).
+6. **🟢 Native binar Windows'da runtime-test bo'lmaydi** — AOT Linux
+   x86_64(+musl) only; bu env'da emit-source + SQL-probe darajasi (CI compile).
 
 ---
 
 ## Priority Timeline (qayta hisoblangan, Go-yo'liga moslab)
 
-Hozirgi holat: Phase 0–10 + Phase 6/7 yopildi. **Phase 11 (Query Layer)** —
-1.0 dan oldin yagona blocker. Boshqa hamma narsa — Non-goals yoki post-1.0.
+Hozirgi holat: Phase 0–11 yopildi (v0.6.1). **Phase 11 (Query Layer) tugadi** —
+1.0-blocker ketdi. Qolgan yagona sezilarli kamchilik — native AOT auth/crypto
+builtinlari (Sprint 14), lekin bu interpreter'da to'siq emas.
 
 ```
-hozir    →  Phase 11.1 — Join (FK, Inner/Left)
-+2 hafta →  Phase 11.2 — Projection / shape
-+3 hafta →  Phase 11.3 — Composable filter
-+4 hafta →  Phase 11.4 — Aggregation (scalar)
-+5 hafta →  Phase 11.5 — Conformance + docs
-+6 hafta →  v0.5.0 release — Query Layer ready
-+8 hafta →  v1.0.0-rc.1 — bake + 2 external pilots
-+12 hafta → v1.0.0 — LTS statement
+✅ done   →  Phase 11.1–11.6 — JOIN + projection + filter + agg + eager-load
+✅ v0.5.0 →  Query Layer yadrosi (eager-load + grouped agg)
+✅ v0.6.0 →  explicit JOIN (0 raw_sql) + op? + dynamic in-list + nested with
+             + atomic update-set + live OpenAPI + native query-layer parity
+✅ v0.6.1 →  hotfix: atomik update-set camelCase ustun
+keyingi  →  Sprint 8 davomi — native auth/crypto builtinlar (real-app native build)
+keyin    →  v1.0.0-rc.1 — bake + external pilots → v1.0.0 LTS
 ```
 
 Post-1.0 (xohlasak): jwc-registry server, jwc publish/login, qo'shimcha
@@ -631,7 +668,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
 | 6 | SQL completeness | ⏳ qisman | `group by` + `having` ✅. `jwc migrate list` offline enumerator ✅. Insert/FieldAssign payload field-name compile-time check ✅ (tracks `let v = new Entity()` bindings + if/else/loop branch-aware intersect). Live DB schema drift — qoldi. |
 | 7 | Code health refactor | ⏳ qisman | 8 cmd modullari: `pkg`, `migrate`, `lint`, `check`, `fmt`, `build`, `run`, `serve` ✅ + `builtins.rs` ✅. main.rs 349 qator — pure Clap dispatcher, har handler `cmd::<sub>::run` ortida. runner.rs `src/runner/{mod,builtins}.rs` ga ajratildi ✅ (v0.4.0). parser.rs modul ajratish — qoldi. |
-| 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅, `tests/native_emit.rs` ✅, `tests/examples_parse.rs` ✅, `tests/native_parity.rs` ✅ (golden harness, v0.4.0 da array/range/push/join/sha256/hmac/const case'lari bilan kengaytirildi). v0.4.0 parity auditi: array literal, hash builtinlari, `const`, custom MIME `response/raw` ikkala mode'da bayt-aynan; `hash_password`/`verify_password` native'da yoqildi; `ok`/`not_found`/`no_content`/`bad_request`/`internal_error` interpreter'da dispatch qilindi. Qolgan error-body shape farqlari `docs/parity-notes.md` da, v0.4.1 ga. Cargo-build-and-diff v2 — qoldi. |
+| 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅, `tests/native_emit.rs` ✅, `tests/examples_parse.rs` ✅, `tests/native_parity.rs` ✅ (golden harness). v0.4.0 parity auditi: array literal, hash builtinlari, `const`, custom MIME bayt-aynan. **v0.6.x: Query Layer native parity** ✅ — nav eager-load (belongs-to/has-many/one/m2m/nested), grouped aggregation, explicit JOIN + aliased cols, `op?` optional predicate — barchasi interpreter SQL builder'larini qayta ishlaydi (`build_navigation_subqueries`/`where_col_sql`/`agg_select_sql` `pub(crate)`), natija `row_to_json(r)::text` → `jwc_db_query_json`. **camelCase funksiya-chaqiruv rezolyutsiya bug fix** (`rewrite_expr`) — `byStatus()` kabi root call FQN'ga o'tmasdan "unknown function" berardi; real app'lar uchun native'ni ochdi. **Qolgan kamchiliklar:** (a) auth/crypto builtinlar (`jwt_verify`/`jwt_sign`/`verify_password`/`hash_password`/`env`) native'da yo'q → auth-app native build bloklanadi; (b) dinamik in-list `= ANY` native'da interpreter-only; (c) JOIN WHERE joined-entity ustuni native'da interpreter-only; (d) native runtime faqat Linux/CI (Windows — emit + SQL-probe). Cargo-build-and-diff v2 — qoldi. |
 | 9-10 | Registry server | ⬜ blocked-on-infra | Alohida repo `jwc-registry.1kb.uz` kerak; bu sessiyada bajarib bo'lmaydi. |
 | 11 | Publish & login | ⬜ blocked | Registry server ishga tushgandan keyin. |
 | 12-13 | Native cross-target | ⏳ qisman | Sprint 12 `--target` flag ✅ + 5-triple allowlist + `tests/native_target.rs` (5 tests). Sprint 13 `src/native_ir.rs` skeleton ✅. End-to-end AST → IR → LLVM via inkwell — deferred. |

@@ -1,5 +1,22 @@
 # JWC plan v3 (0.5.1'dan keyin)
 
+> **STATUS (v0.6.1): hamma Epic (1–5) shipped + native query-layer parity.**
+> Epic 1 explicit JOIN + grouped agg over JOIN (→ 0 raw_sql) ✅ · Epic 2 `op?`
+> optional filter + dynamic in-list (`= ANY`) ✅ · Epic 3 data-literal string
+> kalit + jonli `/openapi.json`+`/docs` ✅ · Epic 4 native AOT query-layer
+> parity (nav/agg/JOIN/op? + camelCase call-resolution fix) ✅ · Epic 5
+> position/reorder (atomik `update set`) + ikki-bosqichli nested `with` ✅.
+> Dogfood: `task-tracker` — 0 raw_sql, 0 read-path N+1 (PAIN_LOG4).
+>
+> **Qolgan kamchiliklar (halol):**
+> - Native AOT auth/crypto builtinlar yo'q (`jwt_verify`/`jwt_sign`/
+>   `verify_password`/`hash_password`/`env`) → auth-app native build bloklanadi
+>   (ROADMAP Sprint 8 davomi). Interpreter'da hammasi ishlaydi.
+> - Native: dinamik in-list `= ANY` va JOIN-WHERE joined-entity ustuni —
+>   interpreter-only.
+> - Faqat Inner equi-join; LEFT/outer + non-equi ON — post-1.0.
+> - Native runtime test faqat Linux/CI (AOT Linux x86_64+musl only).
+
 **Tugagan (0.4.8 → 0.5.1):** canonical patterns (status-safe json, `update x in`,
 schema-aware bind, partial PATCH, Bearer, unique+ALTER, DB-side paging + scalar
 count), `with` eager-load (belongs-to + has-many + m2m → read-path N+1 = 0),

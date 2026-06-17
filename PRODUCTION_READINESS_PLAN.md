@@ -1,7 +1,23 @@
 # JWC Production Readiness Plan
 
-Status: ACTIVE · Target: v1.0.0
-Scope: everything between today's v0.4.8 and a version teams can bet a real backend on.
+Status: ACTIVE · Target: v1.0.0 · Current: **v0.6.1**
+Scope: everything between v0.4.8 and a version teams can bet a real backend on.
+
+> **Progress update (v0.6.1).** Since this plan was written:
+> - **Query Layer (ROADMAP Phase 11, the headline 1.0-blocker) shipped** —
+>   explicit JOIN + grouped aggregation over JOIN (→ 0 raw_sql), nav
+>   eager-load (belongs-to/has-many/one/m2m/2-level nested), `op?` optional
+>   filter, dynamic in-list (`= ANY`), live `/openapi.json`.
+> - **Atomic partial update** (Phase 4 dogfooding finding: the `hits`
+>   lost-update) shipped as `update CTX.T set col = expr where …` and used for
+>   task ordering; a v0.6.1 hotfix fixed camelCase column quoting in it.
+> - Re-dogfooded on `task-tracker`: 0 raw_sql, 0 read-path N+1 (PAIN_LOG4).
+>
+> **Remaining gap added by this work (not yet a blocker):** native AOT has
+> **no auth/crypto builtins** (`jwt_verify`/`jwt_sign`/`verify_password`/
+> `hash_password`/`env`), so an auth-using app builds native for its query
+> layer but not its auth path. Interpreter is unaffected. Tracked in
+> ROADMAP Sprint 8 (native parity).
 
 This plan is grounded in a code audit of the current tree:
 it names the actual files and gaps, not generic advice. Phases are ordered by
