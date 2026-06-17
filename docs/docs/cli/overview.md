@@ -42,6 +42,17 @@ Every subcommand in one place. `jwc --help` and `jwc <sub> --help` print the up-
 | `jwc migrate down --steps N` | Roll back the most recent N. |
 | `jwc migrate list` | Offline — print every migration file in chronological order. |
 
+## API docs
+
+| Command | Effect |
+|---|---|
+| `jwc openapi [path] [--out file] [--pretty]` | Emit an OpenAPI **3.0.3** document for the project — same generator the server serves at `/openapi.json`. Prints to stdout, or writes `--out`. |
+| `jwc swagger [--stdout]` | Emit an OpenAPI **3.1** document; writes `openapi.json` by default, or prints with `--stdout`. |
+
+The running server also exposes these live without the CLI: `/openapi.json`
+(generated from your routes) + `/docs` (Swagger UI). See
+[deployment → observability](../deployment/observability#api-docs-openapi).
+
 ## Packages
 
 | Command | Effect |
