@@ -368,10 +368,14 @@ impl<'a> NameResolver<'a> {
         match e {
             Expr::Call { name, args } => {
                 let lower = name.to_lowercase();
-                // Only rewrite if it looks like a user function ref. If the
-                // resolver returns something different, swap it in.
                 let resolved = self.resolve_fn(&lower, caller_ns);
-                if resolved != lower {
+                // Rewrite to the resolved FQN whenever it names a user function
+                // (always lowercased by `ns_fqn`, so a camelCase source name
+                // like `byStatus` must be swapped to its `bystatus` FQN to match
+                // the renamed decl). Builtins resolve to their own lowercased
+                // name but aren't in `fqn_set`, so their original casing — which
+                // `builtin_fn_name` depends on — is left intact.
+                if self.fqn_set.contains(&resolved) {
                     *name = resolved;
                 }
                 for a in args {
@@ -2765,6 +2769,11 @@ struct WhereBuilder<'a> {
     entity: &'a EntityMeta,
     sql: String,
     params: Vec<(PgKind, &'a Expr)>,
+    /// Table-alias map (entity name → `t` / `j{i}`) for JOIN queries; `None`
+    /// for single-table selects (columns stay unqualified, byte-identical to
+    /// the historical output). Param TYPES are still resolved against the main
+    /// entity, so a WHERE on a *joined* entity's column is not supported here.
+    aliases: Option<HashMap<String, String>>,
 }
 
 impl<'a> WhereBuilder<'a> {
@@ -2773,7 +2782,23 @@ impl<'a> WhereBuilder<'a> {
             entity,
             sql: String::new(),
             params: Vec::new(),
+            aliases: None,
         }
+    }
+
+    fn new_joined(entity: &'a EntityMeta, aliases: HashMap<String, String>) -> Self {
+        WhereBuilder {
+            entity,
+            sql: String::new(),
+            params: Vec::new(),
+            aliases: Some(aliases),
+        }
+    }
+
+    /// SQL reference for a WHERE column — qualified by table alias when this is
+    /// a JOIN query, bare otherwise. Shares the interpreter's `where_col_sql`.
+    fn col_ref(&self, field: &str) -> String {
+        crate::runner::sql::where_col_sql(field, self.aliases.as_ref())
     }
 
     fn col_kind(&self, raw_field: &str) -> Result<(String, PgKind)> {
@@ -2794,7 +2819,11 @@ impl<'a> WhereBuilder<'a> {
         use crate::ast::WhereExpr;
         match w {
             WhereExpr::Atom(atom) => {
-                let (col, kind) = self.col_kind(&atom.field)?;
+                // `col_kind` validates the column exists (on the main entity)
+                // and gives the bind type; `col_ref` renders the SQL reference
+                // (alias-qualified for JOIN queries).
+                let (_, kind) = self.col_kind(&atom.field)?;
+                let cref = self.col_ref(&atom.field);
                 // `==?` / `like?` etc. — optional predicate: a NULL (or, for a
                 // string column, empty) bound value drops the filter. The
                 // interpreter omits the clause at runtime; native can't rebuild
@@ -2811,8 +2840,8 @@ impl<'a> WhereBuilder<'a> {
                 {
                     let neg = raw_op == "!=";
                     self.sql.push_str(&format!(
-                        "\"{}\" IS {}NULL",
-                        col,
+                        "{} IS {}NULL",
+                        cref,
                         if neg { "NOT " } else { "" }
                     ));
                     return Ok(());
@@ -2833,15 +2862,14 @@ impl<'a> WhereBuilder<'a> {
                 if optional {
                     // Repeated `$n` is fine — one bound param, referenced thrice.
                     if matches!(kind, PgKind::Str) {
-                        self.sql.push_str(&format!(
-                            "(${n} IS NULL OR ${n} = '' OR \"{col}\" {op} ${n})"
-                        ));
+                        self.sql
+                            .push_str(&format!("(${n} IS NULL OR ${n} = '' OR {cref} {op} ${n})"));
                     } else {
                         self.sql
-                            .push_str(&format!("(${n} IS NULL OR \"{col}\" {op} ${n})"));
+                            .push_str(&format!("(${n} IS NULL OR {cref} {op} ${n})"));
                     }
                 } else {
-                    self.sql.push_str(&format!("\"{}\" {} ${}", col, op, n));
+                    self.sql.push_str(&format!("{} {} ${}", cref, op, n));
                 }
                 Ok(())
             }
@@ -2862,13 +2890,14 @@ impl<'a> WhereBuilder<'a> {
                 Ok(())
             }
             WhereExpr::InList { field, values } => {
-                let (col, kind) = self.col_kind(field)?;
+                let (_, kind) = self.col_kind(field)?;
+                let cref = self.col_ref(field);
                 if values.is_empty() {
                     // SQL `IN ()` is a parse error; `FALSE` makes the row count zero.
                     self.sql.push_str("FALSE");
                     return Ok(());
                 }
-                self.sql.push_str(&format!("\"{}\" IN (", col));
+                self.sql.push_str(&format!("{} IN (", cref));
                 for (i, v) in values.iter().enumerate() {
                     if i > 0 {
                         self.sql.push_str(", ");
@@ -2881,13 +2910,14 @@ impl<'a> WhereBuilder<'a> {
                 Ok(())
             }
             WhereExpr::Between { field, low, high } => {
-                let (col, kind) = self.col_kind(field)?;
+                let (_, kind) = self.col_kind(field)?;
+                let cref = self.col_ref(field);
                 let nl = self.params.len() + 1;
                 self.params.push((kind, low));
                 let nh = self.params.len() + 1;
                 self.params.push((kind, high));
                 self.sql
-                    .push_str(&format!("\"{}\" BETWEEN ${} AND ${}", col, nl, nh));
+                    .push_str(&format!("{} BETWEEN ${} AND ${}", cref, nl, nh));
                 Ok(())
             }
         }
@@ -3193,9 +3223,13 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             aggregates,
             aliased_cols,
             joins,
-            ..
+            group_by,
+            having,
+            entity: _,
+            context_var: _,
         } => {
             if aggregates.is_empty() && joins.is_empty() && aliased_cols.is_empty() {
+                // Plain select / `with` eager-load.
                 emit_db_select(
                     out,
                     table,
@@ -3209,10 +3243,23 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                     ctx,
                 );
             } else {
-                out.push_str(&format!(
-                    "{{ compile_error!({:?}); V::Null }}",
-                    "native AOT does not support aggregate projection / JOIN / aliased columns — use the interpreter (`jwc run`/`serve`)"
-                ));
+                // Grouped aggregation / explicit JOIN / aliased columns.
+                emit_db_select_explicit(
+                    out,
+                    table,
+                    *first,
+                    where_clause.as_deref(),
+                    order_by.as_ref(),
+                    limit.as_deref(),
+                    offset.as_deref(),
+                    projection,
+                    aggregates,
+                    aliased_cols,
+                    joins,
+                    group_by,
+                    having.as_deref(),
+                    ctx,
+                );
             }
         }
         Expr::DbCount {
@@ -3526,6 +3573,230 @@ fn emit_db_select_with_navs(
 
     // Wrap so the whole row (with nested nav JSON) comes back as one text
     // column — same shape the interpreter reads.
+    let sql = if first {
+        format!("SELECT row_to_json(r)::text FROM ({}) r", inner)
+    } else {
+        format!(
+            "SELECT COALESCE(json_agg(row_to_json(r)), '[]')::text FROM ({}) r",
+            inner
+        )
+    };
+
+    out.push('{');
+    out.push_str(" let __params: DbParams = vec![");
+    for (kind, expr) in &wb.params {
+        out.push_str(&format!("{}(", helper_for_kind(*kind)));
+        emit_expr(out, expr, ctx);
+        out.push_str("),");
+    }
+    out.push_str("];");
+    out.push_str(&format!(
+        " jwc_db_query_json(\"{}\", __params).await }}",
+        escape_sql(&sql)
+    ));
+}
+
+/// `select Entity { col, alias: count(*), alias2: Other.col } [join ...]
+/// [group by ...] [having ...]` — grouped aggregation / explicit JOIN /
+/// aliased columns. Mirrors the interpreter's `build_select_sql`: a `t` alias
+/// for the main table, `j{i}` per join, columns qualified through the shared
+/// `where_col_sql` / `agg_select_sql`, the whole row wrapped
+/// `row_to_json(r)::text` and read via `jwc_db_query_json`. WHERE/HAVING params
+/// come from the alias-aware `WhereBuilder` (so the bind types resolve against
+/// the main entity — a WHERE on a joined entity's column is not supported here).
+#[allow(clippy::too_many_arguments)]
+fn emit_db_select_explicit(
+    out: &mut String,
+    table: &str,
+    first: bool,
+    where_clause: Option<&crate::ast::WhereExpr>,
+    order_by: Option<&crate::ast::DbOrderBy>,
+    limit: Option<&Expr>,
+    offset: Option<&Expr>,
+    projection: &[String],
+    aggregates: &[crate::ast::AggProj],
+    aliased_cols: &[crate::ast::AliasedCol],
+    joins: &[crate::ast::JoinClause],
+    group_by: &[String],
+    having: Option<&crate::ast::WhereExpr>,
+    ctx: &CodegenCtx,
+) {
+    let meta = match ctx.entities.get(table) {
+        Some(m) => m,
+        None => {
+            out.push_str(&format!("panic!(\"select on unknown entity {}\")", table));
+            return;
+        }
+    };
+
+    // Alias map: main → t, each joined entity → j{i}. None when there are no
+    // joins (columns stay unqualified, matching the single-table path).
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    aliases.insert(table.to_lowercase(), "t".to_string());
+    for (i, j) in joins.iter().enumerate() {
+        if !ctx.entities.contains_key(&j.entity) {
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                format!("join references unknown entity `{}`", j.entity),
+            ));
+            return;
+        }
+        aliases.insert(j.entity.to_lowercase(), format!("j{}", i));
+    }
+    let has_joins = !joins.is_empty();
+    let alias_opt = if has_joins { Some(&aliases) } else { None };
+
+    // SELECT list: projected cols (main table), aliased columns from any
+    // entity, then the aggregate terms.
+    let mut bits: Vec<String> = Vec::new();
+    for c in projection {
+        match meta.fields.iter().find(|f| f.name.eq_ignore_ascii_case(c)) {
+            Some(f) => bits.push(format!("t.\"{}\"", f.name)),
+            None => {
+                out.push_str(&format!(
+                    "{{ compile_error!({:?}); V::Null }}",
+                    format!(
+                        "unknown projection column `{}` on entity `{}`",
+                        c, meta.table
+                    ),
+                ));
+                return;
+            }
+        }
+    }
+    for ac in aliased_cols {
+        bits.push(format!(
+            "{} AS \"{}\"",
+            crate::runner::sql::where_col_sql(&ac.field, alias_opt),
+            ac.alias
+        ));
+    }
+    for agg in aggregates {
+        // count(*) needs no column; other aggregates must name a real column on
+        // the main entity (joined-entity aggregation is interpreter-only).
+        if !matches!(agg.kind, AggregateKind::Count) {
+            let col = match agg.col.split_once('.') {
+                Some((_, c)) => c,
+                None => agg.col.as_str(),
+            };
+            if !has_joins && !meta.fields.iter().any(|f| f.name.eq_ignore_ascii_case(col)) {
+                out.push_str(&format!(
+                    "{{ compile_error!({:?}); V::Null }}",
+                    format!(
+                        "unknown aggregate column `{}` on entity `{}`",
+                        col, meta.table
+                    ),
+                ));
+                return;
+            }
+        }
+        bits.push(crate::runner::sql::agg_select_sql(agg, alias_opt));
+    }
+    let select = if bits.is_empty() {
+        "*".to_string()
+    } else {
+        bits.join(", ")
+    };
+
+    // FROM + JOINs.
+    let mut from = format!("\"{}\" t", meta.table);
+    for (i, j) in joins.iter().enumerate() {
+        let jt = crate::sql::to_snake_case(&j.entity);
+        from.push_str(&format!(
+            " JOIN \"{}\" j{} ON {} = {}",
+            jt,
+            i,
+            crate::runner::sql::where_col_sql(&j.left, alias_opt),
+            crate::runner::sql::where_col_sql(&j.right, alias_opt),
+        ));
+    }
+
+    // WHERE + HAVING share one param counter (where params first, then
+    // having), matching the interpreter's bind order.
+    let mut wb = if has_joins {
+        WhereBuilder::new_joined(meta, aliases.clone())
+    } else {
+        WhereBuilder::new(meta)
+    };
+    let where_sql = if let Some(w) = where_clause {
+        if let Err(e) = wb.emit(w) {
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                e.to_string()
+            ));
+            return;
+        }
+        std::mem::take(&mut wb.sql)
+    } else {
+        String::new()
+    };
+    let group_sql = if group_by.is_empty() {
+        String::new()
+    } else {
+        let cols: Vec<String> = group_by
+            .iter()
+            .map(|f| crate::runner::sql::where_col_sql(f, alias_opt))
+            .collect();
+        format!(" GROUP BY {}", cols.join(", "))
+    };
+    let having_sql = if let Some(hv) = having {
+        if let Err(e) = wb.emit(hv) {
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                e.to_string()
+            ));
+            return;
+        }
+        format!(" HAVING {}", std::mem::take(&mut wb.sql))
+    } else {
+        String::new()
+    };
+    let order_sql = if let Some(ob) = order_by {
+        let dir = match ob.dir {
+            crate::ast::SortDir::Asc => "ASC",
+            crate::ast::SortDir::Desc => "DESC",
+        };
+        format!(
+            " ORDER BY {} {}",
+            crate::runner::sql::where_col_sql(&ob.field, alias_opt),
+            dir
+        )
+    } else {
+        String::new()
+    };
+    let mut limit_sql = String::new();
+    if let Some(l) = limit {
+        match l {
+            Expr::Int(n) => limit_sql.push_str(&format!(" LIMIT {}", n)),
+            _ => {
+                let n = wb.params.len() + 1;
+                wb.params.push((PgKind::Bigint, l));
+                limit_sql.push_str(&format!(" LIMIT ${}", n));
+            }
+        }
+    } else if first {
+        limit_sql.push_str(" LIMIT 1");
+    }
+    if let Some(o) = offset {
+        match o {
+            Expr::Int(n) => limit_sql.push_str(&format!(" OFFSET {}", n)),
+            _ => {
+                let n = wb.params.len() + 1;
+                wb.params.push((PgKind::Bigint, o));
+                limit_sql.push_str(&format!(" OFFSET ${}", n));
+            }
+        }
+    }
+
+    let where_clause_sql = if where_sql.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_sql)
+    };
+    let inner = format!(
+        "SELECT {} FROM {}{}{}{}{}{}",
+        select, from, where_clause_sql, group_sql, having_sql, order_sql, limit_sql
+    );
     let sql = if first {
         format!("SELECT row_to_json(r)::text FROM ({}) r", inner)
     } else {

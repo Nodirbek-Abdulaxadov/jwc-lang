@@ -147,6 +147,73 @@ fn emit_rust_source_supports_optional_predicate() {
 }
 
 #[test]
+fn emit_rust_source_supports_grouped_aggregation_and_join() {
+    // Native AOT parity (Epic 4): grouped aggregation, explicit JOIN, and
+    // aliased columns all codegen via the shared SQL builders — no rejection.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Task of AppDb {
+            id int pk;
+            projectId int;
+            columnId int;
+            status varchar(32);
+        }
+        entity Column of AppDb {
+            id int pk;
+            name varchar(64);
+        }
+        function byStatus(projectId: int) {
+            return select Task { status, total: count(*) } from AppDb.Task
+                where Task.projectId == @projectId
+                group by status orderby status asc;
+        }
+        function byColumn(projectId: int) {
+            return select Task { columnId, columnName: Column.name, total: count(*) }
+                from AppDb.Task
+                join Column on Column.id == Task.columnId
+                where Task.projectId == @projectId
+                group by Task.columnId, Column.name
+                orderby Task.columnId asc;
+        }
+        function main() { byStatus(1); byColumn(1); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, root, "agg", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    // Single-table grouped aggregation.
+    assert!(
+        body.contains("count(*) AS \\\"total\\\""),
+        "aggregate term must be emitted"
+    );
+    assert!(body.contains("GROUP BY"), "group by must be emitted");
+    // Explicit JOIN with table-alias qualification + aliased joined column.
+    assert!(
+        body.contains("JOIN \\\"column\\\" j0 ON"),
+        "join must be emitted with a j0 alias"
+    );
+    assert!(
+        body.contains("j0.\\\"name\\\" AS \\\"columnName\\\""),
+        "aliased joined column must be qualified"
+    );
+    // WHERE on the main entity is qualified to t under a join.
+    assert!(
+        body.contains("t.\\\"projectId\\\""),
+        "join-query WHERE must qualify the main entity column"
+    );
+    assert!(
+        body.contains("jwc_db_query_json"),
+        "grouped/join selects use the json-text read path"
+    );
+    assert!(
+        !body.contains("does not support aggregate"),
+        "grouped aggregation / JOIN should no longer be rejected"
+    );
+}
+
+#[test]
 fn emit_rust_source_respects_release_profile_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();

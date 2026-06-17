@@ -706,7 +706,7 @@ fn sort_dir_sql(dir: SortDir) -> &'static str {
 }
 
 /// A `<fn>(...) AS "alias"` term for an aliased aggregate projection.
-fn agg_select_sql(agg: &AggProj, aliases: Option<&HashMap<String, String>>) -> String {
+pub(crate) fn agg_select_sql(agg: &AggProj, aliases: Option<&HashMap<String, String>>) -> String {
     let func = match agg.kind {
         AggregateKind::Count => return format!("count(*) AS \"{}\"", agg.alias),
         AggregateKind::Sum => "sum",
@@ -930,7 +930,7 @@ pub(crate) fn build_navigation_subqueries(
 /// table) it's the bare quoted column — byte-identical to the historical
 /// output. With a map (JOIN query) it's qualified by the entity's table alias:
 /// `Entity.col` → `<alias>."col"`, bare/unknown → the main alias `t`.
-fn where_col_sql(field: &str, aliases: Option<&HashMap<String, String>>) -> String {
+pub(crate) fn where_col_sql(field: &str, aliases: Option<&HashMap<String, String>>) -> String {
     match aliases {
         None => format!("\"{}\"", field_path_to_col(field)),
         Some(map) => {
