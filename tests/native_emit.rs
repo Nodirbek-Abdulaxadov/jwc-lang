@@ -114,6 +114,39 @@ fn emit_rust_source_supports_full_nav_eager_load() {
 }
 
 #[test]
+fn emit_rust_source_supports_optional_predicate() {
+    // Native AOT parity (Epic 4): `status ==? @s` (optional predicate) can't be
+    // dropped per-call in static SQL, so it codegens an equivalent guard that
+    // treats NULL / empty as "no filter" — not a compile_error rejection.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Task of AppDb {
+            id int pk;
+            status varchar(32);
+        }
+        function filter(s) {
+            return select Task from AppDb.Task where Task.status ==? @s;
+        }
+        function main() { filter(""); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, root, "optpred", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    // String column: NULL or empty short-circuits the predicate to TRUE.
+    assert!(
+        body.contains("($1 IS NULL OR $1 = '' OR"),
+        "optional string predicate must emit the NULL/empty guard"
+    );
+    assert!(
+        !body.contains("WHERE operator"),
+        "`==?` must not fall through to the unsupported-operator bail"
+    );
+}
+
+#[test]
 fn emit_rust_source_respects_release_profile_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();

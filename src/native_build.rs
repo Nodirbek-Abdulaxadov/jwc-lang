@@ -2795,10 +2795,21 @@ impl<'a> WhereBuilder<'a> {
         match w {
             WhereExpr::Atom(atom) => {
                 let (col, kind) = self.col_kind(&atom.field)?;
+                // `==?` / `like?` etc. — optional predicate: a NULL (or, for a
+                // string column, empty) bound value drops the filter. The
+                // interpreter omits the clause at runtime; native can't rebuild
+                // SQL per-call, so it emits an equivalent guard that short-
+                // circuits to TRUE for those values.
+                let optional = atom.op.ends_with('?');
+                let raw_op = atom.op.trim_end_matches('?');
                 // is null / is not null sentinel from the parser: op `==`/`!=`
-                // with rhs == Expr::Null.
-                if matches!(&atom.rhs, Expr::Null) && (atom.op == "==" || atom.op == "!=") {
-                    let neg = atom.op == "!=";
+                // with rhs == Expr::Null (only meaningful for a non-optional
+                // literal-null comparison).
+                if !optional
+                    && matches!(&atom.rhs, Expr::Null)
+                    && (raw_op == "==" || raw_op == "!=")
+                {
+                    let neg = raw_op == "!=";
                     self.sql.push_str(&format!(
                         "\"{}\" IS {}NULL",
                         col,
@@ -2806,7 +2817,7 @@ impl<'a> WhereBuilder<'a> {
                     ));
                     return Ok(());
                 }
-                let op = match atom.op.as_str() {
+                let op = match raw_op {
                     "==" | "=" => "=",
                     "!=" | "<>" => "<>",
                     "<" => "<",
@@ -2819,7 +2830,19 @@ impl<'a> WhereBuilder<'a> {
                 };
                 let n = self.params.len() + 1;
                 self.params.push((kind, &atom.rhs));
-                self.sql.push_str(&format!("\"{}\" {} ${}", col, op, n));
+                if optional {
+                    // Repeated `$n` is fine — one bound param, referenced thrice.
+                    if matches!(kind, PgKind::Str) {
+                        self.sql.push_str(&format!(
+                            "(${n} IS NULL OR ${n} = '' OR \"{col}\" {op} ${n})"
+                        ));
+                    } else {
+                        self.sql
+                            .push_str(&format!("(${n} IS NULL OR \"{col}\" {op} ${n})"));
+                    }
+                } else {
+                    self.sql.push_str(&format!("\"{}\" {} ${}", col, op, n));
+                }
                 Ok(())
             }
             WhereExpr::And(l, r) => {
@@ -3393,6 +3416,7 @@ fn emit_db_select(
 /// read back through `jwc_db_query_json`. Nav subqueries carry no bind
 /// parameters, so the only params are the outer WHERE/LIMIT/OFFSET ones the
 /// `WhereBuilder` already handles.
+#[allow(clippy::too_many_arguments)]
 fn emit_db_select_with_navs(
     out: &mut String,
     meta: &EntityMeta,
