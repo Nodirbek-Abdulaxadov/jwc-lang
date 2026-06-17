@@ -133,7 +133,7 @@
     "publish": "vsce publish --no-dependencies"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^10.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
