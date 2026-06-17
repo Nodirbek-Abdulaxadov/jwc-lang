@@ -794,6 +794,13 @@ function totalIn(country) {
   columns. Every name is checked against the entity's declared fields at
   compile time. Combines with `with rel` (relations are added on top of the
   picked columns).
+- Explicit `join Entity on a == b` + aliased columns (`name: Other.col`) +
+  **grouped aggregation** (`select Task { status, total: count(*) } group by
+  status` / `having`) — cross-table reads without `raw_sql`.
+- Optional predicate `col ==? @v` (drops when the value is empty/null) and a
+  dynamic in-list `where col in (@arr)` (binds a runtime array as `= ANY`).
+- Two-level nested eager-load: `select Project with boards.columns`.
+  Full surface: [docs/data/select](./docs/docs/data/select.md).
 
 ## Entity relations (navigation + auto-JOIN)
 

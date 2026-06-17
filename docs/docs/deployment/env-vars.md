@@ -54,6 +54,7 @@ Cross-link: [backend/middleware](../backend/middleware.md), [stdlib/http](../std
 | `JWC_OTLP_ENDPOINT` | _(unset)_ | OTLP HTTP collector URL (e.g. `http://localhost:4318/v1/traces`). When set, the server exports spans to that endpoint. Requires the binary to be built with `--features otlp`. | v0.4.6 |
 | `JWC_SERVICE_NAME` | `jwc` | `service.name` resource attribute on every exported span — drives the service picker in Jaeger / Tempo / Honeycomb. Set per-deployment so pods don't blur into one entry. | v0.4.6 |
 | `JWC_PRINT_CONFIG` | `true` | Print the rendered config table at server boot. Set off (`0`) to suppress once values are pinned in a deployment. | v0.4.6 |
+| `JWC_DISABLE_OPENAPI` | `false` | `1` / `true` turns off the built-in `/openapi.json` + `/docs` endpoints — for deployments that don't want the API surface advertised publicly. | v0.6.0 |
 
 Cross-link: [deployment/observability](./observability.md), [deployment/otlp](./otlp.md).
 

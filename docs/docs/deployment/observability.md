@@ -59,6 +59,24 @@ is configured — a missing gauge is a clearer signal than a misleading
 zero. Wire them into the standard "pool saturation > 80% for 5 min"
 alert in any non-trivial deployment.
 
+## API docs (OpenAPI)
+
+The server generates an OpenAPI spec **at request time from the running
+routes**, so it can never drift from what the service actually serves:
+
+| Path | What it does |
+|---|---|
+| `/openapi.json` | OpenAPI 3.0.3 document — paths from your routes, path/query params from handler signatures, request bodies from `validate body`, `400`/`401` responses inferred from validation + `Auth*` middleware, and `components.schemas` per entity/class. |
+| `/docs` | Swagger UI that renders `/openapi.json`. |
+
+Both are built-in unless your program declares its own route at the same
+path, and both are off when `JWC_DISABLE_OPENAPI=1` (or `true`) — set that
+for deployments that don't want the API surface advertised publicly.
+
+The same document is available offline from the CLI — `jwc openapi`
+(3.0.3, the form served at runtime) or `jwc swagger` (3.1) — for
+contract tests, codegen, or committing a spec snapshot.
+
 ## Access logs
 
 Default format is one line per request:

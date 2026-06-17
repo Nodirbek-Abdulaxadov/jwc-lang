@@ -53,6 +53,33 @@ select User from AppDb.User where User.deleted_at is null;
 
 Supported operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `like`, `ilike`, `in (...)`, `between ... and ...`, `is null`, `is not null`. Combine with `and` / `or` and parentheses; `and` binds tighter than `or`.
 
+### Optional predicate (`op?`)
+
+Suffix any comparison operator with `?` to make the term **conditional**: if
+the bound value is `null` or an empty string at runtime, the predicate is
+dropped (no filter). One static query then serves every filter combination —
+no in-code branching:
+
+```jwc
+// @status / @priority empty -> that filter is skipped, all rows match
+select Task from AppDb.Task
+    where Task.projectId == @projectId
+      and Task.status ==? @status
+      and Task.priority ==? @priority
+    orderby Task.position asc;
+```
+
+### Dynamic in-list
+
+`in (@arr)` with a single runtime array binds the whole array and emits
+`= ANY($1)` — the list length is dynamic, decided at call time:
+
+```jwc
+delete from AppDb.Column where Column.boardId in (@boardIds);  // boardIds: array
+```
+
+A fixed `in (@a, @b, @c)` keeps the literal `IN ($1, $2, $3)` shape.
+
 ## order by / limit / offset
 
 ```jwc
@@ -80,31 +107,87 @@ let max_age    = select max(User.age) from AppDb.User;
 let avg_score  = select avg(Post.score) from AppDb.Post where Post.published == true;
 ```
 
-## group by / having — not usable yet
+## group by / having
 
-`group by` and `having` are accepted by the parser, but the feature is **not
-functional end-to-end**:
+Grouped aggregation is a first-class projection. The select list mixes plain
+group-key columns with **aliased aggregate terms** (`alias: count(*)` etc.) —
+the alias becomes the JSON key in each result row:
 
-- A whole-entity `select Post ... group by Post.user_id` emits `SELECT t.* ...
-  GROUP BY ...`, which Postgres rejects (`column "t.id" must appear in the
-  GROUP BY clause`).
-- `having` only parses a plain column comparison — an aggregate such as
-  `having count(*) > 10` is a parse error.
-- Arbitrary-shape aggregate projection (`select { user_id, total: count(*) }`)
-  is not implemented; the projection list accepts plain column names only.
+```jwc
+let by_status = select Task { status, total: count(*) }
+    from AppDb.Task
+    where Task.projectId == @projectId
+    group by status
+    orderby status asc;
+// -> [ { "status": "todo", "total": 3 }, { "status": "done", "total": 7 } ]
+```
 
-For grouped aggregation today, drop to [`raw_sql`](../reference/builtins.md)
-(wrap the rows in `json_agg(...)::text` and `json_parse` the result). Scalar
-aggregates over the whole query — `select count(*) from ...` etc. (see above) —
-do work.
+- Aggregate functions in the projection: `count(*)`, `sum(col)`, `avg(col)`,
+  `min(col)`, `max(col)`.
+- `group by col [, ...]` — group keys (also `group by Entity.col` under a join).
+- `having <cond>` — post-aggregation filter, same shape as `where`.
+
+A grouped `select` **must** use the aliased projection form — a bare
+`select Task ... group by ...` (no projection) would emit `SELECT t.*` which
+Postgres rejects under `GROUP BY`. Name the columns you group by.
+
+Scalar aggregates over the whole query (no `group by`) keep the function form:
+
+```jwc
+let total   = select count(*) from AppDb.User;
+let max_age = select max(User.age) from AppDb.User;
+```
 
 ## with — eager nav loading
+
+`with` eager-loads declared navigation properties (see
+[entities](./entities.md#navigation-properties)) as nested JSON, in a single
+query — no N+1, no manual assembly:
 
 ```jwc
 let users = select User with posts, profile from AppDb.User;
 ```
 
-Each nav becomes a `json_agg(...)` subquery. Validated against the entity's declared navs.
+Each nav becomes a correlated `json_agg(...)` / `row_to_json(...)` subquery,
+validated against the entity's declared navs. All nav kinds are supported:
+
+- **has-many** (`posts: List<Post> via Post.userId`) → array.
+- **belongs-to / has-one** (`author: User via authorId`) → nested object.
+- **many-to-many** (`labels: List<Label> via TaskLabel(taskId, labelId)`) →
+  array, joined through the link table.
+- **nav projection** hides columns (`assignees: List<User> { id, name }` never
+  leaks `passwordHash`).
+- **nav ordering** comes from the declaration (`... via Post.userId orderby
+  createdAt desc`).
+
+**Two-level nesting** with a dotted nav — load an aggregate root, its children,
+and their grandchildren in one statement:
+
+```jwc
+let project = select Project with boards.columns
+    from AppDb.Project where Project.id == @id first;
+// -> { id, name, boards: [ { id, name, columns: [ { id, name }, ... ] } ] }
+```
+
+## join — explicit cross-entity queries
+
+Equi-join another entity in the same dbcontext. Columns are qualified by
+entity name; the projection can surface a joined column under an alias, and
+aggregation can group across the join:
+
+```jwc
+let by_column = select Task { columnId, columnName: Column.name, total: count(*) }
+    from AppDb.Task
+    join Column on Column.id == Task.columnId
+    where Task.projectId == @projectId
+    group by Task.columnId, Column.name
+    orderby Task.columnId asc;
+```
+
+`join Entity on a == b` chains for multiple joins. This is what replaces the
+`raw_sql` escape hatch for cross-table aggregation — a task-tracker dogfood
+brought its stats endpoints to **0 raw_sql** this way. Only inner equi-joins
+are supported today (`LEFT`/outer and non-equi `on` are post-1.0).
 
 ## Parameters
 
@@ -143,15 +226,14 @@ bump, status transition), reach for `update ... set ...`; reserve
 whole-row `update u in ...` for cases where the new value comes from
 user input that you've already read end-to-end.
 
-## Joins, projection, aggregation (coming in Phase 11)
+## Query Layer status
 
-The current `select` surface is single-entity. Cross-entity joins,
-arbitrary-shape projection (`select { id, title, author.email }`), and
-scalar aggregation (`count`, `sum`, `avg`, `min`, `max`) land in **Phase
-11 — Query Layer** before v1.0. Joinsiz the "no ORM pain" promise is
-half-finished; once Phase 11 ships, raw_sql fallback is no longer the
-default escape hatch for cross-table reads.
+The full Query Layer (joins, eager-load, grouped aggregation, projection,
+optional/dynamic filters) shipped across v0.5.0–v0.6.1 — **Phase 11 is done**.
+`raw_sql` is no longer the default escape hatch for cross-table reads.
 
-Until then: use `select` per entity and assemble the response shape in
-JWC code, or drop to raw SQL via the engine helpers if the join is
-unavoidable.
+Native AOT (`jwc build --native`) mirrors this query surface: nav eager-load,
+grouped aggregation, joins, and `==?` all codegen the same SQL. Two query
+forms remain interpreter-only on the native path: a dynamic in-list (`= ANY`)
+and a `where` on a *joined* entity's column. They run fine under
+`jwc run` / `jwc serve`.

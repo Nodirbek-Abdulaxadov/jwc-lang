@@ -49,7 +49,7 @@ Ushbu band'lar uchun PR'lar yopiladi yoki forka tavsiya etiladi.
 | Phase 1 — MVP Core | ✅ Done (Sprint 1 closeout) |
 | Phase 2 — Language Completeness | ✅ Done (Sprint 2A/2B/2C code-health audit yopildi) |
 | Phase 3 — Developer Experience | ✅ Done (Sprint 3: typed catch + dotted subtypes + gradual type checker + AOT visibility) |
-| Phase 4 — Real Compiler (Native) | ✅ Done for 1.0 scope (native AOT via Rust codegen + cargo). Query-layer native parity ✅ v0.6.x (nav eager-load/grouped agg/JOIN/op? + camelCase call-resolution fix). Kamchilik: auth/crypto builtinlar (`jwt_verify`/`jwt_sign`/`verify_password`/`hash_password`/`env`) native'da hali yo'q → real auth-app native build bloklanadi (Sprint 8 davomi). LLVM IR + cross-target → **Non-goals** |
+| Phase 4 — Real Compiler (Native) | ✅ Done for 1.0 scope (native AOT via Rust codegen + cargo). Query-layer native parity ✅ v0.6.x (nav eager-load/grouped agg/JOIN/op? + camelCase call-resolution fix). Kamchilik: JWT builtinlari (`jwt_sign`/`jwt_verify`) native'da hali yo'q (`hash_password`/`verify_password`/`env` ✅ native) → Bearer-auth app'ning auth yo'li native build bo'lmaydi (Sprint 8 davomi). LLVM IR + cross-target → **Non-goals** |
 | Phase 5 — Ecosystem | ✅ Done for 1.0 surface (config registry + OTLP + persistent queue + DLQ + soak harness ✅; 72h soak real run = ops) |
 | Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
 | Phase 6 (security) — SECURITY.md + cargo audit + threat model + SSRF allowlist + JWT exp + secrets redaction | ✅ Done (external review = ops) |
@@ -617,10 +617,10 @@ Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
   — qoldi.
 
 ### Phase 11 — qolgan kamchiliklar (halol)
-1. **🟡 Native: auth/crypto builtinlar yo'q.** `jwt_verify`/`jwt_sign`/
-   `verify_password`/`hash_password`/`env` native AOT'da rad etiladi →
-   auth ishlatadigan real app `jwc build --native` qila olmaydi (query-layer
-   o'tadi, auth o'tmaydi). Interpreter'da hammasi ishlaydi. → Sprint 8 davomi.
+1. **🟡 Native: JWT builtinlari yo'q.** `jwt_sign`/`jwt_verify` native AOT'da
+   rad etiladi (`hash_password`/`verify_password`/`env` esa ✅ native). Bearer
+   auth ishlatadigan app `jwc build --native` qila olmaydi (query-layer o'tadi,
+   JWT auth o'tmaydi). Interpreter'da hammasi ishlaydi. → Sprint 8 davomi.
 2. **🟡 Native: dinamik in-list (`= ANY`) interpreter-only.** Massiv-param
    binding native'da yo'q (runtime coverage Linux/CI). Statik `in (a,b,c)` ✅.
 3. **🟡 Native: JOIN where faqat asosiy entity ustuni.** WHERE/HAVING bind
@@ -668,7 +668,7 @@ Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
 | 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
 | 6 | SQL completeness | ⏳ qisman | `group by` + `having` ✅. `jwc migrate list` offline enumerator ✅. Insert/FieldAssign payload field-name compile-time check ✅ (tracks `let v = new Entity()` bindings + if/else/loop branch-aware intersect). Live DB schema drift — qoldi. |
 | 7 | Code health refactor | ⏳ qisman | 8 cmd modullari: `pkg`, `migrate`, `lint`, `check`, `fmt`, `build`, `run`, `serve` ✅ + `builtins.rs` ✅. main.rs 349 qator — pure Clap dispatcher, har handler `cmd::<sub>::run` ortida. runner.rs `src/runner/{mod,builtins}.rs` ga ajratildi ✅ (v0.4.0). parser.rs modul ajratish — qoldi. |
-| 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅, `tests/native_emit.rs` ✅, `tests/examples_parse.rs` ✅, `tests/native_parity.rs` ✅ (golden harness). v0.4.0 parity auditi: array literal, hash builtinlari, `const`, custom MIME bayt-aynan. **v0.6.x: Query Layer native parity** ✅ — nav eager-load (belongs-to/has-many/one/m2m/nested), grouped aggregation, explicit JOIN + aliased cols, `op?` optional predicate — barchasi interpreter SQL builder'larini qayta ishlaydi (`build_navigation_subqueries`/`where_col_sql`/`agg_select_sql` `pub(crate)`), natija `row_to_json(r)::text` → `jwc_db_query_json`. **camelCase funksiya-chaqiruv rezolyutsiya bug fix** (`rewrite_expr`) — `byStatus()` kabi root call FQN'ga o'tmasdan "unknown function" berardi; real app'lar uchun native'ni ochdi. **Qolgan kamchiliklar:** (a) auth/crypto builtinlar (`jwt_verify`/`jwt_sign`/`verify_password`/`hash_password`/`env`) native'da yo'q → auth-app native build bloklanadi; (b) dinamik in-list `= ANY` native'da interpreter-only; (c) JOIN WHERE joined-entity ustuni native'da interpreter-only; (d) native runtime faqat Linux/CI (Windows — emit + SQL-probe). Cargo-build-and-diff v2 — qoldi. |
+| 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅, `tests/native_emit.rs` ✅, `tests/examples_parse.rs` ✅, `tests/native_parity.rs` ✅ (golden harness). v0.4.0 parity auditi: array literal, hash builtinlari, `const`, custom MIME bayt-aynan. **v0.6.x: Query Layer native parity** ✅ — nav eager-load (belongs-to/has-many/one/m2m/nested), grouped aggregation, explicit JOIN + aliased cols, `op?` optional predicate — barchasi interpreter SQL builder'larini qayta ishlaydi (`build_navigation_subqueries`/`where_col_sql`/`agg_select_sql` `pub(crate)`), natija `row_to_json(r)::text` → `jwc_db_query_json`. **camelCase funksiya-chaqiruv rezolyutsiya bug fix** (`rewrite_expr`) — `byStatus()` kabi root call FQN'ga o'tmasdan "unknown function" berardi; real app'lar uchun native'ni ochdi. **Qolgan kamchiliklar:** (a) JWT builtinlari (`jwt_sign`/`jwt_verify`) native'da yo'q → Bearer-auth app'ning auth yo'li native build bo'lmaydi (`hash_password`/`verify_password`/`env` ✅ native); (b) dinamik in-list `= ANY` native'da interpreter-only; (c) JOIN WHERE joined-entity ustuni native'da interpreter-only; (d) native runtime faqat Linux/CI (Windows — emit + SQL-probe). Cargo-build-and-diff v2 — qoldi. |
 | 9-10 | Registry server | ⬜ blocked-on-infra | Alohida repo `jwc-registry.1kb.uz` kerak; bu sessiyada bajarib bo'lmaydi. |
 | 11 | Publish & login | ⬜ blocked | Registry server ishga tushgandan keyin. |
 | 12-13 | Native cross-target | ⏳ qisman | Sprint 12 `--target` flag ✅ + 5-triple allowlist + `tests/native_target.rs` (5 tests). Sprint 13 `src/native_ir.rs` skeleton ✅. End-to-end AST → IR → LLVM via inkwell — deferred. |

@@ -50,23 +50,50 @@ Supported actions: `cascade`, `restrict`, `set null`.
 
 ## Navigation properties
 
-Declare in-language relations so projections can fetch them in one query:
+Navs use the `name: Type via ...` form (note the colon — that's what
+distinguishes them from columns). They declare in-language relations so
+[`select ... with`](./select.md#with--eager-nav-loading) fetches them as
+nested JSON in one query — no N+1. The `via` shape picks the relation kind:
 
 ```jwc
-entity User of AppDb {
-    id uuid pk;
-    posts: List<Post> via Post.user_id;       // one-to-many (navigation)
-    profile: Profile via Profile.user_id;     // one-to-one (navigation)
+entity Post of AppDb {
+    id        int pk autoincrement;
+    userId    int;
+    authorId  int;
+    createdAt datetime;
+
+    // belongs-to / has-one: a BARE via column on THIS entity holds the FK.
+    author: User via authorId;
+
+    // has-many: a DOTTED via points at the FK column on the TARGET entity.
+    comments: List<Comment> via Comment.postId orderby createdAt desc;
+
+    // many-to-many: via a link table — via JoinTable(nearCol, farCol).
+    tags: List<Tag> via PostTag(postId, tagId);
 }
 ```
 
-Then in a select:
+| `via` form | Relation | Materialises as |
+|---|---|---|
+| `via localFk` (bare) | belongs-to / has-one | nested object |
+| `via Target.fk` (dotted) | has-many / has-one | array / object |
+| `via JoinTable(near, far)` | many-to-many | array |
+
+Extras:
+
+- **Projection** — `assignees: List<User> { id, name } via ...` materialises
+  only those columns, so secrets like `passwordHash` never leak.
+- **Ordering** — `orderby <col> [asc|desc]` (as above) makes a collection
+  deterministic.
+- **Nesting** — load two levels at once with a dotted `with`:
+  `select Project with boards.columns ...` (see
+  [select](./select.md#with--eager-nav-loading)).
 
 ```jwc
-let users = select User with posts, profile from AppDb.User;
+let posts = select Post with author, comments, tags from AppDb.Post;
 ```
 
-This emits one correlated `json_agg(...)` subquery per nav — no N+1.
+Each nav emits one correlated `json_agg(...)` / `row_to_json(...)` subquery.
 
 ## Generated SQL
 

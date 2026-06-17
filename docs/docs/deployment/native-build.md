@@ -60,11 +60,19 @@ The host toolchain must have the target installed (`rustup target add <triple>`)
 
 The native pipeline is partial. These constructs are interpreter-only today (clear error at build time):
 
+- **`jwt_sign` / `jwt_verify`** — JWT signing/verification (an app using
+  Bearer auth builds its query layer native but not its auth path; run it
+  under `jwc run` / `jwc serve`).
 - Class methods on user-defined `class` (DTOs work; methods don't)
 - `cache_*` family
 - Some queue primitives
+- A few **query forms** on the native path only: a dynamic in-list
+  (`where col in (@arr)` → `= ANY`) and a `where` on a *joined* entity's
+  column. The rest of the Query Layer — nav eager-load (all kinds + nested),
+  grouped aggregation, explicit `join`, `==?` optional predicate — **does**
+  compile native as of v0.6.x.
 
-As of v0.4.0, `hash_password` / `verify_password` are accepted by `jwc build --native` (previously interpreter-only). Graceful shutdown — `serve(port)` draining in-flight requests on Ctrl+C — also works in native builds.
+As of v0.4.0, `hash_password` / `verify_password` are accepted by `jwc build --native`; `env` is native too. Graceful shutdown — `serve(port)` draining in-flight requests on Ctrl+C — also works in native builds.
 
 Roadmap [Phase 4 + Sprint 13](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md) tracks the closing list.
 

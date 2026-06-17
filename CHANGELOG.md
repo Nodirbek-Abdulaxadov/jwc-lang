@@ -3,6 +3,68 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] — Hotfix: atomic update-set column case
+
+- **`update CTX.Table set col = expr where …` no longer lowercases the SET
+  column name** (or an RHS column self-reference). It previously emitted
+  `"columnid"` for a `columnId` column and failed to prepare against camelCase
+  schemas (`Failed to prepare SQL statement`); the `hits = hits + 1` example
+  never hit it because the column was already lowercase. Columns are now quoted
+  as-declared, matching `where` / `insert` / `update`. Surfaced by a task-tracker
+  `move` (reorder) endpoint.
+
+## [0.6.0] — Query Layer complete + native query-layer parity
+
+Closes ROADMAP **Phase 11 (Query Layer)** — the last 1.0-blocker. `raw_sql` is
+no longer the default escape hatch for cross-table reads. Re-dogfooded on
+task-tracker: **0 raw_sql, 0 read-path N+1**.
+
+**Cross-entity queries**
+
+- **Explicit `join Entity on a == b`** (inner equi-join, chainable) with
+  table-alias qualification, **aliased columns** (`columnName: Column.name`),
+  and **grouped aggregation over a join** — bringing cross-table stats to 0
+  raw_sql.
+- **`group by` + `having`** with aliased aggregate projection
+  (`select Task { status, total: count(*) } group by status`).
+
+**Filters**
+
+- **Optional predicate `op?`** (`status ==? @s`) — a null/empty bound value
+  drops the term, so one static query serves every filter combination.
+- **Dynamic in-list** — `where col in (@arr)` binds a runtime array as
+  `= ANY($1)`.
+
+**Eager loading**
+
+- `with` now covers every nav kind — belongs-to, has-many/one, many-to-many
+  (link table) — plus nav projection (hides columns) and nav ordering.
+- **Two-level nested `with`** (`select Project with boards.columns`) loads an
+  aggregate root and two levels of children in one query.
+
+**Mutations**
+
+- **Atomic `update CTX.Table set col = expr where …`** (no read-modify-write):
+  counters, status transitions, and position-shift reorders. RHS supports
+  column arithmetic (`position = position + 1`).
+
+**API docs**
+
+- Built-in **`/openapi.json`** (OpenAPI 3.0.3, generated at request time from
+  the live routes) and **`/docs`** (Swagger UI). Off via `JWC_DISABLE_OPENAPI`.
+  Also offline from the CLI: `jwc openapi` (3.0.3) / `jwc swagger` (3.1).
+
+**Native AOT**
+
+- **Query-layer parity**: nav eager-load (all kinds + nested), grouped
+  aggregation, explicit join, and `==?` all codegen the same SQL the
+  interpreter emits.
+- **Fixed** a call-resolution bug where a camelCase root function call
+  (`byStatus()`) wasn't rewritten to its FQN and was rejected as "unknown
+  function" — this blocked native builds of any camelCase-named app.
+- Still interpreter-only on the native path: `jwt_sign` / `jwt_verify`,
+  dynamic in-list (`= ANY`), and a `where` on a joined entity's column.
+
 ## [0.5.1] — Release pipeline fixes
 
 No language or runtime changes from v0.5.0 — this release just gets the

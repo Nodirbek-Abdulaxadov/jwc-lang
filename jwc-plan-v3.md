@@ -9,9 +9,10 @@
 > Dogfood: `task-tracker` — 0 raw_sql, 0 read-path N+1 (PAIN_LOG4).
 >
 > **Qolgan kamchiliklar (halol):**
-> - Native AOT auth/crypto builtinlar yo'q (`jwt_verify`/`jwt_sign`/
->   `verify_password`/`hash_password`/`env`) → auth-app native build bloklanadi
->   (ROADMAP Sprint 8 davomi). Interpreter'da hammasi ishlaydi.
+> - Native AOT JWT builtinlari yo'q (`jwt_sign`/`jwt_verify`) → Bearer-auth
+>   app'ning auth yo'li native build bo'lmaydi (`hash_password`/
+>   `verify_password`/`env` esa ✅ native). ROADMAP Sprint 8 davomi.
+>   Interpreter'da hammasi ishlaydi.
 > - Native: dinamik in-list `= ANY` va JOIN-WHERE joined-entity ustuni —
 >   interpreter-only.
 > - Faqat Inner equi-join; LEFT/outer + non-equi ON — post-1.0.

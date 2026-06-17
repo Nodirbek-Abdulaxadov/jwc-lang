@@ -14,10 +14,10 @@ Scope: everything between v0.4.8 and a version teams can bet a real backend on.
 > - Re-dogfooded on `task-tracker`: 0 raw_sql, 0 read-path N+1 (PAIN_LOG4).
 >
 > **Remaining gap added by this work (not yet a blocker):** native AOT has
-> **no auth/crypto builtins** (`jwt_verify`/`jwt_sign`/`verify_password`/
-> `hash_password`/`env`), so an auth-using app builds native for its query
-> layer but not its auth path. Interpreter is unaffected. Tracked in
-> ROADMAP Sprint 8 (native parity).
+> **no JWT builtins** (`jwt_sign` / `jwt_verify`), so a Bearer-auth app builds
+> native for its query layer but not its auth path (`hash_password` /
+> `verify_password` / `env` *are* native). Interpreter is unaffected. Tracked
+> in ROADMAP Sprint 8 (native parity).
 
 This plan is grounded in a code audit of the current tree:
 it names the actual files and gaps, not generic advice. Phases are ordered by
