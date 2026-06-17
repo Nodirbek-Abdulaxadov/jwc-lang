@@ -676,7 +676,7 @@ pub(super) async fn build_select_sql(
     Ok((sql, params, shape_key, cache_key))
 }
 
-pub(super) struct NavigationSubquery {
+pub(crate) struct NavigationSubquery {
     name: String,
     kind: NavigationKind,
     target_table: String,
@@ -722,7 +722,7 @@ fn agg_select_sql(agg: &AggProj, aliases: Option<&HashMap<String, String>>) -> S
 }
 
 impl NavigationSubquery {
-    fn alias(&self) -> &str {
+    pub(crate) fn alias(&self) -> &str {
         &self.name
     }
 
@@ -772,7 +772,7 @@ impl NavigationSubquery {
     /// alias when nested). Row/link aliases are depth-derived so nested levels
     /// never collide; depth 0 keeps the historical `c` / `j` aliases so flat
     /// navs emit unchanged SQL.
-    fn sql_fragment(&self, source_alias: &str, depth: usize) -> String {
+    pub(crate) fn sql_fragment(&self, source_alias: &str, depth: usize) -> String {
         let row_alias = if depth == 0 {
             "c".to_string()
         } else {
@@ -877,7 +877,7 @@ fn build_one_nav(
     })
 }
 
-pub(super) fn build_navigation_subqueries(
+pub(crate) fn build_navigation_subqueries(
     entity: &str,
     _source_table_name: &str,
     requested: &[String],

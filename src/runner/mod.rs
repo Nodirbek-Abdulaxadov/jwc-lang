@@ -44,7 +44,7 @@ mod builtins;
 mod dispatch;
 mod eval;
 mod exec;
-mod sql;
+pub(crate) mod sql;
 mod types;
 mod util;
 mod validation;

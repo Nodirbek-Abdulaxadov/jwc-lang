@@ -69,6 +69,25 @@ async fn jwc_db_query(sql: &str, params: DbParams) -> Vec<V> {
     rows.iter().map(jwc_row_to_v).collect()
 }
 
+/// Run a query whose single column is a `::text`-cast JSON document and parse
+/// it into a `V`. Mirrors the interpreter's eager-load / complex-select path:
+/// the SQL wraps the inner select in `row_to_json(r)::text` (a `first` query
+/// yields 0 or 1 rows) or `json_agg(...)::text` (a list query always yields one
+/// row holding the array). No row → `V::Null`; unparseable text → `V::Null`.
+#[allow(dead_code)]
+async fn jwc_db_query_json(sql: &str, params: DbParams) -> V {
+    let rows = jwc_db_query_rows(sql, params).await;
+    match rows.first() {
+        Some(row) => row
+            .try_get::<_, Option<String>>(0)
+            .ok()
+            .flatten()
+            .map(|t| jwc_from_json(&t).unwrap_or(V::Null))
+            .unwrap_or(V::Null),
+        None => V::Null,
+    }
+}
+
 /// Raw-row variant of `jwc_db_query`. Used by the monomorphized struct
 /// path (Phase 1) so generated code can map each row straight into a
 /// concrete `JwcEnt_<Name>` (via the struct's `jwc_from_row` ctor)
@@ -274,114 +293,6 @@ fn jwc_param_bool(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
         V::Null => Box::new(None::<bool>),
         V::Bool(b) => Box::new(b),
         other => Box::new(jwc_truthy(&other)),
-    }
-}
-
-// --- eager-load helper for `select ... with rel1, rel2 ...` ------------------
-//
-// One extra `SELECT * FROM <target> WHERE <fk> IN (...)` per relation, groups
-// children by FK client-side. N+1 collapses to N+R.
-
-fn jwc_v_to_key(v: &V) -> String {
-    match v {
-        V::Int(n) => n.to_string(),
-        V::Float(n) => n.to_string(),
-        V::Str(s) => s.to_string(),
-        V::Bool(b) => b.to_string(),
-        V::Null => String::new(),
-        V::Array(_) | V::Object(_) | V::Record { .. } | V::RawJson(_) => jwc_to_json(v),
-    }
-}
-
-// Boxing kind passed to `jwc_db_eager_load` so the IN-clause parameters
-// match the FK column's actual Postgres width (i16/i32/i64). The plain bool
-// `pk_is_int` flag this used to carry collapsed all integer widths onto i32
-// and would re-trigger the INT4/INT8 mismatch bug for `bigint` FKs.
-#[derive(Clone, Copy)]
-enum JwcPkKind {
-    Smallint,
-    Int,
-    Bigint,
-    Str,
-}
-
-async fn jwc_db_eager_load(
-    parents: &mut Vec<V>,
-    parent_pk: &str,
-    target_table: &str,
-    fk_col: &str,
-    pk_kind: JwcPkKind,
-    nav_name: &str,
-    one_to_one: bool,
-    order_col: &str,
-    order_desc: bool,
-) {
-    if parents.is_empty() {
-        return;
-    }
-    let mut keys: Vec<V> = Vec::new();
-    for p in parents.iter() {
-        if let V::Object(m) = p {
-            if let Some(v) = m.get(parent_pk) {
-                if !matches!(v, V::Null) {
-                    keys.push(v.clone());
-                }
-            }
-        }
-    }
-    if keys.is_empty() {
-        for p in parents.iter_mut() {
-            if let V::Object(m) = p {
-                let val = if one_to_one { V::Null } else { v_arr(Vec::new()) };
-                Arc::make_mut(m).insert(nav_name.to_string(), val);
-            }
-        }
-        return;
-    }
-    let placeholders: Vec<String> = (1..=keys.len()).map(|i| format!("${}", i)).collect();
-    let mut sql = format!(
-        "SELECT * FROM \"{}\" WHERE \"{}\" IN ({})",
-        target_table,
-        fk_col,
-        placeholders.join(", "),
-    );
-    // Ordered collection: a global ORDER BY the nav column. Grouping below is a
-    // stable partition by FK, so each collection inherits the column order.
-    if !order_col.is_empty() {
-        sql.push_str(&format!(
-            " ORDER BY \"{}\" {}",
-            order_col,
-            if order_desc { "DESC" } else { "ASC" }
-        ));
-    }
-    let params: DbParams = match pk_kind {
-        JwcPkKind::Smallint => keys.into_iter().map(jwc_param_smallint).collect(),
-        JwcPkKind::Int => keys.into_iter().map(jwc_param_int).collect(),
-        JwcPkKind::Bigint => keys.into_iter().map(jwc_param_bigint).collect(),
-        JwcPkKind::Str => keys.into_iter().map(jwc_param_str).collect(),
-    };
-    let children = jwc_db_query(&sql, params).await;
-    let mut by_fk: BTreeMap<String, Vec<V>> = BTreeMap::new();
-    for c in children {
-        if let V::Object(ref m) = c {
-            if let Some(k) = m.get(fk_col) {
-                let key = jwc_v_to_key(k);
-                by_fk.entry(key).or_default().push(c);
-                continue;
-            }
-        }
-    }
-    for p in parents.iter_mut() {
-        if let V::Object(m) = p {
-            let key = m.get(parent_pk).map(jwc_v_to_key).unwrap_or_default();
-            let attached = by_fk.remove(&key).unwrap_or_default();
-            let val = if one_to_one {
-                attached.into_iter().next().unwrap_or(V::Null)
-            } else {
-                v_arr(attached)
-            };
-            Arc::make_mut(m).insert(nav_name.to_string(), val);
-        }
     }
 }
 

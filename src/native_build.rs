@@ -31,8 +31,8 @@ use std::process::Command;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::ast::{
-    AggregateKind, ConstDecl, Expr, FunctionDecl, ImportDecl, ModelKind, MountDecl,
-    NavigationField, Program, RouteDecl, Stmt,
+    AggregateKind, ConstDecl, Expr, FunctionDecl, ImportDecl, ModelKind, MountDecl, Program,
+    RouteDecl, Stmt,
 };
 
 /// Compute the FQN form a decl will be emitted under in generated Rust:
@@ -520,7 +520,6 @@ fn codegen_levenshtein(a: &str, b: &str) -> usize {
 struct EntityMeta {
     table: String,
     fields: Vec<EntityField>,
-    navigations: Vec<NavigationField>,
 }
 
 #[derive(Clone)]
@@ -1214,6 +1213,23 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
         .map(|c| c.name.to_lowercase())
         .collect();
     let mw_refs: Vec<&crate::ast::MiddlewareDecl> = program.middlewares.iter().collect();
+    // Inputs for the shared navigation SQL builder (reused from the
+    // interpreter so native `with` eager-load emits identical SQL).
+    let nav_models: HashMap<String, &crate::ast::ModelDecl> = program
+        .models
+        .iter()
+        .map(|m| (m.name.to_lowercase(), m))
+        .collect();
+    let mut pk_by_table: HashMap<String, Vec<String>> = HashMap::new();
+    for m in &program.models {
+        let pks: Vec<String> = m
+            .fields
+            .iter()
+            .filter(|f| f.is_primary_key)
+            .map(|f| f.name.clone())
+            .collect();
+        pk_by_table.insert(m.name.to_lowercase(), pks);
+    }
     let ctx = CodegenCtx {
         funcs: &known_funcs,
         entities: &entities,
@@ -1223,6 +1239,8 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
         has_error_handler: program.error_handler.is_some(),
         closure_depth: std::cell::Cell::new(0),
         shapes: std::cell::RefCell::new(HashMap::new()),
+        nav_models: &nav_models,
+        pk_by_table: &pk_by_table,
     };
 
     // Module-level consts become zero-arg functions. A const that references
@@ -1564,7 +1582,6 @@ fn collect_entities(program: &Program) -> HashMap<String, EntityMeta> {
                 // the generated SQL must match what migrations produced.
                 table: crate::sql::to_snake_case(&model.name),
                 fields,
-                navigations: model.navigations.clone(),
             },
         );
     }
@@ -1600,6 +1617,13 @@ struct CodegenCtx<'a> {
     /// `/json-large` route (1000 same-shape constructions per request) gets
     /// one shape allocation instead of one FxHashMap per row.
     shapes: std::cell::RefCell<HashMap<Vec<String>, usize>>,
+    /// Interpreter-shared inputs for the navigation SQL builder
+    /// (`runner::sql::build_navigation_subqueries`). Native `with` eager-load
+    /// reuses the exact correlated json_agg subquery SQL the interpreter emits
+    /// — same SQL, no divergent second implementation. Both keyed by
+    /// lowercased entity name.
+    nav_models: &'a HashMap<String, &'a crate::ast::ModelDecl>,
+    pk_by_table: &'a HashMap<String, Vec<String>>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -3213,6 +3237,26 @@ fn emit_db_select(
         }
     };
 
+    // `with` eager-load goes through the shared json-subquery path (identical
+    // SQL to the interpreter): one query, nav collections materialised as
+    // nested JSON. Handles every nav kind + projection + ordering + nesting.
+    if !with_relations.is_empty() {
+        emit_db_select_with_navs(
+            out,
+            meta,
+            table,
+            first,
+            where_clause,
+            order_by,
+            limit,
+            offset,
+            with_relations,
+            projection,
+            ctx,
+        );
+        return;
+    }
+
     // Resolve projection columns up front so unknown names surface as a clear
     // codegen error rather than a Postgres runtime error.
     let select_clause: String = if projection.is_empty() {
@@ -3236,110 +3280,6 @@ fn emit_db_select(
         }
         parts.join(", ")
     };
-
-    // Eager-load needs the PK in each parent row, so when `with` is requested
-    // expand `*` is fine; with explicit projection, force-include the PK so
-    // navigation lookups still work.
-    let select_clause = if !with_relations.is_empty() && !projection.is_empty() {
-        let pks = pk_fields(meta);
-        let mut cols: Vec<String> = projection
-            .iter()
-            .filter_map(|c| {
-                meta.fields
-                    .iter()
-                    .find(|f| f.name.eq_ignore_ascii_case(c))
-                    .map(|f| format!("\"{}\"", f.name))
-            })
-            .collect();
-        for p in &pks {
-            let q = format!("\"{}\"", p.name);
-            if !cols.contains(&q) {
-                cols.push(q);
-            }
-        }
-        cols.join(", ")
-    } else {
-        select_clause
-    };
-
-    // Validate `with` relations early.
-    struct NavPlan<'a> {
-        nav: &'a NavigationField,
-        target: &'a EntityMeta,
-        parent_pk: &'a EntityField,
-    }
-    let mut plans: Vec<NavPlan> = Vec::new();
-    for rel in with_relations {
-        // Nested `with parent.child` eager-load is interpreter-only; the native
-        // eager-load helper has no recursive-nesting path yet.
-        if rel.contains('.') {
-            out.push_str(&format!(
-                "{{ compile_error!({:?}); V::Null }}",
-                format!("nested `with {}` eager-load is interpreter-only", rel),
-            ));
-            return;
-        }
-        let nav = match meta
-            .navigations
-            .iter()
-            .find(|n| n.name.eq_ignore_ascii_case(rel))
-        {
-            Some(n) => n,
-            None => {
-                out.push_str(&format!(
-                    "{{ compile_error!({:?}); V::Null }}",
-                    format!("unknown navigation `{}` on entity `{}`", rel, meta.table),
-                ));
-                return;
-            }
-        };
-        // belongs-to / projected / ordered navigations are interpreter-only for
-        // now — the native eager-load helper (jwc_db_eager_load) groups full
-        // rows by FK and has no projection / ordering / reverse-FK path yet.
-        if matches!(
-            nav.kind,
-            crate::ast::NavigationKind::BelongsTo | crate::ast::NavigationKind::ManyToMany
-        ) || !nav.projection.is_empty()
-        {
-            out.push_str(&format!(
-                "{{ compile_error!({:?}); V::Null }}",
-                format!(
-                    "native AOT does not yet support belongs-to / m2m / projected navigation `{}` on `{}` — use the interpreter (`jwc run`/`serve`)",
-                    rel, meta.table
-                ),
-            ));
-            return;
-        }
-        let target = match ctx.entities.get(&nav.target_entity) {
-            Some(m) => m,
-            None => {
-                out.push_str(&format!(
-                    "{{ compile_error!({:?}); V::Null }}",
-                    format!(
-                        "navigation `{}` targets unknown entity `{}`",
-                        rel, nav.target_entity
-                    ),
-                ));
-                return;
-            }
-        };
-        let pks = pk_fields(meta);
-        if pks.is_empty() {
-            out.push_str(&format!(
-                "{{ compile_error!({:?}); V::Null }}",
-                format!(
-                    "entity `{}` has no PK; `with {}` needs one",
-                    meta.table, rel
-                ),
-            ));
-            return;
-        }
-        plans.push(NavPlan {
-            nav,
-            target,
-            parent_pk: pks[0],
-        });
-    }
 
     let mut sql = format!("SELECT {} FROM \"{}\"", select_clause, meta.table);
     let mut wb = WhereBuilder::new(meta);
@@ -3437,49 +3377,152 @@ fn emit_db_select(
         ));
     }
 
-    // Eager-load each `with` relation by issuing `WHERE fk IN (...)` against
-    // the target table and grouping client-side. One round-trip per relation
-    // (N+1 collapsed to N+R, where R = number of `with` clauses).
-    for plan in &plans {
-        let pk_kind_token = match plan.parent_pk.pg {
-            PgKind::Smallint => "JwcPkKind::Smallint",
-            PgKind::Int => "JwcPkKind::Int",
-            PgKind::Bigint => "JwcPkKind::Bigint",
-            // Float / Bool / Timestamp PKs are not currently supported as
-            // join keys — fall back to text so the IN-clause still binds
-            // something serialisable instead of panicking with WrongType.
-            PgKind::Float | PgKind::Bool | PgKind::Timestamp | PgKind::Str => "JwcPkKind::Str",
-        };
-        let one_to_one = matches!(plan.nav.kind, crate::ast::NavigationKind::OneToOne);
-        // Ordered nav collection (`... via T.fk orderby col [asc|desc]`): the
-        // eager-load query sorts by the column so each grouped collection comes
-        // back deterministically — matches the interpreter's
-        // `json_agg(... ORDER BY ...)`. Empty order_col = unordered (legacy).
-        let (order_col, order_desc) = match &plan.nav.order_by {
-            Some(o) => {
-                let col = o.col.rsplit('.').next().unwrap_or(o.col.as_str());
-                (col.to_string(), matches!(o.dir, crate::ast::SortDir::Desc))
-            }
-            None => (String::new(), false),
-        };
-        out.push_str(&format!(
-            " jwc_db_eager_load(&mut __rows, \"{pk}\", \"{tgt}\", \"{fk}\", {pk_kind}, \"{nav}\", {oto}, \"{ocol}\", {odesc}).await;",
-            pk = plan.parent_pk.name,
-            tgt = plan.target.table,
-            fk = plan.nav.target_field,
-            pk_kind = pk_kind_token,
-            nav = plan.nav.name,
-            oto = one_to_one,
-            ocol = order_col,
-            odesc = order_desc,
-        ));
-    }
-
     if first {
         out.push_str(" __rows.into_iter().next().unwrap_or(V::Null) }");
     } else {
         out.push_str(" v_arr(__rows) }");
     }
+}
+
+/// `select Entity [ { cols } ] with rel[, rel.child ...] from ...` — eager-load
+/// path. Reuses the interpreter's navigation SQL builder so the emitted query
+/// is byte-identical to `jwc run`/`serve`: one statement, each nav collection
+/// materialised as a correlated `json_agg` subquery (belongs-to / m2m /
+/// projected / ordered / nested all handled there). The whole result row is
+/// wrapped in `row_to_json(r)::text` (or `json_agg(...)::text` for a list) and
+/// read back through `jwc_db_query_json`. Nav subqueries carry no bind
+/// parameters, so the only params are the outer WHERE/LIMIT/OFFSET ones the
+/// `WhereBuilder` already handles.
+fn emit_db_select_with_navs(
+    out: &mut String,
+    meta: &EntityMeta,
+    entity: &str,
+    first: bool,
+    where_clause: Option<&crate::ast::WhereExpr>,
+    order_by: Option<&crate::ast::DbOrderBy>,
+    limit: Option<&Expr>,
+    offset: Option<&Expr>,
+    with_relations: &[String],
+    projection: &[String],
+    ctx: &CodegenCtx,
+) {
+    let navs = match crate::runner::sql::build_navigation_subqueries(
+        entity,
+        &meta.table,
+        with_relations,
+        ctx.nav_models,
+        ctx.pk_by_table,
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                e.to_string()
+            ));
+            return;
+        }
+    };
+
+    // Inner SELECT list: projected columns (or `t.*`) followed by one
+    // correlated json subquery per requested navigation.
+    let mut cols: Vec<String> = Vec::new();
+    if projection.is_empty() {
+        cols.push("t.*".to_string());
+    } else {
+        for c in projection {
+            match meta.fields.iter().find(|f| f.name.eq_ignore_ascii_case(c)) {
+                Some(f) => cols.push(format!("\"{}\"", f.name)),
+                None => {
+                    out.push_str(&format!(
+                        "{{ compile_error!({:?}); V::Null }}",
+                        format!(
+                            "unknown projection column `{}` on entity `{}`",
+                            c, meta.table
+                        ),
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+    for nav in &navs {
+        cols.push(format!(
+            "{} AS \"{}\"",
+            nav.sql_fragment("t", 0),
+            nav.alias()
+        ));
+    }
+
+    let mut inner = format!("SELECT {} FROM \"{}\" t", cols.join(", "), meta.table);
+    let mut wb = WhereBuilder::new(meta);
+    if let Some(w) = where_clause {
+        if let Err(e) = wb.emit(w) {
+            out.push_str(&format!(
+                "{{ compile_error!({:?}); V::Null }}",
+                e.to_string()
+            ));
+            return;
+        }
+        inner.push_str(" WHERE ");
+        inner.push_str(&wb.sql);
+    }
+    if let Some(ord) = order_by {
+        let col = match ord.field.split_once('.') {
+            Some((_, c)) => c,
+            None => ord.field.as_str(),
+        };
+        let dir = match ord.dir {
+            crate::ast::SortDir::Asc => "ASC",
+            crate::ast::SortDir::Desc => "DESC",
+        };
+        inner.push_str(&format!(" ORDER BY \"{}\" {}", col, dir));
+    }
+    if first {
+        inner.push_str(" LIMIT 1");
+    } else if let Some(l) = limit {
+        match l {
+            Expr::Int(n) => inner.push_str(&format!(" LIMIT {}", n)),
+            _ => {
+                let n = wb.params.len() + 1;
+                wb.params.push((PgKind::Bigint, l));
+                inner.push_str(&format!(" LIMIT ${}", n));
+            }
+        }
+    }
+    if let Some(o) = offset {
+        match o {
+            Expr::Int(n) => inner.push_str(&format!(" OFFSET {}", n)),
+            _ => {
+                let n = wb.params.len() + 1;
+                wb.params.push((PgKind::Bigint, o));
+                inner.push_str(&format!(" OFFSET ${}", n));
+            }
+        }
+    }
+
+    // Wrap so the whole row (with nested nav JSON) comes back as one text
+    // column — same shape the interpreter reads.
+    let sql = if first {
+        format!("SELECT row_to_json(r)::text FROM ({}) r", inner)
+    } else {
+        format!(
+            "SELECT COALESCE(json_agg(row_to_json(r)), '[]')::text FROM ({}) r",
+            inner
+        )
+    };
+
+    out.push('{');
+    out.push_str(" let __params: DbParams = vec![");
+    for (kind, expr) in &wb.params {
+        out.push_str(&format!("{}(", helper_for_kind(*kind)));
+        emit_expr(out, expr, ctx);
+        out.push_str("),");
+    }
+    out.push_str("];");
+    out.push_str(&format!(
+        " jwc_db_query_json(\"{}\", __params).await }}",
+        escape_sql(&sql)
+    ));
 }
 
 fn emit_db_aggregate(
