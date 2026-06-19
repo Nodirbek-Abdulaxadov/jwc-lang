@@ -3,6 +3,19 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] — Hotfix: native redirect with `V::Record` header object
+
+`statusCode(3xx, { Location: url })` stopped redirecting on the `--native`
+build — it returned `{"Location":"..."}` as a JSON body with no `Location`
+header, so browsers never followed it. Object literals lower to `V::Record`
+(the shape-deduped fast layout) on the native path, but `jwc_b_status_code`
+only special-cased `V::Object` for the 3xx-as-headers branch, so the record
+fell through to the JSON-body arm. It now accepts both `V::Object` and
+`V::Record`. The interpreter was unaffected (it builds `V::Object`).
+
+Verified end-to-end: a native jwc-shortener binary against Postgres now
+returns `HTTP/1.1 302` + `location:` for `GET /:code`.
+
 ## [0.6.2] — Hotfix: native AOT Cargo.toml dependency emission
 
 The `--native` build produced a non-compiling crate for any DB-touching app

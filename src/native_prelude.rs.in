@@ -1334,16 +1334,35 @@ fn jwc_b_status_code(code: V, v: V) -> V {
     let status = jwc_to_int(&code).unwrap_or(200) as u16;
     let is_redirect = (300..400).contains(&status);
     if is_redirect {
-        if let V::Object(m) = v {
-            let body = String::new();
+        // Object literals lower to `V::Record` on the native path (the
+        // shape-deduped fast layout), and only to `V::Object` after a runtime
+        // field-add or in the interpreter. Accept BOTH — otherwise
+        // `statusCode(302, { Location: url })` falls through to the JSON-body
+        // arm below and emits `{"Location":...}` as the body instead of a
+        // redirect (no Location header is set, so the browser never follows).
+        let headers: Option<JwcObj> = match &v {
+            V::Object(m) => Some((**m).clone()),
+            V::Record {
+                field_names,
+                values,
+            } => {
+                let mut h: JwcObj = FxHashMap::default();
+                for (name, val) in field_names.iter().zip(values.iter()) {
+                    h.insert(name.as_ref().to_string(), val.clone());
+                }
+                Some(h)
+            }
+            _ => None,
+        };
+        if let Some(h) = headers {
             // `text/html` because we may emit a minimal `<a href=...>` body
             // someday; for now the body stays empty and the browser follows
             // the Location header.
             return make_response_with_headers(
                 status,
-                body,
+                String::new(),
                 "text/html; charset=utf-8",
-                Arc::unwrap_or_clone(m),
+                h,
             );
         }
     }
