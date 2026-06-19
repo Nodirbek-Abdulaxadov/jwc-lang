@@ -3,6 +3,25 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] — Hotfix: native AOT Cargo.toml dependency emission
+
+The `--native` build produced a non-compiling crate for any DB-touching app
+(`error[E0433]: unresolved module or unlinked crate`), surfaced by the
+jwc-shortener Linux CI build. Two bugs in `render_cargo_toml`
+(`src/native_build.rs`):
+
+- **`tokio-postgres` / `deadpool-postgres` (and the crypto crates) were
+  emitted *after* the `[target.'cfg(windows)'.dependencies]` table header**,
+  so they landed under the Windows-only target and silently vanished on
+  Linux/musl. The `[target.'cfg(windows)']` block is now the last thing
+  written, after the conditional `needs_db` / `needs_crypto` deps.
+- **`serde_json` and `url` were never declared** even though the prelude uses
+  them unconditionally (JSON body validation, SSRF host-allowlist parse in
+  `http_get`). Both are now direct `[dependencies]`.
+
+Native builds on Windows masked the first bug (the crates resolved via the
+`cfg(windows)` table) — only the Linux release path failed.
+
 ## [0.6.1] — Hotfix: atomic update-set column case
 
 - **`update CTX.Table set col = expr where …` no longer lowercases the SET

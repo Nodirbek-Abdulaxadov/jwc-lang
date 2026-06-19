@@ -4151,15 +4151,12 @@ fn render_cargo_toml(
     // Hot-path V::Object payload is an FxHashMap (Phase A1 of PERF_PLAN.md):
     // O(1) lookup + fxhash, replacing BTreeMap's O(log n) + node alloc cost.
     deps.push_str("rustc-hash = \"2\"\n");
-    // Phase A4 (PERF_PLAN.md): global allocator. mimalloc on Windows
-    // sidesteps the notoriously slow `HeapAlloc` / `HeapFree` path that
-    // dominates Vec / String / HashMap churn on a Windows host; on Linux
-    // we fall back to the system allocator (glibc malloc is competitive
-    // for our workload, and jemalloc adds 100+ KB to every binary).
-    // The actual `#[global_allocator]` declaration lives in the prelude,
-    // gated on `#[cfg(windows)]`.
-    deps.push_str("[target.'cfg(windows)'.dependencies]\n");
-    deps.push_str("mimalloc = { version = \"0.1\", default-features = false }\n");
+    // The prelude uses these unconditionally — `serde_json` for JSON body
+    // validation / `json_*` builtins, `url` for the SSRF host-allowlist parse
+    // in `http_get`. They must be direct deps or every native build fails
+    // with `E0433: unresolved module or unlinked crate`.
+    deps.push_str("serde_json = \"1\"\n");
+    deps.push_str("url = \"2\"\n");
     if needs_db {
         // `with-chrono-0_4` plugs `chrono::DateTime` into tokio-postgres'
         // ToSql/FromSql so `jwc_param_timestamp` can bind directly to
@@ -4177,6 +4174,21 @@ fn render_cargo_toml(
         deps.push_str("hmac = \"0.12\"\n");
         deps.push_str("argon2 = { version = \"0.5\", features = [\"std\"] }\n");
     }
+    // Phase A4 (PERF_PLAN.md): global allocator. mimalloc on Windows
+    // sidesteps the notoriously slow `HeapAlloc` / `HeapFree` path that
+    // dominates Vec / String / HashMap churn on a Windows host; on Linux
+    // we fall back to the system allocator (glibc malloc is competitive
+    // for our workload, and jemalloc adds 100+ KB to every binary).
+    // The actual `#[global_allocator]` declaration lives in the prelude,
+    // gated on `#[cfg(windows)]`.
+    //
+    // This MUST stay the last block: it opens a
+    // `[target.'cfg(windows)'.dependencies]` table, so any crate pushed
+    // after it lands under that table instead of `[dependencies]` and
+    // silently vanishes on non-Windows targets — exactly how tokio-postgres
+    // went missing on the Linux CI build.
+    deps.push_str("[target.'cfg(windows)'.dependencies]\n");
+    deps.push_str("mimalloc = { version = \"0.1\", default-features = false }\n");
     format!(
         r#"[package]
 name = "{name}"
