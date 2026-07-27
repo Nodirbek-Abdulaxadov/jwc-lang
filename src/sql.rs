@@ -127,7 +127,30 @@ pub(crate) fn generate_postgres_table_sql(entity: &ModelDecl) -> Result<String> 
     out.push_str(&format!("CREATE TABLE IF NOT EXISTS \"{}\" (\n", table));
     out.push_str(&lines.join(",\n"));
     out.push_str("\n);\n");
+    for stmt in index_statements(entity) {
+        out.push_str(&stmt);
+    }
     Ok(out)
+}
+
+/// `CREATE INDEX` for every column marked `index`.
+///
+/// Emitted after the table so the statement is valid on both a fresh create
+/// and a re-run. `pk` and `unique` columns are skipped: Postgres already
+/// backs those with an index, and a second one would just cost writes.
+pub(crate) fn index_statements(entity: &ModelDecl) -> Vec<String> {
+    let table = to_snake_case(&entity.name);
+    entity
+        .fields
+        .iter()
+        .filter(|f| f.is_indexed && !f.is_primary_key && !f.is_unique)
+        .map(|f| {
+            format!(
+                "CREATE INDEX IF NOT EXISTS \"ix_{}_{}\" ON \"{}\" (\"{}\");\n",
+                table, f.name, table, f.name
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn map_type_postgres(ty: &TypeSpec, field_name: &str) -> Result<(String, Vec<String>)> {

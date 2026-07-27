@@ -262,6 +262,12 @@ pub struct FieldDecl {
     /// `email varchar(120) unique;` — emits a column-level `UNIQUE` constraint
     /// in the generated DDL / migration diff.
     pub is_unique: bool,
+    /// `user_id int references User.id index;` — emits a standalone
+    /// `CREATE INDEX`. Postgres does **not** index a foreign key for you, so
+    /// without this every `where user_id == @u` was a sequential scan and
+    /// there was no way to say otherwise short of a hand-written migration.
+    /// Redundant on `pk` / `unique` columns, which already have an index.
+    pub is_indexed: bool,
     pub references: Option<FieldReference>,
 }
 

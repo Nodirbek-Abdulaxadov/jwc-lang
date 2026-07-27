@@ -280,12 +280,26 @@ impl<'a> Parser<'a> {
             let mut is_primary_key = false;
             let mut is_auto_increment = false;
             let mut is_unique = false;
+            let mut is_indexed = false;
             let mut references: Option<FieldReference> = None;
 
             loop {
                 match self.current.kind.clone() {
                     TokenKind::Ident(v) if v.eq_ignore_ascii_case("nullable") => {
                         is_nullable = true;
+                        self.bump()?;
+                    }
+                    // `null` is the SQL spelling and the one people reach for
+                    // first; accepting it here avoids concluding the feature
+                    // doesn't exist. It lexes as a keyword, not an identifier.
+                    TokenKind::Keyword(Keyword::Null) => {
+                        is_nullable = true;
+                        self.bump()?;
+                    }
+                    TokenKind::Ident(v)
+                        if v.eq_ignore_ascii_case("index") || v.eq_ignore_ascii_case("indexed") =>
+                    {
+                        is_indexed = true;
                         self.bump()?;
                     }
                     TokenKind::Ident(v) if v.eq_ignore_ascii_case("unique") => {
@@ -317,6 +331,7 @@ impl<'a> Parser<'a> {
                 name: field_name,
                 ty,
                 is_nullable,
+                is_indexed,
                 is_primary_key,
                 is_auto_increment,
                 is_unique,

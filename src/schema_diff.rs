@@ -57,6 +57,11 @@ pub struct ColumnSnapshot {
     /// (from `entity X { col ... unique; }`). Round-tripped from prior
     /// migrations so `migrate new` doesn't re-add the constraint.
     pub is_unique: bool,
+    /// A standalone `CREATE INDEX` was emitted for this column (from
+    /// `entity X { col ... index; }`). Round-tripped from prior migrations
+    /// so `migrate new` neither re-creates an existing index nor misses a
+    /// newly declared one.
+    pub is_indexed: bool,
     /// Foreign-key target for `entity X { col uuid references Y.id ... }`.
     /// Populated by `entity_to_snapshot`; the DDL parser does NOT extract
     /// FK constraints from prior migrations (FK diff is intentionally
@@ -115,6 +120,14 @@ pub enum DiffOp {
         table: String,
         column_name: String,
     },
+    CreateIndex {
+        table: String,
+        column_name: String,
+    },
+    DropIndex {
+        table: String,
+        column_name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +165,10 @@ pub fn entity_to_snapshot(model: &ModelDecl) -> Result<TableSnapshot> {
             // A PK is already unique and the DDL skips a separate UNIQUE for
             // it, so mirror that here to stay diff-stable with the SQL parser.
             is_unique: field.is_unique && !field.is_primary_key,
+            // `index_statements` skips PK / unique columns because those
+            // already have an index; mirror that so the diff doesn't think
+            // an index is missing every run.
+            is_indexed: field.is_indexed && !field.is_primary_key && !field.is_unique,
             fk,
         });
     }
@@ -207,7 +224,7 @@ pub fn read_latest_snapshot(migrations_dir: &Path) -> Result<Vec<TableSnapshot>>
 
     let mut tables: Vec<TableSnapshot> = Vec::new();
 
-    for path in up_files {
+    for path in &up_files {
         let sql = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
 
@@ -226,6 +243,21 @@ pub fn read_latest_snapshot(migrations_dir: &Path) -> Result<Vec<TableSnapshot>>
 
         // DROP TABLE (in case a future op emits one) — keep snapshot honest.
         apply_drop_statements(&sql, &mut tables);
+    }
+
+    // CREATE INDEX / DROP INDEX in a second pass, once every table is known.
+    //
+    // These are standalone statements that reference a table by name, so
+    // unlike a column definition they can't be read while that table may not
+    // exist yet. Two migrations generated inside the same second sort by
+    // name, which is enough to put an `add-index` file ahead of the
+    // `initial` that creates the table — a single pass would silently drop
+    // the flag there and re-propose the index on every later `migrate new`.
+    for path in &up_files {
+        let Ok(sql) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        apply_index_statements(&sql, &mut tables);
     }
 
     Ok(tables)
@@ -351,7 +383,8 @@ fn parse_column_line(entry: &str) -> Option<ColumnSnapshot> {
         is_nullable,
         is_primary_key: false, // PRIMARY KEY clause sets this in a later pass
         is_auto_increment,
-        is_unique: false, // UNIQUE clause sets this in a later pass
+        is_unique: false,  // UNIQUE clause sets this in a later pass
+        is_indexed: false, // CREATE INDEX statements set this in a later pass
         fk: None,
     })
 }
@@ -464,6 +497,7 @@ fn apply_alter_statements(sql: &str, tables: &mut [TableSnapshot]) {
                 is_primary_key: false,
                 is_auto_increment,
                 is_unique: false,
+                is_indexed: false,
                 fk: None,
             });
         }
@@ -573,6 +607,46 @@ fn apply_alter_statements(sql: &str, tables: &mut [TableSnapshot]) {
 }
 
 /// Replay `DROP TABLE` statements onto the running snapshot.
+/// Recover `is_indexed` from the `CREATE INDEX` / `DROP INDEX` statements a
+/// previous migration emitted. Matches on the target table and column rather
+/// than the index name, so an index a user added by hand under a different
+/// name still counts as present and isn't proposed again.
+fn apply_index_statements(sql: &str, tables: &mut [TableSnapshot]) {
+    let create = Regex::new(
+        r#"(?is)CREATE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?"?[A-Za-z_][A-Za-z0-9_]*"?\s+ON\s+"([A-Za-z_][A-Za-z0-9_]*)"\s*\(\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\)"#,
+    )
+    .expect("static regex compiles");
+    for cap in create.captures_iter(sql) {
+        let (Some(table), Some(col)) = (cap.get(1), cap.get(2)) else {
+            continue;
+        };
+        if let Some(t) = tables.iter_mut().find(|t| t.name == table.as_str()) {
+            if let Some(c) = t.columns.iter_mut().find(|c| c.name == col.as_str()) {
+                c.is_indexed = true;
+            }
+        }
+    }
+
+    // `DROP INDEX "ix_<table>_<col>";` — the name is the only thing the
+    // statement carries, so the convention is what we can match on.
+    let drop =
+        Regex::new(r#"(?is)DROP\s+INDEX\s+(?:IF\s+EXISTS\s+)?"ix_([A-Za-z_][A-Za-z0-9_]*)"\s*;"#)
+            .expect("static regex compiles");
+    for cap in drop.captures_iter(sql) {
+        let Some(rest) = cap.get(1).map(|m| m.as_str()) else {
+            continue;
+        };
+        for t in tables.iter_mut() {
+            let Some(col_name) = rest.strip_prefix(&format!("{}_", t.name)) else {
+                continue;
+            };
+            if let Some(c) = t.columns.iter_mut().find(|c| c.name == col_name) {
+                c.is_indexed = false;
+            }
+        }
+    }
+}
+
 fn apply_drop_statements(sql: &str, tables: &mut Vec<TableSnapshot>) {
     let re = Regex::new(r#"(?is)DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?"([A-Za-z_][A-Za-z0-9_]*)"\s*;"#)
         .expect("static regex compiles");
@@ -630,10 +704,19 @@ pub fn compute_diff(old: &[TableSnapshot], new: &[TableSnapshot]) -> Vec<DiffOp>
         // Added / modified columns.
         for new_col in &new_table.columns {
             match old_table.columns.iter().find(|c| c.name == new_col.name) {
-                None => ops.push(DiffOp::AddColumn {
-                    table: new_table.name.clone(),
-                    column: new_col.clone(),
-                }),
+                None => {
+                    ops.push(DiffOp::AddColumn {
+                        table: new_table.name.clone(),
+                        column: new_col.clone(),
+                    });
+                    // ADD COLUMN carries no index; emit one alongside.
+                    if new_col.is_indexed {
+                        ops.push(DiffOp::CreateIndex {
+                            table: new_table.name.clone(),
+                            column_name: new_col.name.clone(),
+                        });
+                    }
+                }
                 Some(old_col) => {
                     if !sql_types_equal(&old_col.sql_type, &new_col.sql_type) {
                         ops.push(DiffOp::AlterColumnType {
@@ -662,6 +745,18 @@ pub fn compute_diff(old: &[TableSnapshot], new: &[TableSnapshot]) -> Vec<DiffOp>
                         });
                     } else if old_col.is_unique && !new_col.is_unique {
                         ops.push(DiffOp::DropUnique {
+                            table: new_table.name.clone(),
+                            column_name: new_col.name.clone(),
+                        });
+                    }
+                    // Same for an `index` modifier.
+                    if !old_col.is_indexed && new_col.is_indexed {
+                        ops.push(DiffOp::CreateIndex {
+                            table: new_table.name.clone(),
+                            column_name: new_col.name.clone(),
+                        });
+                    } else if old_col.is_indexed && !new_col.is_indexed {
+                        ops.push(DiffOp::DropIndex {
                             table: new_table.name.clone(),
                             column_name: new_col.name.clone(),
                         });
@@ -749,6 +844,18 @@ pub fn diff_to_sql(diff: &[DiffOp]) -> String {
                     table, table, column_name
                 ));
             }
+            DiffOp::CreateIndex { table, column_name } => {
+                out.push_str(&format!(
+                    "CREATE INDEX IF NOT EXISTS \"ix_{}_{}\" ON \"{}\" (\"{}\");\n",
+                    table, column_name, table, column_name
+                ));
+            }
+            DiffOp::DropIndex { table, column_name } => {
+                out.push_str(&format!(
+                    "DROP INDEX IF EXISTS \"ix_{}_{}\";\n",
+                    table, column_name
+                ));
+            }
         }
     }
 
@@ -815,6 +922,17 @@ fn render_create_table(snapshot: &TableSnapshot) -> String {
     ));
     out.push_str(&lines.join(",\n"));
     out.push_str("\n);\n");
+    // Indexes are standalone statements, so they follow the table — and must
+    // be emitted here too, or a table created by `migrate new` would lose the
+    // indexes that `gen-sql` gives the same entity.
+    for col in &snapshot.columns {
+        if col.is_indexed && !col.is_primary_key && !col.is_unique {
+            out.push_str(&format!(
+                "CREATE INDEX IF NOT EXISTS \"ix_{}_{}\" ON \"{}\" (\"{}\");\n",
+                snapshot.name, col.name, snapshot.name, col.name
+            ));
+        }
+    }
     out
 }
 
@@ -835,6 +953,7 @@ mod tests {
             is_primary_key: pk,
             is_auto_increment: false,
             is_unique: false,
+            is_indexed: false,
             fk: None,
         }
     }
@@ -1137,5 +1256,118 @@ CREATE TABLE IF NOT EXISTS "user" (
         let _ = std::fs::remove_dir_all(&tmp);
         let snaps = read_latest_snapshot(&tmp).unwrap();
         assert!(snaps.is_empty());
+    }
+
+    fn snapshots_of(src: &str) -> Vec<TableSnapshot> {
+        let program = parse_program(src).expect("parses");
+        validate_program(&program).expect("validates");
+        program_to_snapshots(&program).expect("snapshots")
+    }
+
+    const WALLET_PLAIN: &str = r#"
+        dbcontext Db: Postgres;
+        entity Wallet of Db {
+            id      int pk autoincrement;
+            user_id int;
+        }
+    "#;
+    const WALLET_INDEXED: &str = r#"
+        dbcontext Db: Postgres;
+        entity Wallet of Db {
+            id      int pk autoincrement;
+            user_id int index;
+        }
+    "#;
+
+    /// Foreign-key columns were unindexed with no way to say otherwise, so
+    /// every `where user_id == @u` was a sequential scan.
+    #[test]
+    fn declaring_index_emits_create_index() {
+        let sql = diff_to_sql(&compute_diff(
+            &snapshots_of(WALLET_PLAIN),
+            &snapshots_of(WALLET_INDEXED),
+        ));
+        assert!(
+            sql.contains(
+                r#"CREATE INDEX IF NOT EXISTS "ix_wallet_user_id" ON "wallet" ("user_id")"#
+            ),
+            "got: {sql}"
+        );
+    }
+
+    #[test]
+    fn removing_index_emits_drop_index() {
+        let sql = diff_to_sql(&compute_diff(
+            &snapshots_of(WALLET_INDEXED),
+            &snapshots_of(WALLET_PLAIN),
+        ));
+        assert!(
+            sql.contains(r#"DROP INDEX IF EXISTS "ix_wallet_user_id""#),
+            "got: {sql}"
+        );
+    }
+
+    /// The index flag has to survive the SQL round-trip, or every later
+    /// `migrate new` would re-propose an index that already exists.
+    #[test]
+    fn index_flag_round_trips_through_generated_sql() {
+        let dir = std::env::temp_dir().join(format!("jwc-idx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // Deliberately named so the index migration sorts BEFORE the table
+        // that it references — two migrations made in the same second do
+        // exactly this, and a single-pass reader loses the flag.
+        let snaps = snapshots_of(WALLET_INDEXED);
+        std::fs::write(
+            dir.join("100_aaa-add-index.up.sql"),
+            "CREATE INDEX IF NOT EXISTS \"ix_wallet_user_id\" ON \"wallet\" (\"user_id\");\n",
+        )
+        .unwrap();
+        let mut create = diff_to_sql(&compute_diff(&[], &snaps));
+        // Strip the index line so only the CREATE TABLE remains in this file.
+        create = create
+            .lines()
+            .filter(|l| !l.starts_with("CREATE INDEX"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("100_bbb-initial.up.sql"), create).unwrap();
+
+        let recovered = read_latest_snapshot(&dir).expect("reads");
+        let col = recovered
+            .iter()
+            .find(|t| t.name == "wallet")
+            .and_then(|t| t.columns.iter().find(|c| c.name == "user_id"))
+            .expect("user_id column recovered");
+        assert!(col.is_indexed, "index flag lost on round-trip");
+
+        // Nothing left to do → an empty diff.
+        assert!(
+            compute_diff(&recovered, &snaps)
+                .iter()
+                .all(|op| !matches!(op, DiffOp::CreateIndex { .. })),
+            "index was re-proposed after round-trip"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PK or unique column already has an index; a second one would only
+    /// cost writes.
+    #[test]
+    fn index_is_not_emitted_for_pk_or_unique_columns() {
+        let snaps = snapshots_of(
+            r#"
+            dbcontext Db: Postgres;
+            entity E of Db {
+                id    int pk autoincrement index;
+                email varchar(80) unique index;
+            }
+        "#,
+        );
+        let sql = diff_to_sql(&compute_diff(&[], &snaps));
+        assert!(
+            !sql.contains("CREATE INDEX"),
+            "redundant index emitted: {sql}"
+        );
     }
 }

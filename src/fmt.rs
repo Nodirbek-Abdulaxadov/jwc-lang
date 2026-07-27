@@ -278,16 +278,57 @@ pub fn format_program(program: &Program) -> String {
         printed_block = true;
     }
 
-    // 7. Functions.
+    // 7. Functions, with dome members regrouped into their `dome` block.
+    //
+    // The parser flattens `dome S { function f() }` into a single function
+    // named `S.f`, so rendering the list verbatim emitted
+    // `function S.f() { ... }` — the dome was gone and the dotted name is not
+    // a legal declaration, so formatting any comment-free file containing a
+    // dome produced source that no longer parsed.
     if !program.functions.is_empty() {
         if printed_block {
             w.blank();
         }
-        for (i, f) in program.functions.iter().enumerate() {
-            if i > 0 {
-                w.blank();
+        let mut first = true;
+        let mut rendered_domes: Vec<&str> = Vec::new();
+        for f in program.functions.iter() {
+            match f.name.split_once('.') {
+                None => {
+                    if !first {
+                        w.blank();
+                    }
+                    render_function(&mut w, f, None);
+                    first = false;
+                }
+                Some((dome, _)) => {
+                    // Emit the whole dome the first time one of its members
+                    // is reached, so members stay together and in order.
+                    if rendered_domes.contains(&dome) {
+                        continue;
+                    }
+                    rendered_domes.push(dome);
+                    if !first {
+                        w.blank();
+                    }
+                    w.line(&format!("dome {} {{", dome));
+                    w.push_indent();
+                    let members: Vec<&FunctionDecl> = program
+                        .functions
+                        .iter()
+                        .filter(|m| m.name.split_once('.').map(|(d, _)| d) == Some(dome))
+                        .collect();
+                    for (i, m) in members.iter().enumerate() {
+                        if i > 0 {
+                            w.blank();
+                        }
+                        let base = m.name.split_once('.').map(|(_, b)| b).unwrap_or(&m.name);
+                        render_function(&mut w, m, Some(base));
+                    }
+                    w.pop_indent();
+                    w.line("}");
+                    first = false;
+                }
             }
-            render_function(&mut w, f);
         }
         printed_block = true;
     }
@@ -391,10 +432,13 @@ fn render_const(w: &mut Writer, c: &ConstDecl) {
 }
 
 fn render_dbcontext(w: &mut Writer, d: &DbContextDecl) {
+    // `parse_dbcontext_decl` requires the colon: `dbcontext AppDb: Postgres;`.
+    // Emitting `dbcontext AppDb Postgres;` produced a file the parser then
+    // rejected — the same round-trip break the validate-rule renderer had.
     let driver = if d.driver.is_empty() {
         String::new()
     } else {
-        format!(" {}", d.driver)
+        format!(": {}", d.driver)
     };
     w.line(&format!("dbcontext {}{};", d.name, driver));
 }
@@ -445,6 +489,9 @@ fn render_field(w: &mut Writer, f: &FieldDecl) {
     }
     if f.is_nullable {
         parts.push("nullable".to_string());
+    }
+    if f.is_indexed {
+        parts.push("index".to_string());
     }
     if let Some(r) = &f.references {
         parts.push(render_field_reference(r));
@@ -518,7 +565,9 @@ fn render_middleware(w: &mut Writer, m: &MiddlewareDecl) {
     w.line("}");
 }
 
-fn render_function(w: &mut Writer, f: &FunctionDecl) {
+/// `name_override` supplies the bare member name when rendering inside a
+/// `dome` block, where the AST holds the qualified `Dome.member` form.
+fn render_function(w: &mut Writer, f: &FunctionDecl, name_override: Option<&str>) {
     let vis = vis_prefix(f.visibility);
     let async_kw = if f.is_async { "async " } else { "" };
     let params: Vec<String> = f.params.iter().map(render_typed_param).collect();
@@ -531,7 +580,7 @@ fn render_function(w: &mut Writer, f: &FunctionDecl) {
         "{}{}function {}({}){} {{",
         vis,
         async_kw,
-        f.name,
+        name_override.unwrap_or(&f.name),
         params.join(", "),
         ret
     ));
@@ -1007,7 +1056,10 @@ fn is_ident_key(k: &str) -> bool {
 
 fn vis_prefix(v: Visibility) -> &'static str {
     match v {
-        Visibility::Public => "pub ",
+        // The lexer only knows `public` / `private`; `pub` is not a keyword,
+        // so emitting it produced source the parser rejected.
+        Visibility::Public => "public ",
+        // `private` is the default and adds nothing but noise.
         Visibility::Private => "",
     }
 }
@@ -1137,5 +1189,99 @@ mod tests {
             "formatter emitted source the parser rejects:\n{formatted}"
         );
         assert_eq!(formatted, format_source(&formatted), "must stay idempotent");
+    }
+
+    /// The AST renderer and the parser have to agree on every construct, not
+    /// just the ones someone thought to test. Two had already drifted apart —
+    /// validate rules (`min_length` vs `minLength`) and `dbcontext`, which was
+    /// rendered without the `:` the parser requires. Both produced a file that
+    /// no longer compiled, which is the worst thing a formatter can do.
+    ///
+    /// This walks a program touching each declaration form and asserts the
+    /// output still parses, so the next divergence fails here instead of in a
+    /// user's editor on save.
+    #[test]
+    fn formatting_round_trips_for_every_declaration_form() {
+        let cases: &[(&str, &str)] = &[
+            ("dbcontext", "dbcontext AppDb: Postgres;\n"),
+            (
+                "entity with every column modifier",
+                concat!(
+                    "dbcontext AppDb: Postgres;\n",
+                    "entity Wallet of AppDb {\n",
+                    "    id int pk autoincrement;\n",
+                    "    email varchar(120) unique;\n",
+                    "    owner int references User.id on delete cascade index;\n",
+                    "    note varchar(200) nullable;\n",
+                    "}\n",
+                    "entity User of AppDb {\n",
+                    "    id int pk autoincrement;\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "route with middleware and validate",
+                concat!(
+                    "middleware Auth { return null; }\n",
+                    "route POST \"/users\" use Auth {\n",
+                    "    validate body {\n",
+                    "        name: required, minLength(1), maxLength(120);\n",
+                    "        age: min(1), max(150);\n",
+                    "    }\n",
+                    "    return created(json({ ok: true }));\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "dome with modifiers",
+                concat!(
+                    "dome Billing {\n",
+                    "    function plain() { return 1; }\n",
+                    "    public async function suspends() { return 2; }\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "queries",
+                concat!(
+                    "dbcontext AppDb: Postgres;\n",
+                    "entity Sale of AppDb {\n",
+                    "    id int pk autoincrement;\n",
+                    "    country varchar(64);\n",
+                    "    amount int;\n",
+                    "}\n",
+                    "function totals() {\n",
+                    "    return select Sale from AppDb.Sale group by Sale.country;\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "control flow",
+                concat!(
+                    "function f() {\n",
+                    "    let n = 0;\n",
+                    "    while (n < 3) { n = n + 1; }\n",
+                    "    if (n == 3) { return 1; } else { return 2; }\n",
+                    "}\n",
+                ),
+            ),
+        ];
+
+        for (label, src) in cases {
+            assert!(
+                crate::parser::parse_program(src).is_ok(),
+                "{label}: test input itself must parse"
+            );
+            let formatted = format_source(src);
+            assert!(
+                crate::parser::parse_program(&formatted).is_ok(),
+                "{label}: formatter emitted source the parser rejects:\n{formatted}"
+            );
+            assert_eq!(
+                formatted,
+                format_source(&formatted),
+                "{label}: must stay idempotent"
+            );
+        }
     }
 }
