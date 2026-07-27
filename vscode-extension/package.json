@@ -45,9 +45,6 @@
   "homepage": "https://jwc.1kb.uz",
   "qna": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang/discussions",
   "main": "./out/extension.js",
-  "activationEvents": [
-    "onLanguage:jwc"
-  ],
   "contributes": {
     "languages": [
       {

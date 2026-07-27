@@ -143,8 +143,8 @@
   "Transaction": {
     "prefix": "transaction",
     "body": [
-      "transaction ${1:AppDb} {",
-      "\t${2:// db statements run atomically}",
+      "transaction {",
+      "\t${1:// db statements run atomically}",
       "}"
     ],
     "description": "Transaction block"

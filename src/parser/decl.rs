@@ -460,12 +460,39 @@ impl<'a> Parser<'a> {
         self.expect_symbol('{')?;
 
         while !self.check_symbol('}') {
+            // Per-member modifiers, mirroring the top-level declaration loop.
+            // Business logic lives in domes, so the modifiers that work on a
+            // top-level `function` have to work here too — otherwise `async`
+            // is only available in the one place domain code isn't written,
+            // and the editor's "Async Function" snippet expands into code the
+            // parser rejects.
+            let mut member_vis: Option<bool> = None;
+            if matches!(self.current.kind, TokenKind::Keyword(Keyword::Public)) {
+                self.bump()?;
+                member_vis = Some(true);
+            } else if matches!(self.current.kind, TokenKind::Keyword(Keyword::Private)) {
+                self.bump()?;
+                member_vis = Some(false);
+            }
+
+            let is_async = if matches!(self.current.kind, TokenKind::Keyword(Keyword::Async)) {
+                self.bump()?;
+                true
+            } else {
+                false
+            };
+
             match &self.current.kind {
                 TokenKind::Keyword(Keyword::Function) => {
                     let mut decl = self.parse_function_decl(Some(&dome_name))?;
                     decl.namespace = self.current_namespace.clone();
-                    decl.visibility = visibility_from(is_pub);
+                    // An explicit modifier on the member wins over the dome's.
+                    decl.visibility = visibility_from(member_vis.unwrap_or(is_pub));
+                    decl.is_async = is_async;
                     program.functions.push(decl);
+                }
+                _ if is_async => {
+                    return Err(self.error_here("expected 'function' after 'async'"));
                 }
                 _ => return Err(self.error_here("expected function declaration inside dome block")),
             }

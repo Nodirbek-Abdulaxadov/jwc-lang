@@ -317,6 +317,7 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![
                         ".".to_string(),
@@ -579,6 +580,47 @@ impl LanguageServer for Backend {
             document_changes: None,
             change_annotations: None,
         }))
+    }
+
+    /// `textDocument/formatting` — the editor side of `jwc fmt`.
+    ///
+    /// The capability wasn't advertised, so the request came back
+    /// `-32601 Method not found` and format-on-save silently did nothing even
+    /// though the CLI has had a formatter all along.
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> LspResult<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let text = match self.documents.read().await.get(&uri).cloned() {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let formatted = jwc::fmt::format_source(&text);
+        if formatted == text {
+            // Already canonical — returning no edits keeps the undo stack and
+            // the file's dirty flag untouched.
+            return Ok(None);
+        }
+
+        // `format_source` is whole-file (and falls back to a comment-preserving
+        // normaliser when the source doesn't parse), so hand back one edit
+        // spanning the document, the same shape rustfmt and gofmt use.
+        let end = match offset_to_position(&text, text.len()) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        Ok(Some(vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end,
+            },
+            new_text: formatted,
+        }]))
     }
 
     async fn completion(&self, params: CompletionParams) -> LspResult<Option<CompletionResponse>> {

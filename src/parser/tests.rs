@@ -1318,3 +1318,62 @@ fn savepoint_with_invalid_identifier_rejected() {
     "#;
     assert!(parse_program(src).is_err());
 }
+
+/// Domes hold the business logic, so the modifiers that work on a top-level
+/// `function` have to work on a dome member too. `async` in particular was
+/// rejected outright, while the editor ships an "Async Function" snippet that
+/// expands to exactly this shape.
+#[test]
+fn dome_members_accept_async_and_visibility_modifiers() {
+    let src = r#"
+        dome Billing {
+            function plain() { return 1; }
+            async function suspends() { return 2; }
+            public function exposed() { return 3; }
+            private async function hidden() { return 4; }
+        }
+    "#;
+    let program = parse_program(src).expect("dome modifiers should parse");
+
+    let by_name = |n: &str| {
+        program
+            .functions
+            .iter()
+            .find(|f| f.name == n)
+            .unwrap_or_else(|| panic!("{n} not parsed"))
+    };
+
+    assert!(!by_name("Billing.plain").is_async);
+    assert!(by_name("Billing.suspends").is_async);
+    assert!(by_name("Billing.hidden").is_async);
+
+    assert_eq!(by_name("Billing.exposed").visibility, Visibility::Public);
+    assert_eq!(by_name("Billing.hidden").visibility, Visibility::Private);
+    // No modifier on the member — inherits the dome's own visibility.
+    assert_eq!(by_name("Billing.plain").visibility, Visibility::Private);
+}
+
+/// A dome member's own modifier wins over the dome's.
+#[test]
+fn dome_member_visibility_overrides_the_dome() {
+    let src = r#"
+        public dome Api {
+            function inherited() { return 1; }
+            private function overridden() { return 2; }
+        }
+    "#;
+    let program = parse_program(src).expect("should parse");
+    let by_name = |n: &str| program.functions.iter().find(|f| f.name == n).unwrap();
+    assert_eq!(by_name("Api.inherited").visibility, Visibility::Public);
+    assert_eq!(by_name("Api.overridden").visibility, Visibility::Private);
+}
+
+#[test]
+fn async_without_function_inside_dome_is_rejected() {
+    let err = parse_program("dome S { async let x = 1; }").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("expected 'function' after 'async'"),
+        "unhelpful error: {err}"
+    );
+}
