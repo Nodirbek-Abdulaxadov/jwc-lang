@@ -17,7 +17,7 @@ sidebar_position: 7
 
 ## Patterns
 
-```jwc
+```jwc no-compile
 // optional env with default
 let max = int(env("MAX_ITEMS") || "20");
 

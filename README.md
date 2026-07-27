@@ -2,30 +2,48 @@
 
 **Write web backends without hand-coding CRUD, without fighting an ORM, native-fast.**
 
-JWC is a small, Postgres-first backend language. The compiler reads your
-entity definitions and emits the routes, the SQL, and the migrations for
-you — there's no ORM layer, no DTO mapping, no repository boilerplate to
-maintain. What you'd hand-write across a controller, a service, a
-repository, a request DTO, a response DTO, and an AutoMapper profile is
-one entity + one `dbcontext` block in JWC.
+JWC is a small, Postgres-first backend language. Entities compile straight
+to SQL and queries are part of the language, so there's no ORM layer, no
+DTO mapping, and no repository boilerplate to maintain. What you'd
+hand-write across a controller, a service, a repository, a request DTO, a
+response DTO, and an AutoMapper profile is an entity plus the handlers
+that use it.
 
 ```jwc
-entity Note {
-    id:        Guid     primary_key
-    title:     string   max(200) required
-    body:      string
-    createdAt: DateTime default(now())
+dbcontext AppDb: Postgres;
+
+entity Note of AppDb {
+    id         int pk autoincrement;
+    title      varchar(200);
+    body       text;
+    created_at datetime;
 }
 
-dbcontext AppDb {
-    Notes: Note
-    routes Notes
+route GET "/notes" {
+    return json(select Note from AppDb.Note orderby Note.created_at desc);
+}
+
+route POST "/notes" {
+    validate body {
+        title: required, minLength(1), maxLength(200);
+    }
+    let req = body();
+    let n = new Note();
+    n.title      = req.title;
+    n.body       = req.body;
+    n.created_at = now();
+    insert n into AppDb.Note;
+    return created(json(n));
 }
 ```
 
-`jwc run` boots a Postgres-backed HTTP server with full CRUD on `/notes`
-(GET/POST/PUT/DELETE, pagination, validation, JSON in/out). `jwc build
+`jwc run` boots a Postgres-backed HTTP server serving those routes, with
+validation and JSON in/out handled for you. `jwc migrate new` diffs the
+entities against the last migration and writes the DDL; `jwc build
 --native` produces a single static binary.
+
+Routes are written, not generated — `jwc new --template api` scaffolds a
+working CRUD set you can edit.
 
 Latest release: **v0.5.1**. Status: production-ready for the maintainer's
 own workload; external pilots TBD.
@@ -603,7 +621,7 @@ route GET "/export.csv" { return response(csv_body, "text/csv"); }  // text/csv;
 
 ## Strings, arrays, iteration
 
-```jwc
+```jwc no-compile
 lower("HELLO")           // "hello"
 upper("najim")           // "NAJIM"
 trim("  hi  ")           // "hi"
@@ -645,7 +663,7 @@ print(join(squares, ","));          // "0,1,4,9,16" — O(n)
 
 ### Hashing (v0.4.0)
 
-```jwc
+```jwc no-compile
 sha256("hello")    // "2cf24dba…9824"   (also sha1, md5)
 hmac_sha256("key", "msg")              // lowercase hex HMAC-SHA256
 let h = hash_password("hunter2");      // argon2id PHC string
@@ -961,7 +979,7 @@ Built-in types recognised in function signatures and JSON body validation:
 | `List<T>` | JSON array; every element must match `T` |
 | Custom `class` / `entity` names | runtime JSON schema check |
 
-```jwc
+```jwc no-compile
 function createUser(id: uuid, joined: datetime, tags: List<string>): User? {
     ...
 }

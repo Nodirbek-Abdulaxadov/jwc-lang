@@ -7,8 +7,18 @@ sidebar_position: 1
 A `dbcontext` declares a database connection. JWC supports **Postgres** only in v1.
 
 ```jwc
-dbcontext AppDb {
-    driver = "postgres";
+dbcontext AppDb: Postgres;
+```
+
+The driver name is part of the declaration — there is no block form and no
+`driver = "..."` setting. Entities then name the context they belong to:
+
+```jwc
+dbcontext AppDb: Postgres;
+
+entity Note of AppDb {
+    id    int pk autoincrement;
+    title varchar(200);
 }
 ```
 
@@ -23,8 +33,8 @@ Format: `postgres://user:password@host:5432/dbname` (`postgres-native-tls` is en
 ## Multiple contexts
 
 ```jwc
-dbcontext AppDb       { driver = "postgres"; }
-dbcontext AnalyticsDb { driver = "postgres"; }
+dbcontext AppDb: Postgres;
+dbcontext AnalyticsDb: Postgres;
 ```
 
 Each context is a separate connection pool keyed by `JWC_DATABASE_URL_<NAME>` (uppercase). Defaults: if `JWC_DATABASE_URL_ANALYTICSDB` is unset, falls back to `JWC_DATABASE_URL`.

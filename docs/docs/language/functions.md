@@ -33,7 +33,7 @@ async function fetchUser(id: int): User? {
 
 `class` declares a typed object shape — no methods, just a struct. Used for typed request/response bodies:
 
-```jwc
+```jwc no-compile
 class CreateUserRequest {
     name: string;
     email: string;
@@ -41,9 +41,8 @@ class CreateUserRequest {
 }
 
 route POST "/users" {
-    let body: CreateUserRequest = body();
-    // body.name / body.email / body.age are typed-field-checked
-    return created({ id: 1, name: body.name });
+    let req = body();
+    return created({ id: 1, name: req.name });
 }
 ```
 

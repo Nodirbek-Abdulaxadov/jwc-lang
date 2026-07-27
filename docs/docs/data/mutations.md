@@ -19,10 +19,10 @@ Body literal short-cut for HTTP routes:
 
 ```jwc
 route POST "/users" {
-    let body: CreateUserRequest = body();
+    let req = body();
     let u = new User();
-    u.name  = body.name;
-    u.email = body.email;
+    u.name  = req.name;
+    u.email = req.email;
     insert u into AppDb.User;
     return created(u);
 }
@@ -78,7 +78,7 @@ delete from AppDb.Session where Session.expires_at < @now;
 
 Escape hatch:
 
-```jwc
+```jwc no-compile
 let count_str = raw_sql(
     "SELECT count(*)::text FROM users WHERE created_at > $1",
     json_stringify([@since])

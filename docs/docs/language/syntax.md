@@ -8,7 +8,7 @@ JWC reads like a hybrid of TypeScript and SQL. Statements end with `;`, blocks u
 
 ## Comments
 
-```jwc
+```jwc no-compile
 // single line
 /* multi
    line */
@@ -19,7 +19,7 @@ JWC reads like a hybrid of TypeScript and SQL. Statements end with `;`, blocks u
 ```jwc
 let name  = "ali";        // type inferred
 let count = 42;
-let typed: int = 7;       // explicit type (compile-time check)
+let n     = 7;            // bindings are untyped; no `let x: T = ...` form
 count = count + 1;        // re-assignable
 ```
 
@@ -48,7 +48,7 @@ Concatenation is `+`. There's no template-literal interpolation today; use `+` o
 
 ## Operators
 
-```jwc
+```jwc no-compile
 +  -  *  /  %      // arithmetic
 == != <  <= > >=   // comparison
 && || !            // logical (short-circuit && and ||)

@@ -27,7 +27,7 @@ route GET "/me" use Auth {
 
 Chain multiple:
 
-```jwc
+```jwc no-compile
 route POST "/admin/posts" use Auth, RequireAdmin, RateLimit {
     ...
 }
@@ -45,7 +45,7 @@ middleware Auth {
     setContext("roles",   claims.roles);
 }
 route GET "/me" use Auth {
-    let uid: string = context("user_id");
+    let uid = context("user_id");
 }
 ```
 
@@ -59,7 +59,7 @@ All HTTP built-ins (`header`, `query_param`, `path_param`, `body`) work. Databas
 
 A middleware can declare a second body that runs **after** the route handler returns. Use it for access logs, metric counters, audit trails — anything that needs to observe the response, not the request.
 
-```jwc
+```jwc no-compile
 middleware Telemetry {
     // request phase: runs before the handler
     setContext("started_at", unix_timestamp());
@@ -95,7 +95,7 @@ middleware Telemetry {
 
 ## Groups (prefix + middleware)
 
-```jwc
+```jwc no-compile
 group "/api" use ApiAuth {
     route GET  "/users"  { ... }   // → GET /api/users
     route POST "/users"  { ... }
@@ -104,7 +104,7 @@ group "/api" use ApiAuth {
 
 Groups nest. The inner middleware list **adds to** the outer:
 
-```jwc
+```jwc no-compile
 group "/api" use ApiAuth {
     group "/admin" use RequireAdmin {
         route GET "/users" { ... }   // → GET /api/admin/users, ApiAuth + RequireAdmin

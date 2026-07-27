@@ -8,7 +8,7 @@ sidebar_position: 4
 
 In-handler:
 
-```jwc
+```jwc no-compile
 try {
     let u = first(select User from AppDb.User where User.id == @id);
     return ok(u);
@@ -35,7 +35,7 @@ The catch type filter is a runtime classifier (`runner::classify_jwc_error`). Un
 
 `e` is bound to a JSON value:
 
-```jwc
+```jwc no-compile
 { "type": "DbError", "message": "connection closed", "causes": ["..."] }
 ```
 

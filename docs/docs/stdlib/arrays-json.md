@@ -69,7 +69,7 @@ let csv = join(squares, ",");   // "0,1,4,9,16"
 
 The `json` type in entity columns or function signatures means "arbitrary JSON value":
 
-```jwc
+```jwc no-compile
 entity Event of AppDb {
     id: uuid pk;
     payload: json;

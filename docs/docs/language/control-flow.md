@@ -46,7 +46,7 @@ The loop header has **no parentheses** — `for <var> in <iterable> { ... }`.
 
 ## try / catch
 
-```jwc
+```jwc no-compile
 try {
     let user = first(select User from AppDb.User where User.id == @id);
     return ok(user);

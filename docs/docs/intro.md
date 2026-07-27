@@ -7,30 +7,48 @@ sidebar_position: 1
 
 **Write web backends without hand-coding CRUD, without fighting an ORM, native-fast.**
 
-JWC is a small, Postgres-first backend language. The compiler reads your
-entity definitions and emits the routes, the SQL, and the migrations for
-you — there's no ORM layer, no DTO mapping, no repository boilerplate to
-maintain. What you'd hand-write across a controller, a service, a
-repository, a request DTO, a response DTO, and an AutoMapper profile is
-one entity + one `dbcontext` block in JWC.
+JWC is a small, Postgres-first backend language. Entities compile straight
+to SQL and queries are part of the language, so there's no ORM layer, no
+DTO mapping, and no repository boilerplate to maintain. What you'd
+hand-write across a controller, a service, a repository, a request DTO, a
+response DTO, and an AutoMapper profile is an entity plus the handlers
+that use it.
 
 ```jwc
-entity Note {
-    id:        Guid     primary_key
-    title:     string   max(200) required
-    body:      string
-    createdAt: DateTime default(now())
+dbcontext AppDb: Postgres;
+
+entity Note of AppDb {
+    id         int pk autoincrement;
+    title      varchar(200);
+    body       text;
+    created_at datetime;
 }
 
-dbcontext AppDb {
-    Notes: Note
-    routes Notes
+route GET "/notes" {
+    return json(select Note from AppDb.Note orderby Note.created_at desc);
+}
+
+route POST "/notes" {
+    validate body {
+        title: required, minLength(1), maxLength(200);
+    }
+    let req = body();
+    let n = new Note();
+    n.title      = req.title;
+    n.body       = req.body;
+    n.created_at = now();
+    insert n into AppDb.Note;
+    return created(json(n));
 }
 ```
 
-`jwc run` boots a Postgres-backed HTTP server with full CRUD on `/notes`
-(GET/POST/PUT/DELETE, pagination, validation, JSON in/out). `jwc build
+`jwc run` boots a Postgres-backed HTTP server serving those routes, with
+validation and JSON in/out handled for you. `jwc migrate new` diffs the
+entities against the last migration and writes the DDL; `jwc build
 --native` produces a single static binary.
+
+Routes are written, not generated — `jwc new --template api` scaffolds a
+working CRUD set you can edit.
 
 ## Why JWC
 

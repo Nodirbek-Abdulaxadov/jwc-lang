@@ -73,7 +73,7 @@ reject it at runtime with `SAVEPOINT can only be used in transaction
 blocks`. Catching it in the runner gives a clearer message + the
 correct fix:
 
-```jwc
+```jwc no-compile
 transaction {
     savepoint try_charge { ... }
 }

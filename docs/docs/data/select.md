@@ -43,7 +43,7 @@ existing style usually wins.
 
 ## where
 
-```jwc
+```jwc no-compile
 select User from AppDb.User where User.email == @email;
 select User from AppDb.User where User.age > @min and User.email like @pattern;
 select User from AppDb.User where User.id in (@a, @b, @c);
@@ -60,7 +60,7 @@ the bound value is `null` or an empty string at runtime, the predicate is
 dropped (no filter). One static query then serves every filter combination —
 no in-code branching:
 
-```jwc
+```jwc no-compile
 // @status / @priority empty -> that filter is skipped, all rows match
 select Task from AppDb.Task
     where Task.projectId == @projectId
@@ -82,7 +82,7 @@ A fixed `in (@a, @b, @c)` keeps the literal `IN ($1, $2, $3)` shape.
 
 ## order by / limit / offset
 
-```jwc
+```jwc no-compile
 select User from AppDb.User
     orderby User.created_at desc
     limit 20

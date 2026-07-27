@@ -314,7 +314,7 @@ function stripe_verify_webhook(payload, sig_header, secret) {
 Paket sifatida `jwc-retry` core helper qilib publish qilamiz — har paket
 o'zi `retry(fn, max_attempts, backoff_ms)` o'rashi shart bo'lmasin:
 
-```jwc
+```jwc no-compile
 import retry from "jwc-retry";
 
 function get_user(id) {

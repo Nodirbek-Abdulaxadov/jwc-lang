@@ -31,7 +31,7 @@ Binary frames + per-client backpressure controls land in a future sprint; v1 is 
 
 ## Authentication
 
-```jwc
+```jwc no-compile
 middleware AuthWS {
     let token = query_param("token");
     if (token == null) { return unauthorized(); }

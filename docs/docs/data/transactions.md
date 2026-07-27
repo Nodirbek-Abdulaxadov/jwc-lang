@@ -24,7 +24,7 @@ There's no explicit `rollback` keyword. Either:
 - Throw / return from the block — the `TxGuard` rolls back automatically.
 - Wrap in `try`:
 
-  ```jwc
+  ```jwc no-compile
   try {
       transaction { ... }
   } catch (e) {
@@ -40,7 +40,7 @@ compile-time error (E016) — Postgres would silently SAVEPOINT it, which
 hides the intent. For the genuine "let me roll back part of this
 transaction without losing the rest" case, use the **savepoint** form:
 
-```jwc
+```jwc no-compile
 transaction {
     insert order into AppDb.Order;
 

@@ -25,14 +25,14 @@ JWC has a small fixed type set. Types appear on function parameters, return type
 
 Append `?` to make a type nullable; `Optional<T>` is an alias:
 
-```jwc
+```jwc no-compile
 function find(id: int): User? { ... }   // may return null
 function find(id: int): Optional<User> { ... }
 ```
 
 ## Lists
 
-```jwc
+```jwc no-compile
 function tags(): List<string> { ... }
 ```
 

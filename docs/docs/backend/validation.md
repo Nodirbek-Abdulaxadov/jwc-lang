@@ -13,7 +13,7 @@ route POST "/users" {
         email:    required, pattern(r"^[^@]+@[^@]+\.[^@]+$");
         age:      min(0), max(150);
     }
-    let req: CreateUserRequest = body();
+    let req = body();
     // … handler runs only if all rules passed
 }
 ```

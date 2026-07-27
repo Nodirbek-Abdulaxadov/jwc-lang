@@ -4,7 +4,7 @@ sidebar_position: 1
 
 # Routes
 
-```jwc
+```jwc no-compile
 route GET    "/users"           { ... }
 route POST   "/users"           { ... }
 route GET    "/users/{id}"      { ... }
@@ -53,12 +53,24 @@ let limit = int(query_param("limit", "20")); // default "20" → coerced to int
 ## Request body
 
 ```jwc
-let raw    = body();                                       // raw bytes / text
-let parsed = json_parse(raw);                              // any JSON
-let typed: CreateUserRequest = body();                     // checked against class
+let raw    = body();          // parsed request body
+let parsed = json_parse(raw); // when you were handed a JSON string
 ```
 
-The third form is shorthand for `let typed: CreateUserRequest = body();` — the framework parses + validates against the class's field schema.
+`let` bindings are untyped — there is no `let x: Type = ...` form. To check
+the shape of an incoming body, declare the rules with `validate body`
+(see [Validation](./validation.md)); the handler runs only if they all pass.
+
+```jwc
+route POST "/users" {
+    validate body {
+        name:  required, minLength(1), maxLength(120);
+        email: required, pattern("^[^@]+@[^@]+$");
+    }
+    let req = body();
+    return created(json({ name: req.name }));
+}
+```
 
 ## Response builders
 

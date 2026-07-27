@@ -27,7 +27,7 @@ function main() {
 }
 
 route POST "/signup" {
-    let req: SignupRequest = body();
+    let req = body();
     insert new_user into AppDb.User;
     enqueue("welcome_email", json_stringify({ to: req.email, name: req.name }));
     return created({ id: new_user.id });
