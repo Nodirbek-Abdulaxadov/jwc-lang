@@ -238,7 +238,7 @@ pub fn read_latest_snapshot(migrations_dir: &Path) -> Result<Vec<TableSnapshot>>
     let mut tables: Vec<TableSnapshot> = Vec::new();
 
     for path in &up_files {
-        let sql = std::fs::read_to_string(&path)
+        let sql = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
 
         // CREATE TABLE statements emitted by jwc.

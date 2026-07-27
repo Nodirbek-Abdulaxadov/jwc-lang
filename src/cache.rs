@@ -55,12 +55,9 @@ pub(crate) fn set_with_ttl(key: &str, value: &str, ttl: Option<Duration>) {
 /// elapsed (in which case the stale entry is also evicted).
 pub fn get(key: &str) -> Option<String> {
     let mut guard = store().lock().expect("cache mutex poisoned");
-    let expired = match guard.get(key) {
-        Some(entry) => match entry.expires_at {
-            Some(deadline) => Instant::now() >= deadline,
-            None => false,
-        },
-        None => return None,
+    let expired = match guard.get(key)?.expires_at {
+        Some(deadline) => Instant::now() >= deadline,
+        None => false,
     };
     if expired {
         guard.remove(key);
