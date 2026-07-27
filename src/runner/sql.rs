@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_recursion::async_recursion;
-use tokio_postgres::types::ToSql;
+use tokio_postgres::types::{to_sql_checked, IsNull, ToSql, Type};
 
 use crate::ast::{
     AggProj, AggregateKind, AliasedCol, DbOrderBy, Expr, JoinClause, ModelDecl, NavigationKind,
@@ -221,19 +221,113 @@ pub(super) fn build_delete_sql(
     ))
 }
 
+/// A numeric bind parameter that encodes itself to whatever numeric Postgres
+/// type the target column actually is.
+///
+/// Binding used to pick the Rust type from the *value's magnitude*: anything
+/// inside `i32` range bound as `i32`, everything else as `i64`. tokio-postgres
+/// type-checks parameters strictly against the target column, so that made
+/// whole column types unusable:
+///
+/// - `bigint` rejected every value that fit in 32 bits — `5000` failed with
+///   "cannot convert between the Rust type `i32` and the Postgres type
+///   `int8`", while `3000000000` worked. Exactly inverted.
+/// - `numeric` / `decimal` rejected *every* value shape (`i32`, `f64` and
+///   `String` alike), so a `decimal(12,2)` column could never be written at
+///   all despite passing `jwc check` and generating correct DDL.
+///
+/// Money columns were the common casualty. Deferring the choice to `to_sql`
+/// fixes it at the only layer that knows the truth: Postgres hands us the
+/// resolved parameter type, so insert, update and `where` are all covered
+/// without threading column types through every builder.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PgNumber {
+    Int(i64),
+    Float(f64),
+}
+
+impl PgNumber {
+    /// Render as a decimal string, then parse. Going through the shortest
+    /// round-trip text form keeps `12.34` as `12.34` instead of the binary
+    /// f64 approximation you get from `Decimal::try_from(f64)` — for money
+    /// that difference is the whole point.
+    fn to_decimal(self) -> Result<rust_decimal::Decimal, Box<dyn std::error::Error + Sync + Send>> {
+        use std::str::FromStr;
+        match self {
+            PgNumber::Int(i) => Ok(rust_decimal::Decimal::from(i)),
+            PgNumber::Float(f) => {
+                let s = f.to_string();
+                rust_decimal::Decimal::from_str(&s)
+                    .or_else(|_| rust_decimal::Decimal::from_scientific(&s))
+                    .map_err(|e| format!("value {s} is not representable as numeric: {e}").into())
+            }
+        }
+    }
+}
+
+impl ToSql for PgNumber {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        // Narrowing conversions are checked, not silently truncated: a value
+        // that doesn't fit the column surfaces as an error instead of being
+        // written as a different number.
+        if *ty == Type::NUMERIC {
+            return self.to_decimal()?.to_sql(ty, out);
+        }
+        match *self {
+            PgNumber::Int(i) => {
+                if *ty == Type::INT8 {
+                    i.to_sql(ty, out)
+                } else if *ty == Type::INT4 {
+                    i32::try_from(i)?.to_sql(ty, out)
+                } else if *ty == Type::INT2 {
+                    i16::try_from(i)?.to_sql(ty, out)
+                } else if *ty == Type::FLOAT8 {
+                    (i as f64).to_sql(ty, out)
+                } else if *ty == Type::FLOAT4 {
+                    (i as f32).to_sql(ty, out)
+                } else {
+                    Err(format!("cannot bind integer value {i} to Postgres type {ty}").into())
+                }
+            }
+            // A fractional value into an integer column is a real type error;
+            // rounding it silently would corrupt data.
+            PgNumber::Float(f) => {
+                if *ty == Type::FLOAT8 {
+                    f.to_sql(ty, out)
+                } else if *ty == Type::FLOAT4 {
+                    (f as f32).to_sql(ty, out)
+                } else {
+                    Err(format!("cannot bind fractional value {f} to Postgres type {ty}").into())
+                }
+            }
+        }
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::INT2
+            || *ty == Type::INT4
+            || *ty == Type::INT8
+            || *ty == Type::FLOAT4
+            || *ty == Type::FLOAT8
+            || *ty == Type::NUMERIC
+    }
+
+    to_sql_checked!();
+}
+
 pub(super) fn json_value_to_sql_param(val: &serde_json::Value) -> Box<dyn ToSql + Sync + Send> {
     match val {
         serde_json::Value::Null => Box::new(Option::<String>::None),
         serde_json::Value::Bool(b) => Box::new(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                if (i32::MIN as i64..=i32::MAX as i64).contains(&i) {
-                    Box::new(i as i32)
-                } else {
-                    Box::new(i)
-                }
+                Box::new(PgNumber::Int(i))
             } else if let Some(f) = n.as_f64() {
-                Box::new(f)
+                Box::new(PgNumber::Float(f))
             } else {
                 Box::new(n.to_string())
             }
@@ -354,15 +448,12 @@ pub(super) fn boxed_params_to_refs(
 
 pub(super) fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync + Send> {
     match val {
-        Value::Int(n) => {
-            if (i32::MIN as i64..=i32::MAX as i64).contains(n) {
-                Box::new(*n as i32)
-            } else {
-                Box::new(*n)
-            }
-        }
+        // See [`PgNumber`]: bind against the column's real type rather than
+        // guessing from magnitude, so `where Wallet.balance == @amount` works
+        // on `bigint` / `numeric` columns too.
+        Value::Int(n) => Box::new(PgNumber::Int(*n)),
         Value::Str(s) => string_to_sql_param(s),
-        Value::Float(n) => Box::new(*n),
+        Value::Float(n) => Box::new(PgNumber::Float(*n)),
         Value::Bool(b) => Box::new(*b),
         Value::Null | Value::Void => Box::new(Option::<String>::None),
         // No native array param type yet — bind the JSON text. The DB column is
@@ -1211,6 +1302,117 @@ pub(super) fn aggregate_sql_op(kind: AggregateKind, col: &str) -> (String, &'sta
         AggregateKind::Count => "count",
     };
     (agg_sql, tag)
+}
+
+/// Regression tests for [`PgNumber`].
+///
+/// Binding used to choose the Rust type from the value's magnitude, which made
+/// `bigint` columns reject anything that fit in 32 bits and `numeric` columns
+/// reject every value. These assert the encoder now follows the *column* type.
+#[cfg(test)]
+mod pg_number_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    fn encode(n: PgNumber, ty: &Type) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        let mut buf = bytes::BytesMut::new();
+        n.to_sql(ty, &mut buf)
+    }
+
+    fn encoded_bytes(n: PgNumber, ty: &Type) -> bytes::BytesMut {
+        let mut buf = bytes::BytesMut::new();
+        n.to_sql(ty, &mut buf).expect("encodes");
+        buf
+    }
+
+    #[test]
+    fn accepts_every_numeric_postgres_type() {
+        for ty in [
+            Type::INT2,
+            Type::INT4,
+            Type::INT8,
+            Type::FLOAT4,
+            Type::FLOAT8,
+            Type::NUMERIC,
+        ] {
+            assert!(PgNumber::accepts(&ty), "should accept {ty}");
+        }
+        for ty in [Type::TEXT, Type::BOOL, Type::UUID, Type::TIMESTAMPTZ] {
+            assert!(!PgNumber::accepts(&ty), "should not accept {ty}");
+        }
+    }
+
+    /// The exact reported failure: a small value into a `bigint` column.
+    /// Previously bound as `i32` and rejected with "cannot convert between the
+    /// Rust type `i32` and the Postgres type `int8`".
+    #[test]
+    fn small_value_binds_to_bigint_column() {
+        assert!(encode(PgNumber::Int(5000), &Type::INT8).is_ok());
+    }
+
+    #[test]
+    fn small_value_into_bigint_matches_native_i64_encoding() {
+        let mut want = bytes::BytesMut::new();
+        5000i64.to_sql(&Type::INT8, &mut want).expect("encodes");
+        assert_eq!(encoded_bytes(PgNumber::Int(5000), &Type::INT8), want);
+    }
+
+    #[test]
+    fn large_value_still_binds_to_bigint_column() {
+        assert!(encode(PgNumber::Int(3_000_000_000), &Type::INT8).is_ok());
+    }
+
+    #[test]
+    fn integers_bind_to_numeric_columns() {
+        assert!(encode(PgNumber::Int(5000), &Type::NUMERIC).is_ok());
+    }
+
+    /// `decimal(12,2)` accepted no value shape at all before this fix.
+    #[test]
+    fn fractional_values_bind_to_numeric_columns() {
+        assert!(encode(PgNumber::Float(1234.56), &Type::NUMERIC).is_ok());
+    }
+
+    /// Money must not pick up f64 drift: the encoding has to match the decimal
+    /// parsed from the literal text, not `Decimal::try_from(f64)`.
+    #[test]
+    fn numeric_encoding_preserves_decimal_precision() {
+        let mut want = bytes::BytesMut::new();
+        rust_decimal::Decimal::from_str("1234.56")
+            .expect("parses")
+            .to_sql(&Type::NUMERIC, &mut want)
+            .expect("encodes");
+        assert_eq!(
+            encoded_bytes(PgNumber::Float(1234.56), &Type::NUMERIC),
+            want
+        );
+    }
+
+    #[test]
+    fn integer_still_binds_to_plain_int_column() {
+        assert!(encode(PgNumber::Int(42), &Type::INT4).is_ok());
+    }
+
+    /// Silently rounding would corrupt data, so this must be an error.
+    #[test]
+    fn fractional_value_into_integer_column_is_rejected() {
+        // `IsNull` isn't Debug, so unwrap the Result by hand rather than
+        // reaching for expect_err.
+        match encode(PgNumber::Float(4.5), &Type::INT4) {
+            Ok(_) => panic!("fractional value must not bind to an integer column"),
+            Err(e) => assert!(e.to_string().contains("fractional"), "unhelpful error: {e}"),
+        }
+    }
+
+    #[test]
+    fn value_too_large_for_int_column_is_rejected() {
+        assert!(encode(PgNumber::Int(3_000_000_000), &Type::INT4).is_err());
+    }
+
+    #[test]
+    fn non_numeric_target_is_rejected() {
+        assert!(encode(PgNumber::Int(1), &Type::TEXT).is_err());
+    }
 }
 
 #[cfg(test)]
