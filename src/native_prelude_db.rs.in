@@ -167,6 +167,14 @@ fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
                 .flatten()
                 .map(V::Float)
                 .unwrap_or(V::Null),
+            // Without this arm a NUMERIC column fell through to `_ => V::Null`
+            // below: money read back as null with no error anywhere.
+            Type::NUMERIC => row
+                .try_get::<_, Option<rust_decimal::Decimal>>(i)
+                .ok()
+                .flatten()
+                .map(|d| V::Float(jwc_decimal_f64(d)))
+                .unwrap_or(V::Null),
             Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => row
                 .try_get::<_, Option<String>>(i)
                 .ok()
@@ -230,6 +238,39 @@ fn jwc_param_bigint(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send>
         V::Null => Box::new(None::<i64>),
         other => Box::new(jwc_to_int(&other).unwrap_or(0)),
     }
+}
+
+/// NUMERIC columns need a real decimal type: tokio-postgres has no
+/// `f64 <-> NUMERIC` conversion, so binding a float raises `WrongType` and a
+/// `decimal(p,s)` column could never be written at all.
+///
+/// Values arrive as `V::Float` / `V::Int` / `V::Str`; each is routed through
+/// the decimal's text form so `1234.56` stays `1234.56` rather than picking up
+/// the binary f64 approximation. An unparseable value binds NULL, matching how
+/// the other `jwc_param_*` helpers degrade rather than panicking mid-request.
+fn jwc_param_numeric(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
+    use std::str::FromStr;
+    let text = match v {
+        V::Null => return Box::new(None::<rust_decimal::Decimal>),
+        V::Int(n) => n.to_string(),
+        V::Float(f) => f.to_string(),
+        V::Str(ref s) => s.to_string(),
+        _ => return Box::new(None::<rust_decimal::Decimal>),
+    };
+    match rust_decimal::Decimal::from_str(&text)
+        .or_else(|_| rust_decimal::Decimal::from_scientific(&text))
+    {
+        Ok(d) => Box::new(d),
+        Err(_) => Box::new(None::<rust_decimal::Decimal>),
+    }
+}
+
+/// Widen a NUMERIC read back into the interpreter's `V::Float`. The VM has no
+/// decimal value type, so this matches what the interpreter path yields for
+/// the same column.
+fn jwc_decimal_f64(d: rust_decimal::Decimal) -> f64 {
+    use std::str::FromStr;
+    f64::from_str(&d.to_string()).unwrap_or(0.0)
 }
 
 fn jwc_param_float(v: V) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {

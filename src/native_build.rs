@@ -551,7 +551,12 @@ enum PgKind {
     Smallint, // int2 / smallint -> i16
     Int,      // int / int4 / integer -> i32
     Bigint,   // int8 / bigint -> i64
-    Float,    // double / decimal / float / real
+    Float,    // double / float / real -> f64
+    /// numeric / decimal -> `rust_decimal::Decimal`. Distinct from `Float`
+    /// because tokio-postgres has no f64 <-> NUMERIC conversion in either
+    /// direction: binding one raises `WrongType`, and reading one used to
+    /// fall through to `V::Null`, losing the value without an error.
+    Numeric,
     Bool,
     /// datetime / timestamp / timestamptz / date — carried as text by the VM
     /// but bound through a `$N::timestamptz` placeholder so Postgres casts the
@@ -568,7 +573,11 @@ fn pg_kind_for(type_name: &str) -> PgKind {
         "int2" | "smallint" => PgKind::Smallint,
         "int" | "int4" | "integer" => PgKind::Int,
         "int8" | "bigint" => PgKind::Bigint,
-        "double" | "decimal" | "float" | "float4" | "float8" | "real" | "numeric" => PgKind::Float,
+        // `numeric` is NOT a float: binding f64 to a NUMERIC column is
+        // rejected by tokio-postgres, and reading one back matched no arm at
+        // all, so decimal columns silently came out as null.
+        "decimal" | "numeric" => PgKind::Numeric,
+        "double" | "float" | "float4" | "float8" | "real" => PgKind::Float,
         "bool" | "boolean" => PgKind::Bool,
         // Temporal types — every JWC `datetime` lowers to `timestamptz`; we
         // keep the older `timestamp`/`date` aliases for hand-written entities.
@@ -1443,6 +1452,7 @@ fn read_field_from_row(idx: usize, f: &EntityField) -> String {
         PgKind::Int => "i32",
         PgKind::Bigint => "i64",
         PgKind::Float => "f64",
+        PgKind::Numeric => "rust_decimal::Decimal",
         PgKind::Bool => "bool",
         PgKind::Timestamp | PgKind::Str => "String",
     };
@@ -1476,7 +1486,9 @@ fn write_field_to_json(field_ident: &str, f: &EntityField) -> String {
     // a `match` and use the same body in the `Some(__v)` arm, with a
     // `null` literal in the `None` arm.
     let body = match f.pg {
-        PgKind::Smallint | PgKind::Int | PgKind::Bigint | PgKind::Float => {
+        // `Decimal`'s Display is a plain decimal literal (`1234.56`), which is
+        // already valid JSON — no quoting, no exponent form.
+        PgKind::Smallint | PgKind::Int | PgKind::Bigint | PgKind::Float | PgKind::Numeric => {
             "{ use std::fmt::Write; let _ = write!(out, \"{}\", __v); }".to_string()
         }
         PgKind::Bool => "{ out.push_str(if *__v { \"true\" } else { \"false\" }); }".to_string(),
@@ -1501,6 +1513,7 @@ fn rust_type_for_field(f: &EntityField) -> String {
         PgKind::Int => "i32",
         PgKind::Bigint => "i64",
         PgKind::Float => "f64",
+        PgKind::Numeric => "rust_decimal::Decimal",
         PgKind::Bool => "bool",
         PgKind::Timestamp | PgKind::Str => "String",
     };
@@ -1538,6 +1551,7 @@ fn lift_field_to_v(field_ident: &str, f: &EntityField) -> String {
         PgKind::Int => format!("V::Int(self.{} as i64)", field_ident),
         PgKind::Bigint => format!("V::Int(self.{})", field_ident),
         PgKind::Float => format!("V::Float(self.{})", field_ident),
+        PgKind::Numeric => format!("V::Float(jwc_decimal_f64(self.{}))", field_ident),
         PgKind::Bool => format!("V::Bool(self.{})", field_ident),
         PgKind::Timestamp | PgKind::Str => format!("v_str(self.{}.clone())", field_ident),
     };
@@ -1550,6 +1564,7 @@ fn lift_field_to_v(field_ident: &str, f: &EntityField) -> String {
             PgKind::Int => "V::Int(*v as i64)".to_string(),
             PgKind::Bigint => "V::Int(*v)".to_string(),
             PgKind::Float => "V::Float(*v)".to_string(),
+            PgKind::Numeric => "V::Float(jwc_decimal_f64(*v))".to_string(),
             PgKind::Bool => "V::Bool(*v)".to_string(),
             PgKind::Timestamp | PgKind::Str => "v_str(v.clone())".to_string(),
         };
@@ -2337,6 +2352,7 @@ fn helper_for_kind(k: PgKind) -> &'static str {
         PgKind::Int => "jwc_param_int",
         PgKind::Bigint => "jwc_param_bigint",
         PgKind::Float => "jwc_param_float",
+        PgKind::Numeric => "jwc_param_numeric",
         PgKind::Bool => "jwc_param_bool",
         // Timestamp values arrive as RFC 3339 strings; the helper parses
         // them into `chrono::DateTime<Utc>` so tokio-postgres binds the
@@ -4166,6 +4182,12 @@ fn render_cargo_toml(
         // `$N::timestamptz` cast) trips a client-side WrongType check.
         deps.push_str("tokio-postgres = { version = \"0.7\", features = [\"with-chrono-0_4\"] }\n");
         deps.push_str("deadpool-postgres = \"0.14\"\n");
+        // `db-postgres` plugs `Decimal` into tokio-postgres' ToSql/FromSql so
+        // `jwc_param_numeric` can bind NUMERIC columns. Without it there is no
+        // conversion for numeric in either direction.
+        deps.push_str(
+            "rust_decimal = { version = \"1\", default-features = false, features = [\"db-postgres\"] }\n",
+        );
     }
     if needs_crypto {
         deps.push_str("sha2 = \"0.10\"\n");
