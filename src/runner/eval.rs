@@ -231,6 +231,7 @@ impl<'a> Vm<'a> {
                 aliased_cols,
                 joins,
                 group_by,
+                distinct,
                 having,
             } => {
                 let table_name = crate::sql::to_snake_case(table);
@@ -255,6 +256,7 @@ impl<'a> Vm<'a> {
                     aliased_cols,
                     joins,
                     group_by,
+                    *distinct,
                     having.as_deref(),
                     vars,
                     self,

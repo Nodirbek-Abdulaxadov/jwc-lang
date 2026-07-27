@@ -402,6 +402,7 @@ fn validate_expr(
             aliased_cols: _,
             joins,
             group_by,
+            distinct: _,
             having,
         } => {
             let ctx_key = validate_context_exists(context_var, ctx_names)?;

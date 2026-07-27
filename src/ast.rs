@@ -690,6 +690,9 @@ pub enum Expr {
         /// SQL layer. Each entry is a `field` string in the same shape as
         /// `where Entity.col`. Empty vec when no `group by` was written.
         group_by: Vec<String>,
+        /// `select distinct ...` — emits `SELECT DISTINCT`, collapsing rows
+        /// that are identical across every selected column.
+        distinct: bool,
         /// `having <cond>` — post-aggregation filter applied after GROUP BY.
         /// Same shape as `where_clause`; only meaningful when `group_by` is
         /// non-empty, but the parser stores it unconditionally and the

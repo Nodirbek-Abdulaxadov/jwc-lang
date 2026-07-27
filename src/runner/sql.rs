@@ -548,6 +548,7 @@ pub(super) async fn build_select_sql(
     aliased_cols: &[AliasedCol],
     joins: &[JoinClause],
     group_by: &[String],
+    distinct: bool,
     having: Option<&WhereExpr>,
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm<'_>,
@@ -737,9 +738,26 @@ pub(super) async fn build_select_sql(
         cache_bits.push(format!("join:{}", jt));
     }
 
+    // `DISTINCT` is part of the shape key: the same columns with and without
+    // it are different statements and must not share a prepared plan.
+    let distinct_kw = if distinct {
+        shape_bits.push("distinct".to_string());
+        cache_bits.push("distinct".to_string());
+        "DISTINCT "
+    } else {
+        ""
+    };
+
     let inner_sql = format!(
-        "SELECT {} FROM {}{}{}{}{}{}",
-        inner_projection, from_sql, sql_where, sql_group, sql_having, sql_order, sql_limit_offset
+        "SELECT {}{} FROM {}{}{}{}{}{}",
+        distinct_kw,
+        inner_projection,
+        from_sql,
+        sql_where,
+        sql_group,
+        sql_having,
+        sql_order,
+        sql_limit_offset
     );
 
     let sql = if first {

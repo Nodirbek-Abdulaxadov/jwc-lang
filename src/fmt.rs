@@ -917,9 +917,13 @@ fn render_expr(e: &Expr) -> String {
             aliased_cols,
             joins,
             group_by,
+            distinct,
             having,
         } => {
             let mut s = String::from("select ");
+            if *distinct {
+                s.push_str("distinct ");
+            }
             s.push_str(entity);
             if !projection.is_empty() || !aggregates.is_empty() || !aliased_cols.is_empty() {
                 let mut items: Vec<String> = projection.clone();
@@ -1263,6 +1267,19 @@ mod tests {
                     "}\n",
                     "function totals() {\n",
                     "    return select Sale from AppDb.Sale group by Sale.country;\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "select distinct",
+                concat!(
+                    "dbcontext AppDb: Postgres;\n",
+                    "entity Sale of AppDb {\n",
+                    "    id int pk autoincrement;\n",
+                    "    country varchar(64);\n",
+                    "}\n",
+                    "function countries() {\n",
+                    "    return select distinct Sale { country } from AppDb.Sale;\n",
                     "}\n",
                 ),
             ),

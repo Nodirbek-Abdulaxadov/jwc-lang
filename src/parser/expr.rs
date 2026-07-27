@@ -413,13 +413,31 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse `select [Entity|*|count(*)] from CTX.TABLE
+    /// Parse `select [distinct] [Entity|*|count(*)] from CTX.TABLE
     ///        [where COND [and|or COND ...]]
     ///        [orderby FIELD [asc|desc]]
     ///        [limit N] [offset N] [first]`
     pub(super) fn parse_select_expr(&mut self) -> Result<Expr> {
+        // `select distinct ...`. Read before the scalar-aggregate forms below
+        // so `select distinct count(*)` fails on the aggregate rather than on
+        // an unexpected `distinct` — `count(distinct col)` is the SQL for that
+        // and isn't supported yet.
+        let distinct = if self.check_ident_eq("distinct") {
+            self.bump()?;
+            true
+        } else {
+            false
+        };
+
         // `count(*)` aggregation form
         if self.check_ident_eq("count") {
+            if distinct {
+                return Err(self.error_here(
+                    "`select distinct count(*)` is not a thing — de-duplicating a \
+                     single-row result does nothing. To count distinct values use \
+                     `select distinct` with a projection and count the rows.",
+                ));
+            }
             self.bump()?;
             self.expect_symbol('(')?;
             self.expect_symbol('*')?;
@@ -456,6 +474,12 @@ impl<'a> Parser<'a> {
             None
         };
         if let Some(kind) = agg_kind {
+            if distinct {
+                return Err(self.error_here(
+                    "`distinct` is not supported on a scalar aggregate — that would be \
+                     SQL's `sum(distinct col)`, which JWC does not emit yet",
+                ));
+            }
             self.bump()?;
             self.expect_symbol('(')?;
             let field = self.parse_field_path()?;
@@ -702,6 +726,7 @@ impl<'a> Parser<'a> {
             aliased_cols,
             joins,
             group_by,
+            distinct,
             having,
         })
     }

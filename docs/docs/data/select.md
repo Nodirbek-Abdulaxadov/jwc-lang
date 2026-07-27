@@ -107,6 +107,25 @@ let max_age    = select max(User.age) from AppDb.User;
 let avg_score  = select avg(Post.score) from AppDb.Post where Post.published == true;
 ```
 
+## distinct
+
+`select distinct` collapses rows that are identical across every selected
+column — most useful with a projection, since a full row usually carries a
+primary key and is therefore already unique:
+
+```jwc
+let countries = select distinct Sale { country } from AppDb.Sale;
+// -> [ { "country": "uz" }, { "country": "kz" } ]
+```
+
+It composes with the rest of the clause list (`where`, `orderby`, `limit`,
+`group by`, `join`).
+
+Not supported: `distinct` on a scalar aggregate (`select distinct count(*)`).
+That form de-duplicates a one-row result, which does nothing; SQL's
+`count(distinct col)` is a different thing and isn't emitted yet. Both are
+rejected at parse time rather than silently doing nothing.
+
 ## group by / having
 
 Grouped aggregation is a first-class projection. The select list mixes plain

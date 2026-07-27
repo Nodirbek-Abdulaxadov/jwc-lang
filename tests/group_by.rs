@@ -235,3 +235,70 @@ fn having_without_group_by_is_rejected() {
         "expected having-without-group-by error, got: {err}"
     );
 }
+
+#[test]
+fn select_distinct_parses_and_validates() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+        }
+
+        function countries() {
+            return select distinct Sale { country } from AppDb.Sale;
+        }
+
+        function main() { countries(); }
+    "#;
+    validate_source(src).expect("select distinct must validate");
+}
+
+/// `distinct` composes with the rest of the clause list rather than being a
+/// special standalone form.
+#[test]
+fn select_distinct_composes_with_where_and_orderby() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+            amount int;
+        }
+
+        function countries(min) {
+            return select distinct Sale { country } from AppDb.Sale
+                where Sale.amount > @min
+                orderby country asc
+                limit 10;
+        }
+
+        function main() { countries(1); }
+    "#;
+    validate_source(src).expect("distinct must compose with where / orderby / limit");
+}
+
+/// `select distinct count(*)` de-duplicates a one-row result, which is always
+/// a no-op — the user meant `count(distinct col)`, which isn't emitted yet.
+#[test]
+fn select_distinct_on_a_scalar_aggregate_is_rejected() {
+    for form in [
+        "select distinct count(*) from AppDb.Sale",
+        "select distinct sum(Sale.amount) from AppDb.Sale",
+    ] {
+        let src = format!(
+            r#"
+            dbcontext AppDb : Postgres;
+            entity Sale of AppDb {{ id int pk; amount int; }}
+            function f() {{ return {form}; }}
+            function main() {{ f(); }}
+        "#
+        );
+        let err =
+            validate_source(&src).expect_err(&format!("`{form}` should be rejected at parse time"));
+        assert!(
+            err.contains("distinct"),
+            "expected a message naming distinct for `{form}`, got: {err}"
+        );
+    }
+}

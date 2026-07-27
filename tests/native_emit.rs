@@ -291,3 +291,51 @@ fn having_lines(body: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// `distinct` has to reach the AOT SQL too — the interpreter and the compiled
+/// binary must not disagree on how many rows a query returns.
+#[test]
+fn emit_rust_source_lowers_select_distinct() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let program = parse(
+        r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+        }
+
+        function countries() {
+            return select distinct Sale { country } from AppDb.Sale;
+        }
+
+        function all() {
+            return select Sale { country } from AppDb.Sale;
+        }
+
+        function main() { countries(); all(); }
+    "#,
+    );
+
+    let out = emit_rust_source(&program, root, "distinct_app", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    assert!(
+        body.contains("SELECT DISTINCT \\\"country\\\" FROM \\\"sale\\\""),
+        "`select distinct` must lower to SELECT DISTINCT; got:\n{}",
+        select_lines(&body)
+    );
+    assert!(
+        body.contains("SELECT \\\"country\\\" FROM \\\"sale\\\""),
+        "the non-distinct query must stay non-distinct; got:\n{}",
+        select_lines(&body)
+    );
+}
+
+fn select_lines(body: &str) -> String {
+    body.lines()
+        .filter(|l| l.contains("FROM \\\"sale\\\""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}

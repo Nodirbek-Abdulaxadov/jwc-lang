@@ -3342,6 +3342,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             aliased_cols,
             joins,
             group_by,
+            distinct,
             having,
             entity: _,
             context_var: _,
@@ -3358,6 +3359,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                     offset.as_deref(),
                     with_relations,
                     projection,
+                    *distinct,
                     ctx,
                 );
             } else {
@@ -3375,6 +3377,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                     aliased_cols,
                     joins,
                     group_by,
+                    *distinct,
                     having.as_deref(),
                     ctx,
                 );
@@ -3405,6 +3408,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_db_select(
     out: &mut String,
     table: &str,
@@ -3415,6 +3419,7 @@ fn emit_db_select(
     offset: Option<&Expr>,
     with_relations: &[String],
     projection: &[String],
+    distinct: bool,
     ctx: &CodegenCtx,
 ) {
     let meta = match ctx.entities.get(table) {
@@ -3440,6 +3445,7 @@ fn emit_db_select(
             offset,
             with_relations,
             projection,
+            distinct,
             ctx,
         );
         return;
@@ -3469,7 +3475,12 @@ fn emit_db_select(
         parts.join(", ")
     };
 
-    let mut sql = format!("SELECT {} FROM \"{}\"", select_clause, meta.table);
+    let mut sql = format!(
+        "SELECT {}{} FROM \"{}\"",
+        if distinct { "DISTINCT " } else { "" },
+        select_clause,
+        meta.table
+    );
     let mut wb = WhereBuilder::new(meta);
     if let Some(w) = where_clause {
         if let Err(e) = wb.emit(w) {
@@ -3593,6 +3604,7 @@ fn emit_db_select_with_navs(
     offset: Option<&Expr>,
     with_relations: &[String],
     projection: &[String],
+    distinct: bool,
     ctx: &CodegenCtx,
 ) {
     let navs = match crate::runner::sql::build_navigation_subqueries(
@@ -3642,7 +3654,12 @@ fn emit_db_select_with_navs(
         ));
     }
 
-    let mut inner = format!("SELECT {} FROM \"{}\" t", cols.join(", "), meta.table);
+    let mut inner = format!(
+        "SELECT {}{} FROM \"{}\" t",
+        if distinct { "DISTINCT " } else { "" },
+        cols.join(", "),
+        meta.table
+    );
     let mut wb = WhereBuilder::new(meta);
     if let Some(w) = where_clause {
         if let Err(e) = wb.emit(w) {
@@ -3736,6 +3753,7 @@ fn emit_db_select_explicit(
     aliased_cols: &[crate::ast::AliasedCol],
     joins: &[crate::ast::JoinClause],
     group_by: &[String],
+    distinct: bool,
     having: Option<&crate::ast::WhereExpr>,
     ctx: &CodegenCtx,
 ) {
@@ -3917,8 +3935,15 @@ fn emit_db_select_explicit(
         format!(" WHERE {}", where_sql)
     };
     let inner = format!(
-        "SELECT {} FROM {}{}{}{}{}{}",
-        select, from, where_clause_sql, group_sql, having_sql, order_sql, limit_sql
+        "SELECT {}{} FROM {}{}{}{}{}{}",
+        if distinct { "DISTINCT " } else { "" },
+        select,
+        from,
+        where_clause_sql,
+        group_sql,
+        having_sql,
+        order_sql,
+        limit_sql
     );
     let sql = if first {
         format!("SELECT row_to_json(r)::text FROM ({}) r", inner)
