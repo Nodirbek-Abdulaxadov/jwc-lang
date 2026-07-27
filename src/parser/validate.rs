@@ -46,18 +46,24 @@ fn ns_fqn(namespace: &[String], name: &str) -> String {
 
 /// Render `<msg> at <file>:line:col\n<snippet>` when a decl carries a
 /// real offset AND its [`Program::sources`] entry has a non-empty text
-/// buffer. Falls back to the bare `<msg>` shape when offset is `0`, the
-/// `file_idx` is out of range, or the source text for that file is empty
-/// — hand-built `Program::default()` instances in tests stay legible.
+/// buffer. Falls back to the bare `<msg>` shape when the `file_idx` is out
+/// of range or the source text for that file is empty — hand-built
+/// `Program::default()` instances in tests stay legible.
 /// The label is omitted when empty (single-file `parse_program` calls
 /// leave it blank), keeping single-file output identical to the previous
 /// `at line X, col Y` shape so the LSP regex in
 /// `src/bin/jwc_lsp.rs::extract_line_col` still resolves.
+///
+/// Offset `0` is a real position, not a sentinel: a file whose first byte
+/// starts a declaration is completely ordinary, and treating it as "no
+/// location" left those errors unattributed. An empty `sources` entry is
+/// already the signal for a synthesized program, so the emptiness checks
+/// below carry that job on their own.
 fn loc_in(program: &Program, file_idx: usize, offset: usize, msg: &str) -> anyhow::Error {
     let Some(file) = program.sources.get(file_idx) else {
         return anyhow!("{msg}");
     };
-    if offset == 0 || file.text.is_empty() || offset >= file.text.len() {
+    if file.text.is_empty() || offset >= file.text.len() {
         return anyhow!("{msg}");
     }
     let sm = SourceMap::new(&file.text);
@@ -498,12 +504,15 @@ pub fn validate_program(program: &Program) -> Result<()> {
                 if mw_ref.contains('.') {
                     continue;
                 }
-                bail!(
-                    "Route {} {} references unknown middleware '{}'",
-                    route.method,
-                    route.path,
-                    mw_ref
-                );
+                return Err(loc_in(
+                    program,
+                    route.file_idx,
+                    route.offset,
+                    &format!(
+                        "Route {} {} references unknown middleware '{}'",
+                        route.method, route.path, mw_ref
+                    ),
+                ));
             }
         }
     }

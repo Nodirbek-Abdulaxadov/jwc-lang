@@ -43,7 +43,19 @@ pub fn new_project(target: &Path, name: &str, kind: templates::TemplateKind) -> 
     Ok(())
 }
 
-/// Parse + validate a single `.jwc` file. Prints `OK` on success.
+/// Parse + validate a `.jwc` file. Prints `OK` on success.
+///
+/// When the file belongs to a project (a `jwcproj.json` exists at or above
+/// it), validation runs against the **merged project program**, not the file
+/// alone. A JWC project is one flat namespace: entities live in
+/// `Data/AppDbContext.jwc`, middleware in `Infrastructure/`, and the routes
+/// that use them in a third file. Validating a file in isolation reports
+/// every one of those cross-file references as unknown, so a project that
+/// builds and runs cleanly still reports errors like
+/// `Unknown entity 'Wallet' used in select expression` on nearly every file.
+///
+/// The file's own syntax is still parsed first, so a syntax error is reported
+/// against the file the user actually named, with its line and column.
 ///
 /// When `typecheck` is true (the default — only the CLI's `--no-typecheck`
 /// escape hatch flips it to false), the gradual static type checker
@@ -52,6 +64,22 @@ pub fn check(file: &Path, typecheck: bool) -> Result<()> {
     let source = read_source(file)?;
     let program = parser::parse_program(&source)
         .with_context(|| format!("Failed to parse {}", file.display()))?;
+
+    if let Ok(root) = project::find_project_root(file) {
+        project::load_project_from_root_with(&root, project::LoadOpts { typecheck }).with_context(
+            || {
+                format!(
+                    "Validation failed for the project containing {}",
+                    file.display()
+                )
+            },
+        )?;
+        println!("OK");
+        return Ok(());
+    }
+
+    // Standalone file — no manifest above it, so the file is all there is to
+    // check. Cross-file references can't be resolved and aren't expected to.
     parser::validate_program(&program)
         .with_context(|| format!("Validation failed for {}", file.display()))?;
     if typecheck {

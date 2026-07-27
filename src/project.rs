@@ -391,6 +391,56 @@ pub fn load_project_from_root(root: &Path) -> Result<LoadedProject> {
     load_project_from_root_with(root, LoadOpts::default())
 }
 
+/// Merge every `.jwc` file under `root` into one [`Program`] for
+/// **diagnostics**, substituting `overrides` for the on-disk contents of the
+/// paths they name.
+///
+/// The language server is the caller. It needs two things
+/// [`load_project_from_root`] can't give it:
+///
+/// 1. **Unsaved buffers.** The editor's in-memory text is the truth for files
+///    the user is editing; siblings still come from disk.
+/// 2. **Best-effort merging.** A sibling that doesn't currently parse (the
+///    user is mid-edit in another tab) is skipped rather than failing the
+///    whole load, so diagnostics for the file in front of the user don't
+///    blank out. The caller parses the focused file itself and reports its
+///    syntax errors precisely.
+///
+/// It also skips the `main.jwc` requirement and dependency resolution: an
+/// editor must not block on the network for a keystroke, and neither
+/// condition affects whether references resolve *within* the project.
+pub fn merge_project_sources(
+    root: &Path,
+    overrides: &std::collections::HashMap<PathBuf, String>,
+) -> Result<Program> {
+    let source_files = collect_jwc_files(root)?;
+    let mut program = Program::default();
+    for path in &source_files {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = match overrides.get(path) {
+            Some(text) => text.clone(),
+            None => match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                // Unreadable sibling (deleted, permissions) — skip it rather
+                // than losing every diagnostic for the focused file.
+                Err(_) => continue,
+            },
+        };
+        let file_prog = match crate::parser::parse_program_with_label(&content, &rel) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // A merge conflict (duplicate decl name) is likewise not worth
+        // discarding the whole program over.
+        let _ = merge_program(&mut program, file_prog);
+    }
+    Ok(program)
+}
+
 pub fn load_project_from_root_with(root: &Path, opts: LoadOpts) -> Result<LoadedProject> {
     let manifest_path =
         find_manifest_in_dir(root).ok_or_else(|| anyhow!("jwc project not found"))?;

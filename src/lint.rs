@@ -6,6 +6,27 @@ use crate::ast::{Expr, Program, Stmt, WhereExpr};
 pub struct LintWarning {
     pub code: &'static str,
     pub message: String,
+    /// Index into [`Program::sources`] for the file that declared the symbol
+    /// this warning is about.
+    ///
+    /// Lint runs over the *merged* project program, so without this a caller
+    /// can't tell which file a warning belongs to. The language server needs
+    /// it to publish a warning against the file that actually declares the
+    /// symbol instead of repeating every project warning on every open file.
+    ///
+    /// `None` when the program carries no source table (hand-built
+    /// `Program::default()` instances, single-file `parse_program` callers).
+    pub file_idx: Option<usize>,
+}
+
+impl LintWarning {
+    /// Resolve this warning's source label (`"Infrastructure/Auth.jwc"`)
+    /// against the program it came from. `None` when the program has no
+    /// source table or the index is out of range.
+    pub fn source_label<'a>(&self, program: &'a Program) -> Option<&'a str> {
+        let label = program.sources.get(self.file_idx?)?.label.as_str();
+        (!label.is_empty()).then_some(label)
+    }
 }
 
 pub fn lint_program(program: &Program) -> Vec<LintWarning> {
@@ -41,6 +62,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
             warnings.push(LintWarning {
                 code: "W001",
                 message: format!("function '{}' is defined but never called", function.name),
+                file_idx: Some(function.file_idx),
             });
         }
     }
@@ -74,6 +96,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
                     "middleware '{}' is declared but never attached to a route",
                     mw.name
                 ),
+                file_idx: Some(mw.file_idx),
             });
         }
     }
@@ -98,20 +121,32 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         })
         .collect();
 
-    let mut select_sites: Vec<(String, bool, Option<WhereExpr>)> = Vec::new();
+    // Each site carries the `file_idx` of the declaration it was found in so
+    // the warning can be attributed back to a file after the project merge.
+    // The error handler is the one body with no `file_idx` of its own.
+    let mut select_sites: Vec<(String, bool, Option<WhereExpr>, Option<usize>)> = Vec::new();
+    let collect_from = |body: &[Stmt], file_idx: Option<usize>, out: &mut Vec<_>| {
+        let mut local = Vec::new();
+        collect_select_sites(body, &mut local);
+        out.extend(
+            local
+                .into_iter()
+                .map(|(entity, first, w)| (entity, first, w, file_idx)),
+        );
+    };
     for f in &program.functions {
-        collect_select_sites(&f.body, &mut select_sites);
+        collect_from(&f.body, Some(f.file_idx), &mut select_sites);
     }
     for r in &program.routes {
-        collect_select_sites(&r.body, &mut select_sites);
+        collect_from(&r.body, Some(r.file_idx), &mut select_sites);
     }
     for mw in &program.middlewares {
-        collect_select_sites(&mw.body, &mut select_sites);
+        collect_from(&mw.body, Some(mw.file_idx), &mut select_sites);
     }
     if let Some(eh) = &program.error_handler {
-        collect_select_sites(&eh.body, &mut select_sites);
+        collect_from(&eh.body, None, &mut select_sites);
     }
-    for (entity, first, where_clause) in &select_sites {
+    for (entity, first, where_clause, file_idx) in &select_sites {
         if *first {
             continue;
         }
@@ -138,6 +173,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
                         message: format!(
                             "single-row `select {entity}` on PK `{col}` is missing `first` — add `first` to return one row instead of an array"
                         ),
+                        file_idx: *file_idx,
                     });
                 }
             }
@@ -167,6 +203,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
                     "function '{}' has statements after a top-level `return` — they cannot run",
                     f.name
                 ),
+                file_idx: Some(f.file_idx),
             });
         }
     }
@@ -182,6 +219,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
                     r.method.to_uppercase(),
                     r.path
                 ),
+                file_idx: Some(r.file_idx),
             });
         }
     }
@@ -193,6 +231,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
                     "middleware '{}' has statements after a top-level `return` — they cannot run",
                     mw.name
                 ),
+                file_idx: Some(mw.file_idx),
             });
         }
     }
@@ -208,6 +247,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
                     "function '{}' has an empty body — handler returns null silently",
                     function.name
                 ),
+                file_idx: Some(function.file_idx),
             });
         }
     }
@@ -226,6 +266,7 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
                     "function '{}' shadows a built-in — calls resolve to the user-defined version, hiding the built-in",
                     function.name
                 ),
+                file_idx: Some(function.file_idx),
             });
         }
     }
@@ -699,5 +740,66 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|w| w.code == "W002" && w.message.contains("Unused")));
+    }
+
+    /// Lint runs over the merged project program, so each warning has to name
+    /// the file that declared the symbol. Without this the language server
+    /// can't tell whose warning it is and republishes every project warning on
+    /// every open file.
+    #[test]
+    fn warnings_are_attributed_to_the_declaring_file() {
+        let mw_src = "middleware Unused { return 1; }\n";
+        let route_src = "route GET \"/x\" { return json(\"ok\"); }\n";
+
+        let mut program = crate::ast::Program::default();
+        crate::project::merge_program(
+            &mut program,
+            crate::parser::parse_program_with_label(mw_src, "Infra/Unused.jwc").unwrap(),
+        )
+        .unwrap();
+        crate::project::merge_program(
+            &mut program,
+            crate::parser::parse_program_with_label(route_src, "Routes.jwc").unwrap(),
+        )
+        .unwrap();
+        validate_program(&program).unwrap();
+
+        let warnings = lint_program(&program);
+        let w = warnings
+            .iter()
+            .find(|w| w.code == "W002")
+            .expect("unused middleware should warn");
+        assert_eq!(
+            w.source_label(&program),
+            Some("Infra/Unused.jwc"),
+            "W002 must point at the file declaring the middleware"
+        );
+    }
+
+    /// The mirror case: a middleware declared in one file and attached to a
+    /// route in another is used, and must not warn. Analysing either file on
+    /// its own reports it as both unused and unknown at the same time.
+    #[test]
+    fn middleware_used_from_another_file_does_not_warn() {
+        let mw_src = "middleware Auth { return 1; }\n";
+        let route_src = "route GET \"/x\" use Auth { return json(\"ok\"); }\n";
+
+        let mut program = crate::ast::Program::default();
+        crate::project::merge_program(
+            &mut program,
+            crate::parser::parse_program_with_label(mw_src, "Infra/Auth.jwc").unwrap(),
+        )
+        .unwrap();
+        crate::project::merge_program(
+            &mut program,
+            crate::parser::parse_program_with_label(route_src, "Routes.jwc").unwrap(),
+        )
+        .unwrap();
+        validate_program(&program).unwrap();
+
+        assert!(
+            !lint_program(&program).iter().any(|w| w.code == "W002"),
+            "middleware attached from a sibling file is used"
+        );
     }
 }

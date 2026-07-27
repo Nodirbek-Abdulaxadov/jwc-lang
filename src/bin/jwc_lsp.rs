@@ -67,13 +67,25 @@ struct SymbolEntry {
     #[allow(dead_code)]
     kind: SymbolKindTag,
     /// Index into `Program::sources` for the file this decl came from.
-    /// The LSP currently runs single-file but the field is part of the
-    /// stable shape: cross-file rename / definition (Phase 8E) needs it.
     #[allow(dead_code)]
     file_idx: usize,
-    /// Byte offset of the declaration's name token inside the source text.
+    /// Project-relative label of the declaring file (`"Data/Ctx.jwc"`), taken
+    /// from `Program::sources[file_idx].label`. Empty when the program has no
+    /// source table (single-file analysis), meaning "the focused document".
+    file_label: String,
+    /// The name token's range **within its own file**, resolved at index time
+    /// while that file's text is in hand. Query-time handlers can't recompute
+    /// it: they only hold the focused document's text, which is the wrong
+    /// text for a symbol declared in a sibling file.
+    range: Range,
+    /// Byte offset of the declaration's name token inside its file's text.
+    /// Superseded by `range` for LSP responses; retained as the byte-level
+    /// view the index tests assert against and the natural basis for a future
+    /// reference search.
+    #[allow(dead_code)]
     offset_start: usize,
     /// `offset_start + name.len()`.
+    #[allow(dead_code)]
     offset_end: usize,
 }
 
@@ -127,12 +139,52 @@ impl Backend {
         }
     }
 
-    /// Parse + validate + lint the given source and translate the results into
-    /// LSP `Diagnostic` values.
-    fn compute_diagnostics(source: &str) -> Vec<Diagnostic> {
+    /// Build the merged program for the project `uri` belongs to, with every
+    /// open editor buffer substituted for its on-disk contents.
+    ///
+    /// A JWC project is one flat namespace — entities, middleware and dome
+    /// functions routinely live in sibling files. Analysing a file on its own
+    /// reports each of those cross-file references as unknown, which is what
+    /// made a healthy project show a screenful of errors that the CLI never
+    /// produced.
+    ///
+    /// Returns `None` for a file with no `jwcproj.json` above it, where the
+    /// single-file view is the correct one.
+    async fn project_program(&self, uri: &Url) -> Option<Program> {
+        let path = uri.to_file_path().ok()?;
+        let root = jwc::project::find_project_root(&path).ok()?;
+
+        // Unsaved edits in any open tab must win over what's on disk,
+        // otherwise diagnostics lag a save behind.
+        let docs = self.documents.read().await;
+        let mut overrides = HashMap::new();
+        for (doc_uri, text) in docs.iter() {
+            if let Ok(p) = doc_uri.to_file_path() {
+                overrides.insert(p, text.clone());
+            }
+        }
+        drop(docs);
+
+        jwc::project::merge_project_sources(&root, &overrides).ok()
+    }
+
+    /// Parse + validate + lint, and translate the results into LSP
+    /// `Diagnostic` values.
+    ///
+    /// `project` is the merged program for the whole project when the file
+    /// belongs to one; validation and lint run against it so cross-file
+    /// references resolve. `file_label` is the file's project-relative path,
+    /// used to keep another file's lint warnings from being republished here.
+    fn compute_diagnostics(
+        source: &str,
+        project: Option<&Program>,
+        file_label: Option<&str>,
+    ) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
 
-        let program = match parse_program(source) {
+        // The focused file is always parsed on its own so a syntax error
+        // carries this file's line and column.
+        let own_program = match parse_program(source) {
             Ok(p) => p,
             Err(err) => {
                 let msg = err.to_string();
@@ -152,24 +204,35 @@ impl Backend {
             }
         };
 
-        if let Err(err) = validate_program(&program) {
-            // validate_program errors don't carry line/col, so anchor them at
-            // the top of the file.
-            diags.push(Diagnostic {
-                range: zero_range(),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: Some(NumberOrString::String("validate".into())),
-                code_description: None,
-                source: Some("jwc".into()),
-                message: err.to_string(),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
+        let analysed = project.unwrap_or(&own_program);
+
+        if let Err(err) = validate_program(analysed) {
+            let msg = err.to_string();
+            // Validating the merged project surfaces errors that belong to a
+            // sibling file. Those carry an `at <file>:<line>:<col>` marker —
+            // publish them against that file only, otherwise a single real
+            // error is repeated on every file in the project. Errors with no
+            // marker can't be attributed, so they stay on the current file
+            // rather than being dropped.
+            match located_diagnostic(&msg) {
+                Some((label, range)) => {
+                    if file_label.is_none_or(|f| f == label) {
+                        diags.push(validate_diagnostic(msg, range));
+                    }
+                }
+                None => diags.push(validate_diagnostic(msg, zero_range())),
+            }
             return diags;
         }
 
-        for w in lint_program(&program) {
+        for w in lint_program(analysed) {
+            // Lint ran over the merged project, so a warning about a symbol
+            // declared elsewhere belongs on that file, not this one.
+            if let (Some(label), Some(warned_on)) = (file_label, w.source_label(analysed)) {
+                if label != warned_on {
+                    continue;
+                }
+            }
             diags.push(Diagnostic {
                 range: zero_range(),
                 severity: Some(DiagnosticSeverity::WARNING),
@@ -186,18 +249,54 @@ impl Backend {
         diags
     }
 
+    /// Resolve a `Program::sources` label to a file URI, relative to the
+    /// project that `current` belongs to. Returns `None` for an empty label
+    /// (single-file analysis) or when the file sits outside a project, in
+    /// which case the caller falls back to the focused document.
+    fn uri_for_label(current: &Url, label: &str) -> Option<Url> {
+        if label.is_empty() {
+            return None;
+        }
+        let path = current.to_file_path().ok()?;
+        let root = jwc::project::find_project_root(&path).ok()?;
+        Url::from_file_path(root.join(label)).ok()
+    }
+
+    /// The file's project-relative label (`"Features/Wallets/Routes.jwc"`),
+    /// matching the labels `merge_project_sources` stamps on each source.
+    fn project_label(uri: &Url) -> Option<String> {
+        let path = uri.to_file_path().ok()?;
+        let root = jwc::project::find_project_root(&path).ok()?;
+        Some(
+            path.strip_prefix(&root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    }
+
     async fn analyze_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
-        let diags = Self::compute_diagnostics(&text);
-        // Build a symbol index from a successful parse. If parsing fails we
-        // clear the index so stale lookups can't return phantom hits.
-        let index = parse_program(&text)
-            .ok()
-            .map(|p| build_symbol_index(&p, &text))
-            .unwrap_or_default();
+        // Record the buffer first so `project_program` merges the text the
+        // user is looking at, not the last-saved copy.
         {
             let mut docs = self.documents.write().await;
-            docs.insert(uri.clone(), text);
+            docs.insert(uri.clone(), text.clone());
         }
+
+        let project = self.project_program(&uri).await;
+        let label = Self::project_label(&uri);
+        let diags = Self::compute_diagnostics(&text, project.as_ref(), label.as_deref());
+        // Build a symbol index from a successful parse. If parsing fails we
+        // clear the index so stale lookups can't return phantom hits.
+        //
+        // The index is seeded from the merged project so hover, go-to-
+        // definition and completion resolve symbols declared in sibling
+        // files — the same root cause as the false diagnostics above.
+        let index = match (&project, parse_program(&text)) {
+            (Some(p), Ok(_)) => build_symbol_index(p, &text),
+            (None, Ok(own)) => build_symbol_index(&own, &text),
+            (_, Err(_)) => SymbolIndex::default(),
+        };
         {
             let mut idx = self.indices.write().await;
             idx.insert(uri.clone(), index);
@@ -314,11 +413,17 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        // Re-parse on demand. parse_program is fast enough for interactive use
-        // and avoids us having to cache an AST that may be stale on errors.
-        let program = match parse_program(&text) {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
+        // Prefer the merged project: hovering `AppDbContext.Wallet` in a
+        // service file has to find the entity even though it's declared in
+        // another file. Falls back to a re-parse of this document when the
+        // file isn't part of a project. parse_program is fast enough for
+        // interactive use and avoids caching an AST that may be stale.
+        let program = match self.project_program(&uri).await {
+            Some(p) => p,
+            None => match parse_program(&text) {
+                Ok(p) => p,
+                Err(_) => return Ok(None),
+            },
         };
 
         let summary = match hover_summary(&program, &ident) {
@@ -365,14 +470,14 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let range = match offsets_to_range(&text, entry.offset_start, entry.offset_end) {
-            Some(r) => r,
-            None => return Ok(None),
-        };
+        // The declaration may live in a sibling file. `entry.range` was
+        // resolved against that file's own text at index time, so it is used
+        // as-is rather than recomputed against the focused document.
+        let target_uri = Self::uri_for_label(&uri, &entry.file_label).unwrap_or(uri);
 
         Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri,
-            range,
+            uri: target_uri,
+            range: entry.range,
         })))
     }
 
@@ -434,13 +539,41 @@ impl LanguageServer for Backend {
             )));
         }
 
-        let edits = collect_rename_edits(&text, &old_name, &new_name);
-        if edits.is_empty() {
-            return Ok(None);
+        // Rename every file in the project, not just this one. A JWC project
+        // is a single flat namespace, so an entity declared in one file is
+        // referenced from many others; rewriting only the focused document
+        // would leave every other reference pointing at a name that no longer
+        // exists — a silent break the user wouldn't see until the next build.
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        match self.project_program(&uri).await {
+            Some(program) => {
+                for source in &program.sources {
+                    let edits = collect_rename_edits(&source.text, &old_name, &new_name);
+                    if edits.is_empty() {
+                        continue;
+                    }
+                    match Self::uri_for_label(&uri, &source.label) {
+                        Some(target) => {
+                            changes.insert(target, edits);
+                        }
+                        // Unlabelled source — can only be the focused buffer.
+                        None => {
+                            changes.insert(uri.clone(), edits);
+                        }
+                    }
+                }
+            }
+            None => {
+                let edits = collect_rename_edits(&text, &old_name, &new_name);
+                if !edits.is_empty() {
+                    changes.insert(uri.clone(), edits);
+                }
+            }
         }
 
-        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        changes.insert(uri, edits);
+        if changes.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(WorkspaceEdit {
             changes: Some(changes),
             document_changes: None,
@@ -475,6 +608,49 @@ impl LanguageServer for Backend {
 
 /// Convert a 1-based `(line, col)` mention in a parser error message into an
 /// LSP `Range`. Returns `None` if the message doesn't carry one.
+/// Pull the `at <file>:<line>:<col>` marker `validate.rs::loc_in` renders for
+/// a multi-file program, returning the file label and the range it points at.
+///
+/// `None` for the single-file `at line X, col Y` shape and for errors raised
+/// without a location — those can't be attributed to a sibling file.
+fn located_diagnostic(msg: &str) -> Option<(String, Range)> {
+    static RE_SRC: &str = r"at ([^\s:]+\.jwc):(\d+):(\d+)";
+    let re = Regex::new(RE_SRC).ok()?;
+    let caps = re.captures(msg)?;
+    let label = caps.get(1)?.as_str().to_string();
+    let line: u32 = caps.get(2)?.as_str().parse().ok()?;
+    let col: u32 = caps.get(3)?.as_str().parse().ok()?;
+    let line = line.saturating_sub(1);
+    let col = col.saturating_sub(1);
+    Some((
+        label,
+        Range {
+            start: Position {
+                line,
+                character: col,
+            },
+            end: Position {
+                line,
+                character: col + 1,
+            },
+        },
+    ))
+}
+
+fn validate_diagnostic(message: String, range: Range) -> Diagnostic {
+    Diagnostic {
+        range,
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(NumberOrString::String("validate".into())),
+        code_description: None,
+        source: Some("jwc".into()),
+        message,
+        related_information: None,
+        tags: None,
+        data: None,
+    }
+}
+
 fn extract_line_col(msg: &str) -> Option<Range> {
     // Compiled lazily on first call; cheap to keep static.
     static RE_SRC: &str = r"at line (\d+), col (\d+)";
@@ -741,18 +917,45 @@ fn build_symbol_index(program: &Program, source: &str) -> SymbolIndex {
             .push(entry);
     };
 
+    // A declaration's `offset` indexes into the text of the file it came
+    // from, which is only `source` for a single-file program. Once the
+    // program is a merged project, resolving every offset against the
+    // focused file's text would hand back spans pointing at unrelated code.
+    // `Program::sources` carries each file's verbatim text, so use that when
+    // it's populated.
+    let file_text = |file_idx: usize| -> &str {
+        program
+            .sources
+            .get(file_idx)
+            .map(|s| s.text.as_str())
+            .filter(|t| !t.is_empty())
+            .unwrap_or(source)
+    };
+    let file_label = |file_idx: usize| -> String {
+        program
+            .sources
+            .get(file_idx)
+            .map(|s| s.label.clone())
+            .unwrap_or_default()
+    };
+
     for f in &program.functions {
-        if let Some((s, e)) = name_span_after_keyword(source, f.offset, &f.name) {
-            push(
-                SymbolEntry {
-                    name: f.name.clone(),
-                    kind: SymbolKindTag::Function,
-                    file_idx: f.file_idx,
-                    offset_start: s,
-                    offset_end: e,
-                },
-                &mut index,
-            );
+        let text = file_text(f.file_idx);
+        if let Some((s, e)) = name_span_after_keyword(text, f.offset, &f.name) {
+            if let Some(range) = offsets_to_range(text, s, e) {
+                push(
+                    SymbolEntry {
+                        name: f.name.clone(),
+                        kind: SymbolKindTag::Function,
+                        file_idx: f.file_idx,
+                        file_label: file_label(f.file_idx),
+                        range,
+                        offset_start: s,
+                        offset_end: e,
+                    },
+                    &mut index,
+                );
+            }
         }
         index.user_functions.push(f.name.clone());
     }
@@ -761,46 +964,61 @@ fn build_symbol_index(program: &Program, source: &str) -> SymbolIndex {
             ModelKind::Entity => SymbolKindTag::Entity,
             ModelKind::Class => SymbolKindTag::Class,
         };
-        if let Some((s, e)) = name_span_after_keyword(source, m.offset, &m.name) {
-            push(
-                SymbolEntry {
-                    name: m.name.clone(),
-                    kind,
-                    file_idx: m.file_idx,
-                    offset_start: s,
-                    offset_end: e,
-                },
-                &mut index,
-            );
+        let text = file_text(m.file_idx);
+        if let Some((s, e)) = name_span_after_keyword(text, m.offset, &m.name) {
+            if let Some(range) = offsets_to_range(text, s, e) {
+                push(
+                    SymbolEntry {
+                        name: m.name.clone(),
+                        kind,
+                        file_idx: m.file_idx,
+                        file_label: file_label(m.file_idx),
+                        range,
+                        offset_start: s,
+                        offset_end: e,
+                    },
+                    &mut index,
+                );
+            }
         }
     }
     for mw in &program.middlewares {
-        if let Some((s, e)) = name_span_after_keyword(source, mw.offset, &mw.name) {
-            push(
-                SymbolEntry {
-                    name: mw.name.clone(),
-                    kind: SymbolKindTag::Middleware,
-                    file_idx: mw.file_idx,
-                    offset_start: s,
-                    offset_end: e,
-                },
-                &mut index,
-            );
+        let text = file_text(mw.file_idx);
+        if let Some((s, e)) = name_span_after_keyword(text, mw.offset, &mw.name) {
+            if let Some(range) = offsets_to_range(text, s, e) {
+                push(
+                    SymbolEntry {
+                        name: mw.name.clone(),
+                        kind: SymbolKindTag::Middleware,
+                        file_idx: mw.file_idx,
+                        file_label: file_label(mw.file_idx),
+                        range,
+                        offset_start: s,
+                        offset_end: e,
+                    },
+                    &mut index,
+                );
+            }
         }
         index.middlewares.push(mw.name.clone());
     }
     for db in &program.dbcontexts {
-        if let Some((s, e)) = name_span_after_keyword(source, db.offset, &db.name) {
-            push(
-                SymbolEntry {
-                    name: db.name.clone(),
-                    kind: SymbolKindTag::DbContext,
-                    file_idx: db.file_idx,
-                    offset_start: s,
-                    offset_end: e,
-                },
-                &mut index,
-            );
+        let text = file_text(db.file_idx);
+        if let Some((s, e)) = name_span_after_keyword(text, db.offset, &db.name) {
+            if let Some(range) = offsets_to_range(text, s, e) {
+                push(
+                    SymbolEntry {
+                        name: db.name.clone(),
+                        kind: SymbolKindTag::DbContext,
+                        file_idx: db.file_idx,
+                        file_label: file_label(db.file_idx),
+                        range,
+                        offset_start: s,
+                        offset_end: e,
+                    },
+                    &mut index,
+                );
+            }
         }
     }
 
@@ -1198,9 +1416,57 @@ async function doStuff() { return null; }
     #[test]
     fn diagnostics_for_parse_error_have_position() {
         let src = "entity {";
-        let diags = Backend::compute_diagnostics(src);
+        let diags = Backend::compute_diagnostics(src, None, None);
         assert!(!diags.is_empty());
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    /// Multi-file validation errors carry `at <file>:<line>:<col>`, which is
+    /// how a project-wide error gets published against the one file it
+    /// belongs to instead of every file in the project.
+    #[test]
+    fn located_diagnostic_extracts_file_and_position() {
+        let msg = "Route GET /stats references unknown middleware 'Ghost' \
+                   at Features/Stats/StatsRoutes.jwc:3:1";
+        let (label, range) = located_diagnostic(msg).expect("should parse a located error");
+        assert_eq!(label, "Features/Stats/StatsRoutes.jwc");
+        assert_eq!(range.start.line, 2, "1-based line 3 -> 0-based 2");
+        assert_eq!(range.start.character, 0);
+    }
+
+    /// Single-file errors use `at line X, col Y` and carry no file, so they
+    /// must not be mistaken for another file's problem and filtered away.
+    #[test]
+    fn located_diagnostic_ignores_single_file_shape() {
+        assert!(located_diagnostic("expected ';' at line 8, col 35").is_none());
+        assert!(located_diagnostic("Unknown entity 'Wallet'").is_none());
+    }
+
+    /// A project-wide error belonging to another file is dropped here; the
+    /// file it names publishes it instead.
+    #[test]
+    fn diagnostics_skip_errors_owned_by_another_file() {
+        // Parses fine on its own; the project error points elsewhere.
+        let src = "route GET \"/x\" { return json(\"ok\"); }\n";
+        let mut project = Program::default();
+        jwc::project::merge_program(
+            &mut project,
+            jwc::parser::parse_program_with_label(
+                "route GET \"/y\" use Ghost { return json(\"ok\"); }\n",
+                "Other.jwc",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let diags = Backend::compute_diagnostics(src, Some(&project), Some("Mine.jwc"));
+        assert!(
+            diags.is_empty(),
+            "Other.jwc's error must not surface on Mine.jwc, got: {diags:?}"
+        );
+
+        let owned = Backend::compute_diagnostics(src, Some(&project), Some("Other.jwc"));
+        assert_eq!(owned.len(), 1, "the owning file still reports it");
     }
 
     #[test]
@@ -1209,7 +1475,7 @@ async function doStuff() { return null; }
             function helper() { return 1; }
             function main() { print("hi"); }
         "#;
-        let diags = Backend::compute_diagnostics(src);
+        let diags = Backend::compute_diagnostics(src, None, None);
         assert!(diags.iter().any(
             |d| d.severity == Some(DiagnosticSeverity::WARNING) && d.message.contains("helper")
         ));
