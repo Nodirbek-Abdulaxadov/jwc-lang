@@ -153,8 +153,8 @@ Columns:
 | `sha1` | — | 1 | ✅ |
 | `md5` | — | 1 | ✅ |
 | `hmac_sha256` | — | 2 | ✅ |
-| `jwt_sign` | — | 1..2 | — |
-| `jwt_verify` | — | 1..2 | — |
+| `jwt_sign` | — | 1..2 | ✅ |
+| `jwt_verify` | — | 1..2 | ✅ |
 | `hash_password` | — | 1 | ✅ |
 | `verify_password` | — | 2 | ✅ |
 

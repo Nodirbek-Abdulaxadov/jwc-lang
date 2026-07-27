@@ -3,6 +3,155 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — Field feedback: the DSL, the editor, and the HTTP contract
+
+Two real applications — MyWallet and jwc-shortener — were written against
+0.6.x and their authors wrote down every place the language got in the way.
+This release works through both lists. Nothing here is speculative; each
+item below started as a workaround somebody had already shipped.
+
+### BREAKING
+
+**One error envelope.** The runtime returned three different error shapes
+and a client had to handle all of them:
+
+```text
+{"errors":{"email":"pattern(...)","password":"minLength(8)"}}   // validate
+{"status":404,"error":"Not Found","method":"GET","path":"/x"}   // router
+{"error":"category has transactions; delete them first"}        // handler
+```
+
+They now share one shape, with `code` as the stable key to branch on
+(`validation_failed`, `not_found`, `method_not_allowed`, `timeout`,
+`internal_error`):
+
+```text
+{ "error": "…", "status": 400, "code": "validation_failed", "details": {…} }
+```
+
+Per-field validation detail moved from a top-level `errors` object to
+`details`, and every body gained `status` and `code`. A client reading
+`.error` for the message keeps working — that key is now present on all of
+them, where before it was missing from the validation response.
+
+**A 500 no longer echoes server internals.** The raw error used to go
+straight to the caller, putting internal Rust type names and SQL text in
+front of anyone who could make a request. The response is now a generic
+message pointing at the `x-request-id`; the full error is still logged
+server-side, and `JWC_DEBUG_ERRORS=1` restores it locally.
+
+### Language
+
+- **`unique(a, b);`** — table-level composite unique constraints, checked
+  against the entity at `jwc check`. A join table's `(taskId, labelId)`
+  pair previously had to be enforced by a select-then-insert in
+  application code, which is a TOCTOU race.
+- **`col int index;`** — index declarations. `gen-sql` emitted no
+  `CREATE INDEX` at all, so every foreign-key column was unindexed and
+  `where user_id == @u` was a sequential scan.
+- **`null`** is accepted as a spelling of `nullable`.
+- **`&&` and `||`** as aliases for `and` / `or`; `and` / `or` keep working.
+- **`+=` / `-=` / `*=` / `/=`** on plain variables and object fields.
+- **`?:` and `??`**, both short-circuiting, so `x ?? expensive()` is safe
+  to write. `?:` requires a bool condition; `??` tests for null
+  specifically, so `0` and `""` pass through as themselves.
+- **`async` / `public` / `private` on dome members.** Domes hold the
+  business logic, so `async` was available everywhere except where domain
+  code is written.
+
+### HTTP runtime
+
+- **CORS.** There was none — an `OPTIONS` preflight fell through to the
+  route table and came back 404, so a browser frontend on another origin
+  needed a reverse proxy in front of the server. `JWC_CORS_ORIGINS` turns
+  it on; it stays off unless configured, and `*` plus credentials is
+  refused at boot rather than silently ignored by the browser.
+- **405 for a wrong verb.** A path that existed under another method was
+  indistinguishable from one that didn't exist — both 404. Wrong-verb
+  requests now get 405 with an `Allow` header.
+- **Dual-stack bind.** The listener bound `0.0.0.0`, so a Node dev proxy
+  resolving `localhost` to `::1` got `ECONNREFUSED`. It now binds `[::]`
+  and falls back to IPv4 where there is no IPv6 stack.
+
+### Database
+
+- **Numeric parameters bind by column type, not value magnitude.** An
+  `i64` was passed for every integer regardless of the column, so an
+  `int4` column raised `cannot convert between the Rust type i64 and the
+  Postgres type int4`. Binding now resolves against the target type;
+  `decimal` goes through the value's shortest text form so money doesn't
+  pick up `f64` drift.
+- **`raw_sql` routes on the statement's result shape.** Anything not
+  starting with `select` / `with` went down the exec path, so
+  `UPDATE … RETURNING url` returned the affected-row count and discarded
+  the column it asked for. A prepared statement with no result columns is
+  now an exec, anything else is a query.
+
+### Native AOT
+
+- `jwt_sign` / `jwt_verify` are supported, so a project using Bearer auth
+  can be built with `--native` at all.
+- Handled errors stop printing panic noise. `try { jwt_verify(…) } catch
+  { unauthorized() }` is every auth middleware, and each unauthenticated
+  request logged a panic message and a full backtrace for what the
+  interpreter reports as nothing. `RUST_BACKTRACE=1` restores the trace.
+- `decimal` / `numeric` columns work end to end. They mapped to
+  `PgKind::Float`, so writes hit `WrongType` and reads fell through to
+  `V::Null` — a money column came back empty with no error raised.
+- 404 / 405 use the same JSON envelope as the interpreter.
+
+### Editor
+
+- **`jwc check` and the language server validate against the whole
+  project.** Both parsed a single file in isolation, but a JWC project is
+  one flat namespace — so on a project `jwc lint`, `jwc test` and
+  `jwc run` all accept, the editor showed 12 diagnostics, including the
+  same middleware reported as both "declared but never attached" and
+  "unknown". Warnings are now published on the file that declares the
+  symbol, and validation errors are anchored at their real line.
+- **Go-to-definition and rename work across files.** Rename previously
+  resolved a sibling file's symbol and then edited only the current one.
+- **`textDocument/formatting` is implemented and advertised.** The
+  capability was never declared, so format-on-save came back `-32601
+  Method not found` and silently did nothing.
+- **The extension warns when `jwc-lsp` is older than the extension.** The
+  two update through different channels, and a stale binary flags valid
+  code as an error in the Problems panel.
+
+### `jwc fmt`
+
+Four ways the formatter produced source the parser then rejected:
+`min_length` / `max_length` instead of `minLength` / `maxLength`,
+`dbcontext AppDb Postgres;` without the `:`, `pub function` (the lexer
+only knows `public`), and `function Dome.member()` — which deleted the
+`dome` wrapper, so formatting any comment-free file containing a dome
+corrupted it. Files carrying comments took the line-based fallback, which
+is the only reason this wasn't constant.
+
+The durable fix is a round-trip test over every declaration form; it is
+what found the last three.
+
+### Documentation
+
+A sweep of every fenced example found 37 of 136 unparseable, including the
+README's headline example — the first code anyone sees. It used a
+`dbcontext AppDb { Notes: Note }` block form and colon-separated entity
+fields, neither of which the parser has ever accepted. The surrounding
+claim was wrong too: one entity and one dbcontext do not yield CRUD
+routes; there is no route generation.
+
+`tests/docs_parse.rs` and `tests/snippets_parse.rs` keep docs and shipped
+snippets at zero parse failures. Deliberate excerpts are marked
+` ```jwc no-compile `.
+
+### Fixed
+
+- `jwc check main.jwc` failed on a bare relative filename —
+  `Path::parent("main.jwc")` is `""`, not `"."`, so the project root came
+  back empty and every path built from it was unreadable. `./main.jwc`
+  worked. Introduced by the project-aware `check` above, and caught before
+  release.
+
 ## [0.6.3] — Hotfix: native redirect with `V::Record` header object
 
 `statusCode(3xx, { Location: url })` stopped redirecting on the `--native`

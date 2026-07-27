@@ -4,10 +4,12 @@
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
 >
-> Joriy holat: **v0.6.1** — Phase 0–10 + **Phase 11 (Query Layer) yopildi**
+> Joriy holat: **v0.7.0** — Phase 0–10 + **Phase 11 (Query Layer) yopildi**
 > (Query Layer v3: Epic 1–5) + native query-layer parity. 1.0-blocker'lar
-> ketdi. Qolgan kamchiliklar pastdagi **Phase 11** va **Sprint Tracker**
-> (Sprint 8 — native parity) bo'limlarida ro'yxatlangan.
+> ketdi. v0.7.0 — real ilovalardan (MyWallet, jwc-shortener) kelgan
+> feedback bo'yicha DSL/editor/HTTP-kontrakt tuzatishlari; batafsil
+> `CHANGELOG.md`. Qolgan kamchiliklar pastdagi **Phase 11** va
+> **Sprint Tracker** (Sprint 8 — native parity) bo'limlarida ro'yxatlangan.
 > Sprint Tracker (pastda) yangi 1.0 yo'l xaritasini ("1.0 Readiness Plan")
 > aks ettiradi.
 
@@ -636,9 +638,9 @@ Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
 
 ## Priority Timeline (qayta hisoblangan, Go-yo'liga moslab)
 
-Hozirgi holat: Phase 0–11 yopildi (v0.6.1). **Phase 11 (Query Layer) tugadi** —
-1.0-blocker ketdi. Qolgan yagona sezilarli kamchilik — native AOT auth/crypto
-builtinlari (Sprint 14), lekin bu interpreter'da to'siq emas.
+Hozirgi holat: Phase 0–11 yopildi (v0.7.0). **Phase 11 (Query Layer) tugadi** —
+1.0-blocker ketdi. Native AOT auth/crypto builtinlari (`jwt_sign`/`jwt_verify`)
+v0.7.0'da yopildi.
 
 ```
 ✅ done   →  Phase 11.1–11.6 — JOIN + projection + filter + agg + eager-load
@@ -646,7 +648,10 @@ builtinlari (Sprint 14), lekin bu interpreter'da to'siq emas.
 ✅ v0.6.0 →  explicit JOIN (0 raw_sql) + op? + dynamic in-list + nested with
              + atomic update-set + live OpenAPI + native query-layer parity
 ✅ v0.6.1 →  hotfix: atomik update-set camelCase ustun
-keyingi  →  Sprint 8 davomi — native auth/crypto builtinlar (real-app native build)
+✅ v0.7.0 →  field feedback: index + unique(a,b) + &&/||/+=/?:/?? + CORS/405/
+             dual-stack + bitta error envelope + project-wide diagnostics +
+             fmt round-trip + native jwt_sign/jwt_verify va decimal
+keyingi  →  having(agg) + distinct, entity default/timestamps, `jwc test`
 keyin    →  v1.0.0-rc.1 — bake + external pilots → v1.0.0 LTS
 ```
 
