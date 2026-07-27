@@ -194,6 +194,12 @@ pub const REGISTRY: &[EnvVar] = &[
         doc: "Graceful shutdown budget before force-exit.",
     },
     EnvVar {
+        name: "JWC_DEBUG_ERRORS",
+        parse_kind: ParseKind::Bool,
+        default: "0",
+        doc: "Return the full error text on a 500 instead of a generic message. Local debugging only.",
+    },
+    EnvVar {
         name: "JWC_CORS_ORIGINS",
         parse_kind: ParseKind::Str,
         default: "",

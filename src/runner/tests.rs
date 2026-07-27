@@ -1482,8 +1482,16 @@ async fn validate_body_returns_400_on_missing_required_field() {
         .await
         .unwrap();
     assert_eq!(status, 400);
-    assert!(body.contains("\"errors\""));
-    assert!(body.contains("\"name\""));
+    // Unified envelope: the message is under `error`, the machine-readable
+    // kind under `code`, and the per-field detail under `details`.
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(doc["status"], 400);
+    assert_eq!(doc["code"], "validation_failed");
+    assert!(doc["error"].as_str().is_some());
+    assert!(
+        doc["details"]["name"].as_str().is_some(),
+        "body was: {body}"
+    );
 }
 
 #[tokio::test]
@@ -1804,7 +1812,8 @@ async fn wrong_method_on_existing_path_is_405_with_allow_header() {
             .unwrap();
 
     assert_eq!(status, 405, "body was: {body}");
-    assert!(body.contains("Method Not Allowed"), "body was: {body}");
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(doc["code"], "method_not_allowed", "body was: {body}");
     // Both declared verbs are advertised, sorted, per RFC 9110 §10.2.1.
     let allow = headers
         .iter()

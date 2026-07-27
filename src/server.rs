@@ -882,9 +882,7 @@ async fn handle_http_fallback(
                         &request_id,
                     );
                 }
-                let body = format!(
-                    "{{\"error\":\"request timed out after {timeout}s\",\"request_id\":\"{request_id}\"}}"
-                );
+                let body = crate::http_error::timeout(timeout);
                 let mut resp = Response::new(body.into());
                 *resp.status_mut() = StatusCode::GATEWAY_TIMEOUT;
                 resp.headers_mut().insert(
@@ -961,7 +959,7 @@ async fn handle_http_fallback(
             state.metrics.failed.fetch_add(1, Ordering::Relaxed);
             error_report::log_runtime_error(&format!("HTTP {} {} failed", method, uri.path()), &e);
             let msg = error_report::to_single_line(&e).replace('"', "'");
-            let body = format!("{{\"error\":\"{msg}\"}}");
+            let body = crate::http_error::internal(&msg);
             let mut resp = Response::new(body.into());
             *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             resp.headers_mut().insert(

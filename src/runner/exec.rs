@@ -381,9 +381,15 @@ impl<'a> Vm<'a> {
 
                 let errors = run_validation_rules(fields, &parsed);
                 if !errors.is_empty() {
-                    let mut error_doc = serde_json::Map::new();
+                    // Same envelope as every other error response; the
+                    // per-field detail lives under `details`. `__jwc_status__`
+                    // is the runner's internal status sentinel and is stripped
+                    // before the body reaches the client.
+                    let mut error_doc: serde_json::Map<String, JsonValue> = serde_json::from_str(
+                        &crate::http_error::validation_failed(JsonValue::Object(errors)),
+                    )
+                    .expect("envelope is a JSON object");
                     error_doc.insert("__jwc_status__".into(), json!(400));
-                    error_doc.insert("errors".into(), JsonValue::Object(errors));
                     return Ok(Flow::Return(Some(Value::Str(
                         JsonValue::Object(error_doc).to_string(),
                     ))));

@@ -60,20 +60,12 @@ impl<'a> Vm<'a> {
             if !path_matched.is_empty() {
                 path_matched.sort();
                 let allow = path_matched.join(", ");
-                return Ok((
-                    405,
-                    format!(
-                        "{{\"status\":405,\"error\":\"Method Not Allowed\",\"method\":\"{method}\",\"path\":\"{clean_path}\",\"allow\":\"{allow}\"}}"
-                    ),
-                    None,
-                    vec![("Allow".to_string(), allow)],
-                ));
+                let body = crate::http_error::method_not_allowed(method, &clean_path, &allow);
+                return Ok((405, body, None, vec![("Allow".to_string(), allow)]));
             }
             return Ok((
                 404,
-                format!(
-                    "{{\"status\":404,\"error\":\"Not Found\",\"method\":\"{method}\",\"path\":\"{clean_path}\"}}"
-                ),
+                crate::http_error::not_found(method, &clean_path),
                 None,
                 Vec::new(),
             ));

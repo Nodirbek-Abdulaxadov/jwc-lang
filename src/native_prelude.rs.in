@@ -1786,8 +1786,8 @@ async fn handle_axum_request(
             if !allowed.is_empty() {
                 let allow = allowed.join(", ");
                 let body = format!(
-                    "{{\"status\":405,\"error\":\"Method Not Allowed\",\"method\":\"{}\",\"path\":\"{}\",\"allow\":\"{}\"}}",
-                    method_str, clean, allow
+                    "{{\"code\":\"method_not_allowed\",\"details\":{{\"allow\":\"{}\",\"method\":\"{}\",\"path\":\"{}\"}},\"error\":\"{} is not allowed on {}\",\"status\":405}}",
+                    allow, method_str, clean, method_str, clean
                 );
                 return axum::response::Response::builder()
                     .status(405)
@@ -1797,8 +1797,8 @@ async fn handle_axum_request(
                     .unwrap();
             }
             let body = format!(
-                "{{\"status\":404,\"error\":\"Not Found\",\"method\":\"{}\",\"path\":\"{}\"}}",
-                method_str, clean
+                "{{\"code\":\"not_found\",\"details\":{{\"method\":\"{}\",\"path\":\"{}\"}},\"error\":\"No route for {} {}\",\"status\":404}}",
+                method_str, clean, method_str, clean
             );
             return axum::response::Response::builder()
                 .status(404)
