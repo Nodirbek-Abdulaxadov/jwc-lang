@@ -619,9 +619,15 @@ async fn query_text_on_conn(
         .await
         .with_context(|| "Failed to execute SQL query")?;
 
-    // Hot path: select/insert/update/delete RETURNING always project a single
-    // text column (json_agg/row_to_json), so the result has 0 or 1 rows.
-    // Skip Vec/join/trim allocations for that case.
+    rows_first_column_text(rows)
+}
+
+/// Collapse a result set to its first column as text.
+///
+/// Hot path: select/insert/update/delete RETURNING always project a single
+/// text column (json_agg/row_to_json), so the result has 0 or 1 rows. Skip
+/// Vec/join/trim allocations for that case.
+fn rows_first_column_text(rows: Vec<tokio_postgres::Row>) -> Result<String> {
     match rows.len() {
         0 => Ok(String::new()),
         1 => {
@@ -643,6 +649,65 @@ async fn query_text_on_conn(
             Ok(parts.join("\n").trim().to_string())
         }
     }
+}
+
+/// What a `raw_sql` statement produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawSqlOutcome {
+    /// The statement projects result columns — `SELECT`, `WITH ... SELECT`,
+    /// `VALUES`, and any `INSERT` / `UPDATE` / `DELETE ... RETURNING`. Carries
+    /// the first column, same shape as [`query_text`].
+    Rows(String),
+    /// No result columns; the affected-row count is all there is to report.
+    Affected(u64),
+}
+
+/// Run a statement and route the result by **what it actually returns**,
+/// asking the prepared statement rather than guessing from the leading
+/// keyword.
+///
+/// `raw_sql` used to send anything not starting with `select` / `with` down
+/// the `exec` path, so `UPDATE ... RETURNING url` reported the affected-row
+/// count and the returned column was thrown away. Nothing errored — a
+/// redirect built from it just carried `Location: 1`. Prefix matching can't
+/// see `RETURNING` at all, and the same trap waits for `INSERT ... RETURNING
+/// id`, so the check moved to the one place that knows: a prepared statement
+/// with no result columns is an exec, everything else is a query.
+pub async fn query_or_exec(sql: &str, params: &[&(dyn ToSql + Sync)]) -> Result<RawSqlOutcome> {
+    if let Some(cell) = take_tx_conn().await {
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.as_mut() {
+            return query_or_exec_on_conn(conn, sql, params).await;
+        }
+    }
+    retry_with_backoff(|| async {
+        let conn = get_connection().await?;
+        query_or_exec_on_conn(&conn, sql, params).await
+    })
+    .await
+}
+
+async fn query_or_exec_on_conn(
+    conn: &PgConn,
+    sql: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<RawSqlOutcome> {
+    let stmt = conn
+        .prepare_cached(sql)
+        .await
+        .with_context(|| "Failed to prepare SQL statement")?;
+    if stmt.columns().is_empty() {
+        let affected = conn
+            .execute(&stmt, params)
+            .await
+            .with_context(|| "Failed to execute SQL statement")?;
+        return Ok(RawSqlOutcome::Affected(affected));
+    }
+    let rows = conn
+        .query(&stmt, params)
+        .await
+        .with_context(|| "Failed to execute SQL query")?;
+    Ok(RawSqlOutcome::Rows(rows_first_column_text(rows)?))
 }
 
 /// Returns `Ok(Some(value))` when the result cache is enabled AND has a fresh

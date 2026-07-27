@@ -765,20 +765,32 @@ impl<'a> Vm<'a> {
         }
 
         let param_refs = boxed_params_to_refs(&boxed_params);
-        let lowered = sql.trim_start().to_ascii_lowercase();
-        // For SELECT-shaped queries return the first column as text; everything
-        // else routes through `exec` to also support write statements.
-        if lowered.starts_with("select") || lowered.starts_with("with") {
-            let result = engine::query_text(&sql, &param_refs).await?;
-            if result.is_empty() {
-                Ok(Value::Null)
-            } else {
-                Ok(Value::Str(result))
-            }
-        } else {
-            let affected = engine::exec(&sql, &param_refs).await?;
+        // Route on what the statement actually returns, not on its leading
+        // keyword. Prefix matching sent `UPDATE ... RETURNING url` to the exec
+        // path, so the caller got the affected-row count and the returned
+        // column was dropped — silently, which is how a redirect ended up
+        // with `Location: 1`.
+        let outcome = engine::query_or_exec(&sql, &param_refs).await?;
+
+        // Cache invalidation is a separate question from routing: a statement
+        // that returns rows may still have written some (`UPDATE ...
+        // RETURNING`, `WITH x AS (DELETE ...) SELECT`). Erring toward
+        // clearing costs a cache refill; erring the other way serves stale
+        // reads, which is why the old prefix check under-invalidated a
+        // mutating `WITH`.
+        if may_mutate(&sql) {
             engine::invalidate_result_cache()?;
-            Ok(Value::Int(affected as i64))
+        }
+
+        match outcome {
+            engine::RawSqlOutcome::Rows(result) => {
+                if result.is_empty() {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::Str(result))
+                }
+            }
+            engine::RawSqlOutcome::Affected(affected) => Ok(Value::Int(affected as i64)),
         }
     }
 
@@ -1445,5 +1457,59 @@ fn slice_chars(s: &str, start: i64, len: Option<i64>) -> String {
         Some(n) if n <= 0 => String::new(),
         Some(n) => s.chars().skip(start).take(n as usize).collect(),
         None => s.chars().skip(start).collect(),
+    }
+}
+
+/// Whether a raw statement might have written something, used only to decide
+/// cache invalidation.
+///
+/// Deliberately crude and deliberately over-eager: a column named
+/// `updated_at` makes a plain `SELECT` look mutating, which costs one cache
+/// refill. The opposite mistake — missing a write and serving a stale read —
+/// is the one that produces wrong answers, and it's what the previous
+/// leading-keyword check did to `WITH x AS (UPDATE ...) SELECT`.
+fn may_mutate(sql: &str) -> bool {
+    const WRITE_WORDS: &[&str] = &[
+        "insert", "update", "delete", "merge", "truncate", "alter", "drop", "create", "grant",
+        "revoke", "call", "do ",
+    ];
+    let lowered = sql.to_ascii_lowercase();
+    WRITE_WORDS.iter().any(|w| lowered.contains(w))
+}
+
+#[cfg(test)]
+mod raw_sql_tests {
+    use super::may_mutate;
+
+    /// Routing is decided by the prepared statement's result columns, but
+    /// cache invalidation still needs a guess. It must lean toward clearing.
+    #[test]
+    fn mutating_statements_invalidate_the_cache() {
+        for sql in [
+            "UPDATE \"link\" SET hits = hits + 1 WHERE code = $1 RETURNING url",
+            "WITH b AS (UPDATE \"link\" SET hits = hits + 1 RETURNING url) SELECT url FROM b",
+            "INSERT INTO t(a) VALUES ($1) RETURNING id",
+            "DELETE FROM t WHERE id = $1",
+            "TRUNCATE t",
+        ] {
+            assert!(may_mutate(sql), "should invalidate: {sql}");
+        }
+    }
+
+    #[test]
+    fn plain_reads_leave_the_cache_alone() {
+        for sql in [
+            "SELECT coalesce(json_agg(t),'[]')::text FROM (SELECT id FROM link) t",
+            "SELECT count(*)::text FROM link WHERE code = $1",
+        ] {
+            assert!(!may_mutate(sql), "should not invalidate: {sql}");
+        }
+    }
+
+    /// Over-eager is the safe direction: a column named `updated_at` makes a
+    /// read look mutating, which costs a cache refill and nothing else.
+    #[test]
+    fn over_invalidation_is_tolerated_under_invalidation_is_not() {
+        assert!(may_mutate("SELECT updated_at FROM t"));
     }
 }
