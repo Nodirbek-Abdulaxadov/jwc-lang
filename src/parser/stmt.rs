@@ -197,6 +197,23 @@ impl<'a> Parser<'a> {
                         let call = self.parse_call_after_name(format!("{}.{}", name, member))?;
                         self.expect_symbol(';')?;
                         Ok(Stmt::Expr(call))
+                    } else if let Some(op) = self.take_compound_assign_op()? {
+                        // `w.balance += delta;` desugars to
+                        // `w.balance = w.balance + delta;`
+                        let rhs = self.parse_expr()?;
+                        self.expect_symbol(';')?;
+                        Ok(Stmt::FieldAssign {
+                            var: name.clone(),
+                            field: member.clone(),
+                            value: compound_expr(
+                                op,
+                                Expr::FieldGet {
+                                    var: name,
+                                    field: member,
+                                },
+                                rhs,
+                            ),
+                        })
                     } else {
                         self.expect_symbol('=')?;
                         let value = self.parse_expr()?;
@@ -212,6 +229,14 @@ impl<'a> Parser<'a> {
                     let value = self.parse_expr()?;
                     self.expect_symbol(';')?;
                     Ok(Stmt::Assign { name, value })
+                } else if let Some(op) = self.take_compound_assign_op()? {
+                    // `n += 1;` desugars to `n = n + 1;`
+                    let rhs = self.parse_expr()?;
+                    self.expect_symbol(';')?;
+                    Ok(Stmt::Assign {
+                        name: name.clone(),
+                        value: compound_expr(op, Expr::Var(name), rhs),
+                    })
                 } else if self.check_symbol('(') {
                     let call = self.parse_call_after_name(name)?;
                     self.expect_symbol(';')?;
@@ -227,6 +252,28 @@ impl<'a> Parser<'a> {
                 Ok(Stmt::Expr(expr))
             }
         }
+    }
+
+    /// Consume a compound-assignment operator (`+=`, `-=`, `*=`, `/=`) if one
+    /// is next, leaving the parser positioned on the right-hand expression.
+    ///
+    /// The lexer emits each punctuation character on its own, so this peeks
+    /// at the arithmetic symbol and only commits once the `=` is confirmed —
+    /// `n + 1` must still parse as an expression statement.
+    pub(super) fn take_compound_assign_op(&mut self) -> Result<Option<CompoundOp>> {
+        let op = match &self.current.kind {
+            TokenKind::Symbol('+') => CompoundOp::Add,
+            TokenKind::Symbol('-') => CompoundOp::Sub,
+            TokenKind::Symbol('*') => CompoundOp::Mul,
+            TokenKind::Symbol('/') => CompoundOp::Div,
+            _ => return Ok(None),
+        };
+        self.bump()?;
+        // Only `<op>=` is a compound assignment; anything else here is a
+        // syntax error in statement position, and demanding the `=` reports
+        // it against the operator the user actually typed.
+        self.expect_symbol('=')?;
+        Ok(Some(op))
     }
 
     pub(super) fn parse_if_stmt(&mut self) -> Result<Stmt> {
@@ -402,5 +449,29 @@ impl<'a> Parser<'a> {
         }
         self.expect_symbol('}')?;
         Ok(body)
+    }
+}
+
+/// The arithmetic operator behind a compound assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompoundOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// Build the desugared right-hand side: `x += v` becomes `x = x + v`.
+///
+/// Desugaring rather than adding a statement form keeps the runner, the
+/// native codegen and the formatter untouched — they only ever see the
+/// expanded assignment.
+pub(super) fn compound_expr(op: CompoundOp, target: Expr, rhs: Expr) -> Expr {
+    let (l, r) = (Box::new(target), Box::new(rhs));
+    match op {
+        CompoundOp::Add => Expr::Add(l, r),
+        CompoundOp::Sub => Expr::Sub(l, r),
+        CompoundOp::Mul => Expr::Mul(l, r),
+        CompoundOp::Div => Expr::Div(l, r),
     }
 }

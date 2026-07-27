@@ -382,6 +382,19 @@ impl<'a> NameResolver<'a> {
                     self.rewrite_expr(a, caller_ns);
                 }
             }
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.rewrite_expr(cond, caller_ns);
+                self.rewrite_expr(then_expr, caller_ns);
+                self.rewrite_expr(else_expr, caller_ns);
+            }
+            Expr::Coalesce(a, b) => {
+                self.rewrite_expr(a, caller_ns);
+                self.rewrite_expr(b, caller_ns);
+            }
             Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => {
                 self.rewrite_expr(inner, caller_ns)
             }
@@ -1050,6 +1063,19 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             check_expr(b, funcs, builtins)
         }
         Expr::Neg(e) | Expr::Not(e) => check_expr(e, funcs, builtins),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            check_expr(cond, funcs, builtins)?;
+            check_expr(then_expr, funcs, builtins)?;
+            check_expr(else_expr, funcs, builtins)
+        }
+        Expr::Coalesce(a, b) => {
+            check_expr(a, funcs, builtins)?;
+            check_expr(b, funcs, builtins)
+        }
         Expr::FieldGet { .. } => Ok(()),
         Expr::NewEntity { .. } => Ok(()),
         Expr::ObjectLit(pairs) => {
@@ -3059,6 +3085,28 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             out.push_str("V::Bool(!jwc_truthy(&");
             emit_expr(out, e, ctx);
             out.push_str("))");
+        }
+        // Both short-circuit: the untaken branch is never evaluated, so
+        // `x ?? expensive()` and `c ? a : b` cost only what they use.
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            out.push_str("{ if jwc_truthy(&");
+            emit_expr(out, cond, ctx);
+            out.push_str(") { ");
+            emit_expr(out, then_expr, ctx);
+            out.push_str(" } else { ");
+            emit_expr(out, else_expr, ctx);
+            out.push_str(" } }");
+        }
+        Expr::Coalesce(a, b) => {
+            out.push_str("{ let __a = ");
+            emit_expr(out, a, ctx);
+            out.push_str("; if matches!(__a, V::Null) { ");
+            emit_expr(out, b, ctx);
+            out.push_str(" } else { __a } }");
         }
         Expr::Call { name, args } => {
             if name == "print" {

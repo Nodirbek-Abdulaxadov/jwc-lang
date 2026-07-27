@@ -970,6 +970,17 @@ fn render_expr(e: &Expr) -> String {
         }
         Expr::Await(inner) => format!("await {}", render_expr(inner)),
         Expr::Not(inner) => format!("!{}", paren_expr(inner)),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => format!(
+            "{} ? {} : {}",
+            paren_expr(cond),
+            paren_expr(then_expr),
+            paren_expr(else_expr)
+        ),
+        Expr::Coalesce(a, b) => format!("{} ?? {}", paren_expr(a), paren_expr(b)),
         Expr::ObjectLit(fields) => {
             let parts: Vec<String> = fields
                 .iter()

@@ -1049,6 +1049,32 @@ impl<'a> Vm<'a> {
                     other => bail!("'or' expects bool, got {}", other.type_name()),
                 }
             }
+            // `cond ? a : b` — only the taken branch is evaluated. The
+            // condition must be a real bool, matching `if` and `and`/`or`
+            // rather than inventing a truthiness rule the rest of the
+            // language doesn't have.
+            Expr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                let c = self.eval_expr(cond, vars).await?;
+                match c {
+                    Value::Bool(true) => self.eval_expr(then_expr, vars).await,
+                    Value::Bool(false) => self.eval_expr(else_expr, vars).await,
+                    other => bail!("'?:' expects bool condition, got {}", other.type_name()),
+                }
+            }
+            // `a ?? b` — `b` is evaluated only when `a` is null, so the
+            // fallback can be an expensive call without paying for it.
+            Expr::Coalesce(left, right) => {
+                let l = self.eval_expr(left, vars).await?;
+                if matches!(l, Value::Null) {
+                    self.eval_expr(right, vars).await
+                } else {
+                    Ok(l)
+                }
+            }
         }
     }
 

@@ -628,6 +628,15 @@ pub enum Expr {
     Await(Box<Expr>),
     /// `!expr` — boolean negation. Inner must evaluate to a bool.
     Not(Box<Expr>),
+    /// `cond ? a : b`. Only the taken branch is evaluated.
+    Ternary {
+        cond: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
+    },
+    /// `a ?? b` — yields `a` unless it is null, else `b`. The right side is
+    /// only evaluated when needed, so `x ?? expensive()` stays cheap.
+    Coalesce(Box<Expr>, Box<Expr>),
     /// `{ key: value, key2: value2 }` — JSON object literal. Each value is
     /// evaluated and the result is serialised as a JSON string Value.
     ObjectLit(Vec<(String, Expr)>),

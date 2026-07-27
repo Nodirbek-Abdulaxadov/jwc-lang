@@ -557,6 +557,34 @@ fn validate_expr(
             db_tables,
             entity_fields_by_table,
         ),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for part in [cond, then_expr, else_expr] {
+                validate_expr(
+                    part,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
+            }
+            Ok(())
+        }
+        Expr::Coalesce(a, b) => {
+            for part in [a, b] {
+                validate_expr(
+                    part,
+                    ctx_names,
+                    entity_contexts,
+                    db_tables,
+                    entity_fields_by_table,
+                )?;
+            }
+            Ok(())
+        }
         Expr::ObjectLit(fields) => {
             for (_, value) in fields {
                 validate_expr(

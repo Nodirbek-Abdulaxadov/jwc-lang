@@ -1841,3 +1841,93 @@ async fn wrong_method_is_405_on_parameterised_paths_too() {
         .unwrap();
     assert_eq!(status, 405);
 }
+
+/// §2 ergonomics: `&&` / `||`, compound assignment, ternary and `??`.
+/// Each was a parse error, so everyday code had to spell out
+/// `n = n + 1` and `if (x == null) { x = d; }` by hand.
+#[tokio::test]
+async fn everyday_operators_evaluate() {
+    let src = r#"
+        function main() {
+            let a = 1;
+            let b = 2;
+            if (a == 1 && b == 2) { print("and"); }
+            if (a == 9 || b == 2) { print("or"); }
+
+            let n = 10;
+            n += 5;
+            n -= 3;
+            n *= 2;
+            n /= 4;
+            print(n);
+
+            print(a > 0 ? "pos" : "neg");
+            let missing = null;
+            print(missing ?? "fallback");
+            print("kept" ?? "unused");
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "and\nor\n6\npos\nfallback\nkept");
+}
+
+/// `?:` and `??` must not evaluate the branch they don't take — otherwise
+/// `x ?? expensive()` silently pays for the fallback every time.
+#[tokio::test]
+async fn ternary_and_coalesce_short_circuit() {
+    let src = r#"
+        function boom() {
+            print("evaluated");
+            return "boom";
+        }
+        function main() {
+            let kept = "value";
+            print(kept ?? boom());
+            print(true ? "taken" : boom());
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(
+        out.trim(),
+        "value\ntaken",
+        "the untaken branch must not run"
+    );
+}
+
+/// Compound assignment on an object field, which is where the manual
+/// `w.balance = w.balance + delta` spelling showed up most.
+#[tokio::test]
+async fn compound_assignment_works_on_object_fields() {
+    let src = r#"
+        function main() {
+            let o = { balance: 100 };
+            o.balance += 50;
+            o.balance -= 20;
+            print(o.balance);
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "130");
+}
+
+/// `and`/`or` keep working — the symbol forms are aliases, not replacements.
+#[tokio::test]
+async fn keyword_and_symbol_boolean_operators_agree() {
+    let src = r#"
+        function main() {
+            let a = 1;
+            if (a == 1 and a < 5) { print("kw"); }
+            if (a == 1 && a < 5) { print("sym"); }
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out.trim(), "kw\nsym");
+}

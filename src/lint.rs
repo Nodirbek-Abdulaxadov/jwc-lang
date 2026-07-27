@@ -434,6 +434,19 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::Await(inner) | Expr::Neg(inner) | Expr::Not(inner) => collect_calls_expr(inner, out),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_calls_expr(cond, out);
+            collect_calls_expr(then_expr, out);
+            collect_calls_expr(else_expr, out);
+        }
+        Expr::Coalesce(a, b) => {
+            collect_calls_expr(a, out);
+            collect_calls_expr(b, out);
+        }
         Expr::ObjectLit(fields) => {
             for (_, v) in fields {
                 collect_calls_expr(v, out);

@@ -21,14 +21,48 @@ use crate::lexer::{Keyword, TemplatePart, TokenKind};
 use super::{parse_template_hole, Parser};
 
 impl<'a> Parser<'a> {
+    /// Entry point. Handles the two lowest-precedence forms, both of which
+    /// open with `?`: `a ?? b` and `a ? b : c`. They share the token, so one
+    /// `?` is consumed here and the next token decides which it was — the
+    /// parser carries no lookahead beyond `current`.
     pub(super) fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_or_expr()
+        let lhs = self.parse_or_expr()?;
+        if !self.check_symbol('?') {
+            return Ok(lhs);
+        }
+        self.expect_symbol('?')?;
+
+        if self.check_symbol('?') {
+            self.expect_symbol('?')?;
+            // Right-associative, so `a ?? b ?? c` chains as expected.
+            let fallback = self.parse_expr()?;
+            return Ok(Expr::Coalesce(Box::new(lhs), Box::new(fallback)));
+        }
+
+        let then_expr = self.parse_expr()?;
+        self.expect_symbol(':')?;
+        let else_expr = self.parse_expr()?;
+        Ok(Expr::Ternary {
+            cond: Box::new(lhs),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
     }
 
     pub(super) fn parse_or_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_and_expr()?;
-        while self.current.kind == TokenKind::Keyword(Keyword::Or) {
-            self.bump()?;
+        loop {
+            if self.current.kind == TokenKind::Keyword(Keyword::Or) {
+                self.bump()?;
+            } else if self.check_symbol('|') {
+                // `||`. A lone `|` is not an operator, so requiring the
+                // second one here gives a clear error rather than a stray
+                // "unexpected symbol" further along.
+                self.expect_symbol('|')?;
+                self.expect_symbol('|')?;
+            } else {
+                break;
+            }
             let right = self.parse_and_expr()?;
             expr = Expr::Or(Box::new(expr), Box::new(right));
         }
@@ -37,8 +71,15 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_and_expr(&mut self) -> Result<Expr> {
         let mut expr = self.parse_eq_expr()?;
-        while self.current.kind == TokenKind::Keyword(Keyword::And) {
-            self.bump()?;
+        loop {
+            if self.current.kind == TokenKind::Keyword(Keyword::And) {
+                self.bump()?;
+            } else if self.check_symbol('&') {
+                self.expect_symbol('&')?;
+                self.expect_symbol('&')?;
+            } else {
+                break;
+            }
             let right = self.parse_eq_expr()?;
             expr = Expr::And(Box::new(expr), Box::new(right));
         }

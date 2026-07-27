@@ -895,6 +895,19 @@ fn check_visibility_in_expr(
         Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => {
             check_visibility_in_expr(inner, caller_ns, fn_table, imports_by_ns, label)
         }
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            check_visibility_in_expr(cond, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_expr(then_expr, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_expr(else_expr, caller_ns, fn_table, imports_by_ns, label)
+        }
+        Expr::Coalesce(a, b) => {
+            check_visibility_in_expr(a, caller_ns, fn_table, imports_by_ns, label)?;
+            check_visibility_in_expr(b, caller_ns, fn_table, imports_by_ns, label)
+        }
         Expr::ObjectLit(entries) => {
             for (_k, v) in entries {
                 check_visibility_in_expr(v, caller_ns, fn_table, imports_by_ns, label)?;
@@ -1038,6 +1051,19 @@ fn validate_const_expr(expr: &Expr, const_names: &HashSet<String>) -> Result<()>
             validate_const_expr(b, const_names)
         }
         Expr::Neg(inner) | Expr::Not(inner) => validate_const_expr(inner, const_names),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            validate_const_expr(cond, const_names)?;
+            validate_const_expr(then_expr, const_names)?;
+            validate_const_expr(else_expr, const_names)
+        }
+        Expr::Coalesce(a, b) => {
+            validate_const_expr(a, const_names)?;
+            validate_const_expr(b, const_names)
+        }
         Expr::ArrayLit(items) => {
             for item in items {
                 validate_const_expr(item, const_names)?;
@@ -1091,6 +1117,19 @@ fn collect_const_var_refs(expr: &Expr, out: &mut Vec<String>) {
             collect_const_var_refs(b, out);
         }
         Expr::Neg(inner) | Expr::Not(inner) => collect_const_var_refs(inner, out),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_const_var_refs(cond, out);
+            collect_const_var_refs(then_expr, out);
+            collect_const_var_refs(else_expr, out);
+        }
+        Expr::Coalesce(a, b) => {
+            collect_const_var_refs(a, out);
+            collect_const_var_refs(b, out);
+        }
         Expr::ArrayLit(items) => {
             for item in items {
                 collect_const_var_refs(item, out);
