@@ -1508,6 +1508,167 @@ impl Router {
         }
         None
     }
+
+    /// Verbs declared on a path that a request's own method didn't match.
+    /// Empty means the path itself is unknown — the difference between a 405
+    /// and a 404, which the router previously collapsed into one answer.
+    fn allowed_methods(&self, path: &str) -> Vec<String> {
+        let req_segs: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        let mut out: Vec<String> = Vec::new();
+        for entry in &self.entries {
+            if entry.segments.len() != req_segs.len() { continue; }
+            let mut ok = true;
+            for (seg, req) in entry.segments.iter().zip(req_segs.iter()) {
+                if let PathSeg::Literal(lit) = seg {
+                    if lit != req { ok = false; break; }
+                }
+            }
+            if ok {
+                let m = entry.method.to_ascii_uppercase();
+                if !out.contains(&m) { out.push(m); }
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+// --- CORS --------------------------------------------------------------------
+//
+// Mirrors `jwc::cors` in the interpreter, including the defaults and the
+// wildcard-plus-credentials rejection, so a project behaves the same whether
+// it is run with `jwc run` or built with `jwc build --native`.
+
+#[derive(Debug, Clone, Default)]
+struct JwcCors {
+    enabled: bool,
+    any_origin: bool,
+    origins: Vec<String>,
+    methods: String,
+    headers: String,
+    expose: String,
+    credentials: bool,
+    max_age: String,
+}
+
+fn jwc_cors_env(key: &str, default: &str) -> String {
+    match std::env::var(key) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => default.to_string(),
+    }
+}
+
+fn jwc_cors_norm(origin: &str) -> String {
+    origin.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+impl JwcCors {
+    fn from_env() -> Self {
+        let raw = jwc_cors_env("JWC_CORS_ORIGINS", "");
+        let raw = raw.trim().to_string();
+        if raw.is_empty() {
+            return Self::default();
+        }
+        let any_origin = raw == "*";
+        let origins = if any_origin {
+            Vec::new()
+        } else {
+            raw.split(',').map(jwc_cors_norm).filter(|o| !o.is_empty()).collect()
+        };
+        JwcCors {
+            enabled: true,
+            any_origin,
+            origins,
+            methods: jwc_cors_env("JWC_CORS_METHODS", "GET,POST,PUT,PATCH,DELETE,OPTIONS"),
+            headers: jwc_cors_env("JWC_CORS_HEADERS", "content-type,authorization"),
+            expose: jwc_cors_env("JWC_CORS_EXPOSE_HEADERS", "x-request-id"),
+            credentials: matches!(
+                jwc_cors_env("JWC_CORS_CREDENTIALS", "0").trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ),
+            max_age: jwc_cors_env("JWC_CORS_MAX_AGE", "86400"),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.enabled && self.any_origin && self.credentials {
+            return Err("JWC_CORS_ORIGINS=* cannot be combined with JWC_CORS_CREDENTIALS=1 — \
+                        browsers reject `Access-Control-Allow-Origin: *` on a credentialed \
+                        request. List the exact origins instead."
+                .to_string());
+        }
+        Ok(())
+    }
+
+    fn allow_origin(&self, origin: &str) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        if self.any_origin {
+            return Some("*".to_string());
+        }
+        let probe = jwc_cors_norm(origin);
+        if self.origins.iter().any(|o| jwc_cors_norm(o) == probe) {
+            Some(origin.to_string())
+        } else {
+            None
+        }
+    }
+}
+
+fn jwc_cors_set(resp: &mut axum::response::Response, name: &'static str, value: &str) {
+    if let Ok(v) = axum::http::HeaderValue::from_str(value) {
+        resp.headers_mut().insert(axum::http::HeaderName::from_static(name), v);
+    }
+}
+
+fn jwc_cors_decorate(resp: &mut axum::response::Response, cfg: &JwcCors, allow_origin: &str) {
+    jwc_cors_set(resp, "access-control-allow-origin", allow_origin);
+    if cfg.credentials {
+        jwc_cors_set(resp, "access-control-allow-credentials", "true");
+    }
+    if allow_origin != "*" {
+        jwc_cors_set(resp, "vary", "Origin");
+    }
+}
+
+async fn jwc_cors_middleware(
+    cfg: Arc<JwcCors>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let origin = req
+        .headers()
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let Some(origin) = origin else {
+        return next.run(req).await;
+    };
+    let allow = cfg.allow_origin(&origin);
+
+    let is_preflight = req.method() == axum::http::Method::OPTIONS
+        && req.headers().contains_key("access-control-request-method");
+    if is_preflight {
+        let mut resp = axum::response::Response::new(axum::body::Body::empty());
+        *resp.status_mut() = axum::http::StatusCode::NO_CONTENT;
+        if let Some(allow) = &allow {
+            jwc_cors_decorate(&mut resp, &cfg, allow);
+            jwc_cors_set(&mut resp, "access-control-allow-methods", &cfg.methods);
+            jwc_cors_set(&mut resp, "access-control-allow-headers", &cfg.headers);
+            jwc_cors_set(&mut resp, "access-control-max-age", &cfg.max_age);
+        }
+        return resp;
+    }
+
+    let mut resp = next.run(req).await;
+    if let Some(allow) = &allow {
+        jwc_cors_decorate(&mut resp, &cfg, allow);
+        if !cfg.expose.is_empty() {
+            jwc_cors_set(&mut resp, "access-control-expose-headers", &cfg.expose);
+        }
+    }
+    resp
 }
 
 // --- HTTP server (axum-based, HTTP/1.1 + keep-alive) -------------------------
@@ -1523,16 +1684,36 @@ impl HttpServer {
     }
 
     async fn run(self) {
-        let app = axum::Router::new()
+        let mut app = axum::Router::new()
             .fallback(axum::routing::any(handle_axum_request))
             .with_state(self.router.clone());
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.port));
-        let listener = match TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                eprintln!("[jwc] failed to bind {}: {}", addr, e);
-                std::process::exit(1);
-            }
+        // Same CORS contract as the interpreter: off unless
+        // `JWC_CORS_ORIGINS` is set, preflights answered before routing.
+        let cors = Arc::new(JwcCors::from_env());
+        if let Err(e) = cors.validate() {
+            eprintln!("[jwc] {}", e);
+            std::process::exit(1);
+        }
+        if cors.enabled {
+            let cors = cors.clone();
+            app = app.layer(axum::middleware::from_fn(move |req, next| {
+                let cors = cors.clone();
+                async move { jwc_cors_middleware(cors, req, next).await }
+            }));
+        }
+        // Prefer dual-stack so a Node dev proxy resolving `localhost` to `::1`
+        // can connect; fall back to IPv4 on hosts with no IPv6 stack.
+        let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, self.port));
+        let v4 = std::net::SocketAddr::from(([0, 0, 0, 0], self.port));
+        let (listener, addr) = match TcpListener::bind(v6).await {
+            Ok(l) => (l, v6),
+            Err(v6_err) => match TcpListener::bind(v4).await {
+                Ok(l) => (l, v4),
+                Err(e) => {
+                    eprintln!("[jwc] failed to bind {} ({}) or {} ({})", v6, v6_err, v4, e);
+                    std::process::exit(1);
+                }
+            },
         };
         eprintln!("[jwc] listening on http://{}", addr);
         if let Err(e) = axum::serve(listener, app)
@@ -1596,10 +1777,33 @@ async fn handle_axum_request(
     let (kind, handler, path_params) = match router.match_route(&method_str, path_str) {
         Some(found) => found,
         None => {
+            // Match the interpreter: a JSON envelope, and 405 (with `Allow`)
+            // when the path exists under a different verb. This used to be a
+            // plain-text 404 for both cases, which differed from `jwc run`
+            // and gave clients no way to tell the two apart.
+            let allowed = router.allowed_methods(path_str);
+            let clean = path_str.split('?').next().unwrap_or(path_str);
+            if !allowed.is_empty() {
+                let allow = allowed.join(", ");
+                let body = format!(
+                    "{{\"status\":405,\"error\":\"Method Not Allowed\",\"method\":\"{}\",\"path\":\"{}\",\"allow\":\"{}\"}}",
+                    method_str, clean, allow
+                );
+                return axum::response::Response::builder()
+                    .status(405)
+                    .header("content-type", "application/json")
+                    .header("allow", allow)
+                    .body(body.into())
+                    .unwrap();
+            }
+            let body = format!(
+                "{{\"status\":404,\"error\":\"Not Found\",\"method\":\"{}\",\"path\":\"{}\"}}",
+                method_str, clean
+            );
             return axum::response::Response::builder()
                 .status(404)
-                .header("content-type", "text/plain; charset=utf-8")
-                .body("Not Found".into())
+                .header("content-type", "application/json")
+                .body(body.into())
                 .unwrap();
         }
     };

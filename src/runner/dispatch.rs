@@ -34,18 +34,41 @@ impl<'a> Vm<'a> {
         let mut found_idx: Option<usize> = None;
         let mut found_params: HashMap<String, String> = HashMap::new();
 
+        // Methods that match this path but not this request — collected so a
+        // wrong verb can be answered 405 with an `Allow` header instead of the
+        // 404 that made "route doesn't exist" and "wrong method" look
+        // identical to a client.
+        let mut path_matched: Vec<String> = Vec::new();
+
         for (i, route) in self.routes.iter().enumerate() {
+            let Some(params) = match_route_pattern(&route.path, &clean_path) else {
+                continue;
+            };
             if !route.method.eq_ignore_ascii_case(method) {
+                let m = route.method.to_ascii_uppercase();
+                if !path_matched.contains(&m) {
+                    path_matched.push(m);
+                }
                 continue;
             }
-            if let Some(params) = match_route_pattern(&route.path, &clean_path) {
-                found_idx = Some(i);
-                found_params = params;
-                break;
-            }
+            found_idx = Some(i);
+            found_params = params;
+            break;
         }
 
         let Some(idx) = found_idx else {
+            if !path_matched.is_empty() {
+                path_matched.sort();
+                let allow = path_matched.join(", ");
+                return Ok((
+                    405,
+                    format!(
+                        "{{\"status\":405,\"error\":\"Method Not Allowed\",\"method\":\"{method}\",\"path\":\"{clean_path}\",\"allow\":\"{allow}\"}}"
+                    ),
+                    None,
+                    vec![("Allow".to_string(), allow)],
+                ));
+            }
             return Ok((
                 404,
                 format!(

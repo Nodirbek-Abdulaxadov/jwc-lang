@@ -194,6 +194,42 @@ pub const REGISTRY: &[EnvVar] = &[
         doc: "Graceful shutdown budget before force-exit.",
     },
     EnvVar {
+        name: "JWC_CORS_ORIGINS",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "Comma-separated allowed origins, or `*`. Empty disables CORS.",
+    },
+    EnvVar {
+        name: "JWC_CORS_METHODS",
+        parse_kind: ParseKind::Str,
+        default: "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+        doc: "Methods echoed in the preflight response.",
+    },
+    EnvVar {
+        name: "JWC_CORS_HEADERS",
+        parse_kind: ParseKind::Str,
+        default: "content-type,authorization",
+        doc: "Request headers the browser may send cross-origin.",
+    },
+    EnvVar {
+        name: "JWC_CORS_EXPOSE_HEADERS",
+        parse_kind: ParseKind::Str,
+        default: "x-request-id",
+        doc: "Response headers readable by cross-origin JS.",
+    },
+    EnvVar {
+        name: "JWC_CORS_CREDENTIALS",
+        parse_kind: ParseKind::Bool,
+        default: "0",
+        doc: "Allow cookies / Authorization cross-origin. Incompatible with `*`.",
+    },
+    EnvVar {
+        name: "JWC_CORS_MAX_AGE",
+        parse_kind: ParseKind::U64,
+        default: "86400",
+        doc: "Seconds a browser may cache the preflight result.",
+    },
+    EnvVar {
         name: "JWC_REAL_IP_HEADER",
         parse_kind: ParseKind::Str,
         default: "x-forwarded-for",

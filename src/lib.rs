@@ -25,6 +25,7 @@ pub mod builtins;
 pub mod cache;
 pub mod cmd;
 pub mod config;
+pub mod cors;
 pub mod diag;
 pub mod email;
 pub mod engine;

@@ -349,6 +349,10 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
     // socket — the operator should see the error in the boot log, not
     // hours later when a request hits the bad code path.
     crate::config::validate_or_bail()?;
+    // A CORS policy the browser would silently ignore is worse than none —
+    // surface it here rather than leaving the user to debug a preflight that
+    // appears to do nothing.
+    crate::cors::CorsConfig::from_env().validate()?;
     if config_print_enabled() {
         let rows = crate::config::snapshot();
         println!("{}", crate::config::render(&rows));
@@ -407,10 +411,17 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
     }
 
     let app = build_router(state);
-    // Bind to 0.0.0.0 so the server accepts traffic on every interface,
-    // but print the loopback URL — most browsers/curl reject `0.0.0.0`,
-    // and `localhost` is what users actually paste into a tab.
-    let addr = format!("0.0.0.0:{port}");
+    // Bind `[::]` (dual-stack) rather than `0.0.0.0`, then print the loopback
+    // URL — most browsers/curl reject `0.0.0.0`, and `localhost` is what
+    // users actually paste into a tab.
+    //
+    // IPv4-only binding is a real trap in local development: Node resolves
+    // `localhost` to `::1` first, so a Vite/webpack dev proxy pointed at
+    // `localhost:<port>` fails with `ECONNREFUSED ::1:<port>` while curl on
+    // `127.0.0.1` works. On Linux a `[::]` socket accepts IPv4 through
+    // v4-mapped addresses, so this covers both families with one listener;
+    // `bind_listener` falls back to `0.0.0.0` where it doesn't.
+    let addr = format!("[::]:{port}");
     let public_url = format!("http://localhost:{port}");
     let label = format!("║  {:<34}  ║", public_url);
     println!("╔══════════════════════════════════════╗");
@@ -432,9 +443,7 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
         // and pays nothing.
         let _otlp_guard = crate::observability::otlp::init_otlp_from_env()?;
 
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| anyhow!("Failed to bind to {addr}: {e}"))?;
+        let listener = bind_listener(&addr, port).await?;
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal(Arc::clone(&metrics), ws_shutdown_tx))
             .await
@@ -443,6 +452,22 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
     })?;
 
     Ok(())
+}
+
+/// Bind the dual-stack address, falling back to IPv4 when the host has no
+/// IPv6 stack at all (some containers are built that way) or refuses
+/// v4-mapped addresses. Without the fallback, disabling IPv6 on the host
+/// would turn a working server into one that won't boot.
+async fn bind_listener(addr: &str, port: u16) -> Result<tokio::net::TcpListener> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => Ok(l),
+        Err(dual_err) => {
+            let v4 = format!("0.0.0.0:{port}");
+            tokio::net::TcpListener::bind(&v4).await.map_err(|v4_err| {
+                anyhow!("Failed to bind to {addr} ({dual_err}) or {v4} ({v4_err})")
+            })
+        }
+    }
 }
 
 /// Whether the user's program declared its own route for the given path.
@@ -739,6 +764,18 @@ fn build_router(state: AppState) -> Router {
     }
 
     let mut built = router.fallback(handle_http_fallback).with_state(state);
+
+    // CORS, when configured. Applied as a layer so it covers the built-in
+    // endpoints (`/healthz`, `/openapi.json`, `/docs`) and the user's routes
+    // alike, and so preflights are answered before the route table gets a
+    // chance to 404 them.
+    let cors = std::sync::Arc::new(crate::cors::CorsConfig::from_env());
+    if cors.enabled {
+        built = built.layer(axum::middleware::from_fn(move |req, next| {
+            let cors = cors.clone();
+            async move { crate::cors::middleware(cors, req, next).await }
+        }));
+    }
     // Body-size cap — a missing limit lets a single client OOM the
     // worker by streaming an unbounded `curl -d @huge.bin`.
     // `JWC_MAX_BODY_BYTES=0` opts out for users running behind a proxy
@@ -1488,5 +1525,37 @@ mod tests {
         // catches it; this test pins that behaviour against a future
         // refactor that swaps split() for a different parser.
         assert!(extract_traceparent_trace_id("").is_none());
+    }
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::*;
+
+    /// The dual-stack listener must come up on hosts with no IPv6 stack at
+    /// all — some containers are built that way, and a hard failure there
+    /// would turn a working server into one that won't boot.
+    ///
+    /// On a host *with* IPv6 this exercises the `[::]` path; on one without,
+    /// the IPv4 fallback. Either way binding has to succeed.
+    #[tokio::test]
+    async fn dual_stack_bind_falls_back_to_ipv4() {
+        // Port 0 = let the OS pick, so the test can't collide with a real
+        // service or another test run.
+        let listener = bind_listener("[::]:0", 0)
+            .await
+            .expect("must bind on IPv6-capable and IPv4-only hosts alike");
+        assert!(listener.local_addr().is_ok());
+    }
+
+    #[tokio::test]
+    async fn bind_error_names_both_addresses_it_tried() {
+        // Port 1 is privileged; unless the suite runs as root this fails on
+        // both families and the message has to say so.
+        if let Err(e) = bind_listener("[::]:1", 1).await {
+            let msg = e.to_string();
+            assert!(msg.contains("[::]:1"), "missing dual-stack addr: {msg}");
+            assert!(msg.contains("0.0.0.0:1"), "missing v4 fallback addr: {msg}");
+        }
     }
 }

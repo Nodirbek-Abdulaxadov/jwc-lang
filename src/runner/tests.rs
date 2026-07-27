@@ -1784,3 +1784,60 @@ fn classify_jwc_error_detects_timeout_error_message_shape() {
     let e = anyhow::anyhow!("request timeout: deadline elapsed");
     assert_eq!(classify_jwc_error(&e), "TimeoutError");
 }
+
+/// A request to a path that exists under a different verb used to return the
+/// same 404 as a path that doesn't exist at all, so a client couldn't tell a
+/// typo'd URL from a wrong method.
+#[tokio::test]
+async fn wrong_method_on_existing_path_is_405_with_allow_header() {
+    let src = r#"
+        route GET "/items" { return json({ ok: true }); }
+        route POST "/items" { return json({ created: true }); }
+        function main() { }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+
+    let (status, body, _ct, headers) =
+        run_request_with_headers(&program, "DELETE", "/items", None, HashMap::new())
+            .await
+            .unwrap();
+
+    assert_eq!(status, 405, "body was: {body}");
+    assert!(body.contains("Method Not Allowed"), "body was: {body}");
+    // Both declared verbs are advertised, sorted, per RFC 9110 §10.2.1.
+    let allow = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("allow"))
+        .map(|(_, v)| v.clone())
+        .expect("405 must carry an Allow header");
+    assert_eq!(allow, "GET, POST");
+}
+
+#[tokio::test]
+async fn unknown_path_is_still_404_not_405() {
+    let src = r#"
+        route GET "/items" { return json({ ok: true }); }
+        function main() { }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, body) = run_request(&program, "GET", "/nope", None).await.unwrap();
+    assert_eq!(status, 404, "body was: {body}");
+}
+
+/// Path params must not make a 405 look like a 404: `/items/{id}` matches
+/// `/items/7` for the purposes of "this path exists".
+#[tokio::test]
+async fn wrong_method_is_405_on_parameterised_paths_too() {
+    let src = r#"
+        route GET "/items/{id}" { return json({ id: path_param("id") }); }
+        function main() { }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let (status, _) = run_request(&program, "PUT", "/items/7", None)
+        .await
+        .unwrap();
+    assert_eq!(status, 405);
+}
