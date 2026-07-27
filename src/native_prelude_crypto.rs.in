@@ -97,3 +97,135 @@ fn jwc_b_verify_password(pwd: V, stored: V) -> V {
         (a, b) => panic!("verify_password() expects two strings, got {:?} / {:?}", a, b),
     }
 }
+
+// --- JWT (HS256) -------------------------------------------------------------
+//
+// Native used to reject `jwt_sign` / `jwt_verify` outright, so any project
+// using Bearer auth could not be built with `--native` at all — which covers
+// most real backends and undercut the "one static binary" promise. This is a
+// port of `crate::jwt`, kept behaviourally identical: same header, same
+// `Bearer ` tolerance, same `exp` enforcement, same HS256-only restriction.
+
+fn jwc_jwt_b64_encode(bytes: &[u8]) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as JwcB64;
+    use base64::Engine as _;
+    JwcB64.encode(bytes)
+}
+
+fn jwc_jwt_b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as JwcB64;
+    use base64::Engine as _;
+    JwcB64.decode(s).map_err(|_| "invalid base64".to_string())
+}
+
+fn jwc_jwt_sign_hs256(payload_json: &str, secret: &str) -> Result<String, String> {
+    // Validate the payload is JSON so the resulting token is decodable.
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .map_err(|_| "jwt_sign: payload must be valid JSON".to_string())?;
+
+    let header_b64 = jwc_jwt_b64_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload_b64 = jwc_jwt_b64_encode(payload_json.as_bytes());
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+
+    let mut mac = <JwcHmac<JwcSha256> as JwcMac>::new_from_slice(secret.as_bytes())
+        .map_err(|e| format!("jwt_sign: invalid secret: {}", e))?;
+    mac.update(signing_input.as_bytes());
+    let signature = mac.finalize().into_bytes();
+    Ok(format!(
+        "{}.{}",
+        signing_input,
+        jwc_jwt_b64_encode(&signature)
+    ))
+}
+
+/// Strip an optional, case-insensitive `Bearer ` prefix so an `Authorization`
+/// header value can be passed straight through.
+fn jwc_jwt_strip_bearer(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("bearer ") {
+        trimmed[7..].trim_start()
+    } else {
+        trimmed
+    }
+}
+
+fn jwc_jwt_verify_hs256(token: &str, secret: &str) -> Result<String, String> {
+    let token = jwc_jwt_strip_bearer(token);
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("jwt_verify: token must have 3 segments".to_string());
+    }
+
+    let header_bytes = jwc_jwt_b64_decode(parts[0])
+        .map_err(|_| "jwt_verify: invalid base64 in header".to_string())?;
+    let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .map_err(|_| "jwt_verify: header is not JSON".to_string())?;
+    let alg = header.get("alg").and_then(|v| v.as_str()).unwrap_or("none");
+    if alg != "HS256" {
+        return Err(format!("jwt_verify: only HS256 is supported, got '{}'", alg));
+    }
+
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let signature = jwc_jwt_b64_decode(parts[2])
+        .map_err(|_| "jwt_verify: invalid base64 in signature".to_string())?;
+    let mut mac = <JwcHmac<JwcSha256> as JwcMac>::new_from_slice(secret.as_bytes())
+        .map_err(|e| format!("jwt_verify: invalid secret: {}", e))?;
+    mac.update(signing_input.as_bytes());
+    mac.verify_slice(&signature)
+        .map_err(|_| "jwt_verify: signature mismatch".to_string())?;
+
+    let payload_bytes = jwc_jwt_b64_decode(parts[1])
+        .map_err(|_| "jwt_verify: invalid base64 in payload".to_string())?;
+    let payload_str = String::from_utf8(payload_bytes)
+        .map_err(|_| "jwt_verify: payload is not valid UTF-8".to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(&payload_str)
+        .map_err(|_| "jwt_verify: payload is not valid JSON".to_string())?;
+
+    // `exp` is enforced when present; absent `exp` stays valid so
+    // non-expiring machine-to-machine tokens keep working.
+    if let Some(exp_value) = parsed.get("exp") {
+        let exp_secs = exp_value
+            .as_i64()
+            .or_else(|| exp_value.as_f64().map(|f| f as i64))
+            .ok_or_else(|| "jwt_verify: 'exp' claim must be a number".to_string())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if exp_secs <= now {
+            return Err(format!(
+                "jwt_verify: token expired (exp={}, now={})",
+                exp_secs, now
+            ));
+        }
+    }
+
+    Ok(parsed.to_string())
+}
+
+fn jwc_b_jwt_sign(payload: V, secret: V) -> V {
+    let payload_json = jwc_to_json(&payload);
+    let secret = match secret {
+        V::Str(s) => s.to_string(),
+        other => panic!("jwt_sign(payload, secret): secret must be a string, got {:?}", other),
+    };
+    match jwc_jwt_sign_hs256(&payload_json, &secret) {
+        Ok(token) => v_str(token),
+        Err(e) => panic!("{}", e),
+    }
+}
+
+fn jwc_b_jwt_verify(token: V, secret: V) -> V {
+    let token = match token {
+        V::Str(s) => s.to_string(),
+        other => panic!("jwt_verify(token, secret): token must be a string, got {:?}", other),
+    };
+    let secret = match secret {
+        V::Str(s) => s.to_string(),
+        other => panic!("jwt_verify(token, secret): secret must be a string, got {:?}", other),
+    };
+    match jwc_jwt_verify_hs256(&token, &secret) {
+        Ok(payload) => v_str(payload),
+        Err(e) => panic!("{}", e),
+    }
+}

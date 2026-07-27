@@ -579,14 +579,14 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         aliases: &[],
         min_args: 1,
         max_args: Some(2),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "jwt_verify",
         aliases: &[],
         min_args: 1,
         max_args: Some(2),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "hash_password",

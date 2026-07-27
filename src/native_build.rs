@@ -728,7 +728,14 @@ fn program_uses_crypto(program: &Program) -> bool {
             Expr::Call { name, args } => {
                 if matches!(
                     name.as_str(),
-                    "sha256" | "sha1" | "md5" | "hmac_sha256" | "hash_password" | "verify_password"
+                    "sha256"
+                        | "sha1"
+                        | "md5"
+                        | "hmac_sha256"
+                        | "hash_password"
+                        | "verify_password"
+                        | "jwt_sign"
+                        | "jwt_verify"
                 ) {
                     return true;
                 }
@@ -1314,7 +1321,7 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
     // already uses `OnceLock` for the HTTP client / param store.
     emit_shape_getters(&mut out, &ctx);
 
-    out.push_str("\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {\n    jwc_load_dotenv();\n    let _ = user_main().await;\n}\n");
+    out.push_str("\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {\n    jwc_install_panic_hook();\n    jwc_load_dotenv();\n    let _ = user_main().await;\n}\n");
     Ok(out)
 }
 
@@ -2173,6 +2180,10 @@ fn emit_try_catch(
     out.push_str(pad);
     out.push_str("{\n");
     out.push_str(&inner);
+    // Mark the region so the panic hook stays quiet for a failure the user's
+    // `catch` block is about to handle.
+    out.push_str("jwc_enter_caught_region();\n");
+    out.push_str(&inner);
     out.push_str(
         "let __res = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {\n",
     );
@@ -2188,6 +2199,8 @@ fn emit_try_catch(
     out.push_str("V::Null\n");
     out.push_str(&inner);
     out.push_str("})).await;\n");
+    out.push_str(&inner);
+    out.push_str("jwc_leave_caught_region();\n");
 
     // If body parked a return, propagate it (skip catch).
     out.push_str(&inner);
@@ -2241,6 +2254,10 @@ fn emit_transaction(out: &mut String, pad: &str, body: &[Stmt], indent: usize, c
     out.push_str(&inner);
     out.push_str("let _ = jwc_db_exec(\"BEGIN\", vec![]).await;\n");
     out.push_str(&inner);
+    // Mark the region so the panic hook stays quiet for a failure the user's
+    // `catch` block is about to handle.
+    out.push_str("jwc_enter_caught_region();\n");
+    out.push_str(&inner);
     out.push_str(
         "let __res = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {\n",
     );
@@ -2256,6 +2273,8 @@ fn emit_transaction(out: &mut String, pad: &str, body: &[Stmt], indent: usize, c
     out.push_str("V::Null\n");
     out.push_str(&inner);
     out.push_str("})).await;\n");
+    out.push_str(&inner);
+    out.push_str("jwc_leave_caught_region();\n");
 
     // Same return-slot propagation: an explicit `return` inside the
     // transaction body commits before bubbling the return up.
@@ -4243,6 +4262,8 @@ fn render_cargo_toml(
         deps.push_str("md-5 = \"0.10\"\n");
         deps.push_str("hmac = \"0.12\"\n");
         deps.push_str("argon2 = { version = \"0.5\", features = [\"std\"] }\n");
+        // JWT segments are base64url without padding.
+        deps.push_str("base64 = \"0.22\"\n");
     }
     // Phase A4 (PERF_PLAN.md): global allocator. mimalloc on Windows
     // sidesteps the notoriously slow `HeapAlloc` / `HeapFree` path that

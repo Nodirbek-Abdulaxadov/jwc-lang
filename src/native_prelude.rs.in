@@ -296,6 +296,55 @@ fn jwc_error_value(msg: String) -> V {
 
 #[cold]
 #[inline(never)]
+/// Quiet the default panic hook.
+///
+/// JWC-level errors travel as panics in the native backend and are caught by
+/// the `catch_unwind` that `try { } catch { }` and the route wrapper emit. The
+/// default hook still prints the message and a backtrace to stderr first, so
+/// an ordinary handled failure — `try { jwt_verify(...) } catch { unauthorized() }`
+/// on every unauthenticated request — filled the log with `thread 'main'
+/// panicked` and a stack trace for what the interpreter reports as nothing at
+/// all.
+///
+/// The hook stays installed for genuine crashes but prints one line instead of
+/// a trace. `RUST_BACKTRACE` restores the full output for debugging.
+fn jwc_install_panic_hook() {
+    // `RUST_BACKTRACE=0` is "no backtrace", not "opt out of the hook" — check
+    // the value rather than mere presence.
+    let want_backtrace = std::env::var("RUST_BACKTRACE")
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off" | "no"))
+        .unwrap_or(false);
+    if want_backtrace {
+        return;
+    }
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Anything a JWC `try` can catch is handled by user code; only report
+        // it when nothing did, and without the trace.
+        if jwc_in_caught_region() {
+            return;
+        }
+        default(info);
+    }));
+}
+
+thread_local! {
+    /// Depth of `catch_unwind` regions the current thread is inside.
+    static JWC_CATCH_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn jwc_enter_caught_region() {
+    JWC_CATCH_DEPTH.with(|d| d.set(d.get() + 1));
+}
+
+fn jwc_leave_caught_region() {
+    JWC_CATCH_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+}
+
+fn jwc_in_caught_region() -> bool {
+    JWC_CATCH_DEPTH.with(|d| d.get()) > 0
+}
+
 fn jwc_panic_payload_to_string(p: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<String>() {
         return s.clone();
