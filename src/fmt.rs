@@ -756,8 +756,11 @@ fn render_validate_field(f: &ValidateField) -> String {
 fn render_validate_rule(r: &ValidateRule) -> String {
     match r {
         ValidateRule::Required => "required".to_string(),
-        ValidateRule::MinLength(n) => format!("min_length({})", n),
-        ValidateRule::MaxLength(n) => format!("max_length({})", n),
+        // Must match the spelling `parse_validate_rule` accepts: it lower-cases
+        // the rule name and matches `minlength` / `maxlength`, so the
+        // underscored form does not round-trip through the parser.
+        ValidateRule::MinLength(n) => format!("minLength({})", n),
+        ValidateRule::MaxLength(n) => format!("maxLength({})", n),
         ValidateRule::Min(n) => format!("min({})", n),
         ValidateRule::Max(n) => format!("max({})", n),
         ValidateRule::Pattern(p) => format!("pattern(\"{}\")", escape_string(p)),
@@ -1101,5 +1104,38 @@ mod tests {
         let src = "@@@ broken !!!\n";
         let out = format_source(src);
         assert_eq!(out, "@@@ broken !!!\n");
+    }
+
+    /// Regression: `render_validate_rule` used to emit `min_length(..)` /
+    /// `max_length(..)`, which `parse_validate_rule` rejects. Formatting a
+    /// valid file therefore produced a file that no longer parsed, so
+    /// format-on-save and `jwc fmt --check` in CI corrupted projects.
+    ///
+    /// Asserts on every rule, not just the two that regressed, so any future
+    /// spelling drift between renderer and parser is caught here.
+    #[test]
+    fn formatted_validate_rules_round_trip_through_the_parser() {
+        let src = concat!(
+            "route POST \"/users\" {\n",
+            "    validate body {\n",
+            "        name: required, minLength(1), maxLength(120);\n",
+            "        age: required, min(1), max(150);\n",
+            "        email: required, pattern(\"^[^@]+@[^@]+$\");\n",
+            "    }\n",
+            "    return json({ ok: true });\n",
+            "}\n",
+        );
+        // Precondition: the input is valid to begin with.
+        assert!(
+            crate::parser::parse_program(src).is_ok(),
+            "test input must parse"
+        );
+
+        let formatted = format_source(src);
+        assert!(
+            crate::parser::parse_program(&formatted).is_ok(),
+            "formatter emitted source the parser rejects:\n{formatted}"
+        );
+        assert_eq!(formatted, format_source(&formatted), "must stay idempotent");
     }
 }
