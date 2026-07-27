@@ -6,7 +6,7 @@
 //! `crate::ast::*` re-exports below.
 
 use super::*;
-use crate::ast::{ModelKind, Program, Stmt};
+use crate::ast::{ModelKind, Program, Stmt, WhereExpr};
 
 #[test]
 fn atomic_update_set_parses_and_validates() {
@@ -1376,4 +1376,100 @@ fn async_without_function_inside_dome_is_rejected() {
             .contains("expected 'function' after 'async'"),
         "unhelpful error: {err}"
     );
+}
+
+/// `and` / `or` belong to the WHERE tree, not to a comparison's right-hand
+/// side. Parsing the RHS with the full expression parser let it swallow them,
+/// so `where a > 2 and b < 9` built a single-term WHERE whose bound value was
+/// `(2 and (b < 9))` — and the emitted SQL quietly dropped the second filter:
+///
+/// ```text
+/// SELECT * FROM "sale" WHERE "amount" > $1
+/// ```
+///
+/// Nothing errored; the query just returned rows it should have excluded.
+#[test]
+fn where_with_literal_rhs_keeps_every_and_term() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb { id int pk; amount int; }
+        function f() {
+            return select Sale from AppDb.Sale where Sale.amount > 2 and Sale.amount < 9;
+        }
+        function main() { f(); }
+    "#;
+    let program = parse_program(src).expect("parse");
+    validate_program(&program).expect("validate");
+
+    let where_expr = find_select_where(&program).expect("select with a where clause");
+    let WhereExpr::And(left, right) = where_expr else {
+        panic!("expected a two-term AND, got: {where_expr:?}");
+    };
+    assert!(
+        matches!(left.as_ref(), WhereExpr::Atom(a) if a.op == ">"),
+        "left term should be `amount > 2`, got: {left:?}"
+    );
+    assert!(
+        matches!(right.as_ref(), WhereExpr::Atom(a) if a.op == "<"),
+        "right term should be `amount < 9`, got: {right:?}"
+    );
+}
+
+#[test]
+fn where_with_literal_rhs_keeps_every_or_term() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb { id int pk; amount int; }
+        function f() {
+            return select Sale from AppDb.Sale where Sale.amount == 2 or Sale.amount == 9;
+        }
+        function main() { f(); }
+    "#;
+    let program = parse_program(src).expect("parse");
+    validate_program(&program).expect("validate");
+    let where_expr = find_select_where(&program).expect("select with a where clause");
+    assert!(
+        matches!(where_expr, WhereExpr::Or(_, _)),
+        "expected a two-term OR, got: {where_expr:?}"
+    );
+}
+
+/// Arithmetic on the right of a comparison still parses — the fix lowered the
+/// RHS to additive precedence, which is exactly what `2 + 3` needs.
+#[test]
+fn where_rhs_still_accepts_arithmetic() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb { id int pk; amount int; }
+        function f() {
+            return select Sale from AppDb.Sale where Sale.amount > 2 + 3;
+        }
+        function main() { f(); }
+    "#;
+    let program = parse_program(src).expect("parse");
+    validate_program(&program).expect("validate");
+    let where_expr = find_select_where(&program).expect("select with a where clause");
+    let WhereExpr::Atom(atom) = where_expr else {
+        panic!("expected a single term, got: {where_expr:?}");
+    };
+    assert!(
+        matches!(atom.rhs, Expr::Add(_, _)),
+        "RHS should still parse `2 + 3` as addition, got: {:?}",
+        atom.rhs
+    );
+}
+
+/// First `where_clause` of the first `select` in the program's functions.
+fn find_select_where(program: &Program) -> Option<&WhereExpr> {
+    for f in &program.functions {
+        for s in &f.body {
+            let Stmt::Return(Some(Expr::DbSelect { where_clause, .. })) = s else {
+                continue;
+            };
+            if let Some(wc) = where_clause {
+                return Some(wc);
+            }
+        }
+    }
+    None
 }

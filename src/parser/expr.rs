@@ -812,9 +812,26 @@ impl<'a> Parser<'a> {
     /// for an `Expr::Var`; `@name.field` extends it to `Expr::FieldGet` so
     /// callers can write `where User.id == @req.userId first;` instead of
     /// staging an extra `let` binding.
+    ///
+    /// The fallback parses at **additive** precedence, not full-expression
+    /// precedence. A comparison's right side is an arithmetic expression;
+    /// `and` / `or` belong to the surrounding WHERE tree. Handing the RHS to
+    /// `parse_expr` let it swallow them, and the second predicate then
+    /// vanished from the emitted SQL:
+    ///
+    /// ```text
+    /// where Sale.amount > 2 and Sale.id < 100
+    ///   ->  SELECT * FROM "sale" WHERE "amount" > $1
+    ///       $1 = (2 and (Sale.id < 100))
+    /// ```
+    ///
+    /// Nothing errored — the filter just silently returned rows it should
+    /// have excluded. Only literal right-hand sides reached it; the common
+    /// `== @param` form returns from the branch above before `parse_expr` is
+    /// ever called, which is why this survived.
     pub(super) fn parse_at_or_expr(&mut self) -> Result<Expr> {
         if !self.check_symbol('@') {
-            return self.parse_expr();
+            return self.parse_add_expr();
         }
         self.bump()?;
         let name = self.expect_ident("expected parameter name after '@'")?;
