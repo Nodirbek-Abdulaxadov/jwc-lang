@@ -345,10 +345,17 @@ pub fn strip_jsonc_comments(raw: &str) -> String {
 
 pub fn find_project_root(start: &Path) -> Result<PathBuf> {
     let start_dir = if start.is_file() {
-        start
-            .parent()
-            .ok_or_else(|| anyhow!("Invalid start file path"))?
-            .to_path_buf()
+        match start.parent() {
+            // `Path::parent` of a bare filename is `""`, not the current
+            // directory. Walking up from an empty path finds a manifest
+            // relative to cwd but then hands back `""` as the project root,
+            // and every path built from it is unreadable — so
+            // `jwc check main.jwc` (the most common form) failed while
+            // `./main.jwc` worked.
+            Some(p) if p.as_os_str().is_empty() => PathBuf::from("."),
+            Some(p) => p.to_path_buf(),
+            None => return Err(anyhow!("Invalid start file path")),
+        }
     } else {
         start.to_path_buf()
     };
@@ -752,6 +759,41 @@ mod tests {
         assert!(env_ex.contains("PG_DATABASE="));
 
         // Be tidy.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Path::parent` of a bare filename is `""`, not `"."`. Walking up from
+    /// that found a manifest relative to cwd but returned `""` as the project
+    /// root, so every path built from it was unreadable — `jwc check main.jwc`
+    /// failed with `Failed to read ` while `./main.jwc` worked.
+    #[test]
+    fn find_project_root_handles_a_bare_relative_filename() {
+        let dir = std::env::temp_dir().join(format!("jwc-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join(PROJECT_FILE), r#"{"name":"t","version":"0.1.0"}"#).unwrap();
+        std::fs::write(dir.join("main.jwc"), "function main() { }\n").unwrap();
+
+        // `find_project_root` resolves relative paths against the process
+        // cwd, so the test has to be in the project directory. The suite is
+        // multi-threaded; keep the guard for the duration of the assertion.
+        static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&dir).expect("chdir");
+
+        let bare = find_project_root(Path::new("main.jwc"));
+        let dotted = find_project_root(Path::new("./main.jwc"));
+
+        std::env::set_current_dir(original).expect("restore cwd");
+
+        let bare = bare.expect("bare filename must resolve to a project root");
+        assert!(
+            !bare.as_os_str().is_empty(),
+            "project root must not be the empty path"
+        );
+        assert!(dotted.is_ok(), "`./` form must keep working");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
