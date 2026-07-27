@@ -602,8 +602,11 @@ pub(super) async fn build_select_sql(
 
     let mut sql_having = String::new();
     if let Some(hv) = having {
+        // Postgres won't take a SELECT alias in HAVING, so `having total > 2`
+        // has to become `HAVING COUNT(*) > $1` before anything is emitted.
+        let hv = crate::ast::resolve_having_aliases(hv, aggregates);
         let having_sql = build_where_sql(
-            hv,
+            &hv,
             &mut params,
             &mut shape_bits,
             &mut cache_bits,
@@ -1088,6 +1091,28 @@ pub(super) async fn build_where_sql(
                     format!("{} {} ${}", csql, op, idx)
                 }
             })
+        }
+        WhereExpr::AggAtom { kind, col, op, rhs } => {
+            let agg_sql = if col == "*" {
+                "COUNT(*)".to_string()
+            } else {
+                format!(
+                    "{}({})",
+                    kind.keyword().to_uppercase(),
+                    where_col_sql(col, aliases)
+                )
+            };
+            let op = normalize_sql_op(op);
+            let rhs_val = vm.eval_expr(rhs, vars).await?;
+            params.push(value_to_sql_param(&rhs_val));
+            let idx = params.len();
+            let key = format!("{}:{}", kind.keyword(), field_path_to_col(col));
+            shape.push(format!("having:{key}:{op}:param"));
+            cache.push(format!(
+                "having:{key}:{op}:{}",
+                value_to_cache_fragment(&rhs_val)
+            ));
+            Ok(format!("{} {} ${}", agg_sql, op, idx))
         }
         WhereExpr::Between { field, low, high } => {
             let col = field_path_to_col(field);

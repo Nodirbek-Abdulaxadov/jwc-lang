@@ -1549,6 +1549,9 @@ fn check_typed_where(
 ) -> Result<()> {
     match expr {
         WhereExpr::Atom(wc) => check_typed_field_access_in_expr(&wc.rhs, locals, model_fields),
+        WhereExpr::AggAtom { rhs, .. } => {
+            check_typed_field_access_in_expr(rhs, locals, model_fields)
+        }
         WhereExpr::InList { values, .. } => {
             for v in values {
                 check_typed_field_access_in_expr(v, locals, model_fields)?;

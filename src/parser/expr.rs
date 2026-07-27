@@ -20,6 +20,14 @@ use crate::lexer::{Keyword, TemplatePart, TokenKind};
 
 use super::{parse_template_hole, Parser};
 
+/// What `take_agg_head` found. `Ident` carries an already-consumed identifier
+/// back to the caller so a column named `count` still parses as a column.
+enum AggHead {
+    Aggregate(AggregateKind),
+    Ident(String),
+    NotAggregate,
+}
+
 impl<'a> Parser<'a> {
     /// Entry point. Handles the two lowest-precedence forms, both of which
     /// open with `?`: `a ?? b` and `a ? b : c`. They share the token, so one
@@ -632,7 +640,7 @@ impl<'a> Parser<'a> {
         // the dependency.
         let having = if self.check_ident_eq("having") {
             self.bump()?;
-            Some(Box::new(self.parse_where_or()?))
+            Some(Box::new(self.parse_having_or()?))
         } else {
             None
         };
@@ -699,34 +707,66 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn parse_where_or(&mut self) -> Result<WhereExpr> {
-        let mut left = self.parse_where_and()?;
+        self.parse_where_or_inner(false)
+    }
+
+    /// `having` accepts everything `where` does plus aggregate comparisons
+    /// (`count(*) > 5`). `where` runs before aggregation, so an aggregate
+    /// there is meaningless — hence the flag rather than one shared grammar.
+    pub(super) fn parse_having_or(&mut self) -> Result<WhereExpr> {
+        self.parse_where_or_inner(true)
+    }
+
+    fn parse_where_or_inner(&mut self, allow_agg: bool) -> Result<WhereExpr> {
+        let mut left = self.parse_where_and(allow_agg)?;
         while self.current.kind == TokenKind::Keyword(Keyword::Or) {
             self.bump()?;
-            let right = self.parse_where_and()?;
+            let right = self.parse_where_and(allow_agg)?;
             left = WhereExpr::Or(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
-    pub(super) fn parse_where_and(&mut self) -> Result<WhereExpr> {
-        let mut left = self.parse_where_atom()?;
+    fn parse_where_and(&mut self, allow_agg: bool) -> Result<WhereExpr> {
+        let mut left = self.parse_where_atom(allow_agg)?;
         while self.current.kind == TokenKind::Keyword(Keyword::And) {
             self.bump()?;
-            let right = self.parse_where_atom()?;
+            let right = self.parse_where_atom(allow_agg)?;
             left = WhereExpr::And(Box::new(left), Box::new(right));
         }
         Ok(left)
     }
 
-    pub(super) fn parse_where_atom(&mut self) -> Result<WhereExpr> {
+    fn parse_where_atom(&mut self, allow_agg: bool) -> Result<WhereExpr> {
         if self.check_symbol('(') {
             self.expect_symbol('(')?;
-            let inner = self.parse_where_or()?;
+            let inner = self.parse_where_or_inner(allow_agg)?;
             self.expect_symbol(')')?;
             return Ok(inner);
         }
 
-        let field = self.parse_field_path()?;
+        // The parser has no lookahead past `current`, so an aggregate head has
+        // to be consumed before we can tell it apart from a field of the same
+        // name. When the `(` doesn't follow, hand the identifier back to the
+        // field-path parser rather than losing it — a column really can be
+        // called `count`.
+        let field = match self.take_agg_head(allow_agg)? {
+            AggHead::Aggregate(kind) => {
+                self.expect_symbol('(')?;
+                let col = if kind == AggregateKind::Count {
+                    self.expect_symbol('*')?;
+                    "*".to_string()
+                } else {
+                    self.parse_field_path()?
+                };
+                self.expect_symbol(')')?;
+                let op = self.parse_cmp_op()?;
+                let rhs = self.parse_where_rhs()?;
+                return Ok(WhereExpr::AggAtom { kind, col, op, rhs });
+            }
+            AggHead::Ident(head) => self.finish_field_path(head)?,
+            AggHead::NotAggregate => self.parse_field_path()?,
+        };
 
         if self.check_ident_eq("between") {
             self.bump()?;
@@ -802,6 +842,55 @@ impl<'a> Parser<'a> {
 
         let rhs = self.parse_at_or_expr()?;
         Ok(WhereExpr::Atom(DbWhere { field, op, rhs }))
+    }
+
+    /// Consume an aggregate head (`count` / `sum` / `avg` / `min` / `max`) if
+    /// one is next and aggregates are legal here.
+    ///
+    /// The identifier is consumed before we can see whether a `(` follows, so
+    /// the non-aggregate answer carries it back out for the caller to finish
+    /// as a field path. Without that, `where count > 5` on a column actually
+    /// named `count` would break.
+    fn take_agg_head(&mut self, allow_agg: bool) -> Result<AggHead> {
+        if !allow_agg {
+            return Ok(AggHead::NotAggregate);
+        }
+        let kind = if self.check_ident_eq("count") {
+            AggregateKind::Count
+        } else if self.check_ident_eq("sum") {
+            AggregateKind::Sum
+        } else if self.check_ident_eq("avg") {
+            AggregateKind::Avg
+        } else if self.check_ident_eq("min") {
+            AggregateKind::Min
+        } else if self.check_ident_eq("max") {
+            AggregateKind::Max
+        } else {
+            return Ok(AggHead::NotAggregate);
+        };
+        let head = self.expect_ident("expected aggregate name")?;
+        if self.check_symbol('(') {
+            Ok(AggHead::Aggregate(kind))
+        } else {
+            Ok(AggHead::Ident(head))
+        }
+    }
+
+    /// Finish a field path whose first identifier is already consumed.
+    fn finish_field_path(&mut self, first: String) -> Result<String> {
+        if self.check_symbol('.') {
+            self.bump()?;
+            let second = self.expect_ident("expected field name after '.'")?;
+            Ok(format!("{}.{}", first, second))
+        } else {
+            Ok(first)
+        }
+    }
+
+    /// RHS of an aggregate comparison. Aggregates compare against a value, so
+    /// unlike a column term there is no `like` / `is null` / `op?` form here.
+    fn parse_where_rhs(&mut self) -> Result<Expr> {
+        self.parse_at_or_expr()
     }
 
     pub(super) fn parse_in_value(&mut self) -> Result<Expr> {

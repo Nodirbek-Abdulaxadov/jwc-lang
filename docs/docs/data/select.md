@@ -125,11 +125,40 @@ let by_status = select Task { status, total: count(*) }
 - Aggregate functions in the projection: `count(*)`, `sum(col)`, `avg(col)`,
   `min(col)`, `max(col)`.
 - `group by col [, ...]` — group keys (also `group by Entity.col` under a join).
-- `having <cond>` — post-aggregation filter, same shape as `where`.
+- `having <cond>` — post-aggregation filter.
 
 A grouped `select` **must** use the aliased projection form — a bare
 `select Task ... group by ...` (no projection) would emit `SELECT t.*` which
 Postgres rejects under `GROUP BY`. Name the columns you group by.
+
+### having
+
+`having` filters **after** grouping, so it can name three things: a `group by`
+key, an aggregate call, or an aggregate alias from the projection.
+
+```jwc
+let busy = select Task { status, total: count(*), effort: sum(hours) }
+    from AppDb.Task
+    group by status
+    having count(*) > 2 and sum(Task.hours) >= 40;
+```
+
+Referring to the alias works too, and reads better when the projection
+already names the aggregate:
+
+```jwc
+let busy = select Task { status, total: count(*) }
+    from AppDb.Task
+    group by status
+    having total > 2;
+```
+
+Anything else is a compile error (`E010`). A plain column that is neither a
+group key nor an aggregate can't be evaluated at that point — Postgres would
+reject it with *"column must appear in the GROUP BY clause or be used in an
+aggregate function"* — so `jwc check` catches it instead of the database.
+
+`having` without a `group by` is also an error (`E009`).
 
 Scalar aggregates over the whole query (no `group by`) keep the function form:
 

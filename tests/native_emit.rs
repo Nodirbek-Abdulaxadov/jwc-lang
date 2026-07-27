@@ -229,3 +229,65 @@ fn emit_rust_source_respects_release_profile_dir() {
     );
     assert!(out.exists(), "release output not written");
 }
+
+/// The AOT path has to agree with the interpreter on `having`: aggregate
+/// comparisons emit the aggregate, and a projection alias is resolved to the
+/// aggregate it names (Postgres rejects an output alias in `HAVING`).
+#[test]
+fn emit_rust_source_lowers_having_aggregates_and_aliases() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let program = parse(
+        r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+            amount int;
+        }
+
+        function busy() {
+            return select Sale { country, total: count(*) } from AppDb.Sale
+                group by Sale.country
+                having count(*) > 2 and sum(Sale.amount) >= 500;
+        }
+
+        function viaAlias() {
+            return select Sale { country, total: count(*) } from AppDb.Sale
+                group by Sale.country
+                having total > 2;
+        }
+
+        function main() { busy(); viaAlias(); }
+    "#,
+    );
+
+    let out = emit_rust_source(&program, root, "having_app", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    assert!(
+        body.contains("HAVING (COUNT(*) > $1 AND SUM("),
+        "aggregate comparison must lower to the SQL aggregate; got:\n{}",
+        having_lines(&body)
+    );
+    // The alias query names no aggregate of its own — if the alias were passed
+    // through as a column the emitted SQL would say `\"total\"` here, which is
+    // what fails at the database.
+    assert!(
+        !body.contains("HAVING \\\"total\\\""),
+        "a projection alias must not reach SQL as a column; got:\n{}",
+        having_lines(&body)
+    );
+    assert!(
+        body.matches("HAVING COUNT(*) > $1").count() >= 1,
+        "the alias query must lower to COUNT(*); got:\n{}",
+        having_lines(&body)
+    );
+}
+
+fn having_lines(body: &str) -> String {
+    body.lines()
+        .filter(|l| l.contains("HAVING"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}

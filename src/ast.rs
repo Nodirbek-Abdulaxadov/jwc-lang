@@ -348,6 +348,19 @@ pub struct DbWhere {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhereExpr {
     Atom(DbWhere),
+    /// `having count(*) > 5` / `having sum(Task.hours) >= @budget` — an
+    /// aggregate function on the left of a comparison.
+    ///
+    /// Only reachable from `having`. `where` runs before aggregation, so an
+    /// aggregate there is meaningless and the parser doesn't accept one.
+    AggAtom {
+        kind: AggregateKind,
+        /// Aggregated column path, or `*` for `count(*)`.
+        col: String,
+        /// SQL comparison operator, same set as [`DbWhere::op`].
+        op: String,
+        rhs: Expr,
+    },
     /// `field in (expr1, expr2, ...)` — SQL `"field" IN ($1, $2, ...)`.
     InList {
         field: String,
@@ -379,6 +392,20 @@ pub enum AggregateKind {
     Count,
 }
 
+impl AggregateKind {
+    /// The JWC surface spelling — what the formatter emits and the parser
+    /// reads back.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            AggregateKind::Sum => "sum",
+            AggregateKind::Avg => "avg",
+            AggregateKind::Min => "min",
+            AggregateKind::Max => "max",
+            AggregateKind::Count => "count",
+        }
+    }
+}
+
 /// One aliased aggregate term in a grouped projection
 /// (`select { status, total: count(*) } ... group by status`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,6 +415,44 @@ pub struct AggProj {
     pub kind: AggregateKind,
     /// Aggregated column path, or `*` for `count(*)`.
     pub col: String,
+}
+
+/// Rewrite `having <alias> <op> <rhs>` into the aggregate that alias names.
+///
+/// Postgres accepts a SELECT output alias in `GROUP BY` and `ORDER BY` but
+/// **not** in `HAVING`, so `having total > 2` against a projection of
+/// `{ status, total: count(*) }` emits `HAVING "total" > $1` and dies at the
+/// database with `column "total" does not exist`. Naming the alias is the
+/// obvious thing to write, so resolve it to the aggregate it stands for
+/// instead of making the caller repeat `count(*)`.
+///
+/// A field that matches no alias is left alone — it's a group key, and the
+/// validator has already confirmed it is one.
+pub fn resolve_having_aliases(expr: &WhereExpr, aggregates: &[AggProj]) -> WhereExpr {
+    match expr {
+        WhereExpr::Atom(w) => match aggregates.iter().find(|a| a.alias == w.field) {
+            Some(agg) => WhereExpr::AggAtom {
+                kind: agg.kind,
+                col: agg.col.clone(),
+                op: w.op.clone(),
+                rhs: w.rhs.clone(),
+            },
+            None => expr.clone(),
+        },
+        WhereExpr::And(a, b) => WhereExpr::And(
+            Box::new(resolve_having_aliases(a, aggregates)),
+            Box::new(resolve_having_aliases(b, aggregates)),
+        ),
+        WhereExpr::Or(a, b) => WhereExpr::Or(
+            Box::new(resolve_having_aliases(a, aggregates)),
+            Box::new(resolve_having_aliases(b, aggregates)),
+        ),
+        // `in (...)` / `between` over an aggregate isn't accepted by the
+        // parser, so there is no alias to resolve on these.
+        WhereExpr::InList { .. } | WhereExpr::Between { .. } | WhereExpr::AggAtom { .. } => {
+            expr.clone()
+        }
+    }
 }
 
 /// An aliased plain column in a projection, used to surface a column from a

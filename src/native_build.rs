@@ -453,6 +453,7 @@ impl<'a> NameResolver<'a> {
         use crate::ast::WhereExpr;
         match wc {
             WhereExpr::Atom(a) => self.rewrite_expr(&mut a.rhs, caller_ns),
+            WhereExpr::AggAtom { rhs, .. } => self.rewrite_expr(rhs, caller_ns),
             WhereExpr::InList { values, .. } => {
                 for v in values {
                     self.rewrite_expr(v, caller_ns);
@@ -656,6 +657,7 @@ fn program_uses_http_client(program: &Program) -> bool {
         use crate::ast::WhereExpr;
         match w {
             WhereExpr::Atom(a) => walk_expr(&a.rhs),
+            WhereExpr::AggAtom { rhs, .. } => walk_expr(rhs),
             WhereExpr::And(l, r) | WhereExpr::Or(l, r) => walk_where(l) || walk_where(r),
             WhereExpr::InList { values, .. } => values.iter().any(walk_expr),
             WhereExpr::Between { low, high, .. } => walk_expr(low) || walk_expr(high),
@@ -777,6 +779,7 @@ fn program_uses_crypto(program: &Program) -> bool {
         use crate::ast::WhereExpr;
         match w {
             WhereExpr::Atom(a) => walk_expr(&a.rhs),
+            WhereExpr::AggAtom { rhs, .. } => walk_expr(rhs),
             WhereExpr::And(l, r) | WhereExpr::Or(l, r) => walk_where(l) || walk_where(r),
             WhereExpr::InList { values, .. } => values.iter().any(walk_expr),
             WhereExpr::Between { low, high, .. } => walk_expr(low) || walk_expr(high),
@@ -1168,6 +1171,7 @@ fn check_where(
     use crate::ast::WhereExpr;
     match w {
         WhereExpr::Atom(a) => check_expr(&a.rhs, funcs, builtins),
+        WhereExpr::AggAtom { rhs, .. } => check_expr(rhs, funcs, builtins),
         WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
             check_where(l, funcs, builtins)?;
             check_where(r, funcs, builtins)
@@ -2934,6 +2938,37 @@ impl<'a> WhereBuilder<'a> {
                 }
                 Ok(())
             }
+            WhereExpr::AggAtom { kind, col, op, rhs } => {
+                use crate::ast::AggregateKind;
+                let op = match op.as_str() {
+                    "==" | "=" => "=",
+                    "!=" | "<>" => "<>",
+                    "<" => "<",
+                    "<=" => "<=",
+                    ">" => ">",
+                    ">=" => ">=",
+                    other => bail!(unsupported(&format!("HAVING operator `{}`", other))),
+                };
+                // `count(*)` counts rows and takes a bigint; the others take
+                // the aggregated column's own type. `avg` is the exception —
+                // Postgres widens it to numeric even over an integer column.
+                let (agg_sql, bind) = if *col == "*" {
+                    ("COUNT(*)".to_string(), PgKind::Bigint)
+                } else {
+                    let (_, col_kind) = self.col_kind(col)?;
+                    let cref = self.col_ref(col);
+                    let bind = match kind {
+                        AggregateKind::Count => PgKind::Bigint,
+                        AggregateKind::Sum | AggregateKind::Avg => PgKind::Numeric,
+                        AggregateKind::Min | AggregateKind::Max => col_kind,
+                    };
+                    (format!("{}({})", kind.keyword().to_uppercase(), cref), bind)
+                };
+                let n = self.params.len() + 1;
+                self.params.push((bind, rhs));
+                self.sql.push_str(&format!("{} {} ${}", agg_sql, op, n));
+                Ok(())
+            }
             WhereExpr::And(l, r) => {
                 self.sql.push('(');
                 self.emit(l)?;
@@ -3794,6 +3829,11 @@ fn emit_db_select_explicit(
         ));
     }
 
+    // Postgres rejects a SELECT alias in HAVING, so `having total > 2` has to
+    // be rewritten to the aggregate it names first. Bound here, above `wb`, so
+    // the rewritten node outlives the builder holding references into it.
+    let resolved_having = having.map(|hv| crate::ast::resolve_having_aliases(hv, aggregates));
+
     // WHERE + HAVING share one param counter (where params first, then
     // having), matching the interpreter's bind order.
     let mut wb = if has_joins {
@@ -3822,7 +3862,7 @@ fn emit_db_select_explicit(
             .collect();
         format!(" GROUP BY {}", cols.join(", "))
     };
-    let having_sql = if let Some(hv) = having {
+    let having_sql = if let Some(hv) = resolved_having.as_ref() {
         if let Err(e) = wb.emit(hv) {
             out.push_str(&format!(
                 "{{ compile_error!({:?}); V::Null }}",

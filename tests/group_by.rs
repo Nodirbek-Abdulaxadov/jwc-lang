@@ -74,7 +74,7 @@ fn group_by_unknown_column_is_rejected() {
 }
 
 #[test]
-fn having_with_group_by_validates() {
+fn having_on_a_group_key_validates() {
     let src = r#"
         dbcontext AppDb : Postgres;
         entity Sale of AppDb {
@@ -84,14 +84,134 @@ fn having_with_group_by_validates() {
         }
 
         function topCountries(min) {
-            return select Sale from AppDb.Sale
+            return select Sale { country, total: count(*) } from AppDb.Sale
+                group by Sale.country
+                having Sale.country != @min;
+        }
+
+        function main() { topCountries("XX"); }
+    "#;
+    validate_source(src).expect("having on a group key must validate");
+}
+
+/// `having <plain column>` where the column is neither a group key nor an
+/// aggregate used to validate and then fail at the database:
+///
+/// ```text
+/// ERROR: column "sale.amount" must appear in the GROUP BY clause
+///        or be used in an aggregate function
+/// ```
+#[test]
+fn having_on_a_non_grouped_column_is_rejected() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+            amount int;
+        }
+
+        function broken(min) {
+            return select Sale { country, total: count(*) } from AppDb.Sale
                 group by Sale.country
                 having Sale.amount > @min;
         }
 
-        function main() { topCountries(100); }
+        function main() { broken(100); }
     "#;
-    validate_source(src).expect("having with group by must validate");
+    let err = validate_source(src).expect_err("non-grouped column in HAVING must be rejected");
+    assert!(
+        err.contains("E010") && err.contains("amount"),
+        "expected the HAVING-scope error, got: {err}"
+    );
+}
+
+#[test]
+fn having_accepts_aggregate_comparisons() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+            amount int;
+        }
+
+        function busyCountries() {
+            return select Sale { country, total: count(*) } from AppDb.Sale
+                group by Sale.country
+                having count(*) > 2 and sum(Sale.amount) >= 500;
+        }
+
+        function main() { busyCountries(); }
+    "#;
+    validate_source(src).expect("aggregate comparisons in having must validate");
+}
+
+/// Postgres rejects a SELECT output alias in `HAVING`, so writing the alias —
+/// the obvious thing to do — has to be rewritten to the aggregate it names.
+#[test]
+fn having_accepts_an_aggregate_alias_from_the_projection() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+        }
+
+        function busyCountries() {
+            return select Sale { country, total: count(*) } from AppDb.Sale
+                group by Sale.country
+                having total > 2;
+        }
+
+        function main() { busyCountries(); }
+    "#;
+    validate_source(src).expect("an aggregate alias must be usable in having");
+}
+
+#[test]
+fn having_rejects_an_unknown_column_inside_an_aggregate() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            country varchar(64);
+        }
+
+        function broken() {
+            return select Sale { country, total: count(*) } from AppDb.Sale
+                group by Sale.country
+                having sum(Sale.nope) > 2;
+        }
+
+        function main() { broken(); }
+    "#;
+    let err = validate_source(src).expect_err("unknown aggregate column must be rejected");
+    assert!(
+        err.contains("nope") && err.contains("sum()"),
+        "expected the aggregate-column error, got: {err}"
+    );
+}
+
+/// The aggregate names aren't reserved words — `where` has no aggregate form,
+/// so a column called `count` still parses there.
+#[test]
+fn a_column_named_like_an_aggregate_still_works_in_where() {
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Sale of AppDb {
+            id int pk;
+            count int;
+            min int;
+        }
+
+        function f(n) {
+            return select Sale from AppDb.Sale where Sale.count > @n and Sale.min < @n;
+        }
+
+        function main() { f(1); }
+    "#;
+    validate_source(src).expect("columns named count/min must still be usable in where");
 }
 
 #[test]

@@ -513,6 +513,7 @@ fn collect_calls_expr(expr: &Expr, out: &mut HashSet<String>) {
 fn collect_calls_where(wc: &WhereExpr, out: &mut std::collections::HashSet<String>) {
     match wc {
         WhereExpr::Atom(atom) => collect_calls_expr(&atom.rhs, out),
+        WhereExpr::AggAtom { rhs, .. } => collect_calls_expr(rhs, out),
         WhereExpr::InList { values, .. } => {
             for v in values {
                 collect_calls_expr(v, out);

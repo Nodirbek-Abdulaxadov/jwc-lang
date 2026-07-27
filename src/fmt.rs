@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::ast::{
-    AggregateKind, ConstDecl, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
+    ConstDecl, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
     FieldReference, FunctionDecl, ImportDecl, MiddlewareDecl, ModelDecl, ModelKind, MountDecl,
     NavigationField, NavigationKind, OnDeleteAction, Program, RouteDecl, RouteProtocol, SortDir,
     Stmt, TypeSpec, TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
@@ -824,6 +824,9 @@ fn render_validate_rule(r: &ValidateRule) -> String {
 fn render_where(w: &WhereExpr) -> String {
     match w {
         WhereExpr::Atom(a) => render_db_where(a),
+        WhereExpr::AggAtom { kind, col, op, rhs } => {
+            format!("{}({}) {} {}", kind.keyword(), col, op, render_expr(rhs))
+        }
         WhereExpr::InList { field, values } => {
             let vs: Vec<String> = values.iter().map(render_expr).collect();
             format!("{} in ({})", field, vs.join(", "))
@@ -886,14 +889,13 @@ fn render_expr(e: &Expr) -> String {
             table,
             where_clause,
         } => {
-            let kw = match kind {
-                AggregateKind::Sum => "sum",
-                AggregateKind::Avg => "avg",
-                AggregateKind::Min => "min",
-                AggregateKind::Max => "max",
-                AggregateKind::Count => "count",
-            };
-            let mut s = format!("select {}({}) from {}.{}", kw, field, context_var, table);
+            let mut s = format!(
+                "select {}({}) from {}.{}",
+                kind.keyword(),
+                field,
+                context_var,
+                table
+            );
             if let Some(wc) = where_clause {
                 s.push_str(" where ");
                 s.push_str(&render_where(wc));
@@ -925,14 +927,7 @@ fn render_expr(e: &Expr) -> String {
                     items.push(format!("{}: {}", ac.alias, ac.field));
                 }
                 for a in aggregates {
-                    let inner = match a.kind {
-                        AggregateKind::Count => "count(*)".to_string(),
-                        AggregateKind::Sum => format!("sum({})", a.col),
-                        AggregateKind::Avg => format!("avg({})", a.col),
-                        AggregateKind::Min => format!("min({})", a.col),
-                        AggregateKind::Max => format!("max({})", a.col),
-                    };
-                    items.push(format!("{}: {}", a.alias, inner));
+                    items.push(format!("{}: {}({})", a.alias, a.kind.keyword(), a.col));
                 }
                 s.push_str(" { ");
                 s.push_str(&items.join(", "));
@@ -1268,6 +1263,22 @@ mod tests {
                     "}\n",
                     "function totals() {\n",
                     "    return select Sale from AppDb.Sale group by Sale.country;\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "grouped aggregation with having",
+                concat!(
+                    "dbcontext AppDb: Postgres;\n",
+                    "entity Sale of AppDb {\n",
+                    "    id int pk autoincrement;\n",
+                    "    country varchar(64);\n",
+                    "    amount int;\n",
+                    "}\n",
+                    "function busy() {\n",
+                    "    return select Sale { country, total: count(*), taken: sum(amount) } ",
+                    "from AppDb.Sale group by Sale.country ",
+                    "having count(*) > 2 and sum(Sale.amount) >= 500;\n",
                     "}\n",
                 ),
             ),

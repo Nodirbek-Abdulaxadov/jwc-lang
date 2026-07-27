@@ -438,6 +438,18 @@ fn validate_expr(
 
             validate_table_in_context(&ctx_key, table, db_tables)?;
 
+            // Checked before the per-column HAVING rules below: "you wrote
+            // `having` without a `group by`" is the more useful message for
+            // that program than "this column isn't a group key".
+            if having.is_some() && group_by.is_empty() {
+                bail!(
+                    "error[E009]: `having` requires `group by` — found `having` on select {} from {}.{} without a `group by` clause",
+                    entity,
+                    context_var,
+                    table
+                );
+            }
+
             // Compile-time column existence check for WHERE / ORDER BY / projection.
             // Skipped for JOIN queries — they reference columns across several
             // entities, which this single-entity check can't resolve; Postgres
@@ -500,16 +512,12 @@ fn validate_expr(
                         );
                     }
                 }
+
+                if let Some(hv) = having {
+                    check_having_columns(hv, fields, group_by, aggregates, context_var, table)?;
+                }
             }
 
-            if having.is_some() && group_by.is_empty() {
-                bail!(
-                    "error[E009]: `having` requires `group by` — found `having` on select {} from {}.{} without a `group by` clause",
-                    entity,
-                    context_var,
-                    table
-                );
-            }
             if let Some(hv) = having {
                 validate_where_expr(
                     hv,
@@ -667,6 +675,10 @@ fn check_where_columns(
             }
             Ok(())
         }
+        // The `where` grammar has no aggregate form, so this is unreachable
+        // from a parsed program; `having` terms go through
+        // `check_having_columns` instead.
+        WhereExpr::AggAtom { .. } => Ok(()),
         WhereExpr::InList { field, .. } | WhereExpr::Between { field, .. } => {
             let col = strip_entity_prefix(field);
             if !fields.iter().any(|f| f.eq_ignore_ascii_case(&col)) {
@@ -687,6 +699,86 @@ fn check_where_columns(
     }
 }
 
+/// Column checks for `having`, which are not the same as the ones for `where`.
+///
+/// `HAVING` runs after aggregation, so the only things it can name are the
+/// group keys and the aggregates. A plain column that is neither used to be
+/// accepted here and then failed at the database:
+///
+/// ```text
+/// having total > 2   ->  HAVING "total" > $1
+///                        ERROR: column "total" does not exist
+/// ```
+///
+/// An alias *is* legal to write — `resolve_having_aliases` rewrites it into
+/// the aggregate it names before any SQL is built — so it passes here too.
+fn check_having_columns(
+    expr: &WhereExpr,
+    fields: &[String],
+    group_by: &[String],
+    aggregates: &[crate::ast::AggProj],
+    context_var: &str,
+    table: &str,
+) -> Result<()> {
+    match expr {
+        WhereExpr::AggAtom { col, kind, .. } => {
+            if col == "*" {
+                return Ok(());
+            }
+            let c = strip_entity_prefix(col);
+            if !fields.iter().any(|f| f.eq_ignore_ascii_case(&c)) {
+                bail!(
+                    "Unknown column '{}' in {}() of HAVING on {}.{}{}",
+                    c,
+                    kind.keyword(),
+                    context_var,
+                    table,
+                    suggest_column(&c, fields),
+                );
+            }
+            Ok(())
+        }
+        WhereExpr::Atom(wc) => {
+            let col = strip_entity_prefix(&wc.field);
+            let is_group_key = group_by
+                .iter()
+                .any(|g| strip_entity_prefix(g).eq_ignore_ascii_case(&col));
+            let is_agg_alias = aggregates.iter().any(|a| a.alias == wc.field);
+            if is_group_key || is_agg_alias {
+                return Ok(());
+            }
+            bail!(
+                "error[E010]: '{}' is not usable in HAVING on {}.{} — HAVING runs after \
+                 aggregation, so it can only reference a `group by` key, an aggregate \
+                 alias from the projection, or an aggregate call like `count(*) > 5`",
+                wc.field,
+                context_var,
+                table,
+            );
+        }
+        WhereExpr::InList { field, .. } | WhereExpr::Between { field, .. } => {
+            let col = strip_entity_prefix(field);
+            let is_group_key = group_by
+                .iter()
+                .any(|g| strip_entity_prefix(g).eq_ignore_ascii_case(&col));
+            if is_group_key || aggregates.iter().any(|a| &a.alias == field) {
+                return Ok(());
+            }
+            bail!(
+                "error[E010]: '{}' is not usable in HAVING on {}.{} — HAVING can only \
+                 reference a `group by` key or an aggregate",
+                field,
+                context_var,
+                table,
+            );
+        }
+        WhereExpr::And(l, r) | WhereExpr::Or(l, r) => {
+            check_having_columns(l, fields, group_by, aggregates, context_var, table)?;
+            check_having_columns(r, fields, group_by, aggregates, context_var, table)
+        }
+    }
+}
+
 fn validate_where_expr(
     expr: &WhereExpr,
     ctx_names: &HashSet<String>,
@@ -697,6 +789,13 @@ fn validate_where_expr(
     match expr {
         WhereExpr::Atom(wc) => validate_expr(
             &wc.rhs,
+            ctx_names,
+            entity_contexts,
+            db_tables,
+            entity_fields_by_table,
+        ),
+        WhereExpr::AggAtom { rhs, .. } => validate_expr(
+            rhs,
             ctx_names,
             entity_contexts,
             db_tables,
