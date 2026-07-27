@@ -185,6 +185,14 @@ pub struct ModelDecl {
     /// Navigation properties (relations) declared inside this entity.
     /// Empty for plain DTO classes.
     pub navigations: Vec<NavigationField>,
+    /// Table-level `unique(a, b);` declarations — one entry per constraint,
+    /// each listing the columns it spans.
+    ///
+    /// A join table's `(taskId, labelId)` pair can't be expressed with the
+    /// per-column `unique` modifier, so uniqueness ended up enforced in
+    /// application code with a select-then-insert: a TOCTOU race with nothing
+    /// holding the invariant at the database level.
+    pub unique_constraints: Vec<Vec<String>>,
     /// Namespace this model lives in. Empty = root.
     pub namespace: Vec<String>,
     pub visibility: Visibility,

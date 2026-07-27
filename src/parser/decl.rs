@@ -264,8 +264,30 @@ impl<'a> Parser<'a> {
 
         let mut fields = Vec::new();
         let mut navigations = Vec::new();
+        let mut unique_constraints: Vec<Vec<String>> = Vec::new();
         while !self.check_symbol('}') {
             let field_name = self.expect_ident("expected field name")?;
+
+            // Table-level `unique(a, b);` — a constraint, not a column. Only
+            // the multi-column form lands here; `col int unique;` is still a
+            // per-column modifier parsed below.
+            if field_name.eq_ignore_ascii_case("unique") && self.check_symbol('(') {
+                self.expect_symbol('(')?;
+                let mut cols = vec![self.expect_ident("expected column name in unique(...)")?];
+                while self.check_symbol(',') {
+                    self.expect_symbol(',')?;
+                    cols.push(self.expect_ident("expected column name in unique(...)")?);
+                }
+                self.expect_symbol(')')?;
+                self.expect_symbol(';')?;
+                if cols.len() < 2 {
+                    return Err(self.error_here(
+                        "unique(...) needs at least two columns; for a single column use                          the `unique` modifier on the column itself",
+                    ));
+                }
+                unique_constraints.push(cols);
+                continue;
+            }
 
             // `field: TypeRef via Target.col;` — navigation property.
             if self.check_symbol(':') {
@@ -346,6 +368,7 @@ impl<'a> Parser<'a> {
             context_name,
             fields,
             navigations,
+            unique_constraints,
             namespace: Vec::new(),
             visibility: Visibility::Private,
             offset,

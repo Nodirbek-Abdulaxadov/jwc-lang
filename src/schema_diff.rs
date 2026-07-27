@@ -84,6 +84,10 @@ pub struct TableSnapshot {
     /// snake_case table name (matches what jwc writes to SQL).
     pub name: String,
     pub columns: Vec<ColumnSnapshot>,
+    /// Table-level `UNIQUE (a, b)` constraints, columns in declared order.
+    /// Separate from `ColumnSnapshot::is_unique`, which is the single-column
+    /// form — a composite constraint belongs to no one column.
+    pub composite_unique: Vec<Vec<String>>,
 }
 
 /// A single DDL change between two snapshots.
@@ -123,6 +127,14 @@ pub enum DiffOp {
     CreateIndex {
         table: String,
         column_name: String,
+    },
+    AddCompositeUnique {
+        table: String,
+        columns: Vec<String>,
+    },
+    DropCompositeUnique {
+        table: String,
+        columns: Vec<String>,
     },
     DropIndex {
         table: String,
@@ -176,6 +188,7 @@ pub fn entity_to_snapshot(model: &ModelDecl) -> Result<TableSnapshot> {
     Ok(TableSnapshot {
         name: table_name,
         columns,
+        composite_unique: model.unique_constraints.clone(),
     })
 }
 
@@ -258,6 +271,7 @@ pub fn read_latest_snapshot(migrations_dir: &Path) -> Result<Vec<TableSnapshot>>
             continue;
         };
         apply_index_statements(&sql, &mut tables);
+        apply_composite_unique_statements(&sql, &mut tables);
     }
 
     Ok(tables)
@@ -287,6 +301,7 @@ fn parse_create_tables(sql: &str) -> Vec<TableSnapshot> {
         let mut columns: Vec<ColumnSnapshot> = Vec::new();
         let mut pk_cols: Vec<String> = Vec::new();
         let mut unique_cols: Vec<String> = Vec::new();
+        let mut composite_unique: Vec<Vec<String>> = Vec::new();
 
         for entry in entries {
             let entry = entry.trim();
@@ -302,13 +317,15 @@ fn parse_create_tables(sql: &str) -> Vec<TableSnapshot> {
                 continue;
             }
 
-            // UNIQUE ("col") — table-level single-column unique we emit for
-            // `unique` fields. (Composite UNIQUE is captured but only the
-            // single-column form round-trips to a column `is_unique` flag.)
+            // UNIQUE ("col") — the single-column form round-trips to a
+            // column's `is_unique` flag; UNIQUE ("a", "b") belongs to no one
+            // column and is kept as a table-level constraint.
             if let Some(rest) = strip_prefix_ci(entry, "UNIQUE") {
                 let cols = extract_quoted_idents(rest);
-                if cols.len() == 1 {
-                    unique_cols.push(cols[0].clone());
+                match cols.len() {
+                    0 => {}
+                    1 => unique_cols.push(cols[0].clone()),
+                    _ => composite_unique.push(cols),
                 }
                 continue;
             }
@@ -339,7 +356,11 @@ fn parse_create_tables(sql: &str) -> Vec<TableSnapshot> {
             }
         }
 
-        out.push(TableSnapshot { name, columns });
+        out.push(TableSnapshot {
+            name,
+            columns,
+            composite_unique,
+        });
     }
 
     out
@@ -611,6 +632,60 @@ fn apply_alter_statements(sql: &str, tables: &mut [TableSnapshot]) {
 /// previous migration emitted. Matches on the target table and column rather
 /// than the index name, so an index a user added by hand under a different
 /// name still counts as present and isn't proposed again.
+/// Recover table-level composite UNIQUE constraints from the
+/// `ALTER TABLE ... ADD CONSTRAINT ... UNIQUE (a, b)` / `DROP CONSTRAINT`
+/// statements a previous migration emitted.
+///
+/// The `CREATE TABLE` parser already captures the inline form; this covers
+/// constraints added to an existing table, without which every later
+/// `migrate new` would re-propose one that is already there.
+fn apply_composite_unique_statements(sql: &str, tables: &mut [TableSnapshot]) {
+    let add = Regex::new(
+        r#"(?is)ALTER\s+TABLE\s+"([A-Za-z_][A-Za-z0-9_]*)"\s+ADD\s+CONSTRAINT\s+"[^"]+"\s+UNIQUE\s*\(([^)]*)\)"#,
+    )
+    .expect("static regex compiles");
+    for cap in add.captures_iter(sql) {
+        let (Some(table), Some(cols_raw)) = (cap.get(1), cap.get(2)) else {
+            continue;
+        };
+        let cols = extract_quoted_idents(cols_raw.as_str());
+        if cols.len() < 2 {
+            continue;
+        }
+        if let Some(t) = tables.iter_mut().find(|t| t.name == table.as_str()) {
+            if !t.composite_unique.iter().any(|c| same_cols(c, &cols)) {
+                t.composite_unique.push(cols);
+            }
+        }
+    }
+
+    // `DROP CONSTRAINT "uq_<table>_<a>_<b>"` — the name is all the statement
+    // carries, so match on the convention `composite_unique_name` writes.
+    let drop = Regex::new(
+        r#"(?is)ALTER\s+TABLE\s+"([A-Za-z_][A-Za-z0-9_]*)"\s+DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?"([^"]+)""#,
+    )
+    .expect("static regex compiles");
+    for cap in drop.captures_iter(sql) {
+        let (Some(table), Some(name)) = (cap.get(1), cap.get(2)) else {
+            continue;
+        };
+        if let Some(t) = tables.iter_mut().find(|t| t.name == table.as_str()) {
+            t.composite_unique
+                .retain(|c| composite_unique_name(&t.name, c) != name.as_str());
+        }
+    }
+}
+
+/// Order-insensitive, case-insensitive column-set comparison.
+fn same_cols(a: &[String], b: &[String]) -> bool {
+    let norm = |v: &[String]| {
+        let mut out: Vec<String> = v.iter().map(|s| s.to_lowercase()).collect();
+        out.sort();
+        out
+    };
+    norm(a) == norm(b)
+}
+
 fn apply_index_statements(sql: &str, tables: &mut [TableSnapshot]) {
     let create = Regex::new(
         r#"(?is)CREATE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?"?[A-Za-z_][A-Za-z0-9_]*"?\s+ON\s+"([A-Za-z_][A-Za-z0-9_]*)"\s*\(\s*"([A-Za-z_][A-Za-z0-9_]*)"\s*\)"#,
@@ -764,9 +839,43 @@ pub fn compute_diff(old: &[TableSnapshot], new: &[TableSnapshot]) -> Vec<DiffOp>
                 }
             }
         }
+
+        // Table-level composite UNIQUE. Compared as ordered column lists —
+        // `unique(a, b)` and `unique(b, a)` are the same constraint to
+        // Postgres, so normalise before comparing or every run would propose
+        // a drop-and-add.
+        let norm = |c: &Vec<String>| {
+            let mut v: Vec<String> = c.iter().map(|s| s.to_lowercase()).collect();
+            v.sort();
+            v
+        };
+        let old_sets: Vec<Vec<String>> = old_table.composite_unique.iter().map(norm).collect();
+        let new_sets: Vec<Vec<String>> = new_table.composite_unique.iter().map(norm).collect();
+        for (i, cols) in new_table.composite_unique.iter().enumerate() {
+            if !old_sets.contains(&new_sets[i]) {
+                ops.push(DiffOp::AddCompositeUnique {
+                    table: new_table.name.clone(),
+                    columns: cols.clone(),
+                });
+            }
+        }
+        for (i, cols) in old_table.composite_unique.iter().enumerate() {
+            if !new_sets.contains(&old_sets[i]) {
+                ops.push(DiffOp::DropCompositeUnique {
+                    table: new_table.name.clone(),
+                    columns: cols.clone(),
+                });
+            }
+        }
     }
 
     ops
+}
+
+/// Deterministic constraint name for a composite UNIQUE, so `ADD` and a later
+/// `DROP` agree without having to look the constraint up in the catalog.
+fn composite_unique_name(table: &str, columns: &[String]) -> String {
+    format!("uq_{}_{}", table, columns.join("_"))
 }
 
 fn sql_types_equal(a: &str, b: &str) -> bool {
@@ -850,6 +959,22 @@ pub fn diff_to_sql(diff: &[DiffOp]) -> String {
                     table, column_name, table, column_name
                 ));
             }
+            DiffOp::AddCompositeUnique { table, columns } => {
+                let quoted: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c)).collect();
+                out.push_str(&format!(
+                    "ALTER TABLE \"{}\" ADD CONSTRAINT \"{}\" UNIQUE ({});\n",
+                    table,
+                    composite_unique_name(table, columns),
+                    quoted.join(", ")
+                ));
+            }
+            DiffOp::DropCompositeUnique { table, columns } => {
+                out.push_str(&format!(
+                    "ALTER TABLE \"{}\" DROP CONSTRAINT IF EXISTS \"{}\";\n",
+                    table,
+                    composite_unique_name(table, columns)
+                ));
+            }
             DiffOp::DropIndex { table, column_name } => {
                 out.push_str(&format!(
                     "DROP INDEX IF EXISTS \"ix_{}_{}\";\n",
@@ -913,6 +1038,10 @@ fn render_create_table(snapshot: &TableSnapshot) -> String {
         lines.push(format!("    PRIMARY KEY ({})", quoted));
     }
     lines.extend(unique_lines);
+    for cols in &snapshot.composite_unique {
+        let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
+        lines.push(format!("    UNIQUE ({})", quoted.join(", ")));
+    }
     lines.extend(fk_lines);
 
     let mut out = String::new();
@@ -962,6 +1091,7 @@ mod tests {
         TableSnapshot {
             name: name.to_string(),
             columns: cols,
+            composite_unique: Vec::new(),
         }
     }
 
@@ -1369,5 +1499,108 @@ CREATE TABLE IF NOT EXISTS "user" (
             !sql.contains("CREATE INDEX"),
             "redundant index emitted: {sql}"
         );
+    }
+
+    const TL_PLAIN: &str = r#"
+        dbcontext D: Postgres;
+        entity TaskLabel of D {
+            id      int pk autoincrement;
+            taskId  int;
+            labelId int;
+        }
+    "#;
+    const TL_UNIQUE: &str = r#"
+        dbcontext D: Postgres;
+        entity TaskLabel of D {
+            id      int pk autoincrement;
+            taskId  int;
+            labelId int;
+            unique(taskId, labelId);
+        }
+    "#;
+
+    /// A join table's (left, right) pair can't be expressed per column, so
+    /// uniqueness was enforced by a select-then-insert in application code —
+    /// a TOCTOU race with nothing holding the invariant in the database.
+    #[test]
+    fn composite_unique_reaches_the_generated_ddl() {
+        let sql = diff_to_sql(&compute_diff(&[], &snapshots_of(TL_UNIQUE)));
+        assert!(
+            sql.contains(r#"UNIQUE ("taskId", "labelId")"#),
+            "got: {sql}"
+        );
+    }
+
+    #[test]
+    fn adding_and_removing_composite_unique_emits_alters() {
+        let add = diff_to_sql(&compute_diff(
+            &snapshots_of(TL_PLAIN),
+            &snapshots_of(TL_UNIQUE),
+        ));
+        assert!(add.contains("ADD CONSTRAINT"), "got: {add}");
+        assert!(
+            add.contains(r#"UNIQUE ("taskId", "labelId")"#),
+            "got: {add}"
+        );
+
+        let drop = diff_to_sql(&compute_diff(
+            &snapshots_of(TL_UNIQUE),
+            &snapshots_of(TL_PLAIN),
+        ));
+        assert!(drop.contains("DROP CONSTRAINT"), "got: {drop}");
+    }
+
+    /// Column order is irrelevant to Postgres, so `unique(a, b)` and
+    /// `unique(b, a)` must not read as a drop plus an add on every run.
+    #[test]
+    fn composite_unique_comparison_ignores_column_order() {
+        let reversed = r#"
+            dbcontext D: Postgres;
+            entity TaskLabel of D {
+                id      int pk autoincrement;
+                taskId  int;
+                labelId int;
+                unique(labelId, taskId);
+            }
+        "#;
+        let ops = compute_diff(&snapshots_of(TL_UNIQUE), &snapshots_of(reversed));
+        assert!(
+            !ops.iter().any(|o| matches!(
+                o,
+                DiffOp::AddCompositeUnique { .. } | DiffOp::DropCompositeUnique { .. }
+            )),
+            "reordering the columns is not a schema change: {ops:?}"
+        );
+    }
+
+    /// The constraint is added by an ALTER, not inside CREATE TABLE, so it
+    /// has to be recovered from that statement too — otherwise every later
+    /// `migrate new` re-proposes a constraint that already exists.
+    #[test]
+    fn composite_unique_round_trips_through_an_alter_statement() {
+        let dir = std::env::temp_dir().join(format!("jwc-uq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        let create = diff_to_sql(&compute_diff(&[], &snapshots_of(TL_PLAIN)));
+        std::fs::write(dir.join("100_initial.up.sql"), create).unwrap();
+        let alter = diff_to_sql(&compute_diff(
+            &snapshots_of(TL_PLAIN),
+            &snapshots_of(TL_UNIQUE),
+        ));
+        std::fs::write(dir.join("200_add-uq.up.sql"), alter).unwrap();
+
+        let recovered = read_latest_snapshot(&dir).expect("reads");
+        let t = recovered
+            .iter()
+            .find(|t| t.name == "task_label")
+            .expect("table recovered");
+        assert_eq!(t.composite_unique.len(), 1, "constraint lost on round-trip");
+
+        assert!(
+            compute_diff(&recovered, &snapshots_of(TL_UNIQUE)).is_empty(),
+            "nothing left to do after the constraint was applied"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

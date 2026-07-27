@@ -119,6 +119,13 @@ pub(crate) fn generate_postgres_table_sql(entity: &ModelDecl) -> Result<String> 
         constraints.extend(extra_constraints);
     }
 
+    // Table-level `unique(a, b);` — the constraint a join table needs to make
+    // its (left, right) pair unique, which no per-column modifier can express.
+    for cols in &entity.unique_constraints {
+        let quoted: Vec<String> = cols.iter().map(|c| format!("\"{}\"", c)).collect();
+        constraints.push(format!("UNIQUE ({})", quoted.join(", ")));
+    }
+
     for c in constraints {
         lines.push(format!("    {}", c));
     }

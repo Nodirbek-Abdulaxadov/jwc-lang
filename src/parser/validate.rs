@@ -155,6 +155,8 @@ pub fn validate_program(program: &Program) -> Result<()> {
         }
 
         let mut field_names = HashSet::new();
+        let field_names_all: HashSet<String> =
+            model.fields.iter().map(|f| f.name.to_lowercase()).collect();
         let resolved_driver = resolve_entity_driver(program, model, &ctx_drivers)?;
         for field in &model.fields {
             let field_key = field.name.to_lowercase();
@@ -178,6 +180,38 @@ pub fn validate_program(program: &Program) -> Result<()> {
                         field.name,
                         field.ty.name
                     );
+                }
+            }
+        }
+
+        // Table-level `unique(a, b);` — every named column must exist, and a
+        // typo'd name would otherwise reach Postgres as a DDL error at
+        // migration time rather than at `jwc check`.
+        for cols in &model.unique_constraints {
+            let mut seen: HashSet<String> = HashSet::new();
+            for col in cols {
+                let key = col.to_lowercase();
+                if !field_names_all.contains(&key) {
+                    return Err(loc_in(
+                        program,
+                        model.file_idx,
+                        model.offset,
+                        &format!(
+                            "Entity '{}': unique(...) names unknown column '{}'",
+                            model.name, col
+                        ),
+                    ));
+                }
+                if !seen.insert(key) {
+                    return Err(loc_in(
+                        program,
+                        model.file_idx,
+                        model.offset,
+                        &format!(
+                            "Entity '{}': column '{}' is repeated in the same unique(...)",
+                            model.name, col
+                        ),
+                    ));
                 }
             }
         }

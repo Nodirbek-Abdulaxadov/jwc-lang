@@ -470,6 +470,11 @@ fn render_model(w: &mut Writer, m: &ModelDecl) {
     for n in &m.navigations {
         render_navigation(w, n);
     }
+    // Table-level constraints last — they read as a summary of the columns
+    // above rather than as another column.
+    for cols in &m.unique_constraints {
+        w.line(&format!("unique({});", cols.join(", ")));
+    }
     w.pop_indent();
     w.line("}");
 }
