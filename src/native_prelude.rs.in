@@ -345,6 +345,68 @@ fn jwc_in_caught_region() -> bool {
     JWC_CATCH_DEPTH.with(|d| d.get()) > 0
 }
 
+/// Bind a listener, clearing `IPV6_V6ONLY` when the address is IPv6.
+///
+/// `TcpListener::bind` on `[::]` gives a dual-stack socket on Linux, where
+/// `net.ipv6.bindv6only` defaults to 0, but not on Windows, where the
+/// option defaults to on. A native build there listened on `[::]:8080`
+/// and refused every connection to `127.0.0.1:8080` — invisible to
+/// container probes, reverse proxies, and load generators dialling IPv4,
+/// while the interpreter build of the same source answered both.
+async fn jwc_bind_dual_stack(addr: std::net::SocketAddr) -> std::io::Result<TcpListener> {
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let sock = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    if addr.is_ipv6() {
+        // Best effort: a host with IPv4 disabled rejects this, and an
+        // IPv6-only listener is still better than not starting.
+        let _ = sock.set_only_v6(false);
+    }
+    // Match what `TcpListener::bind` does, so a restart doesn't trip over
+    // sockets in TIME_WAIT.
+    #[cfg(not(windows))]
+    sock.set_reuse_address(true)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+    sock.listen(1024)?;
+    TcpListener::from_std(std::net::TcpListener::from(sock))
+}
+
+/// Turn an uncaught handler panic into the same 500 envelope the
+/// interpreter's `http_error::internal` produces.
+///
+/// Native handlers used to get a panic guard only when the program
+/// declared an `error_handler` block. Without one, a panic — which is how
+/// every JWC-level failure travels in this backend, including a failed
+/// `jwc_db_exec` — unwound straight into axum, which drops the connection:
+/// the client saw no response at all, not a 500. Under load that is one
+/// panicked worker per failing request.
+///
+/// The detail is logged rather than returned, so SQL text and Rust type
+/// names don't reach the caller. `JWC_DEBUG_ERRORS=1` puts it back, same
+/// switch and same values the interpreter honours.
+#[cold]
+#[inline(never)]
+fn jwc_uncaught_error_response(msg: String) -> V {
+    eprintln!("[jwc] uncaught error in handler: {}", msg);
+    let debug = std::env::var("JWC_DEBUG_ERRORS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let detail = if debug {
+        msg
+    } else {
+        "Internal server error. Check the server log for the matching x-request-id.".to_string()
+    };
+    // Field order matches `http_error::envelope`: error, status, code.
+    let mut body = String::from("{\"error\":");
+    jwc_write_json_string(&detail, &mut body);
+    body.push_str(",\"status\":500,\"code\":\"internal_error\"}");
+    make_response(500, body, "application/json")
+}
+
 fn jwc_panic_payload_to_string(p: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = p.downcast_ref::<String>() {
         return s.clone();
@@ -937,6 +999,28 @@ fn jwc_b_range(start: V, end: V, step: V) -> V {
         i += st;
     }
     v_arr(out)
+}
+
+fn jwc_b_unix_timestamp() -> V {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    V::Int(secs)
+}
+
+/// `random_int(end)` → [0, end); `random_int(start, end)` → [start, end).
+/// Half-open, matching `range()`. Codegen pads the 1-arg form with a 0
+/// start, so both arms arrive here filled in.
+///
+/// NOT cryptographic — see the interpreter arm for the same warning.
+fn jwc_b_random_int(start: V, end: V) -> V {
+    let lo = jwc_to_int(&start).unwrap_or(0);
+    let hi = jwc_to_int(&end).unwrap_or(0);
+    if hi <= lo {
+        panic!("random_int({}, {}): the range is empty (end must exceed start)", lo, hi);
+    }
+    V::Int(rand::Rng::gen_range(&mut rand::thread_rng(), lo..hi))
 }
 
 fn jwc_push(arr: &mut V, elem: V) {
@@ -1752,16 +1836,38 @@ impl HttpServer {
         }
         // Prefer dual-stack so a Node dev proxy resolving `localhost` to `::1`
         // can connect; fall back to IPv4 on hosts with no IPv6 stack.
+        //
+        // `JWC_BIND_HOST` overrides the address entirely — set it to
+        // `0.0.0.0` to force IPv4-only, or to a specific interface.
         let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, self.port));
         let v4 = std::net::SocketAddr::from(([0, 0, 0, 0], self.port));
-        let (listener, addr) = match TcpListener::bind(v6).await {
-            Ok(l) => (l, v6),
-            Err(v6_err) => match TcpListener::bind(v4).await {
-                Ok(l) => (l, v4),
+        let explicit = std::env::var("JWC_BIND_HOST").ok().and_then(|h| {
+            let h = h.trim().trim_start_matches('[').trim_end_matches(']').to_string();
+            match h.parse::<std::net::IpAddr>() {
+                Ok(ip) => Some(std::net::SocketAddr::from((ip, self.port))),
+                Err(_) => {
+                    eprintln!("[jwc] ignoring JWC_BIND_HOST={:?}: not an IP address", h);
+                    None
+                }
+            }
+        });
+        let (listener, addr) = match explicit {
+            Some(a) => match jwc_bind_dual_stack(a).await {
+                Ok(l) => (l, a),
                 Err(e) => {
-                    eprintln!("[jwc] failed to bind {} ({}) or {} ({})", v6, v6_err, v4, e);
+                    eprintln!("[jwc] failed to bind {} ({})", a, e);
                     std::process::exit(1);
                 }
+            },
+            None => match jwc_bind_dual_stack(v6).await {
+                Ok(l) => (l, v6),
+                Err(v6_err) => match TcpListener::bind(v4).await {
+                    Ok(l) => (l, v4),
+                    Err(e) => {
+                        eprintln!("[jwc] failed to bind {} ({}) or {} ({})", v6, v6_err, v4, e);
+                        std::process::exit(1);
+                    }
+                },
             },
         };
         eprintln!("[jwc] listening on http://{}", addr);

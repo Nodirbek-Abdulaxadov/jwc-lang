@@ -26,8 +26,21 @@ fn jwc_db_connection_string() -> String {
 }
 
 async fn jwc_db_init() {
+    jwc_db_init_with(None).await
+}
+
+/// `url_override` is the argument the program passed to
+/// `setConnectionString(...)`, if any.
+///
+/// The native `jwc_b_setConnectionString` used to take no arguments at
+/// all: codegen emitted the supplied URL and the generated crate failed
+/// to compile with E0061, so no native program could name its database
+/// in source. The interpreter has always accepted the argument (it
+/// exports it as `DATABASE_URL`), which is why this only showed up when
+/// a project that ran fine under `jwc run` was built with `--native`.
+async fn jwc_db_init_with(url_override: Option<String>) {
     if DB_POOL.get().is_some() { return; }
-    let url = jwc_db_connection_string();
+    let url = url_override.unwrap_or_else(jwc_db_connection_string);
     let pg_cfg: tokio_postgres::Config = url
         .parse()
         .unwrap_or_else(|e| panic!("setConnectionString: invalid Postgres URL: {}", e));
@@ -48,8 +61,17 @@ async fn jwc_db_init() {
     let _ = DB_POOL.set(pool);
 }
 
-async fn jwc_b_setConnectionString() -> V {
-    jwc_db_init().await;
+async fn jwc_b_setConnectionString(v: V) -> V {
+    // A bare `setConnectionString()` keeps the env fallback chain
+    // (DATABASE_URL, JWC_DATABASE_URL, then the PG_* parts). Object-literal
+    // configs are not wired up here yet — rejected rather than silently
+    // ignored, since ignoring the argument is what made this a bug.
+    let url = match v {
+        V::Null => None,
+        V::Str(s) => Some(s.into_owned()),
+        _ => panic!("setConnectionString(arg): native builds take a URL string or no argument"),
+    };
+    jwc_db_init_with(url).await;
     V::Null
 }
 

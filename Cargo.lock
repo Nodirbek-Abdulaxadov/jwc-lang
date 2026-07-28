@@ -1640,6 +1640,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "postgres-native-tls",
+ "rand 0.8.6",
  "regex",
  "reqwest",
  "rust_decimal",

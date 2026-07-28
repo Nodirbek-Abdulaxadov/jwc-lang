@@ -51,23 +51,52 @@ struct SharedContainer {
 /// named pipe permissions block native binaries) so individual tests can
 /// skip rather than hard-fail.
 fn shared_postgres_url() -> Option<&'static str> {
+    // An externally supplied database wins, so CI can point the suite at a
+    // service container and a developer at a local server — the same shape
+    // `query_differential` uses.
+    //
+    // Deliberately only `JWC_TEST_DATABASE_URL`, not the general
+    // `DATABASE_URL`: `fresh_schema` runs `DROP SCHEMA public CASCADE`, and
+    // `DATABASE_URL` is commonly exported to point at a real development
+    // database. Opting in has to be explicit.
+    if let Ok(url) = std::env::var("JWC_TEST_DATABASE_URL") {
+        if !url.trim().is_empty() {
+            static EXTERNAL: OnceLock<String> = OnceLock::new();
+            let url = EXTERNAL.get_or_init(|| {
+                std::env::set_var("DATABASE_URL", &url);
+                url
+            });
+            return Some(url.as_str());
+        }
+    }
     SHARED
         .get_or_init(|| {
-            let container = Postgres::default()
-                .with_user("postgres")
-                .with_password("postgres")
-                .with_db_name("postgres")
-                .start()
-                .ok()?;
-            let port = container.get_host_port_ipv4(5432).ok()?;
-            let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-            // The engine pool reads DATABASE_URL once on init, so wire it now
-            // for the migration helpers and any code path that defaults from env.
-            std::env::set_var("DATABASE_URL", &url);
-            Some(SharedContainer {
-                _container: container,
-                url,
+            // `SyncRunner::start` calls `block_on`, and every caller is
+            // inside a `#[tokio::test(flavor = "multi_thread")]` runtime, so
+            // an unreachable Docker doesn't return `Err` — it panics with
+            // "Cannot start a runtime from within a runtime". The `.ok()?`
+            // never saw it, and the "graceful skip" this module documents
+            // has been failing the suite instead.
+            std::panic::catch_unwind(|| {
+                let container = Postgres::default()
+                    .with_user("postgres")
+                    .with_password("postgres")
+                    .with_db_name("postgres")
+                    .start()
+                    .ok()?;
+                let port = container.get_host_port_ipv4(5432).ok()?;
+                let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+                // The engine pool reads DATABASE_URL once on init, so wire it
+                // now for the migration helpers and any code path that
+                // defaults from env.
+                std::env::set_var("DATABASE_URL", &url);
+                Some(SharedContainer {
+                    _container: container,
+                    url,
+                })
             })
+            .ok()
+            .flatten()
         })
         .as_ref()
         .map(|c| c.url.as_str())
@@ -95,8 +124,12 @@ fn skip_notice(test_name: &str) {
 
 fn write_project(root: &std::path::Path, main_jwc: &str, manifest_name: &str) {
     std::fs::create_dir_all(root).unwrap();
+    // `dependencies` is a map (name → spec), not a list. The `[]` this used
+    // to write has been invalid since the manifest gained named deps; it
+    // went unnoticed because the suite never actually ran — the container
+    // boot panicked before any test reached the manifest.
     let manifest = format!(
-        "{{\n    \"name\": \"{}\",\n    \"version\": \"1.0.0\",\n    \"dependencies\": []\n}}\n",
+        "{{\n    \"name\": \"{}\",\n    \"version\": \"1.0.0\",\n    \"dependencies\": {{}}\n}}\n",
         manifest_name
     );
     std::fs::write(root.join(format!("{}.jwcproj", manifest_name)), manifest).unwrap();
@@ -192,7 +225,7 @@ async fn migrate_up_then_down_roundtrip() {
         r#"
             dbcontext AppDb : Postgres;
             entity Note of AppDb {
-                id integer pk;
+                id int pk;
                 title varchar(120);
             }
             function main() { print("ok"); }
@@ -260,7 +293,7 @@ async fn migration_advisory_lock_blocks_concurrent_runs() {
         r#"
             dbcontext AppDb : Postgres;
             entity Slow of AppDb {
-                id integer pk;
+                id int pk;
             }
             function main() { print("ok"); }
         "#,

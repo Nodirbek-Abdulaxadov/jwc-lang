@@ -446,6 +446,90 @@ pub(super) fn boxed_params_to_refs(
         .collect()
 }
 
+/// Schema-aware variant of [`value_to_sql_param`]: bind a runtime value
+/// against the **declared column type** instead of guessing from the
+/// value's Rust shape.
+///
+/// `path_param()` and `query_param()` always hand back a `Value::Str`, so
+/// the canonical `GET /users/{id}` route —
+///
+/// ```text
+/// let id = path_param("id");
+/// select User from AppDb.User where User.id == @id first;
+/// ```
+///
+/// — bound the string `"1"` against an `integer` column and every request
+/// failed with `cannot convert between the Rust type
+/// `alloc::string::String` and the Postgres type `int4``. The native
+/// backend has always resolved the bind type from the entity field
+/// (`WhereBuilder::col_kind`); this brings the interpreter level with it.
+///
+/// `target` is the lower-cased Postgres type from the entity schema.
+/// `None` (column not resolvable — a joined entity's column, an ad-hoc
+/// table) falls back to the shape-based binder, which is the previous
+/// behaviour.
+pub(super) fn value_to_sql_param_typed(
+    val: &Value,
+    target: Option<&str>,
+) -> Box<dyn ToSql + Sync + Send> {
+    let Some(t) = target else {
+        return value_to_sql_param(val);
+    };
+    match val {
+        // The interesting direction: text in, typed column out.
+        Value::Str(s) => {
+            if is_text_column_type(t) {
+                // Never re-read a UUID- or date-shaped string as a typed
+                // value just because of its shape — the column is text.
+                return Box::new(s.clone());
+            }
+            if is_integer_column_type(t) {
+                if let Ok(n) = s.trim().parse::<i64>() {
+                    return Box::new(PgNumber::Int(n));
+                }
+            }
+            if is_real_column_type(t) || t.starts_with("numeric") || t.starts_with("decimal") {
+                if let Ok(f) = s.trim().parse::<f64>() {
+                    return Box::new(PgNumber::Float(f));
+                }
+            }
+            if t == "bool" || t == "boolean" {
+                match s.trim().to_ascii_lowercase().as_str() {
+                    "true" | "t" | "1" | "yes" => return Box::new(true),
+                    "false" | "f" | "0" | "no" => return Box::new(false),
+                    _ => {}
+                }
+            }
+            // uuid / timestamp shapes are already handled by the
+            // shape-based binder below, and it agrees with the column here.
+            value_to_sql_param(val)
+        }
+        // A number destined for a text column: Postgres won't coerce the
+        // bind, so render it. `where User.code == 42` on a varchar column.
+        Value::Int(_) | Value::Float(_) if is_text_column_type(t) => Box::new(val.as_string()),
+        _ => value_to_sql_param(val),
+    }
+}
+
+fn is_integer_column_type(t: &str) -> bool {
+    matches!(
+        t,
+        "smallint"
+            | "int2"
+            | "integer"
+            | "int"
+            | "int4"
+            | "bigint"
+            | "int8"
+            | "serial"
+            | "bigserial"
+    )
+}
+
+fn is_real_column_type(t: &str) -> bool {
+    matches!(t, "real" | "float4" | "double precision" | "float8")
+}
+
 pub(super) fn value_to_sql_param(val: &Value) -> Box<dyn ToSql + Sync + Send> {
     match val {
         // See [`PgNumber`]: bind against the column's real type rather than
@@ -572,6 +656,10 @@ pub(super) async fn build_select_sql(
         Some(&aliases)
     };
 
+    // Declared column types for the entity being selected, so WHERE binds
+    // by the column's type rather than the runtime value's Rust shape.
+    let col_types = vm.col_types_for(main_entity);
+
     if let Some(wc) = where_clause {
         let where_sql = build_where_sql(
             wc,
@@ -581,6 +669,7 @@ pub(super) async fn build_select_sql(
             vars,
             vm,
             alias_opt,
+            &col_types,
         )
         .await?;
         sql_where = format!(" WHERE {}", where_sql);
@@ -614,6 +703,7 @@ pub(super) async fn build_select_sql(
             vars,
             vm,
             alias_opt,
+            &col_types,
         )
         .await?;
         sql_having = format!(" HAVING {}", having_sql);
@@ -1057,6 +1147,15 @@ pub(crate) fn where_col_sql(field: &str, aliases: Option<&HashMap<String, String
 }
 
 #[async_recursion]
+/// `col_types` maps the queried entity's column names to their declared
+/// Postgres types, so a bound value takes the column's type rather than
+/// its own Rust shape — see [`value_to_sql_param_typed`]. Pass an empty
+/// map to keep the old shape-based binding.
+///
+/// Columns are resolved against the **main** entity only. A WHERE term on
+/// a joined entity's column misses the map and falls back, matching what
+/// `native_build`'s `WhereBuilder` does.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn build_where_sql(
     expr: &WhereExpr,
     params: &mut Vec<Box<dyn ToSql + Sync + Send>>,
@@ -1065,6 +1164,7 @@ pub(super) async fn build_where_sql(
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm<'_>,
     aliases: Option<&HashMap<String, String>>,
+    col_types: &HashMap<String, String>,
 ) -> Result<String> {
     match expr {
         WhereExpr::Atom(wc) => {
@@ -1099,7 +1199,10 @@ pub(super) async fn build_where_sql(
                     }
                 }
                 other => {
-                    params.push(value_to_sql_param(&other));
+                    params.push(value_to_sql_param_typed(
+                        &other,
+                        col_types.get(&col).map(|s| s.as_str()),
+                    ));
                     let idx = params.len();
                     shape.push(format!("where:{col}:{op}:param"));
                     cache.push(format!(
@@ -1137,9 +1240,10 @@ pub(super) async fn build_where_sql(
             let csql = where_col_sql(field, aliases);
             let low_v = vm.eval_expr(low, vars).await?;
             let high_v = vm.eval_expr(high, vars).await?;
-            params.push(value_to_sql_param(&low_v));
+            let target = col_types.get(&col).map(|s| s.as_str());
+            params.push(value_to_sql_param_typed(&low_v, target));
             let low_idx = params.len();
-            params.push(value_to_sql_param(&high_v));
+            params.push(value_to_sql_param_typed(&high_v, target));
             let high_idx = params.len();
             shape.push(format!("where:{col}:between"));
             cache.push(format!(
@@ -1166,7 +1270,10 @@ pub(super) async fn build_where_sql(
                     cache.push(format!("where:{col}:any[{}]", value_to_cache_fragment(&v)));
                     return Ok(format!("{} = ANY(${})", csql, params.len()));
                 }
-                params.push(value_to_sql_param(&v));
+                params.push(value_to_sql_param_typed(
+                    &v,
+                    col_types.get(&col).map(|s| s.as_str()),
+                ));
                 shape.push(format!("where:{col}:in(1)"));
                 cache.push(format!("where:{col}:in[{}]", value_to_cache_fragment(&v)));
                 return Ok(format!("{} IN (${})", csql, params.len()));
@@ -1176,7 +1283,10 @@ pub(super) async fn build_where_sql(
             let mut cache_parts = Vec::with_capacity(values.len());
             for value_expr in values {
                 let v = vm.eval_expr(value_expr, vars).await?;
-                params.push(value_to_sql_param(&v));
+                params.push(value_to_sql_param_typed(
+                    &v,
+                    col_types.get(&col).map(|s| s.as_str()),
+                ));
                 placeholders.push(format!("${}", params.len()));
                 cache_parts.push(value_to_cache_fragment(&v));
             }
@@ -1185,17 +1295,17 @@ pub(super) async fn build_where_sql(
             Ok(format!("{} IN ({})", csql, placeholders.join(", ")))
         }
         WhereExpr::And(l, r) => {
-            let ls = build_where_sql(l, params, shape, cache, vars, vm, aliases).await?;
+            let ls = build_where_sql(l, params, shape, cache, vars, vm, aliases, col_types).await?;
             shape.push("AND".to_string());
             cache.push("AND".to_string());
-            let rs = build_where_sql(r, params, shape, cache, vars, vm, aliases).await?;
+            let rs = build_where_sql(r, params, shape, cache, vars, vm, aliases, col_types).await?;
             Ok(format!("({} AND {})", ls, rs))
         }
         WhereExpr::Or(l, r) => {
-            let ls = build_where_sql(l, params, shape, cache, vars, vm, aliases).await?;
+            let ls = build_where_sql(l, params, shape, cache, vars, vm, aliases, col_types).await?;
             shape.push("OR".to_string());
             cache.push("OR".to_string());
-            let rs = build_where_sql(r, params, shape, cache, vars, vm, aliases).await?;
+            let rs = build_where_sql(r, params, shape, cache, vars, vm, aliases, col_types).await?;
             Ok(format!("({} OR {})", ls, rs))
         }
     }
@@ -1219,6 +1329,7 @@ pub(super) async fn build_set_rhs_sql(
     params: &mut Vec<Box<dyn ToSql + Sync + Send>>,
     vars: &mut HashMap<String, Value>,
     vm: &mut Vm<'_>,
+    target: Option<&str>,
 ) -> Result<String> {
     let mut fallbacks: Vec<&Expr> = Vec::new();
     collect_set_rhs_fallbacks(expr, vars, &mut fallbacks);
@@ -1229,7 +1340,13 @@ pub(super) async fn build_set_rhs_sql(
         values.push(vm.eval_expr(f, vars).await?);
     }
     let mut value_iter = values.into_iter();
-    Ok(build_set_rhs_sql_sync(expr, params, vars, &mut value_iter))
+    Ok(build_set_rhs_sql_sync(
+        expr,
+        params,
+        vars,
+        &mut value_iter,
+        target,
+    ))
 }
 
 /// Walk the RHS tree and append every `Expr` that needs host-side
@@ -1262,6 +1379,7 @@ fn build_set_rhs_sql_sync(
     params: &mut Vec<Box<dyn ToSql + Sync + Send>>,
     vars: &HashMap<String, Value>,
     values: &mut std::vec::IntoIter<Value>,
+    target: Option<&str>,
 ) -> String {
     match expr {
         Expr::Var(name) => {
@@ -1270,7 +1388,7 @@ fn build_set_rhs_sql_sync(
                 let v = values
                     .next()
                     .expect("fallback collector must produce one value per Var-shadow");
-                params.push(value_to_sql_param(&v));
+                params.push(value_to_sql_param_typed(&v, target));
                 return format!("${}", params.len());
             }
             // Bare identifier that isn't a host var = a column self-reference
@@ -1278,30 +1396,30 @@ fn build_set_rhs_sql_sync(
             format!("\"{}\"", name)
         }
         Expr::Add(a, b) => {
-            let ls = build_set_rhs_sql_sync(a, params, vars, values);
-            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            let ls = build_set_rhs_sql_sync(a, params, vars, values, target);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values, target);
             format!("({} + {})", ls, rs)
         }
         Expr::Sub(a, b) => {
-            let ls = build_set_rhs_sql_sync(a, params, vars, values);
-            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            let ls = build_set_rhs_sql_sync(a, params, vars, values, target);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values, target);
             format!("({} - {})", ls, rs)
         }
         Expr::Mul(a, b) => {
-            let ls = build_set_rhs_sql_sync(a, params, vars, values);
-            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            let ls = build_set_rhs_sql_sync(a, params, vars, values, target);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values, target);
             format!("({} * {})", ls, rs)
         }
         Expr::Div(a, b) => {
-            let ls = build_set_rhs_sql_sync(a, params, vars, values);
-            let rs = build_set_rhs_sql_sync(b, params, vars, values);
+            let ls = build_set_rhs_sql_sync(a, params, vars, values, target);
+            let rs = build_set_rhs_sql_sync(b, params, vars, values, target);
             format!("({} / {})", ls, rs)
         }
         _ => {
             let v = values
                 .next()
                 .expect("fallback collector must produce one value per non-Var leaf");
-            params.push(value_to_sql_param(&v));
+            params.push(value_to_sql_param_typed(&v, target));
             format!("${}", params.len())
         }
     }

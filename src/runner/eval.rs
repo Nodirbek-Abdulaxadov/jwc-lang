@@ -28,6 +28,34 @@ use super::sql::{
 use super::util::{closest_match, current_utc_iso8601};
 use super::{engine, json_to_value, materialize_select_result, value_to_json, Value, Vm};
 
+/// Build the response envelope for `not_found` / `unauthorized` /
+/// `forbidden` with an optional caller-supplied body.
+///
+/// These three used to ignore their argument entirely — they took no
+/// args at all and returned a fixed string. Two of the repo's own
+/// examples call `not_found("note not found")` and
+/// `unauthorized({ error: "missing token" })`, and the message was
+/// silently dropped in the interpreter while the native prelude
+/// (`jwc_b_not_found(v: V)`) honoured it. Same source, two different
+/// response bodies depending on how it was built.
+///
+/// Object bodies keep their shape and gain `__jwc_status__`, matching
+/// what `ok` / `created` do; anything else becomes the `error` field.
+fn error_response(status: u16, default_msg: &str, body: Option<Value>) -> String {
+    let Some(value) = body else {
+        return format!(r#"{{"__jwc_status__":{status},"error":"{default_msg}"}}"#);
+    };
+    let s = value.as_string();
+    if let Ok(mut doc) = serde_json::from_str::<JsonValue>(&s) {
+        if let Some(obj) = doc.as_object_mut() {
+            obj.insert("__jwc_status__".into(), json!(status));
+            return doc.to_string();
+        }
+    }
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(r#"{{"__jwc_status__":{status},"error":"{escaped}"}}"#)
+}
+
 impl<'a> Vm<'a> {
     #[async_recursion]
     pub(super) async fn eval_expr(
@@ -115,6 +143,7 @@ impl<'a> Vm<'a> {
                 let mut shape_bits: Vec<String> = vec![format!("agg:{kind_tag}:{col}")];
                 let mut cache_bits: Vec<String> = vec![format!("agg:{kind_tag}:{col}")];
                 let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
+                let col_types = self.col_types_for(table);
 
                 let where_sql = if let Some(wc) = where_clause {
                     let s = build_where_sql(
@@ -125,6 +154,7 @@ impl<'a> Vm<'a> {
                         vars,
                         self,
                         None,
+                        &col_types,
                     )
                     .await?;
                     format!(" WHERE {}", s)
@@ -168,6 +198,7 @@ impl<'a> Vm<'a> {
                 let mut shape_bits: Vec<String> = Vec::new();
                 let mut cache_bits: Vec<String> = Vec::new();
                 let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
+                let col_types = self.col_types_for(table);
 
                 let where_sql = if let Some(wc) = where_clause {
                     let s = build_where_sql(
@@ -178,6 +209,7 @@ impl<'a> Vm<'a> {
                         vars,
                         self,
                         None,
+                        &col_types,
                     )
                     .await?;
                     format!(" WHERE {}", s)
@@ -436,15 +468,19 @@ impl<'a> Vm<'a> {
                 }
 
                 if name.eq_ignore_ascii_case("unauthorized") {
-                    return Ok(Value::Str(
-                        r#"{"__jwc_status__":401,"error":"Unauthorized"}"#.to_string(),
-                    ));
+                    let body = match args.first() {
+                        Some(arg) => Some(self.eval_expr(arg, vars).await?),
+                        None => None,
+                    };
+                    return Ok(Value::Str(error_response(401, "Unauthorized", body)));
                 }
 
                 if name.eq_ignore_ascii_case("forbidden") {
-                    return Ok(Value::Str(
-                        r#"{"__jwc_status__":403,"error":"Forbidden"}"#.to_string(),
-                    ));
+                    let body = match args.first() {
+                        Some(arg) => Some(self.eval_expr(arg, vars).await?),
+                        None => None,
+                    };
+                    return Ok(Value::Str(error_response(403, "Forbidden", body)));
                 }
 
                 if name.eq_ignore_ascii_case("db_query") {
@@ -566,6 +602,39 @@ impl<'a> Vm<'a> {
                         .map_err(|_| anyhow!("System clock error"))?
                         .as_secs() as i64;
                     return Ok(Value::Int(secs));
+                }
+
+                // `random_int(end)` → [0, end); `random_int(start, end)` →
+                // [start, end). Half-open to match `range()`, so
+                // `random_int(range_end)` and `range(range_end)` cover the
+                // same values.
+                //
+                // NOT cryptographic. Don't build tokens, session ids, or
+                // password resets on this — `uuid()` is the right tool for
+                // an unguessable identifier.
+                if name.eq_ignore_ascii_case("random_int") {
+                    let mut bounds = Vec::with_capacity(args.len());
+                    for a in args {
+                        match self.eval_expr(a, vars).await? {
+                            Value::Int(n) => bounds.push(n),
+                            other => bail!(
+                                "random_int(): bounds must be int, got {}",
+                                other.type_name()
+                            ),
+                        }
+                    }
+                    let (lo, hi) = match bounds.as_slice() {
+                        [end] => (0, *end),
+                        [start, end] => (*start, *end),
+                        _ => bail!("random_int(end) / random_int(start, end) expects 1 or 2 args"),
+                    };
+                    if hi <= lo {
+                        bail!("random_int({lo}, {hi}): the range is empty (end must exceed start)");
+                    }
+                    return Ok(Value::Int(rand::Rng::gen_range(
+                        &mut rand::thread_rng(),
+                        lo..hi,
+                    )));
                 }
 
                 if name.eq_ignore_ascii_case("set_json_field") {
@@ -804,9 +873,11 @@ impl<'a> Vm<'a> {
                 }
 
                 if name.eq_ignore_ascii_case("notFound") || name.eq_ignore_ascii_case("not_found") {
-                    return Ok(Value::Str(
-                        r#"{"__jwc_status__":404,"error":"Not Found"}"#.to_string(),
-                    ));
+                    let body = match args.first() {
+                        Some(arg) => Some(self.eval_expr(arg, vars).await?),
+                        None => None,
+                    };
+                    return Ok(Value::Str(error_response(404, "Not Found", body)));
                 }
 
                 if name.eq_ignore_ascii_case("noContent") || name.eq_ignore_ascii_case("no_content")

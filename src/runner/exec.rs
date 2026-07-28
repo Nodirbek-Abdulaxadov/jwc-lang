@@ -473,6 +473,7 @@ impl<'a> Vm<'a> {
                 let mut shape_bits: Vec<String> = Vec::new();
                 let mut cache_bits: Vec<String> = Vec::new();
                 let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
+                let col_types = self.col_types_for(table);
                 let where_sql = build_where_sql(
                     where_clause,
                     &mut params,
@@ -481,6 +482,7 @@ impl<'a> Vm<'a> {
                     vars,
                     self,
                     None,
+                    &col_types,
                 )
                 .await?;
                 let sql = format!("DELETE FROM \"{}\" WHERE {};", table_name, where_sql);
@@ -529,12 +531,20 @@ impl<'a> Vm<'a> {
         let mut shape_bits: Vec<String> = Vec::new();
         let mut cache_bits: Vec<String> = Vec::new();
         let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
+        let col_types = self.col_types_for(table);
         let mut set_fragments = Vec::with_capacity(assignments.len());
         for (col, rhs) in assignments {
             // Preserve the column's declared case — JWC columns are quoted
             // as-written (e.g. `columnId`), so lowercasing here would emit
             // `"columnid"` and fail to prepare against a camelCase column.
-            let rhs_sql = build_set_rhs_sql(rhs, &mut params, vars, self).await?;
+            let rhs_sql = build_set_rhs_sql(
+                rhs,
+                &mut params,
+                vars,
+                self,
+                col_types.get(col).map(|s| s.as_str()),
+            )
+            .await?;
             set_fragments.push(format!("\"{}\" = {}", col, rhs_sql));
         }
         let set_clause = set_fragments.join(", ");
@@ -546,6 +556,7 @@ impl<'a> Vm<'a> {
             vars,
             self,
             None,
+            &col_types,
         )
         .await?;
         let sql = format!(
