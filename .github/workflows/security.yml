@@ -23,9 +23,17 @@ jobs:
     name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
     # Blocking. The triaged advisory set is documented in deny.toml; the
-    # `--ignore` flags below MUST stay in sync with deny.toml's
-    # [advisories].ignore list. When an upstream patch lands, drop the ID
-    # from BOTH places.
+    # `--ignore` flags below track deny.toml's [advisories].ignore list.
+    # When an upstream patch lands, drop the ID from BOTH places.
+    #
+    # The two lists are near-identical but not literally identical, because
+    # the tools scan different things. `cargo audit` reads Cargo.lock whole
+    # — every crate resolved for any target or feature. `cargo deny` walks
+    # the reachable dependency graph and drops what this build can't reach.
+    # So an ID can be live here and `advisory-not-detected` there; keeping
+    # it in deny.toml would fail that run instead. RUSTSEC-2026-0097
+    # (rand 0.9.2, resolved but unreachable) is the one such ID today — it
+    # is last in the list below. Everything else belongs in both.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -40,7 +48,8 @@ jobs:
             --ignore RUSTSEC-2026-0098 \
             --ignore RUSTSEC-2026-0099 \
             --ignore RUSTSEC-2026-0104 \
-            --ignore RUSTSEC-2025-0134
+            --ignore RUSTSEC-2025-0134 \
+            --ignore RUSTSEC-2026-0097
 
   deny:
     name: cargo deny (licenses, bans, advisories)
