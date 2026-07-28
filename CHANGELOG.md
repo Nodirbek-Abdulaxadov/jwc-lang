@@ -3,6 +3,104 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — SQL params bound by column type, and a brand that isn't a placeholder
+
+### BREAKING
+
+**Wrong-arity builtin calls are rejected at `jwc check` (E022).** Four
+variadic codegen branches used to pad the missing slots with `V::Null`, so
+`raw_sql(sql, a, b)` compiled to a no-op that answered 200 with an empty
+body. `min_args` / `max_args` were documented as informational and nothing
+enforced them. `typecheck` now checks arity for both backends before
+anything is emitted.
+
+A program that passed the wrong number of arguments to a builtin used to
+compile and now fails. That is the pre-1.0 minor bump this release carries
+(see `SEMVER.md` — "a program that used to compile now fails" is breaking
+even when the program was broken). Fixing the arity table first turned up
+15 rows that disagreed with the interpreter in both directions;
+enforcing those as written would have rejected working programs, so the
+table was corrected against the interpreter before the check was turned on.
+
+`serve(host, port)` with the arguments swapped — `serve("0.0.0.0", 8081)`
+— took the host as the port and bound `:0`. That is also E022 now instead
+of a server nobody can reach.
+
+### Fixed — 500 on the most common route in any application
+
+**`where <int column> == @id` never worked in the interpreter.**
+`path_param()` and `query_param()` always return a string, so
+
+```jwc
+let id = path_param("id");
+select User from AppDb.User where User.id == @id first;
+```
+
+bound the text `"1"` against an `integer` column and answered 500 every
+time:
+
+```text
+cannot convert between the Rust type `alloc::string::String`
+and the Postgres type `int4`
+```
+
+`build_where_sql` picked the bind type from the value's Rust shape and
+never consulted the schema. The native backend has always resolved it from
+the entity field (`WhereBuilder::col_kind`); the interpreter now does the
+same through `value_to_sql_param_typed`, across `where`, `between`,
+`in (...)`, and the atomic `update ... set` RHS. A column that doesn't
+resolve — a joined entity's, an ad-hoc table's — falls back to the old
+shape-based binding, which is what native does too.
+
+### Fixed — native builds
+
+- **`update ... set` bound the SET value as TEXT for a variable and int8
+  for a literal**, so no form of writing an `int` column worked.
+  `build_set_rhs_sql_native` now takes the target column's `PgKind`.
+- **SET column names were lower-cased** while `gen-sql` quotes the declared
+  casing, and the case of a column on the RHS of the same statement was
+  kept — so the two halves of one statement disagreed.
+- **A DB error unwound into axum and the client got no response at all.**
+  The route-level panic guard was emitted only for programs that declare an
+  `error_handler`. Every route gets it now, and without a handler it answers
+  the same 500 envelope the interpreter does. `route_N_inner` is no longer
+  separately boxed, so the guard costs no extra allocation.
+- **`[::]` was bound without clearing `IPV6_V6ONLY`**, which Windows
+  defaults to on, so `127.0.0.1` was unreachable. Adds `JWC_BIND_HOST`.
+- **`setConnectionString(url)` failed to compile** — the native prelude took
+  no arguments.
+- **`not_found`, `unauthorized` and `forbidden` discarded their message**,
+  which the native prelude honoured; two shipped examples pass one.
+
+### Fixed — the DB integration suite has never run
+
+`testcontainers`' `SyncRunner::start` calls `block_on` inside the
+`#[tokio::test]` runtime, so a host without Docker got "Cannot start a
+runtime from within a runtime" — a panic, not the `Err` the skip path was
+written against. All six tests failed everywhere, `continue-on-error` hid it
+in CI, and two fixtures had rotted unnoticed (`dependencies: []` against a
+map, `integer` where the JWC type is `int`). The suite now takes
+`JWC_TEST_DATABASE_URL` like the differential suite, catches the boot panic
+so a host without Docker really skips, and is required in CI.
+
+### Added
+
+- **`random_int(end)` / `random_int(start, end)`** in both backends,
+  half-open to match `range()`.
+- **`unix_timestamp`** reaches native.
+- **`JWC_BIND_HOST`** to override the native server's bind address.
+
+### Changed — brand
+
+The hummingbird is teal, and it is the same bird everywhere. `icon.png`,
+the docs favicon, the navbar mark and the social card are all generated
+from one master (`vscode-extension/logo-source.png`) by
+`tools/gen-logo-assets.py`, so the set can't drift the way it did when the
+marketplace listing shipped a blank square for two months. The Docusaurus
+site drops the last of the scaffolding artwork — default logo, default
+social card — and its Infima ramp is built from the two teals sampled off
+the artwork.
+
 ## [0.8.0] — Query layer: a silent filter bug, `having` aggregates, `distinct`
 
 ### Fixed — wrong rows, silently
