@@ -1,3 +1,7 @@
+// Same unwrap guard as the library (see src/lib.rs). Binaries are separate
+// crates, so the lib's crate-level attribute does not reach them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 use jwc::{cmd, error_report, project, runner, server, templates};
 
 use std::path::PathBuf;

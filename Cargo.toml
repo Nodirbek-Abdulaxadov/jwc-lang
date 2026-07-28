@@ -7,14 +7,25 @@ edition = "2021"
 # correctly classifies this crate as private and skips the unlicensed check.
 publish = false
 
-# Phase 2 unwrap budget tracking. The audit (Sprint 1-5 close-out)
-# found ONE production `.unwrap()` after this commit — the remaining
-# 119 are all inside `#[cfg(test)]` modules, which we explicitly want
-# to allow. The right flip is therefore not a global `warn` (would
-# spam test code) but `cfg_attr(not(test), warn(...))` per-module.
-# TODO[unwrap-budget]: 1 prod unwrap remaining; flip to per-module
-# `#![cfg_attr(not(test), warn(clippy::unwrap_used))]` once we have
-# the test-vs-prod boundary clean.
+# Unwrap budget: CLOSED. `src/lib.rs` carries
+# `#![cfg_attr(not(test), deny(clippy::unwrap_used))]`, so production code is
+# unwrap-free and enforced; `#[cfg(test)]` modules keep unwrapping freely.
+# The `allow` below is what that attribute overrides — it exists so unit and
+# integration tests aren't required to handle every Result.
+#
+# `expect_used` stays allowed on purpose, not as debt. `cargo clippy --lib`
+# reports 57 in production and they are not the same thing as an unwrap:
+#
+#   - 14 `Regex::new("<literal>")` in schema_diff — a literal that fails to
+#     compile would fail on every run, not on unlucky input.
+#   - 9 header values built from ASCII literals in server.rs.
+#   - ~10 local invariants restated at the use site ("head key just
+#     inserted", "ManyToMany navigation must carry join-table coordinates").
+#   - the rest are lock poisoning, where the message IS the diagnosis.
+#
+# Rewriting those to `unwrap_or_else(|| unreachable!())` moves the panic
+# without removing it and costs the explanation. Denying the lint would
+# force exactly that, so it stays allowed and the expects stay honest.
 [lints.clippy]
 unwrap_used = "allow"
 expect_used = "allow"

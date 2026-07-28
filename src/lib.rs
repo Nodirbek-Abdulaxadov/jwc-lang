@@ -9,6 +9,15 @@
 // sections across awaits. Tracked under a dedicated clippy-cleanup sprint;
 // silenced crate-wide so CI can enforce `-D warnings` on the rest.
 #![allow(clippy::await_holding_lock)]
+// The unwrap budget is met and now enforced. `cargo clippy --lib` reports
+// zero production `.unwrap()` calls, so this costs nothing today and stops
+// the next one from arriving unnoticed.
+//
+// `not(test)` is what makes it usable: unit tests under `#[cfg(test)] mod
+// tests` unwrap freely — that's the point of a test — while every path that
+// ships is denied. Integration tests in `tests/` are separate crates and are
+// unaffected. `expect_used` deliberately stays allowed; see Cargo.toml.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 // Clippy 1.96+ added several pedantic-style lints that the codebase doesn't
 // yet pass (needless_range_loop, unnecessary_map_or, manual_range_patterns,
 // print_literal, uninlined_format_args). These are stylistic, not bugs.

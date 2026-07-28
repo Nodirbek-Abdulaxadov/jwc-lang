@@ -17,6 +17,10 @@
 //!   * textDocument/completion — context-aware: typed-catch error kinds,
 //!     `use <mw>` middleware names, and in-scope user / builtin identifiers.
 
+// Same unwrap guard as the library (see src/lib.rs). Binaries are separate
+// crates, so the lib's crate-level attribute does not reach them.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
