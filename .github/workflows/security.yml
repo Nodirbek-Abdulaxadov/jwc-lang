@@ -36,7 +36,6 @@ jobs:
           cargo audit \
             --ignore RUSTSEC-2026-0118 \
             --ignore RUSTSEC-2026-0119 \
-            --ignore RUSTSEC-2026-0097 \
             --ignore RUSTSEC-2026-0049 \
             --ignore RUSTSEC-2026-0098 \
             --ignore RUSTSEC-2026-0099 \
