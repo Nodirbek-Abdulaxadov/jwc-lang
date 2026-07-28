@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/vscode-extension/icon.png" alt="JWC" width="128">
+</p>
+
 # JWC Language for VS Code
 
 Syntax highlighting, snippets, and LSP-powered diagnostics for [JWC (Just Web Code)](https://jwc.1kb.uz).

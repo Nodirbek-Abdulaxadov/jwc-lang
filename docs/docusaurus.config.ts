@@ -40,12 +40,12 @@ const config: Config = {
   ],
 
   themeConfig: {
-    image: 'img/docusaurus-social-card.jpg',
+    image: 'img/jwc-social-card.png',
     navbar: {
       title: 'JWC',
       logo: {
-        alt: 'JWC Logo',
-        src: 'img/logo.svg',
+        alt: 'JWC hummingbird logo',
+        src: 'img/logo.png',
       },
       items: [
         {

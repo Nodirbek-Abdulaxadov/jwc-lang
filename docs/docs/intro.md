@@ -3,6 +3,10 @@ slug: /
 sidebar_position: 1
 ---
 
+<p align="center">
+  <img src="/img/logo.png" alt="JWC" width="150" />
+</p>
+
 # JWC
 
 **Write web backends without hand-coding CRUD, without fighting an ORM, native-fast.**

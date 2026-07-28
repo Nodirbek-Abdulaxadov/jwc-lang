@@ -5,26 +5,29 @@
  */
 
 /* You can override the default Infima variables here. */
+
+/* Brand ramp is built around the two teals sampled from the logo artwork
+   (docs/static/img/logo.png): #00746b for light mode, #24c0a4 for dark. */
 :root {
-  --ifm-color-primary: #2e8555;
-  --ifm-color-primary-dark: #29784c;
-  --ifm-color-primary-darker: #277148;
-  --ifm-color-primary-darkest: #205d3b;
-  --ifm-color-primary-light: #33925d;
-  --ifm-color-primary-lighter: #359962;
-  --ifm-color-primary-lightest: #3cad6e;
+  --ifm-color-primary: #00746b;
+  --ifm-color-primary-dark: #006960;
+  --ifm-color-primary-darker: #00635b;
+  --ifm-color-primary-darkest: #00514b;
+  --ifm-color-primary-light: #007f76;
+  --ifm-color-primary-lighter: #00857b;
+  --ifm-color-primary-lightest: #00978b;
   --ifm-code-font-size: 95%;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
 }
 
 /* For readability concerns, you should choose a lighter palette in dark mode. */
 [data-theme='dark'] {
-  --ifm-color-primary: #25c2a0;
-  --ifm-color-primary-dark: #21af90;
-  --ifm-color-primary-darker: #1fa588;
-  --ifm-color-primary-darkest: #1a8870;
-  --ifm-color-primary-light: #29d5b0;
-  --ifm-color-primary-lighter: #32d8b4;
-  --ifm-color-primary-lightest: #4fddbf;
+  --ifm-color-primary: #24c0a4;
+  --ifm-color-primary-dark: #20ad94;
+  --ifm-color-primary-darker: #1ea38b;
+  --ifm-color-primary-darkest: #198672;
+  --ifm-color-primary-light: #34d3b6;
+  --ifm-color-primary-lighter: #45d7bd;
+  --ifm-color-primary-lightest: #6ce0cb;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }

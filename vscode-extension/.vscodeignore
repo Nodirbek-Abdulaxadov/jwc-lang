@@ -20,5 +20,6 @@ npm-debug.log
 yarn.lock
 pnpm-lock.yaml
 .editorconfig
-# Full-resolution artwork icon.png is generated from; not needed at runtime.
+# Master artwork icon.png is generated from, via tools/gen-logo-assets.py at
+# the repo root. Not needed at runtime.
 logo-source.png
