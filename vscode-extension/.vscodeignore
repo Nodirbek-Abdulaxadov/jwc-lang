@@ -20,3 +20,5 @@ npm-debug.log
 yarn.lock
 pnpm-lock.yaml
 .editorconfig
+# Full-resolution artwork icon.png is generated from; not needed at runtime.
+logo-source.png

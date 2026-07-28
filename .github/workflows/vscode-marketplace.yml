@@ -68,6 +68,35 @@ jobs:
           fi
           echo "Publishing as $actual"
 
+      # The icon shipped for two months as a 68-byte 1x1 placeholder, which is
+      # why the marketplace listing showed a blank square. Nothing rejected it
+      # — vsce packages whatever the manifest points at — so it needs a check
+      # of its own. 128x128 is the marketplace minimum.
+      - name: Verify the icon
+        run: |
+          icon="$(jq -r '.icon // empty' package.json)"
+          if [ -z "$icon" ]; then
+            echo "::error ::package.json declares no icon."
+            exit 1
+          fi
+          if [ ! -f "$icon" ]; then
+            echo "::error ::Icon '$icon' is missing."
+            exit 1
+          fi
+          dims="$(python3 -c "
+import struct, sys
+d = open('$icon', 'rb').read(24)
+if d[:8] != b'\x89PNG\r\n\x1a\n':
+    sys.exit('not-a-png')
+print('%d %d' % struct.unpack('>II', d[16:24]))
+")"
+          w="${dims% *}"; h="${dims#* }"
+          echo "Icon $icon is ${w}x${h}"
+          if [ "$w" -lt 128 ] || [ "$h" -lt 128 ]; then
+            echo "::error ::Icon is ${w}x${h}; the marketplace requires at least 128x128."
+            exit 1
+          fi
+
       - name: Resolve version (tag → package.json semver)
         id: ver
         run: |
