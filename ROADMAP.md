@@ -4,14 +4,14 @@
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
 >
-> Joriy holat: **v0.8.0** — Phase 0–10 + **Phase 11 (Query Layer) yopildi**
-> (Query Layer v3: Epic 1–5) + native query-layer parity. 1.0-blocker'lar
-> ketdi. v0.7.0 — real ilovalardan (MyWallet, jwc-shortener) kelgan
-> feedback bo'yicha DSL/editor/HTTP-kontrakt tuzatishlari. v0.8.0 —
-> query layer: `where`'dan `and`/`or` jimgina yo'qolishi tuzatildi,
-> `having`'da agregatlar, `select distinct`. Batafsil — `CHANGELOG.md`.
-> Qolgan kamchiliklar pastdagi **Phase 11** va
-> **Sprint Tracker** (Sprint 8 — native parity) bo'limlarida ro'yxatlangan.
+> Joriy holat: **v0.8.4** — Phase 0–11 yopildi, native query-layer parity bor.
+> v0.7.0 real ilovalardan (MyWallet, jwc-shortener) kelgan feedback bo'yicha
+> DSL/editor/HTTP-kontrakt tuzatishlari; v0.8.0 query layer (where'dan
+> `and`/`or` jimgina yo'qolishi, having'da agregatlar, `select distinct`).
+> Batafsil — `CHANGELOG.md`.
+>
+> **1.0 gacha nima qolgani pastdagi "1.0 gacha yo'l xaritasi" bo'limida** —
+> olti reliz: entity DSL, mapper, ergonomika, query yakuni, `jwc test`, rc.
 > Sprint Tracker (pastda) yangi 1.0 yo'l xaritasini ("1.0 Readiness Plan")
 > aks ettiradi.
 
@@ -638,30 +638,154 @@ Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
 
 ---
 
-## Priority Timeline (qayta hisoblangan, Go-yo'liga moslab)
+## 1.0 gacha yo'l xaritasi
 
-Hozirgi holat: Phase 0–11 yopildi (v0.8.0). **Phase 11 (Query Layer) tugadi** —
-1.0-blocker ketdi. Native AOT auth/crypto builtinlari (`jwt_sign`/`jwt_verify`)
-v0.7.0'da yopildi.
+Hozirgi holat: Phase 0–11 yopildi (v0.8.4). Query Layer tugadi, native
+parity bor. Qolgani — quyidagi olti reliz.
+
+Tartib bitta prinsipga bo'ysunadi: **buzuvchi o'zgarishlar erta, ergonomika
+keyin, ishonch doimiy.** 1.0 sintaksisni muzlatadi, demak har qanday
+breaking o'zgarish 0.9–0.12 ichida tugashi shart.
 
 ```
-✅ done   →  Phase 11.1–11.6 — JOIN + projection + filter + agg + eager-load
 ✅ v0.5.0 →  Query Layer yadrosi (eager-load + grouped agg)
 ✅ v0.6.0 →  explicit JOIN (0 raw_sql) + op? + dynamic in-list + nested with
              + atomic update-set + live OpenAPI + native query-layer parity
-✅ v0.6.1 →  hotfix: atomik update-set camelCase ustun
 ✅ v0.7.0 →  field feedback: index + unique(a,b) + &&/||/+=/?:/?? + CORS/405/
              dual-stack + bitta error envelope + project-wide diagnostics +
              fmt round-trip + native jwt_sign/jwt_verify va decimal
-✅ v0.8.0 →  query layer: where'dan `and`/`or` yo'qolishi tuzatildi +
-             having'da agregatlar (+ alias) + select distinct
-keyingi  →  entity default/timestamps/enum, til ergonomikasi (body().x,
-             xs[0], throw, default param), haqiqiy `jwc test`
-keyin    →  v1.0.0-rc.1 — bake + external pilots → v1.0.0 LTS
+✅ v0.8.0 →  where'dan `and`/`or` yo'qolishi tuzatildi + having'da agregatlar
+             (+ alias) + select distinct
+   v0.9.0 →  Entity DSL: default / private / server / enum / composite pk
+   v0.10.0→  Mapper: new X from Y / patch / class validatsiyasi / check
+   v0.11.0→  Til ergonomikasi: body().x / xs[0] / throw / default param
+   v0.12.0→  Query layer yakuni: ko'p ustunli orderby / LEFT JOIN / subquery
+   v0.13.0→  `jwc test` — haqiqiy test framework
+   v1.0.0-rc.1 → ishonch: differensial qamrov, audit, soak, pilot ko'chirish
+   v1.0.0 →  sintaksis muzlaydi. Breaking faqat 2.0 da
 ```
 
-Post-1.0 (xohlasak): jwc-registry server, jwc publish/login, qo'shimcha
-package ekotizimi. Hammasi opsional, north star fokusini buzmasligi shart.
+---
+
+### v0.9.0 — Entity DSL: default'lar va chegaralar
+
+Birinchi, chunki mapper'ning butun ma'nosi "qaysi ustun avtomatik to'ladi,
+qaysi biri taqiqlangan" degan savolga bog'liq. Buni oldin belgilamasak,
+mapper semantikasini ikki marta ta'riflashga to'g'ri keladi.
+
+- `default <expr>` — `default uuid()`, `default now()`, `default "posted"`
+- `on update now()` — `updatedAt` uchun
+- **`private`** — na javobda, na body'dan (`passwordHash`, `importHash`)
+- **`server`** — javobda bor, body'dan yo'q (`createdBy`, `status`)
+- `enum Direction { in, out }` — DB'da `CHECK`, validatsiyada avtomatik,
+  qoida ikki joyda takrorlanmaydi
+- composite `pk on (a, b)`
+- `on update cascade`
+
+> **BREAKING:** `private` bugungi `select E from ...` javobini o'zgartiradi.
+> Bu ataylab: default xavfsiz tomonga buriladi, proyeksiya esa xavfsizlik
+> uchun emas, trafik uchun yoziladigan bo'ladi.
+
+### v0.10.0 — Mapper
+
+80 ustunli entity uchun router ichida 80 qator o'zlashtirish yozilmasin.
+Chiqish tomonini `select` proyeksiyasi allaqachon hal qiladi — bu reliz
+faqat **kirish** tomoni haqida.
+
+- **`new Entity from <record>`** — manba `body()` ham, DTO instance ham
+  bo'lishi mumkin. Nom bo'yicha moslash; `pk` / `default` / `server` /
+  `private` avtomatik chetlab o'tiladi
+- **`patch e from body()`** — faqat body'da **mavjud** kalitlar. `insert`
+  dan boshqa semantika, shuning uchun alohida so'z
+- **class maydonlarida validatsiya qoidalari** —
+  `amount decimal(14,2) required, min(1);`
+- **`check <expr> : "xabar"`** — maydonlararo qoida. Deklarativ va
+  avtomatik; `validate()` metodi emas, chunki metodni chaqirishni unutish
+  mumkin va bu aynan biz `private` bilan yopayotgan xato turi
+- **`error[E011]`** — `NOT NULL`, default'siz, body'dan kelolmaydigan va
+  hech qayerda o'zlashtirilmagan ustun → kompilyatsiya xatosi
+
+`validate body { ... }` qoladi va DTO majburiy emas: u shakl takrorlanganda,
+maydonlararo qoida kerak bo'lganda yoki OpenAPI'da nomlangan sxema kerak
+bo'lganda o'zini oqlaydi.
+
+Mass-assignment himoyasi til darajasida: `{"id":1,"role":"admin"}` yuborilsa
+o'sha maydonlar jimgina tashlanadi. Bugun bunga to'siq — dasturchining har
+maydonni qo'lda yozgani, ya'ni himoya diqqatga bog'liq.
+
+### v0.11.0 — Til ergonomikasi
+
+Har bir handler'da seziladigan, additive (breaking emas):
+
+- `body().x` — chaqiruv natijasidan maydon olish
+- `xs[0]` — indeksatsiya
+- `throw`
+- default parametr qiymatlari
+- `for i, x in xs`
+
+### v0.12.0 — Query layer yakuni
+
+- **Ko'p ustunli `orderby`** — bugun parser bitta ustun oladi; jadval UI'si
+  uchun majburiy
+- **`LEFT JOIN`** — "har bir kategoriya va undagi tranzaksiyalar soni, nol
+  bo'lsa ham". Avval post-1.0 ga qo'yilgandi; CRUD hisobotlarining yarmi shu
+  shaklda, shuning uchun 1.0 ichiga ko'chirildi
+- `count(distinct col)`
+- `where` ichida subquery (`exists` / `in (select ...)`)
+
+Window funksiya, CTE, `union` — `raw_sql` da qoladi (Non-goal).
+
+### v0.13.0 — `jwc test`
+
+Eng katta strukturaviy bo'shliq: bugun `jwc test` faqat validatsiya qiladi,
+ya'ni **JWC'da yozilgan kodni JWC'da test qilib bo'lmaydi**. 1.0 tili uchun
+bu qabul qilib bo'lmaydigan kamchilik.
+
+Minimum: test bloki, assert'lar, DB fixture, har test uchun transaction
+rollback, runner.
+
+### v1.0.0-rc.1 — Ishonch
+
+Yangi funksiya yo'q, faqat dalil.
+
+- Differensial query suite'ni har yangi shaklga kengaytirish
+  (`tests/query_differential.rs`, CI'da Postgres service bilan)
+- `integration_db` ni service container'ga ko'chirish — hozir
+  testcontainers'da va CI'da skip bo'ladi; **skip pass sifatida
+  o'qilmasligi** kerak
+- **"Hujjatda bor, kodda yo'q" auditi** — `where col is null` shunday chiqdi:
+  hujjatda qo'llab-quvvatlanadigan operator sifatida sanalgan, amalda hech
+  qachon parse bo'lmagan. Yana borligini tekshirish kerak
+- Parser fuzz, 72 soatlik soak
+- MyWallet va task-tracker'ni to'liq yangi sintaksisga ko'chirish
+
+### v1.0.0
+
+Sintaksis muzlaydi. Buzuvchi o'zgarish faqat 2.0 da. Xavfsizlik tuzatmalari
+qo'llab-quvvatlanadi.
+
+---
+
+### Doimiy shart — ishonch
+
+Bu reliz emas, **har bir relizning qabul shartlari**.
+
+v0.6.3–v0.8.0 oralig'ida topilgan bug'larning aksariyati bitta turda edi:
+**jimgina noto'g'ri javob**. `where` dan `and` yo'qolishi, `RETURNING`
+ustun o'rniga affected-count qaytarishi, native'da decimal `null` bo'lib
+kelishi. Va ularning hech biri foydalanuvchi shikoyatidan kelmadi —
+qaralganda topildi.
+
+Shuning uchun v0.9.0 dan boshlab: **har bir yangi query shakli differensial
+testsiz tugallangan hisoblanmaydi.** Qo'lda yozilgan SQL bilan natija
+solishtirilmasa, u "ishlaydi" deb aytilmaydi. Unit test SQL matnini
+tekshiradi, matn esa har doim to'g'ri ko'rinadi.
+
+---
+
+Post-1.0 (xohlasak): jwc-registry server, jwc publish/login, modul
+sistemasi, qo'shimcha package ekotizimi. Hammasi opsional, north star
+fokusini buzmasligi shart.
 
 ---
 
