@@ -38,3 +38,52 @@ jobs:
       - name: jwc fmt --check examples templates
         continue-on-error: true
         run: cargo run --bin jwc -- fmt --check examples templates
+
+  # The query layer gets its own job with a real database. `check` above runs
+  # only the no-DB suites, which is why a `where` clause that dropped half its
+  # predicates shipped in every release up to 0.8.0: the SQL *string* it built
+  # looked correct, and nothing ever executed it.
+  #
+  # A service container rather than testcontainers — the runner exposes it on
+  # localhost, so the suite takes it straight from JWC_TEST_DATABASE_URL and
+  # there is no Docker-in-Docker to fail.
+  query-differential:
+    name: query layer vs hand-written SQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: jwc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Query differential suite
+        env:
+          JWC_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+        run: cargo test --test query_differential -- --nocapture
+
+      - name: Postgres integration suite
+        env:
+          JWC_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+        # Still testcontainers-based, so it skips here rather than failing.
+        # Tracked for 1.0: it should take the service container like the suite
+        # above, and a skip should not read as a pass.
+        continue-on-error: true
+        run: cargo test --test integration_db -- --nocapture

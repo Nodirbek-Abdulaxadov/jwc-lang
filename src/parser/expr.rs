@@ -835,7 +835,13 @@ impl<'a> Parser<'a> {
             } else {
                 false
             };
-            if !self.check_ident_eq("null") {
+            // `null` is a lexer keyword, not an identifier, so `check_ident_eq`
+            // never matched it and `where col is null` has never parsed —
+            // despite being documented as a supported operator. Match the
+            // keyword; the identifier arm stays for a project that shadows it.
+            if self.current.kind != TokenKind::Keyword(Keyword::Null)
+                && !self.check_ident_eq("null")
+            {
                 return Err(self.error_here("expected 'null' after 'is' or 'is not'"));
             }
             self.bump()?;
