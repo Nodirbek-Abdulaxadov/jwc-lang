@@ -41,7 +41,7 @@ pub fn set(key: &str, value: &str, ttl_secs: u64) {
 /// stays whole-seconds via [`set`].
 pub(crate) fn set_with_ttl(key: &str, value: &str, ttl: Option<Duration>) {
     let expires_at = ttl.and_then(|d| Instant::now().checked_add(d));
-    let mut guard = store().lock().expect("cache mutex poisoned");
+    let mut guard = crate::locks::lock_recover(store());
     guard.insert(
         key.to_string(),
         CacheEntry {
@@ -54,7 +54,7 @@ pub(crate) fn set_with_ttl(key: &str, value: &str, ttl: Option<Duration>) {
 /// Look up `key`. Returns `None` if the key is missing or its TTL has
 /// elapsed (in which case the stale entry is also evicted).
 pub fn get(key: &str) -> Option<String> {
-    let mut guard = store().lock().expect("cache mutex poisoned");
+    let mut guard = crate::locks::lock_recover(store());
     let expired = match guard.get(key)?.expires_at {
         Some(deadline) => Instant::now() >= deadline,
         None => false,
@@ -68,13 +68,13 @@ pub fn get(key: &str) -> Option<String> {
 
 /// Remove a single key. Silently succeeds if it was not present.
 pub fn del(key: &str) {
-    let mut guard = store().lock().expect("cache mutex poisoned");
+    let mut guard = crate::locks::lock_recover(store());
     guard.remove(key);
 }
 
 /// Drop every entry in the cache.
 pub fn clear() {
-    let mut guard = store().lock().expect("cache mutex poisoned");
+    let mut guard = crate::locks::lock_recover(store());
     guard.clear();
 }
 
@@ -94,6 +94,39 @@ mod tests {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    /// The behaviour this module's locking is chosen for: a panic somewhere
+    /// else in the process must not take the cache with it.
+    ///
+    /// Before, every `lock()` after the first panic propagated the poison, so
+    /// one bad request turned into "every request that touches the cache
+    /// panics, until someone restarts the process".
+    #[test]
+    fn a_panic_elsewhere_does_not_kill_the_cache() {
+        let _g = lock();
+        clear();
+        set("before", "kept", 0);
+
+        // Panic while holding the store lock — exactly what a handler panic
+        // mid-cache-write looks like to the mutex.
+        let panicked = thread::spawn(|| {
+            let _held = crate::locks::lock_recover(store());
+            panic!("boom");
+        })
+        .join();
+        assert!(panicked.is_err(), "the helper thread should have panicked");
+
+        // The store is poisoned now. Every one of these used to panic.
+        assert_eq!(
+            get("before").as_deref(),
+            Some("kept"),
+            "reads must still work after an unrelated panic"
+        );
+        set("after", "still writable", 0);
+        assert_eq!(get("after").as_deref(), Some("still writable"));
+        del("before");
+        assert_eq!(get("before"), None);
     }
 
     #[test]

@@ -135,7 +135,7 @@ pub fn send_email(to: &str, subject: &str, body_html: &str) -> Result<()> {
         .map_err(|e| anyhow!("send_email: failed to build message: {e}"))?;
 
     let mailer = transport()?;
-    let guard = mailer.lock().expect("smtp transport mutex poisoned");
+    let guard = crate::locks::lock_recover(mailer);
     guard
         .send(&msg)
         .map_err(|e| anyhow!("send_email: SMTP send failed: {e}"))?;

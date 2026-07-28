@@ -248,10 +248,7 @@ impl InMemoryDriver {
     }
 
     fn spawn_workers_if_needed(&self) {
-        let mut started = self
-            .workers_started
-            .lock()
-            .expect("queue workers flag poisoned");
+        let mut started = crate::locks::lock_recover(&self.workers_started);
         if *started {
             return;
         }
@@ -275,7 +272,7 @@ impl JobDriver for InMemoryDriver {
             attempts: 0,
             is_urgent: false,
         };
-        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        let mut q = crate::locks::lock_recover(&self.state.queue);
         q.push(job);
         self.state.cv.notify_one();
     }
@@ -288,33 +285,33 @@ impl JobDriver for InMemoryDriver {
             attempts: 0,
             is_urgent: true,
         };
-        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        let mut q = crate::locks::lock_recover(&self.state.queue);
         q.push_urgent(job);
         self.state.cv.notify_one();
     }
 
     fn register_handler(&self, job_name: &str, handler_fn: &str) {
-        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        let mut q = crate::locks::lock_recover(&self.state.queue);
         q.register_handler(job_name, handler_fn);
     }
 
     fn pending_count(&self) -> usize {
-        let q = self.state.queue.lock().expect("queue mutex poisoned");
+        let q = crate::locks::lock_recover(&self.state.queue);
         q.len()
     }
 
     fn dlq_count(&self) -> usize {
-        let q = self.state.queue.lock().expect("queue mutex poisoned");
+        let q = crate::locks::lock_recover(&self.state.queue);
         q.dlq_len()
     }
 
     fn dlq_drain(&self) -> Vec<FailedJob> {
-        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        let mut q = crate::locks::lock_recover(&self.state.queue);
         q.dlq_drain()
     }
 
     fn record_failed(&self, job: Job, error: &str) {
-        let mut q = self.state.queue.lock().expect("queue mutex poisoned");
+        let mut q = crate::locks::lock_recover(&self.state.queue);
         q.push_dlq(
             FailedJob {
                 job,
@@ -340,11 +337,7 @@ impl JobDriver for InMemoryDriver {
 
     fn install_program(&self, program: Arc<Program>) {
         {
-            let mut slot = self
-                .state
-                .program
-                .lock()
-                .expect("queue program lock poisoned");
+            let mut slot = crate::locks::lock_recover(&self.state.program);
             *slot = Some(program);
         }
         self.spawn_workers_if_needed();
@@ -364,7 +357,7 @@ fn in_memory_state() -> &'static QueueState {
 fn requeue_after_failure(mut job: Job) {
     job.attempts = job.attempts.saturating_add(1);
     let st = in_memory_state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    let mut q = crate::locks::lock_recover(&st.queue);
     q.push(job);
     st.cv.notify_one();
 }
@@ -434,17 +427,17 @@ fn in_memory_worker_loop(worker_id: usize) {
     let st = in_memory_state();
     loop {
         let job = {
-            let mut q = st.queue.lock().expect("queue mutex poisoned");
+            let mut q = crate::locks::lock_recover(&st.queue);
             loop {
                 if let Some(j) = q.pop() {
                     break j;
                 }
-                q = st.cv.wait(q).expect("queue condvar wait poisoned");
+                q = crate::locks::wait_recover(&st.cv, q);
             }
         };
 
         let handler_name = {
-            let q = st.queue.lock().expect("queue mutex poisoned");
+            let q = crate::locks::lock_recover(&st.queue);
             q.handler_for(&job.name)
         };
 
@@ -460,7 +453,7 @@ fn in_memory_worker_loop(worker_id: usize) {
         };
 
         let program = {
-            let slot = st.program.lock().expect("queue program lock poisoned");
+            let slot = crate::locks::lock_recover(&st.program);
             slot.clone()
         };
 
@@ -625,10 +618,7 @@ impl PostgresJobDriver {
     }
 
     fn spawn_workers_if_needed(&self) {
-        let mut started = self
-            .workers_started
-            .lock()
-            .expect("queue workers flag poisoned");
+        let mut started = crate::locks::lock_recover(&self.workers_started);
         if *started {
             return;
         }
@@ -674,7 +664,7 @@ impl JobDriver for PostgresJobDriver {
     }
 
     fn register_handler(&self, job_name: &str, handler_fn: &str) {
-        let mut h = self.handlers.lock().expect("pg handlers lock poisoned");
+        let mut h = crate::locks::lock_recover(&self.handlers);
         h.insert(job_name.to_string(), handler_fn.to_string());
     }
 
@@ -731,7 +721,7 @@ impl JobDriver for PostgresJobDriver {
 
     fn install_program(&self, program: Arc<Program>) {
         {
-            let mut slot = self.program.lock().expect("pg program lock poisoned");
+            let mut slot = crate::locks::lock_recover(&self.program);
             *slot = Some(program);
         }
         self.spawn_workers_if_needed();
@@ -1007,9 +997,9 @@ pub fn record_failed(job: Job, error: &str) {
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
     let st = in_memory_state();
-    let mut q = st.queue.lock().expect("queue mutex poisoned");
+    let mut q = crate::locks::lock_recover(&st.queue);
     *q = Queue::new();
-    let mut p = st.program.lock().expect("queue program lock poisoned");
+    let mut p = crate::locks::lock_recover(&st.program);
     *p = None;
 }
 
@@ -1021,6 +1011,12 @@ mod tests {
 
     /// All queue tests share global state, so serialize them like the
     /// `cache` module does.
+    ///
+    /// They also reach the shared queue through `locks::lock_recover` rather
+    /// than `lock().unwrap()`. `a_panicking_worker_does_not_kill_the_queue`
+    /// deliberately poisons that global mutex, and an unwrapping sibling
+    /// would then fail for a reason that has nothing to do with what it
+    /// tests — the same trap the production code just stopped falling into.
     fn lock() -> MutexGuard<'static, ()> {
         static M: OnceLock<Mutex<()>> = OnceLock::new();
         let m = M.get_or_init(|| Mutex::new(()));
@@ -1028,6 +1024,47 @@ mod tests {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         }
+    }
+
+    /// A worker that panics mid-job used to poison `QueueState::queue`, and
+    /// every later `enqueue` / `pending_count` propagated that poison. One bad
+    /// handler therefore stopped *all* background work for the life of the
+    /// process — the jobs still arrived, nothing ever ran them, and the logs
+    /// showed a wall of identical "poisoned" panics instead of the first one.
+    #[test]
+    fn a_panicking_worker_does_not_kill_the_queue() {
+        let _g = lock();
+        reset_for_tests();
+
+        let st = in_memory_state();
+
+        // Panic while holding the queue lock — what a worker panic looks like
+        // to the mutex.
+        let panicked = std::thread::spawn(|| {
+            let _held = crate::locks::lock_recover(&in_memory_state().queue);
+            panic!("handler blew up");
+        })
+        .join();
+        assert!(panicked.is_err(), "the helper thread should have panicked");
+        assert!(
+            st.queue.lock().is_err(),
+            "the queue mutex should be poisoned at this point"
+        );
+
+        // Every one of these used to panic.
+        enqueue("after_panic", "{}");
+        assert_eq!(
+            pending_count(),
+            1,
+            "the queue must keep accepting work after an unrelated panic"
+        );
+        register_handler("after_panic", "handleIt");
+
+        let mut q = crate::locks::lock_recover(&st.queue);
+        let job = q
+            .pop()
+            .expect("the job enqueued after the panic is still there");
+        assert_eq!(job.name, "after_panic");
     }
 
     #[test]
@@ -1039,7 +1076,7 @@ mod tests {
         assert_eq!(pending_count(), 1);
 
         let st = in_memory_state();
-        let mut q = st.queue.lock().unwrap();
+        let mut q = crate::locks::lock_recover(&st.queue);
         let job = q.pop().expect("expected a pending job");
         assert_eq!(job.name, "send_welcome_email");
         assert_eq!(job.payload, "{\"user_id\":42}");
@@ -1053,7 +1090,7 @@ mod tests {
 
         enqueue("any_job", "payload");
         let st = in_memory_state();
-        let mut q = st.queue.lock().unwrap();
+        let mut q = crate::locks::lock_recover(&st.queue);
         let job = q.pop().expect("expected a pending job");
         assert_eq!(job.attempts, 0, "fresh enqueue must start at 0 attempts");
     }
@@ -1074,7 +1111,7 @@ mod tests {
 
         assert_eq!(pending_count(), 1);
         let st = in_memory_state();
-        let mut q = st.queue.lock().unwrap();
+        let mut q = crate::locks::lock_recover(&st.queue);
         let popped = q.pop().expect("expected the re-pushed job");
         assert_eq!(popped.attempts, 3, "attempts must be bumped on requeue");
     }
@@ -1153,7 +1190,7 @@ mod tests {
         enqueue_urgent("payment_webhook", "5");
 
         let st = in_memory_state();
-        let mut q = st.queue.lock().unwrap();
+        let mut q = crate::locks::lock_recover(&st.queue);
         let order: Vec<String> = (0..5).map(|_| q.pop().unwrap().name).collect();
         assert_eq!(
             order,
@@ -1176,7 +1213,7 @@ mod tests {
         register_handler("send_welcome_email", "welcome_email_handler");
 
         let st = in_memory_state();
-        let q = st.queue.lock().unwrap();
+        let q = crate::locks::lock_recover(&st.queue);
         assert_eq!(
             q.handler_for("resize_image").as_deref(),
             Some("do_resize_image")
