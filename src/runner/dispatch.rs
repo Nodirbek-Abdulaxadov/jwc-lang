@@ -364,6 +364,21 @@ impl<'a> Vm<'a> {
         })
     }
 
+    /// `column name → declared Postgres type` for `table`, the map that
+    /// drives schema-aware parameter binding.
+    ///
+    /// Empty for a table with no matching entity (an ad-hoc table reached
+    /// through `raw_sql`, say), and callers then fall back to binding by
+    /// the runtime value's shape — the behaviour every query path had
+    /// before, and the reason `where User.id == @id` failed when `@id`
+    /// came from `path_param` as a string.
+    pub(super) fn col_types_for(&self, table: &str) -> HashMap<String, String> {
+        self.models
+            .get(&table.to_lowercase())
+            .map(|m| super::sql::column_types_for_fields(&m.fields))
+            .unwrap_or_default()
+    }
+
     /// Look up the primary-key column names for `table` (matching the entity
     /// name or its snake_case form). Falls back to `["id"]` when no `pk` is
     /// declared, so ad-hoc tables not modelled as JWC entities still work.

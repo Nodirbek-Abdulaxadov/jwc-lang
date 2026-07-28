@@ -19,9 +19,25 @@
 //! `native: false`: the interpreter runs them, but `jwc build --native`
 //! still rejects programs that use them, preserving prior behaviour.
 //!
-//! `min_args` / `max_args` are INFORMATIONAL only (for tooling / docs). The
-//! runtime arity checks still live in each `eval_*_call` body — this table
-//! adds no enforcement.
+//! ## `min_args` / `max_args` are the contract, and they are enforced
+//!
+//! They used to be informational, with the real check living in each
+//! `eval_*_call` body — so a wrong-arity call reached the backends. The
+//! interpreter caught it at runtime; native codegen didn't, and several of
+//! its variadic branches padded the missing slots with `V::Null`, turning
+//! `raw_sql(sql, a, b)` into a statement that discarded the query and
+//! returned 200. `serve("0.0.0.0", 8081)` took the host as the port and
+//! bound `:0`. Neither produced a diagnostic anywhere.
+//!
+//! `typecheck::check_program` (E022) now rejects those at `jwc check`,
+//! before either backend sees the program. That makes this table
+//! load-bearing: **a row must match what the interpreter actually
+//! accepts**, or working programs get rejected. Widen a row only after
+//! widening the `eval_*_call` body it describes.
+//!
+//! The runtime checks stay where they are. They're unreachable from a
+//! checked program, but the interpreter is also driven directly by tests
+//! and the LSP, and defence in depth here costs one comparison.
 //!
 //! Adding a new built-in:
 //! 1. Add a `BuiltinDef` row here (set `native` to match codegen support).
@@ -31,17 +47,18 @@
 //!    and set `native: true`. Otherwise leave `native: false` and the
 //!    program is rejected at native-build time, which is the safer default.
 
-/// Metadata for one built-in function. See module docs for the meaning of
-/// `native` (load-bearing) vs. `min_args`/`max_args` (informational).
+/// Metadata for one built-in function. Both `native` and the arity pair
+/// are load-bearing — see module docs.
 pub struct BuiltinDef {
     /// Canonical name as written in a JWC program.
     pub name: &'static str,
     /// camelCase / snake_case aliases the interpreter also dispatches.
     pub aliases: &'static [&'static str],
-    /// Minimum arg count the interpreter enforces (informational).
+    /// Minimum arg count. Enforced by `typecheck` (E022); must match the
+    /// interpreter's own runtime check.
     pub min_args: usize,
-    /// Maximum arg count the interpreter enforces; `None` = variadic
-    /// (informational).
+    /// Maximum arg count; `None` = variadic. Enforced by `typecheck`
+    /// (E022); must match the interpreter's own runtime check.
     pub max_args: Option<usize>,
     /// `true` if native AOT codegen accepts this built-in. Drives the
     /// native-build whitelist — see module docs.
@@ -170,7 +187,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         name: "query_param",
         aliases: &[],
         min_args: 1,
-        max_args: Some(1),
+        max_args: Some(2),
         native: true,
     },
     BuiltinDef {
@@ -287,7 +304,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         name: "not_found",
         aliases: &[],
         min_args: 0,
-        max_args: Some(0),
+        max_args: Some(1),
         native: true,
     },
     BuiltinDef {
@@ -301,14 +318,14 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         name: "unauthorized",
         aliases: &[],
         min_args: 0,
-        max_args: Some(0),
+        max_args: Some(1),
         native: true,
     },
     BuiltinDef {
         name: "forbidden",
         aliases: &[],
         min_args: 0,
-        max_args: Some(0),
+        max_args: Some(1),
         native: true,
     },
     BuiltinDef {
@@ -332,7 +349,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         name: "notFound",
         aliases: &[],
         min_args: 0,
-        max_args: Some(0),
+        max_args: Some(1),
         native: true,
     },
     BuiltinDef {
@@ -412,7 +429,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         name: "http_get",
         aliases: &[],
         min_args: 1,
-        max_args: Some(1),
+        max_args: Some(2),
         native: true,
     },
     BuiltinDef {
@@ -463,7 +480,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef {
         name: "cache_set",
         aliases: &[],
-        min_args: 2,
+        min_args: 3,
         max_args: Some(3),
         native: true,
     },
@@ -486,7 +503,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         name: "raw_sql",
         aliases: &[],
         min_args: 1,
-        max_args: None,
+        max_args: Some(2),
         native: true,
     },
     // ── Array helpers (native) ───────────────────────────────────────────
@@ -549,8 +566,8 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef {
         name: "dispatch",
         aliases: &[],
-        min_args: 1,
-        max_args: None,
+        min_args: 2,
+        max_args: Some(2),
         native: false,
     },
     BuiltinDef {
@@ -571,20 +588,20 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         name: "http_post",
         aliases: &[],
         min_args: 1,
-        max_args: Some(2),
+        max_args: Some(3),
         native: false,
     },
     BuiltinDef {
         name: "jwt_sign",
         aliases: &[],
-        min_args: 1,
+        min_args: 2,
         max_args: Some(2),
         native: true,
     },
     BuiltinDef {
         name: "jwt_verify",
         aliases: &[],
-        min_args: 1,
+        min_args: 2,
         max_args: Some(2),
         native: true,
     },
@@ -605,8 +622,8 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef {
         name: "send_email",
         aliases: &[],
-        min_args: 1,
-        max_args: None,
+        min_args: 3,
+        max_args: Some(3),
         native: false,
     },
     BuiltinDef {
@@ -619,43 +636,43 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     BuiltinDef {
         name: "enqueue",
         aliases: &[],
-        min_args: 1,
-        max_args: None,
+        min_args: 2,
+        max_args: Some(2),
         native: false,
     },
     BuiltinDef {
         name: "enqueue_urgent",
         aliases: &[],
-        min_args: 1,
-        max_args: None,
+        min_args: 2,
+        max_args: Some(2),
         native: false,
     },
     BuiltinDef {
         name: "job_count",
         aliases: &[],
         min_args: 0,
-        max_args: None,
+        max_args: Some(0),
         native: false,
     },
     BuiltinDef {
         name: "dlq_count",
         aliases: &[],
         min_args: 0,
-        max_args: None,
+        max_args: Some(0),
         native: false,
     },
     BuiltinDef {
         name: "dlq_drain",
         aliases: &[],
         min_args: 0,
-        max_args: None,
+        max_args: Some(0),
         native: false,
     },
     BuiltinDef {
         name: "db_query",
         aliases: &[],
         min_args: 1,
-        max_args: None,
+        max_args: Some(1),
         native: false,
     },
     BuiltinDef {
@@ -677,7 +694,15 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         aliases: &[],
         min_args: 0,
         max_args: Some(0),
-        native: false,
+        native: true,
+    },
+    // Not cryptographic — `uuid()` is the builtin for unguessable values.
+    BuiltinDef {
+        name: "random_int",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(2),
+        native: true,
     },
     BuiltinDef {
         name: "set_json_field",
@@ -693,10 +718,52 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         max_args: Some(1),
         native: false,
     },
+    // ── Server entry point ───────────────────────────────────────────────
+    //
+    // Also listed in [`SPECIAL_BUILTINS`] because codegen emits it inline
+    // rather than through `jwc_b_serve` dispatch. It lives here too so the
+    // arity check below covers it: `serve("0.0.0.0", 8081)` used to pass
+    // `jwc check`, then bind port 0 in a native build because codegen took
+    // `args.first()` — the host — as the port.
+    BuiltinDef {
+        name: "serve",
+        aliases: &[],
+        min_args: 0,
+        max_args: Some(1),
+        native: true,
+    },
 ];
 
 /// Built-ins that codegen handles itself (not via `jwc_b_<name>` dispatch).
 pub const SPECIAL_BUILTINS: &[&str] = &["serve"];
+
+/// Look up a built-in by canonical name or alias, case-insensitively —
+/// the same matching rule the interpreter's dispatch uses.
+pub fn lookup(name: &str) -> Option<&'static BuiltinDef> {
+    BUILTIN_DEFS.iter().find(|def| {
+        def.name.eq_ignore_ascii_case(name)
+            || def.aliases.iter().any(|a| a.eq_ignore_ascii_case(name))
+    })
+}
+
+impl BuiltinDef {
+    /// `true` if a call with `n` arguments is within this built-in's
+    /// declared arity.
+    pub fn accepts_arity(&self, n: usize) -> bool {
+        n >= self.min_args && self.max_args.is_none_or(|max| n <= max)
+    }
+
+    /// Human-readable arity for a diagnostic: `"2"`, `"1 or 2"`,
+    /// `"1 to 3"`, `"at least 1"`.
+    pub fn arity_label(&self) -> String {
+        match self.max_args {
+            Some(max) if max == self.min_args => max.to_string(),
+            Some(max) if max == self.min_args + 1 => format!("{} or {}", self.min_args, max),
+            Some(max) => format!("{} to {}", self.min_args, max),
+            None => format!("at least {}", self.min_args),
+        }
+    }
+}
 
 /// True if `name` matches any built-in's canonical name or alias,
 /// case-insensitively (mirroring the interpreter's `eq_ignore_ascii_case`

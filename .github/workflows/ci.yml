@@ -78,12 +78,16 @@ jobs:
           JWC_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
         run: cargo test --test query_differential -- --nocapture
 
+      # Now takes the service container through `JWC_TEST_DATABASE_URL`, same
+      # as the suite above, so it actually runs here — and is required.
+      #
+      # It never ran anywhere before. `testcontainers`' `SyncRunner::start`
+      # calls `block_on`, and every test is a `#[tokio::test]`, so a host with
+      # no Docker got "Cannot start a runtime from within a runtime" — a
+      # panic, not the `Err` the graceful-skip path was written against. Six
+      # tests failed on every machine without a daemon, `continue-on-error`
+      # hid it, and two of the fixtures had rotted in the meantime.
       - name: Postgres integration suite
         env:
           JWC_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
-          DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
-        # Still testcontainers-based, so it skips here rather than failing.
-        # Tracked for 1.0: it should take the service container like the suite
-        # above, and a skip should not read as a pass.
-        continue-on-error: true
         run: cargo test --test integration_db -- --nocapture
