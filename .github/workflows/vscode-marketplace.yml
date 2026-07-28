@@ -46,6 +46,28 @@ jobs:
           npm ci --no-audit --no-fund
           npm run compile
 
+      # `vsce publish` happily creates a NEW extension when the identifier
+      # changes, prints "Published ...", and exits 0. That is how every
+      # release from 0.5.2 to 0.8.2 went to `Nodirbek-Abdulaxadov.jwc-language`
+      # while users kept installing `jwc-extension.jwc-lang` — the marketplace
+      # sat at 0.4.7 for two months with a green pipeline the whole time.
+      #
+      # The identifier is what users' editors key their installs off, so it is
+      # a published contract, not a config value. Pin it here: renaming the
+      # publisher or the extension now has to be a deliberate edit to this
+      # line, not a silent fork.
+      - name: Verify the extension identifier
+        run: |
+          expected="jwc-extension.jwc-lang"
+          actual="$(jq -r '.publisher + "." + .name' package.json)"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error ::Extension identifier is '$actual' but this pipeline publishes '$expected'."
+            echo "::error ::Publishing under a different identifier creates a separate extension that existing users will never receive."
+            echo "::error ::If the change is intended, update 'expected' in .github/workflows/vscode-marketplace.yml."
+            exit 1
+          fi
+          echo "Publishing as $actual"
+
       - name: Resolve version (tag → package.json semver)
         id: ver
         run: |

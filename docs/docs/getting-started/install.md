@@ -52,4 +52,4 @@ The CLI tracks its own version. Re-run the install one-liner above; existing con
 | Native AOT (`jwc build --native`) | [Rust toolchain](https://rustup.rs/) on `PATH` |
 | Cross-compile (`--target`) | The matching `rustup target add <triple>` |
 | `jwc publish` | An API key from [registry-jwc.1kb.uz](https://registry-jwc.1kb.uz/#/keys) (Google login) |
-| Editor support | [JWC Language extension](https://marketplace.visualstudio.com/items?itemName=Nodirbek-Abdulaxadov.jwc-language) on VS Code Marketplace (or build the `.vsix` from `vscode-extension/`) |
+| Editor support | [JWC Language extension](https://marketplace.visualstudio.com/items?itemName=jwc-extension.jwc-lang) on VS Code Marketplace (or build the `.vsix` from `vscode-extension/`) |

@@ -3,15 +3,36 @@
 All notable changes to the **JWC Language** VS Code extension are documented
 here. The extension version tracks the JWC compiler version it ships against.
 
-## 0.8.0 — Version bump to track the compiler
+## 0.8.0 — Back on the right extension, and the query-layer release
 
-No editor-facing changes. The extension and the compiler ship on one
-version line, and 0.8.0 is a query-layer release: a `where` clause could
-silently drop an `and` / `or` term, `having` now accepts aggregates, and
+**If you were stuck on 0.4.7, this is why.** Every release from 0.5.2
+onward was published under a second identifier —
+`Nodirbek-Abdulaxadov.jwc-language` — while the extension you installed is
+`jwc-extension.jwc-lang`. `vsce publish` creates a new extension when the
+identifier changes, prints "Published", and exits 0, so the pipeline stayed
+green for two months while the marketplace listing never moved. Publishing
+now goes back to `jwc-extension.jwc-lang`, and CI fails if the identifier
+ever drifts again.
+
+That means this update carries everything from 0.4.8 through 0.8.0 at once.
+The editor-facing highlights, all of which landed in 0.7.0:
+
+- Diagnostics resolve against the **whole project**, not one file. Before,
+  a project that `jwc lint` accepts showed 12 phantom problems because
+  entities in `Data/` were invisible to routes in another file.
+- **Format-on-save works.** The capability was never advertised, so the
+  request came back `-32601 Method not found`.
+- **Go-to-definition and rename work across files.** Rename used to resolve
+  a symbol declared elsewhere and then edit only the current file.
+- `async` / `public` / `private` on dome members; the shipped "Async
+  Function" snippet no longer expands into a parse error.
+- The `transaction` snippet is fixed, and the extension's own manifest no
+  longer puts a warning in your Problems panel.
+- The extension tells you when the installed `jwc-lsp` is behind it.
+
+The compiler side of 0.8.0 is a query-layer release — a `where` clause
+could silently drop an `and` / `or` term, `having` accepts aggregates, and
 `select distinct` exists. See the root `CHANGELOG.md`.
-
-Diagnostics for the new forms come from `jwc-lsp`, so update the toolchain
-alongside the extension — it will warn you if the binary falls behind.
 
 ## 0.7.0 — The Problems panel tells the truth
 
@@ -57,9 +78,14 @@ they can't drift from the grammar again.
 
 ## 0.5.2 — Marketplace publish fixes
 
+> **Superseded — see 0.8.0.** The rename below is what quietly split this
+> extension in two. The "already taken" name belonged to *this* extension
+> under the `jwc-extension` publisher, not to a stranger, so renaming around
+> it published to a new listing instead of updating the existing one. No
+> release between here and 0.8.0 ever reached anyone.
+
 - Extension id renamed to `jwc-language` and the display name made unique;
-  both `jwc-lang` and the previous display name were already taken on the
-  Marketplace, which had failed the publish step.
+  the publish step had failed with "display name is taken".
 - `package-lock.json` synced with `package.json`.
 
 No editor-facing changes.
