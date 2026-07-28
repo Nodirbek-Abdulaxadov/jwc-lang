@@ -83,13 +83,13 @@ jobs:
             echo "::error ::Icon '$icon' is missing."
             exit 1
           fi
-          dims="$(python3 -c "
-import struct, sys
-d = open('$icon', 'rb').read(24)
-if d[:8] != b'\x89PNG\r\n\x1a\n':
-    sys.exit('not-a-png')
-print('%d %d' % struct.unpack('>II', d[16:24]))
-")"
+          # One line on purpose. A `run: |` block scalar ends at the first
+          # line indented less than the block, and Python rejects a leading
+          # indent on a top-level statement — so a multi-line `python3 -c`
+          # here cannot satisfy both. The filename goes through argv rather
+          # than being interpolated into the source, and the single quotes
+          # keep bash out of the escape sequences.
+          dims="$(python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(24); sys.exit("not a PNG") if d[:8]!=b"\x89PNG\r\n\x1a\n" else None; print("%d %d" % struct.unpack(">II", d[16:24]))' "$icon")"
           w="${dims% *}"; h="${dims#* }"
           echo "Icon $icon is ${w}x${h}"
           if [ "$w" -lt 128 ] || [ "$h" -lt 128 ]; then
