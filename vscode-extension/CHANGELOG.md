@@ -3,6 +3,16 @@
 All notable changes to the **JWC Language** VS Code extension are documented
 here. The extension version tracks the JWC compiler version it ships against.
 
+## 0.8.0 — Version bump to track the compiler
+
+No editor-facing changes. The extension and the compiler ship on one
+version line, and 0.8.0 is a query-layer release: a `where` clause could
+silently drop an `and` / `or` term, `having` now accepts aggregates, and
+`select distinct` exists. See the root `CHANGELOG.md`.
+
+Diagnostics for the new forms come from `jwc-lsp`, so update the toolchain
+alongside the extension — it will warn you if the binary falls behind.
+
 ## 0.7.0 — The Problems panel tells the truth
 
 Everything below was reported from real projects, where the extension's

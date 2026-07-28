@@ -3,6 +3,76 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — Query layer: a silent filter bug, `having` aggregates, `distinct`
+
+### Fixed — wrong rows, silently
+
+**`and` / `or` could vanish from a `where` clause.** A comparison's
+right-hand side was parsed at the top of the precedence ladder, so it
+consumed the `and` belonging to the surrounding WHERE tree:
+
+```text
+where Sale.amount > 2 and Sale.amount < 9
+  ->  SELECT * FROM "sale" WHERE "amount" > $1
+      $1 = (2 and (Sale.amount < 9))
+```
+
+The second filter didn't fail — it was folded into the first term's bound
+value and disappeared. A query that should have returned one row returned
+two, with nothing logged and no error raised. The RHS now parses at
+additive precedence, which is what a comparison's right side actually is.
+
+Only literal right-hand sides could reach it. `where col == @param` — the
+overwhelmingly common form — returns before that code path, which is why
+it went unnoticed. **This bug is present in 0.7.0 and every release before
+it.** If you have a `where` with a literal RHS followed by `and` / `or`,
+that query has been returning wrong rows; upgrading fixes it with no
+source change.
+
+Both backends are fixed by the one parser change — the interpreter and the
+AOT codegen build their SQL from the same tree.
+
+### Added
+
+**Aggregates in `having`.** `having count(*) > 5` was a parse error, so the
+thing `having` exists for could not be written:
+
+```jwc
+select Task { status, total: count(*), effort: sum(hours) }
+    from AppDb.Task
+    group by status
+    having count(*) > 2 and sum(Task.hours) >= 40;
+```
+
+An aggregate alias from the projection works too — Postgres rejects an
+output alias in `HAVING`, so `having total > 2` is resolved to the
+aggregate it names before any SQL is built. Previously that form compiled
+and then died at the database with `column "total" does not exist`.
+
+A `having` term that is neither a group key, an aggregate, nor an alias is
+now `error[E010]` at `jwc check`. It used to reach Postgres as *"column
+must appear in the GROUP BY clause or be used in an aggregate function"*,
+at runtime.
+
+**`select distinct`.**
+
+```jwc
+let countries = select distinct Sale { country } from AppDb.Sale;
+```
+
+Composes with `where`, `orderby`, `limit`, `group by` and `join`, and is
+part of the prepared-statement shape key so the distinct and non-distinct
+forms can't share a cached plan. `select distinct count(*)` is rejected at
+parse time — de-duplicating a one-row result is always a no-op, and SQL's
+`count(distinct col)` is a different construct that isn't emitted yet.
+
+### Changed
+
+`having_with_group_by_validates` asserted `having Sale.amount > @min` while
+grouping by `country`. Postgres rejects that program, so the test was
+replaced rather than kept: E010 now catches it, and a new case covers
+`having` on a real group key.
+
 ## [0.7.0] — Field feedback: the DSL, the editor, and the HTTP contract
 
 Two real applications — MyWallet and jwc-shortener — were written against
