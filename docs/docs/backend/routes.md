@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "Declare HTTP endpoints with route GET/POST/PUT/DELETE. Path and query parameters, request bodies, response helpers and status codes."
 ---
 
 # Routes

@@ -3,6 +3,23 @@
 All notable changes to the **JWC Language** VS Code extension are documented
 here. The extension version tracks the JWC compiler version it ships against.
 
+## 0.9.0 — A logo of its own
+
+The extension ships a new icon: a teal hummingbird, replacing the purple
+one. It is the same mark the documentation site now uses for its favicon,
+navbar and social card — all four are generated from a single master
+(`vscode-extension/logo-source.png`) by `tools/gen-logo-assets.py`, which
+exists so the set stays in step. The gallery banner moves off the purple
+it was matched to.
+
+Nothing about the editor experience changes in this release. The compiler
+side is a correctness release: SQL parameters are bound from the column's
+declared type rather than the value's Rust shape — so
+`where User.id == @id` with an `int` primary key stops answering 500 —
+and wrong-arity builtin calls are now rejected at `jwc check` (E022)
+instead of compiling to a no-op that answers 200. That last one is a
+breaking change; see the root `CHANGELOG.md`.
+
 ## 0.8.0 — Back on the right extension, and the query-layer release
 
 **If you were stuck on 0.4.7, this is why.** Every release from 0.5.2

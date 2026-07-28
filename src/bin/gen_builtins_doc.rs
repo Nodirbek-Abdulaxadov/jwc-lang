@@ -41,6 +41,15 @@ pub fn render_builtins_doc(defs: &[BuiltinDef]) -> String {
     let mut out = String::new();
     out.push_str("---\n");
     out.push_str("sidebar_position: 1\n");
+    // Docusaurus derives the meta description from the first line of body
+    // text when the frontmatter carries none, which for this page is the
+    // "Auto-generated" admonition. Emit a written one, and emit it here so
+    // regenerating the doc doesn't drop it.
+    out.push_str(
+        "description: \"Every JWC built-in function with its arguments, return type and \
+         whether it is supported under jwc build --native. Generated from the compiler's \
+         own table.\"\n",
+    );
     out.push_str("---\n\n");
     out.push_str("# Built-in functions\n\n");
     out.push_str(

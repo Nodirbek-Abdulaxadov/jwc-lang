@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "Declare a database connection with dbcontext and point it at Postgres. Connection strings, environment variables and pool configuration."
 ---
 
 # dbcontext

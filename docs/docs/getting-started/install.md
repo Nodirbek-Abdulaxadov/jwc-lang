@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "Install the JWC toolchain on Windows, Linux or macOS with a single command, or build it from source. Ships the jwc compiler and the jwc-lsp language server."
 ---
 
 # Install

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 5
+description: "Every JWC_* environment variable the runtime reads, with its default, the subsystem that owns it and what changing it affects."
 ---
 
 # Environment variables

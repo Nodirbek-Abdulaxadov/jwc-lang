@@ -1,5 +1,6 @@
 ---
 sidebar_position: 4
+description: "An end-to-end deploy pipeline for a real JWC app, from build and migration to a running service — using jwc-shortener as the worked example."
 ---
 
 # CI/CD walkthrough

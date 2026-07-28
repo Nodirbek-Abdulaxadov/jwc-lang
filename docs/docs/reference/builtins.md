@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "Every JWC built-in function with its arguments, return type and whether it is supported under jwc build --native. Generated from the compiler's own table."
 ---
 
 # Built-in functions
@@ -52,7 +53,7 @@ Columns:
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `path_param` | — | 1 | ✅ |
-| `query_param` | — | 1 | ✅ |
+| `query_param` | — | 1..2 | ✅ |
 | `body` | — | 0 | ✅ |
 | `header` | — | 1 | ✅ |
 | `client_ip` | — | 0 | ✅ |
@@ -74,13 +75,13 @@ Columns:
 | `response` | `raw` | 2 | ✅ |
 | `ok` | — | 0..1 | ✅ |
 | `created` | — | 1 | ✅ |
-| `not_found` | — | 0 | ✅ |
+| `not_found` | — | 0..1 | ✅ |
 | `no_content` | — | 0 | ✅ |
-| `unauthorized` | — | 0 | ✅ |
-| `forbidden` | — | 0 | ✅ |
+| `unauthorized` | — | 0..1 | ✅ |
+| `forbidden` | — | 0..1 | ✅ |
 | `internal_error` | — | 0..1 | ✅ |
 | `status_code` | — | 1..2 | ✅ |
-| `notFound` | — | 0 | ✅ |
+| `notFound` | — | 0..1 | ✅ |
 | `noContent` | — | 0 | ✅ |
 | `internalError` | — | 0..1 | ✅ |
 | `statusCode` | — | 1..2 | ✅ |
@@ -92,8 +93,8 @@ Columns:
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `setConnectionString` | — | 0..1 | ✅ |
-| `raw_sql` | — | 1..* | ✅ |
-| `db_query` | — | 1..* | — |
+| `raw_sql` | — | 1..2 | ✅ |
+| `db_query` | — | 1 | — |
 | `set_connection_string` | — | 0..1 | — |
 
 ## WebSocket
@@ -109,9 +110,9 @@ Columns:
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `sleep_ms` | — | 1 | ✅ |
-| `http_get` | — | 1 | ✅ |
+| `http_get` | — | 1..2 | ✅ |
 | `fetch_json` | — | 1 | ✅ |
-| `http_post` | — | 1..2 | — |
+| `http_post` | — | 1..3 | — |
 
 ## Environment + coercion
 
@@ -126,14 +127,14 @@ Columns:
 |---|---|---|---|
 | `now` | — | 0 | ✅ |
 | `uuid` | — | 0 | ✅ |
-| `unix_timestamp` | — | 0 | — |
+| `unix_timestamp` | — | 0 | ✅ |
 
 ## Cache (in-memory)
 
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `cache_get` | — | 1 | ✅ |
-| `cache_set` | — | 2..3 | ✅ |
+| `cache_set` | — | 3 | ✅ |
 | `cache_del` | — | 1 | ✅ |
 | `cache_clear` | — | 0 | ✅ |
 
@@ -153,8 +154,8 @@ Columns:
 | `sha1` | — | 1 | ✅ |
 | `md5` | — | 1 | ✅ |
 | `hmac_sha256` | — | 2 | ✅ |
-| `jwt_sign` | — | 1..2 | ✅ |
-| `jwt_verify` | — | 1..2 | ✅ |
+| `jwt_sign` | — | 2 | ✅ |
+| `jwt_verify` | — | 2 | ✅ |
 | `hash_password` | — | 1 | ✅ |
 | `verify_password` | — | 2 | ✅ |
 
@@ -162,13 +163,13 @@ Columns:
 
 | Name | Aliases | Args | Native |
 |---|---|---|---|
-| `send_email` | — | 1..* | — |
+| `send_email` | — | 3 | — |
 
 ## Request context
 
 | Name | Aliases | Args | Native |
 |---|---|---|---|
-| `dispatch` | — | 1..* | — |
+| `dispatch` | — | 2 | — |
 | `context` | — | 1 | — |
 | `setContext` | `set_context` | 2 | — |
 
@@ -177,11 +178,11 @@ Columns:
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `register_job_handler` | — | 2 | — |
-| `enqueue` | — | 1..* | — |
-| `enqueue_urgent` | — | 1..* | — |
-| `job_count` | — | 0..* | — |
-| `dlq_count` | — | 0..* | — |
-| `dlq_drain` | — | 0..* | — |
+| `enqueue` | — | 2 | — |
+| `enqueue_urgent` | — | 2 | — |
+| `job_count` | — | 0 | — |
+| `dlq_count` | — | 0 | — |
+| `dlq_drain` | — | 0 | — |
 
 ## Notes
 

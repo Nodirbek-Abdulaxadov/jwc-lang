@@ -25,6 +25,15 @@
 //!    resolves to a known user function (not a built-in / not variadic),
 //!    `args.len()` must equal the declared parameter count.
 //!
+//! 2b. **E022 — built-in call-site arity.** Every call whose name
+//!    resolves to a [`crate::builtins`] row must fall inside that row's
+//!    declared `min_args..=max_args`. Unlike E019/E020 this is not
+//!    gradual: built-in signatures are fixed, so there's nothing to opt
+//!    into. It exists because a wrong-arity built-in call used to reach
+//!    the backends and disagree between them — the interpreter raised a
+//!    runtime error, while native codegen padded the missing slots with
+//!    `V::Null` and silently produced a no-op.
+//!
 //! 3. **E020 — call-site argument type.** For each typed parameter, the
 //!    matching argument's static type (if any) must be compatible with
 //!    the parameter's declared type. Variable reads, field accesses,
@@ -269,47 +278,11 @@ fn check_function(f: &FunctionDecl, fns: &FnTable) -> Result<()> {
         }
     }
 
-    // ── E019 / E020: walk every call site in the body ────────────────
+    // ── E019 / E020 / E022: walk every call site in the body ─────────
     let mut calls = Vec::new();
     collect_calls(&f.body, &mut calls);
     for expr in calls {
-        let Expr::Call { name, args } = expr else {
-            continue;
-        };
-        let Some(sig) = fns.unique(name) else {
-            continue;
-        };
-
-        // E019: arity must match exactly. User functions in JWC don't
-        // support defaults or rest params today, so any mismatch is a
-        // hard error.
-        if args.len() != sig.params.len() {
-            bail!(
-                "error[E019]: wrong number of arguments to '{}': expected {}, got {}",
-                name,
-                sig.params.len(),
-                args.len()
-            );
-        }
-
-        // E020: typed parameters must receive a compatible argument.
-        // Untyped params (`Ty::Dynamic`) accept anything — the function
-        // author opted out of the check for that slot.
-        for (idx, (arg, param_ty)) in args.iter().zip(sig.params.iter()).enumerate() {
-            if matches!(param_ty, Ty::Dynamic) {
-                continue;
-            }
-            let arg_ty = infer_expr(arg, fns);
-            if !arg_ty.assignable_to(param_ty) {
-                bail!(
-                    "error[E020]: argument {} to '{}' has wrong type: expected {}, got {}",
-                    idx + 1,
-                    name,
-                    param_ty.label(),
-                    arg_ty.label()
-                );
-            }
-        }
+        check_call(expr, fns)?;
     }
 
     Ok(())
@@ -447,12 +420,37 @@ pub fn typecheck_program(program: &Program) -> Result<()> {
     Ok(())
 }
 
-/// E019 + E020 check for a single call expression. Pulled out so route
-/// + middleware bodies can share it with the function-body walker.
+/// E019 + E020 + E022 check for a single call expression. Shared by the
+/// function-body, route-body, and middleware-body walkers so a call site
+/// is checked identically wherever it appears.
 fn check_call(expr: &Expr, fns: &FnTable) -> Result<()> {
     let Expr::Call { name, args } = expr else {
         return Ok(());
     };
+
+    // E022: built-in arity, from the declared range in `builtins.rs`.
+    //
+    // The interpreter checks this again at runtime, but only the
+    // interpreter did — native codegen padded missing arguments with
+    // `V::Null` instead, so `raw_sql(sql, a, b)` compiled to a query
+    // that ran nothing and reported success. Rejecting the call here
+    // means neither backend can be reached with an arity the built-in
+    // doesn't accept.
+    if let Some(def) = builtins::lookup(name) {
+        if !def.accepts_arity(args.len()) {
+            bail!(
+                "error[E022]: wrong number of arguments to built-in '{}': expected {}, got {}",
+                name,
+                def.arity_label(),
+                args.len()
+            );
+        }
+        // A built-in shadows any same-named user function in the
+        // interpreter's dispatch order, so stop here — the E019/E020
+        // user-function checks below don't apply.
+        return Ok(());
+    }
+
     let Some(sig) = fns.unique(name) else {
         return Ok(());
     };
@@ -645,18 +643,115 @@ mod tests {
     }
 
     #[test]
-    fn builtin_call_is_not_checked() {
-        // `upper` is a string built-in. If the typechecker mistakenly
-        // looked it up in the user-function table it'd either produce
-        // an arity false positive or stamp the result with the wrong
-        // type — neither should happen.
+    fn builtin_call_is_not_type_checked() {
+        // `upper` is a string built-in. Its arity is now checked (E022),
+        // but it must not be looked up in the user-function table — that
+        // would stamp the result with the wrong type or fire E019/E020
+        // against a signature that doesn't exist.
         let src = r#"
             function main() {
                 let s = upper("hello");
                 print(s);
             }
         "#;
-        check(src).expect("builtin arity must not be enforced here");
+        check(src).expect("a correct builtin call must pass");
+    }
+
+    #[test]
+    fn builtin_with_too_many_args_is_rejected() {
+        // The defect this check exists for: `raw_sql` takes (sql,
+        // params_json). Spread the params as separate arguments — the
+        // shape every other database API uses — and native codegen
+        // padded both slots with `V::Null`, emitting a statement that
+        // ran nothing and answered 200.
+        let src = r#"
+            function main() {
+                raw_sql("UPDATE world SET randomnumber = $1 WHERE id = $2", 4242, 1);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(err.contains("E022"), "missing E022: {err}");
+        assert!(err.contains("raw_sql"), "wrong builtin flagged: {err}");
+        assert!(err.contains("1 or 2"), "arity not spelled out: {err}");
+    }
+
+    #[test]
+    fn serve_with_a_host_argument_is_rejected() {
+        // `serve("0.0.0.0", 8081)` passed `jwc check`, then bound port 0
+        // in a native build: codegen took `args.first()` as the port and
+        // `jwc_to_u16("0.0.0.0")` is 0.
+        let src = r#"
+            function main() {
+                serve("0.0.0.0", 8081);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(err.contains("E022"), "missing E022: {err}");
+        assert!(err.contains("serve"), "wrong builtin flagged: {err}");
+    }
+
+    #[test]
+    fn builtin_with_too_few_args_is_rejected() {
+        let src = r#"
+            function main() {
+                let x = replace("a", "b");
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(err.contains("E022"), "missing E022: {err}");
+    }
+
+    #[test]
+    fn optional_argument_builtins_accept_both_forms() {
+        // Regression guard for the arity table itself: these rows were
+        // narrower than the interpreter, so enforcing them as written
+        // would have rejected working programs.
+        for src in [
+            r#"function main() { let x = query_param("a", "fallback"); }"#,
+            r#"function main() { let x = query_param("a"); }"#,
+            r#"function main() { let x = http_get("http://h/", "{}"); }"#,
+            r#"function main() { let x = range(1, 10, 2); }"#,
+            r#"function main() { let x = not_found("gone"); }"#,
+            r#"function main() { let x = not_found(); }"#,
+            r#"function main() { serve(8080); }"#,
+            r#"function main() { serve(); }"#,
+        ] {
+            check(src).unwrap_or_else(|e| panic!("rejected a valid call: {src}\n  {e}"));
+        }
+    }
+
+    #[test]
+    fn every_builtin_row_agrees_with_the_interpreter() {
+        // The table is only safe to enforce if it matches what the
+        // interpreter accepts. A row that is too narrow rejects working
+        // programs; too wide and the wrong-arity call reaches codegen
+        // again. Spot-check the rows that were wrong before E022 landed
+        // — every one of these was a real mismatch.
+        for (name, min, max) in [
+            ("query_param", 1usize, Some(2usize)),
+            ("http_get", 1, Some(2)),
+            ("http_post", 1, Some(3)),
+            ("jwt_sign", 2, Some(2)),
+            ("jwt_verify", 2, Some(2)),
+            ("cache_set", 3, Some(3)),
+            ("send_email", 3, Some(3)),
+            ("enqueue", 2, Some(2)),
+            ("enqueue_urgent", 2, Some(2)),
+            ("job_count", 0, Some(0)),
+            ("dlq_count", 0, Some(0)),
+            ("dlq_drain", 0, Some(0)),
+            ("raw_sql", 1, Some(2)),
+            ("db_query", 1, Some(1)),
+            ("dispatch", 2, Some(2)),
+            ("serve", 0, Some(1)),
+            ("not_found", 0, Some(1)),
+            ("unauthorized", 0, Some(1)),
+            ("forbidden", 0, Some(1)),
+        ] {
+            let def = builtins::lookup(name).unwrap_or_else(|| panic!("no builtin row: {name}"));
+            assert_eq!(def.min_args, min, "min_args drifted for {name}");
+            assert_eq!(def.max_args, max, "max_args drifted for {name}");
+        }
     }
 
     #[test]

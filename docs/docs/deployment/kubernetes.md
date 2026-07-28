@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "Deploy a JWC service to Kubernetes: the minimum Deployment, Service and probe configuration, with a live ArgoCD-synced reference repo."
 ---
 
 # Kubernetes

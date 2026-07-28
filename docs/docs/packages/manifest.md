@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "The .jwcproj manifest: JSONC format, every supported field, and how the compiler resolves it from the working directory."
 ---
 
 # Manifest

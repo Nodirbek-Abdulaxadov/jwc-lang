@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "The official multi-arch JWC images on GHCR, rebuilt on every release, plus a Dockerfile for packaging your own JWC service."
 ---
 
 # Docker

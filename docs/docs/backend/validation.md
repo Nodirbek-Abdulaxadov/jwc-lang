@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "The validate body block declares per-field rules and returns 400 with a structured errors object before your handler runs. All built-in validators."
 ---
 
 # Request validation

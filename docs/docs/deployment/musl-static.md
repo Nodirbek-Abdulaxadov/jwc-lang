@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "A fully static x86_64-unknown-linux-musl build of jwc, for distroless and scratch containers with no libc to link against."
 ---
 
 # Static binary (musl)

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 4
+description: "Scaffold a complete working project with jwc new --template: the available template kinds and what each one generates."
 ---
 
 # Project templates

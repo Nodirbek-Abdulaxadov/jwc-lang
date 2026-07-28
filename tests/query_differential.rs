@@ -139,6 +139,46 @@ const ROWS: &str = "SELECT COALESCE(json_agg(row_to_json(r)), '[]')::text FROM";
 
 fn cases() -> Vec<Case> {
     vec![
+        // -- binding a string against a typed column -------------------------
+        //
+        // `path_param()` and `query_param()` always return a string, so
+        // `GET /sales/{id}` hands `where Sale.id == @id` the text "4".
+        // Every query path bound that as TEXT and Postgres refused it:
+        // `cannot convert between the Rust type `alloc::string::String`
+        // and the Postgres type `int4``. The most common route shape in
+        // any app, 500 on every request. Bind type now comes from the
+        // column, which is what the native backend always did.
+        Case {
+            name: "where int column compared to a string variable",
+            body: r#"let id = "4"; return json(select Sale from AppDb.Sale where Sale.id == @id first);"#,
+            oracle: r#"SELECT row_to_json(r)::text FROM (SELECT * FROM "sale" WHERE "id" = 4) r"#
+                .to_string(),
+            ordered: false,
+        },
+        Case {
+            name: "where int column ordered against a string variable",
+            body: r#"let lo = "9"; return json(select Sale from AppDb.Sale where Sale.amount >= @lo);"#,
+            oracle: format!(r#"{ROWS} (SELECT * FROM "sale" WHERE "amount" >= 9) r"#),
+            ordered: false,
+        },
+        Case {
+            name: "between with string bounds on an int column",
+            body: r#"let lo = "3"; let hi = "9"; return json(select Sale from AppDb.Sale where Sale.amount between @lo and @hi);"#,
+            oracle: format!(r#"{ROWS} (SELECT * FROM "sale" WHERE "amount" BETWEEN 3 AND 9) r"#),
+            ordered: false,
+        },
+        Case {
+            name: "in list with string values on an int column",
+            body: r#"let a = "1"; let b = "20"; return json(select Sale from AppDb.Sale where Sale.id in (@a, @b));"#,
+            oracle: format!(r#"{ROWS} (SELECT * FROM "sale" WHERE "id" IN (1, 20)) r"#),
+            ordered: false,
+        },
+        Case {
+            name: "a numeric-looking string still matches a varchar column",
+            body: r#"let p = "widget"; return json(select Sale from AppDb.Sale where Sale.product == @p);"#,
+            oracle: format!(r#"{ROWS} (SELECT * FROM "sale" WHERE "product" = 'widget') r"#),
+            ordered: false,
+        },
         // -- where: the shapes that hid the vanishing-conjunct bug -----------
         Case {
             name: "where two literal conjuncts",
@@ -473,15 +513,28 @@ fn container_url() -> Option<&'static str> {
 
     SHARED
         .get_or_init(|| {
-            let c = Postgres::default()
-                .with_user("postgres")
-                .with_password("postgres")
-                .with_db_name("postgres")
-                .start()
-                .ok()?;
-            let port = c.get_host_port_ipv4(5432).ok()?;
-            let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-            Some(Shared { _c: c, url })
+            // `SyncRunner::start` calls `block_on` internally, and every
+            // caller here is inside a `#[tokio::test]` runtime — so on a
+            // machine with no reachable Docker it doesn't return `Err`, it
+            // panics with "Cannot start a runtime from within a runtime"
+            // and takes the whole suite with it. The `.ok()?` below only
+            // ever covered the cases that get far enough to fail cleanly.
+            //
+            // Catch it so "no Docker" degrades to a skip, which is what the
+            // module docs promise.
+            std::panic::catch_unwind(|| {
+                let c = Postgres::default()
+                    .with_user("postgres")
+                    .with_password("postgres")
+                    .with_db_name("postgres")
+                    .start()
+                    .ok()?;
+                let port = c.get_host_port_ipv4(5432).ok()?;
+                let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+                Some(Shared { _c: c, url })
+            })
+            .ok()
+            .flatten()
         })
         .as_ref()
         .map(|s| s.url.as_str())

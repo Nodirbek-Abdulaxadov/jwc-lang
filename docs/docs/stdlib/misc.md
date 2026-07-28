@@ -1,5 +1,6 @@
 ---
 sidebar_position: 7
+description: "The remaining JWC built-ins: environment variables with defaults, time and timestamps, UUIDs, random numbers, hashing and encoding helpers."
 ---
 
 # Misc helpers

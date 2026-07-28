@@ -6,6 +6,13 @@ version = 2
 yanked = "deny"
 # Triaged ignores. Each entry MUST cite the advisory ID, the upstream dep
 # blocking the fix, and the impact rationale (dev-only vs. runtime).
+#
+# This list is not a literal copy of the `--ignore` flags in
+# .github/workflows/security.yml. cargo-audit scans Cargo.lock whole;
+# cargo-deny walks the reachable graph. An ID for a crate that resolves but
+# isn't reachable belongs only in the audit list — putting it here fails
+# cargo-deny with `advisory-not-detected`. RUSTSEC-2026-0097 (rand 0.9.2)
+# is the current example.
 ignore = [
     # TODO(security): hickory-proto 0.25.2 advisories — pulled exclusively
     # through reqwest -> hickory-resolver, which is pinned to 0.25.x upstream.
@@ -15,11 +22,6 @@ ignore = [
     #   RUSTSEC-2026-0119: O(n^2) name compression in encode path
     "RUSTSEC-2026-0118",
     "RUSTSEC-2026-0119",
-    # TODO(security): RUSTSEC-2026-0097 — rand 0.9.2 unsound when a custom
-    # logger calls into rand::rng(). JWC does not install a custom global
-    # logger, so the unsound path is not exercised. Drop once hickory-proto
-    # / postgres-protocol upgrade past rand 0.9.2.
-    "RUSTSEC-2026-0097",
     # TODO(security): rustls-webpki 0.102.8 advisories below are
     # dev-dependency-only — reached exclusively via testcontainers ->
     # bollard -> rustls 0.22 -> rustls-webpki 0.102. No production code path

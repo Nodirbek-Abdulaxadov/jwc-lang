@@ -1,5 +1,6 @@
 ---
 sidebar_position: 5
+description: "JWC runs on a real async runtime (tokio). How async functions and await work, and why every HTTP request gets its own task."
 ---
 
 # Async runtime

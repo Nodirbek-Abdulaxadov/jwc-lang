@@ -1125,6 +1125,22 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
                      `jwc lint --explain E001` lists the full builtin set."
                 )));
             }
+            // Arity backstop. `typecheck::check_program` (E022) already
+            // rejects this before either backend runs, so reaching here
+            // means codegen was driven directly — by a test, or by a
+            // caller that skipped the check pass. It matters because the
+            // variadic branches in `emit_expr` pad missing slots with
+            // `V::Null`: unchecked, `raw_sql(sql, a, b)` emitted a call
+            // that discarded the SQL and returned success.
+            if let Some(def) = crate::builtins::lookup(name) {
+                if !def.accepts_arity(args.len()) {
+                    bail!(unsupported(&format!(
+                        "call to `{name}(...)` with {} argument(s) — `{name}` takes {}",
+                        args.len(),
+                        def.arity_label()
+                    )));
+                }
+            }
             for a in args {
                 check_expr(a, funcs, builtins)?;
             }
@@ -1719,10 +1735,12 @@ fn emit_route_handler(
     // reference middlewares by name; we resolve them against the
     // already-flattened decl list `CodegenCtx` carries.
     let mw_decls: Vec<&crate::ast::MiddlewareDecl> = ctx.middlewares.to_vec();
-    out.push_str(&format!(
-        "\nfn route_{idx}_inner() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> + Send>> {{\n"
-    ));
-    out.push_str("    Box::pin(async move {\n");
+    // Plain `async fn`, not a boxed future: `route_{idx}` below boxes once
+    // for the dispatch table, and this is the only caller. Boxing here as
+    // well would put a second allocation on every request now that the
+    // panic guard always wraps this call.
+    out.push_str(&format!("\nasync fn route_{idx}_inner() -> V {{\n"));
+    out.push_str("    {\n");
     for mw in &route.middlewares {
         out.push_str(&format!(
             "        {{ let __mw = {}().await; if !matches!(__mw, V::Null) {{ return __mw; }} }}\n",
@@ -1781,29 +1799,38 @@ fn emit_route_handler(
     }
     out.push_str("        if let Some(__r) = jwc_take_return() { return __r; }\n");
     out.push_str("        __resp\n");
-    out.push_str("    })\n");
+    out.push_str("    }\n");
     out.push_str("}\n");
 
     out.push_str(&format!(
         "\nfn route_{idx}() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> + Send>> {{\n"
     ));
+    // Every route gets the panic guard, not just programs that declare an
+    // `error_handler`. JWC-level failures travel as panics in this backend,
+    // so an unguarded route let a failed query unwind into axum, which drops
+    // the connection without sending anything — the client read `[000]`,
+    // never a 500. The interpreter answers with the unified envelope whether
+    // or not the program has an error handler, and now so does native.
+    //
+    // `futures::FutureExt::catch_unwind` catches panics during polling, which
+    // a plain `std::panic::catch_unwind` around the call cannot: the panic
+    // happens inside a later `poll`, long after the future was constructed.
+    out.push_str("    Box::pin(async move {\n");
+    out.push_str(&format!(
+        "        match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(route_{idx}_inner())).await {{\n"
+    ));
+    out.push_str("            Ok(v) => v,\n");
+    out.push_str("            Err(e) => {\n");
+    out.push_str("                let __msg = jwc_panic_payload_to_string(e);\n");
+    out.push_str("                let _ = jwc_take_return();\n");
     if ctx.has_error_handler {
-        // `futures::FutureExt::catch_unwind` catches panics during polling.
-        out.push_str("    Box::pin(async move {\n");
-        out.push_str(&format!(
-            "        match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(route_{idx}_inner())).await {{\n"
-        ));
-        out.push_str("            Ok(v) => v,\n");
-        out.push_str("            Err(e) => {\n");
-        out.push_str("                let __msg = jwc_panic_payload_to_string(e);\n");
-        out.push_str("                let _ = jwc_take_return();\n");
         out.push_str("                jwc_user_error_handler(jwc_error_value(__msg)).await\n");
-        out.push_str("            }\n");
-        out.push_str("        }\n");
-        out.push_str("    })\n");
     } else {
-        out.push_str(&format!("    route_{idx}_inner()\n"));
+        out.push_str("                jwc_uncaught_error_response(__msg)\n");
     }
+    out.push_str("            }\n");
+    out.push_str("        }\n");
+    out.push_str("    })\n");
     out.push_str("}\n");
 }
 
@@ -2708,21 +2735,29 @@ fn emit_db_update_set(
     // params follow the SET ones (Postgres `$N` is positional).
     let mut set_fragments: Vec<String> = Vec::with_capacity(assignments.len());
     for (col, rhs) in assignments {
-        let col_lc = col.to_ascii_lowercase();
-        // Validate the column exists on the entity, mirroring WhereBuilder.
-        if !meta
+        // Resolve the column against the entity, mirroring WhereBuilder.
+        // Take the *declared* name and type from the field, not the
+        // spelling at the call site: the name because `gen-sql` quotes
+        // the declared casing (`"randomNumber"`), so lower-casing it here
+        // built an UPDATE that no jwc-generated schema could satisfy —
+        // and did it inconsistently, since a column reference on the RHS
+        // kept its case in the same statement; the type because the SET
+        // value has to bind as the column's type, exactly as WHERE
+        // already does via `col_kind`.
+        let Some(field) = meta
             .fields
             .iter()
-            .any(|f| f.name.eq_ignore_ascii_case(&col_lc))
-        {
+            .find(|f| f.name.eq_ignore_ascii_case(col))
+        else {
             out.push_str(pad);
             out.push_str(&format!(
                 "compile_error!({:?});\n",
                 format!("unknown column `{}` on entity `{}`", col, meta.table)
             ));
             return;
-        }
-        let rhs_sql = match build_set_rhs_sql_native(rhs, &mut wb) {
+        };
+        let (col_name, col_pg) = (field.name.clone(), field.pg);
+        let rhs_sql = match build_set_rhs_sql_native(rhs, &mut wb, col_pg) {
             Ok(s) => s,
             Err(e) => {
                 out.push_str(pad);
@@ -2730,7 +2765,7 @@ fn emit_db_update_set(
                 return;
             }
         };
-        set_fragments.push(format!("\"{}\" = {}", col_lc, rhs_sql));
+        set_fragments.push(format!("\"{}\" = {}", col_name, rhs_sql));
     }
     let set_clause = set_fragments.join(", ");
     if let Err(e) = wb.emit(where_clause) {
@@ -2768,7 +2803,20 @@ fn emit_db_update_set(
 /// references stay inline (`"col"`); arithmetic ops recurse; everything
 /// else lands on the `WhereBuilder`'s param list (the SQL `$N` is
 /// allocated in the order params are pushed, and SET runs before WHERE).
-fn build_set_rhs_sql_native<'a>(expr: &'a Expr, wb: &mut WhereBuilder<'a>) -> Result<String> {
+///
+/// `target` is the declared type of the column being assigned, and every
+/// bound value on this RHS takes it. That's the whole point: the value
+/// has to be assignment-compatible with the column, so the column is the
+/// only correct source for the bind type. Guessing from the expression
+/// instead — `Str` for a variable, `Bigint` for an integer literal —
+/// meant no form of `update … set <int column> = …` worked in a native
+/// build: a variable raised `error serializing parameter 0` and a
+/// literal bound int8 into an int4 column.
+fn build_set_rhs_sql_native<'a>(
+    expr: &'a Expr,
+    wb: &mut WhereBuilder<'a>,
+    target: PgKind,
+) -> Result<String> {
     match expr {
         Expr::Var(name) => {
             let key = name.to_ascii_lowercase();
@@ -2784,41 +2832,31 @@ fn build_set_rhs_sql_native<'a>(expr: &'a Expr, wb: &mut WhereBuilder<'a>) -> Re
             {
                 return Ok(format!("\"{}\"", f.name));
             }
-            wb.params.push((PgKind::Str, expr));
+            wb.params.push((target, expr));
             Ok(format!("${}", wb.params.len()))
         }
         Expr::Add(a, b) => {
-            let ls = build_set_rhs_sql_native(a, wb)?;
-            let rs = build_set_rhs_sql_native(b, wb)?;
+            let ls = build_set_rhs_sql_native(a, wb, target)?;
+            let rs = build_set_rhs_sql_native(b, wb, target)?;
             Ok(format!("({} + {})", ls, rs))
         }
         Expr::Sub(a, b) => {
-            let ls = build_set_rhs_sql_native(a, wb)?;
-            let rs = build_set_rhs_sql_native(b, wb)?;
+            let ls = build_set_rhs_sql_native(a, wb, target)?;
+            let rs = build_set_rhs_sql_native(b, wb, target)?;
             Ok(format!("({} - {})", ls, rs))
         }
         Expr::Mul(a, b) => {
-            let ls = build_set_rhs_sql_native(a, wb)?;
-            let rs = build_set_rhs_sql_native(b, wb)?;
+            let ls = build_set_rhs_sql_native(a, wb, target)?;
+            let rs = build_set_rhs_sql_native(b, wb, target)?;
             Ok(format!("({} * {})", ls, rs))
         }
         Expr::Div(a, b) => {
-            let ls = build_set_rhs_sql_native(a, wb)?;
-            let rs = build_set_rhs_sql_native(b, wb)?;
+            let ls = build_set_rhs_sql_native(a, wb, target)?;
+            let rs = build_set_rhs_sql_native(b, wb, target)?;
             Ok(format!("({} / {})", ls, rs))
         }
         _ => {
-            // Best-effort param kind: Int literals get Bigint, Float gets
-            // Float, the rest get Str and rely on Postgres's text-coercion
-            // path. The hot pattern (`col + 1`) hits the Int branch via
-            // Add(Var, Int).
-            let kind = match expr {
-                Expr::Int(_) => PgKind::Bigint,
-                Expr::Float(_) => PgKind::Float,
-                Expr::Bool(_) => PgKind::Bool,
-                _ => PgKind::Str,
-            };
-            wb.params.push((kind, expr));
+            wb.params.push((target, expr));
             Ok(format!("${}", wb.params.len()))
         }
     }
@@ -3020,6 +3058,16 @@ impl<'a> WhereBuilder<'a> {
     }
 }
 
+/// Emitted in place of a call's arguments when codegen is handed an arity
+/// that `typecheck::check_program` (E022) and `reject_unsupported` should
+/// both have rejected. Fails the generated crate's build instead of
+/// padding the missing slots with `V::Null` — the old shape, which turned
+/// `raw_sql(sql, a, b)` into a call that discarded the SQL and answered
+/// 200, and `serve(host, port)` into a bind on port 0.
+const BAD_ARITY: &str = "compile_error!(\"jwc: internal error — a built-in reached \
+     native codegen with an argument count it does not accept; this should have been \
+     rejected by `jwc check` (E022), please report it\")";
+
 fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
     match expr {
         Expr::Int(n) => {
@@ -3176,11 +3224,17 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
             }
             if name == "serve" {
                 // `serve(port)` lowers to the async route-registering wrapper.
+                //
+                // Only `serve()` and `serve(port)` reach here — E022 rejects
+                // anything else. It used to take `args.first()` regardless,
+                // so `serve("0.0.0.0", 8081)` bound `jwc_to_u16("0.0.0.0")`
+                // = port 0 and the process listened on an ephemeral port
+                // with no diagnostic anywhere.
                 out.push_str("{ jwc_serve_impl(jwc_to_u16(");
-                if let Some(a) = args.first() {
-                    emit_expr(out, a, ctx);
-                } else {
-                    out.push_str("V::Int(8080)");
+                match args.as_slice() {
+                    [] => out.push_str("V::Int(8080)"),
+                    [port] => emit_expr(out, port, ctx),
+                    _ => out.push_str(BAD_ARITY),
                 }
                 out.push_str(")).await; V::Null }");
                 return;
@@ -3199,7 +3253,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                         out.push_str(", ");
                         emit_expr(out, b, ctx);
                     }
-                    _ => out.push_str("V::Null, V::Null"),
+                    _ => out.push_str(BAD_ARITY),
                 }
                 out.push(')');
                 return;
@@ -3219,9 +3273,28 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                         out.push_str(", ");
                         emit_expr(out, b, ctx);
                     }
-                    _ => out.push_str("V::Null, v_str(\"[]\")"),
+                    _ => out.push_str(BAD_ARITY),
                 }
                 out.push_str(").await");
+                return;
+            }
+            if name == "random_int" {
+                // `random_int(end)` / `random_int(start, end)`; the prelude
+                // takes both bounds, so pad the 1-arg form with a 0 start.
+                out.push_str("jwc_b_random_int(");
+                match args.as_slice() {
+                    [end] => {
+                        out.push_str("V::Int(0), ");
+                        emit_expr(out, end, ctx);
+                    }
+                    [start, end] => {
+                        emit_expr(out, start, ctx);
+                        out.push_str(", ");
+                        emit_expr(out, end, ctx);
+                    }
+                    _ => out.push_str(BAD_ARITY),
+                }
+                out.push(')');
                 return;
             }
             if name == "range" {
@@ -3248,7 +3321,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                         out.push_str(", ");
                         emit_expr(out, st, ctx);
                     }
-                    _ => out.push_str("V::Int(0), V::Int(0), V::Int(1)"),
+                    _ => out.push_str(BAD_ARITY),
                 }
                 out.push(')');
                 return;
@@ -3310,6 +3383,11 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                         | "internalError"
                         | "bad_request"
                         | "badRequest"
+                        // `setConnectionString()` with no argument means
+                        // "take the URL from the environment"; the prelude
+                        // signals that with V::Null.
+                        | "setConnectionString"
+                        | "set_connection_string"
                 );
             out.push('(');
             if pads_to_one {
@@ -4288,6 +4366,12 @@ fn render_cargo_toml(
     deps.push_str("tokio = { version = \"1\", features = [\"full\"] }\n");
     deps.push_str("futures = \"0.3\"\n");
     deps.push_str("axum = { version = \"0.7\", features = [\"http2\"] }\n");
+    // Already in the tree via tokio; named explicitly so the listener can
+    // clear IPV6_V6ONLY. Neither `std` nor `tokio` exposes that option, and
+    // Windows defaults it to on — a native build bound `[::]` and was
+    // unreachable on 127.0.0.1, which is what every container health check
+    // and load generator dials.
+    deps.push_str("socket2 = \"0.5\"\n");
     deps.push_str(
         "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"json\"] }\n",
     );
@@ -4295,6 +4379,7 @@ fn render_cargo_toml(
     // crates unconditionally. Combined wire weight is ~50 KB stripped, far
     // below the noise floor of axum + reqwest + tokio.
     deps.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
+    deps.push_str("rand = \"0.8\"\n");
     deps.push_str("chrono = { version = \"0.4\", default-features = false, features = [\"clock\", \"std\"] }\n");
     // Hot-path V::Object payload is an FxHashMap (Phase A1 of PERF_PLAN.md):
     // O(1) lookup + fxhash, replacing BTreeMap's O(log n) + node alloc cost.

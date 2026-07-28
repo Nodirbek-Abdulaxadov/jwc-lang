@@ -1,5 +1,6 @@
 ---
 sidebar_position: 5
+description: "Wrap a group of statements in a transaction block. Commit and rollback semantics, and what happens when a handler returns early or errors."
 ---
 
 # Transactions

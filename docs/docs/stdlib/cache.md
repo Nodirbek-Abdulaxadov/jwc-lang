@@ -1,5 +1,6 @@
 ---
 sidebar_position: 6
+description: "A per-process, TTL-bounded in-memory cache for hot lookups such as config and user permissions. Not a Redis replacement — the trade-offs are documented here."
 ---
 
 # In-memory cache

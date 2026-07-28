@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "The JWC type set and how each type maps to a Postgres column, where type annotations are required, and how nullability is expressed."
 ---
 
 # Types

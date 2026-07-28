@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "Entities are JWC's table definitions: columns, primary keys, autoincrement, relations, and the Postgres DDL they generate."
 ---
 
 # Entities

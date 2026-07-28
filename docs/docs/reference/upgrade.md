@@ -1,5 +1,6 @@
 ---
 sidebar_position: 5
+description: "jwc upgrade runs automated codemods over your project to migrate off deprecated syntax and builtins. Available migrations and how to apply them."
 ---
 
 # `jwc upgrade` — deprecation codemod

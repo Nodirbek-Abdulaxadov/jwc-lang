@@ -1,5 +1,6 @@
 ---
 sidebar_position: 6
+description: "A pluggable background job queue with an in-memory and a Postgres-backed driver. Enqueuing jobs, workers, retries and scheduling."
 ---
 
 # Background queue

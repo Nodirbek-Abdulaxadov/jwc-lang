@@ -1,6 +1,6 @@
 [package]
 name = "jwc"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 # Workspace-private until a license decision lands (see deny.toml [licenses]
 # `private = { ignore = true }`). Set to false explicitly so cargo-deny v2
@@ -62,6 +62,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 native-tls = "0.2"
 notify = "6"
 postgres-native-tls = "0.5"
+rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking", "multipart"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

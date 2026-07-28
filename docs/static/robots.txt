@@ -1,0 +1,7 @@
+# https://jwc.1kb.uz — public documentation for the JWC language.
+# Everything served here is meant to be crawled and indexed.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://jwc.1kb.uz/sitemap.xml
