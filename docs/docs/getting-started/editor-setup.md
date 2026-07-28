@@ -1,5 +1,6 @@
 ---
 sidebar_position: 4
+description: "Set up JWC in VS Code: syntax highlighting, snippets, and diagnostics, go-to-definition and rename powered by the jwc-lsp language server."
 ---
 
 # Editor setup

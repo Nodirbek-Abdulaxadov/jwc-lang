@@ -1,5 +1,6 @@
 ---
 sidebar_position: 4
+description: "Conditionals, loops and early return in JWC: if / else, for, while, foreach, break and continue."
 ---
 
 # Control flow

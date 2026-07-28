@@ -1,3 +1,7 @@
+---
+description: "jwc fmt canonicalises the whitespace and shape of .jwc source files. Formatting rules, --check mode for CI, and editor format-on-save."
+---
+
 # `jwc fmt`
 
 Canonicalise the whitespace and shape of `.jwc` source files.

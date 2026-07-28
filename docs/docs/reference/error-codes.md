@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "The numbered JWC diagnostic catalog: Exxx compile errors and Wxxx lint warnings, what each one means and what to change."
 ---
 
 # Error & warning codes

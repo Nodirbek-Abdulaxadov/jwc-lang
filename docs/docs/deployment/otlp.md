@@ -1,5 +1,6 @@
 ---
 sidebar_position: 8
+description: "Optional distributed tracing. JWC exports spans over OTLP HTTP to any compatible collector, enabled by the otlp Cargo feature and JWC_OTLP_ENDPOINT."
 ---
 
 # Distributed tracing (OTLP) — optional

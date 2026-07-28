@@ -1,5 +1,6 @@
 ---
 sidebar_position: 7
+description: "The three observability surfaces JWC ships with: HTTP health endpoints, Prometheus metrics and structured request logs."
 ---
 
 # Observability
@@ -117,5 +118,5 @@ Outbound `traceparent` injection on runtime-initiated HTTP calls
 
 - [deployment/otlp](./otlp.md) — OpenTelemetry / Jaeger / Tempo recipe.
 - [deployment/env-vars](./env-vars.md) — every `JWC_*` knob.
-- [backend/middleware](../backend/middleware.md#response-phase-after--) — the `after { ... }` block + `response_status()` / `response_duration_ms()` for per-route metrics.
+- [backend/middleware](../backend/middleware.md#response-phase-after---) — the `after { ... }` block + `response_status()` / `response_duration_ms()` for per-route metrics.
 - [backend/queue](../backend/queue.md) — queue depth + DLQ gauges.

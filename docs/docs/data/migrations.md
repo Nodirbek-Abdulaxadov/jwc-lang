@@ -1,5 +1,6 @@
 ---
 sidebar_position: 6
+description: "Schema changes are explicit in JWC. jwc migrate new diffs your entities against the last snapshot and emits only the ALTER and CREATE TABLE statements needed."
 ---
 
 # Migrations

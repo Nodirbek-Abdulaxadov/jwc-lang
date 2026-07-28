@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "How a JWC project is laid out: the .jwcproj manifest, how the compiler walks up from the working directory to find it, and how .jwc files form one flat namespace."
 ---
 
 # Project structure

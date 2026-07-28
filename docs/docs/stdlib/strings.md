@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "String built-ins in JWC: trim, lower, upper, split, join, replace, substring, padding and case conversion, with return types for each."
 ---
 
 # Strings

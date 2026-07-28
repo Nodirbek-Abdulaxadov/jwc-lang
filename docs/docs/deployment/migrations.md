@@ -1,5 +1,6 @@
 ---
 sidebar_position: 6
+description: "Running schema migrations as part of a deployment: ordering against rollout, the advisory lock that serialises concurrent appliers, and rollback."
 ---
 
 # Migrations (deployment)

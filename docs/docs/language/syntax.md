@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "JWC syntax at a glance — a hybrid of TypeScript and SQL. Statements, blocks, comments, variables and string interpolation."
 ---
 
 # Syntax basics

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 4
+description: "Error handling in JWC: try / catch with typed error kinds (DbError, HttpError, ValidationError) and a project-wide error_handler for uncaught failures."
 ---
 
 # Error handling

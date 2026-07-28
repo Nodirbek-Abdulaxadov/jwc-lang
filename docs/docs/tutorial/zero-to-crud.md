@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "A 15-minute walkthrough from jwc --version to a deployed JWC service with a working CRUD API backed by Postgres."
 ---
 
 # Zero to deployed CRUD in 15 minutes

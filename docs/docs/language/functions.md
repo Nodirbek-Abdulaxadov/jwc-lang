@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "Declaring functions and classes in JWC: parameters, return types, public and private visibility, and methods on classes."
 ---
 
 # Functions & classes

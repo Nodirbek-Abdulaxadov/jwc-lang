@@ -1,5 +1,6 @@
 ---
 sidebar_position: 4
+description: "Sign and verify JWTs (HS256) and hash passwords with argon2id — jwt_sign, jwt_verify, hash_password and verify_password."
 ---
 
 # JWT & passwords

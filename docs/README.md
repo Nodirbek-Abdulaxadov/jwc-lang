@@ -57,6 +57,44 @@ kubectl create secret docker-registry ghcr-secret \
 (Reuse the same PAT as the other `ghcr-secret`s on the cluster — same
 auth, separate namespace.)
 
+## Indexing invariants
+
+Four things here are load-bearing for search indexing. They were all
+broken at once, which is why the site wasn't getting indexed.
+
+1. **`trailingSlash: false` in `docusaurus.config.ts` and `nginx.conf` are
+   one decision, not two.** That setting makes Docusaurus emit flat
+   `backend/routes.html` files and canonical tags without a trailing
+   slash, so nginx resolves a request with `try_files $uri $uri.html`.
+   The `$uri/` form that used to be there answered every canonical URL
+   with a 301 to the slashed variant — i.e. every entry in the sitemap
+   redirected, to a URL whose own canonical tag pointed back.
+
+2. **Redirects must stay relative** (`absolute_redirect off`). TLS
+   terminates at Cloudflare, so nginx sees plain HTTP and an absolute
+   redirect names `http://` — a protocol downgrade on every hop.
+
+3. **Unknown paths must 404.** An SPA-style `/index.html` fallback
+   answers every mistyped or stale URL with the homepage under a 200,
+   which is an unbounded set of soft 404s to a crawler.
+
+4. **Every page needs a `description` in its frontmatter.** Without one
+   Docusaurus falls back to the first line of body text, which produced
+   meta descriptions like `Add`, `insert` and `| Built-in | Returns |`.
+
+`robots.txt` lives in `static/`. Cloudflare prepends its own managed
+block to whatever the origin returns, so the file here is what shows up
+*after* `# END Cloudflare Managed Content` — including the `Sitemap:`
+line.
+
+To check the four after a change:
+
+```bash
+npm run build
+grep -c '<lastmod>' build/sitemap.xml     # 50, one per page
+ls build/backend/routes.html              # flat file, not a directory
+```
+
 ## Site structure
 
 - `docs/intro.md` — landing (north star + niche statement)

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "A two-minute tour from an empty directory to a running JWC HTTP server: jwc new, a first route, and jwc run."
 ---
 
 # Hello world

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "JSON is JWC's native data shape. Working with arrays and objects, json_parse and json_stringify, and the array built-ins."
 ---
 
 # Arrays & JSON

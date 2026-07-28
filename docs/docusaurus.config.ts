@@ -13,8 +13,18 @@ const config: Config = {
   organizationName: 'Nodirbek-Abdulaxadov',
   projectName: 'jwc-lang',
 
+  // Every canonical tag and every sitemap entry is emitted without a
+  // trailing slash, so say so explicitly and keep nginx serving the same
+  // shape. One URL per page is the whole point: the slashed form used to
+  // be a second live URL that 301'd back here.
+  trailingSlash: false,
+
   onBrokenLinks: 'throw',
   onBrokenMarkdownLinks: 'warn',
+  // A dead in-page anchor is a dead link to a crawler too; two of them sat
+  // in the build output as warnings for long enough to prove that warning
+  // isn't enough.
+  onBrokenAnchors: 'throw',
 
   i18n: {
     defaultLocale: 'en',
@@ -35,12 +45,55 @@ const config: Config = {
         theme: {
           customCss: './src/css/custom.css',
         },
+        sitemap: {
+          // `lastmod` from git history gives crawlers a real recrawl signal;
+          // without it every entry looks equally stale.
+          lastmod: 'date',
+          changefreq: 'weekly',
+          priority: 0.5,
+        },
       } satisfies Preset.Options,
     ],
   ],
 
+  // JSON-LD. Search engines have no other way to learn that "JWC" here is a
+  // programming language and not the three-letter acronym they already rank.
+  headTags: [
+    {
+      tagName: 'script',
+      attributes: {type: 'application/ld+json'},
+      innerHTML: JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'SoftwareApplication',
+        name: 'JWC',
+        alternateName: 'Just Web Code',
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'Linux, Windows, macOS',
+        description:
+          'A backend-first programming language with first-class HTTP routes, ' +
+          'entities that compile to SQL, and Postgres execution.',
+        url: 'https://jwc.1kb.uz',
+        image: 'https://jwc.1kb.uz/img/jwc-social-card.png',
+        codeRepository: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang',
+        programmingLanguage: 'Rust',
+        // No `license` / `offers` here on purpose: the repo carries no
+        // LICENSE file yet (Cargo.toml: "workspace-private until a license
+        // decision lands"), and structured data is a claim, not decoration.
+      }),
+    },
+  ],
+
   themeConfig: {
     image: 'img/jwc-social-card.png',
+    metadata: [
+      {
+        name: 'keywords',
+        content:
+          'jwc, jwc language, just web code, backend language, postgres, ' +
+          'sql, http routes, entities, orm alternative, rest api, crud',
+      },
+      {name: 'twitter:card', content: 'summary_large_image'},
+    ],
     navbar: {
       title: 'JWC',
       logo: {

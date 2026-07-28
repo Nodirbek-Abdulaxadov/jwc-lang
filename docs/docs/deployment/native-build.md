@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "jwc build --native emits Rust from your program and compiles a standalone tokio binary. How it differs from the bundled interpreter build, and its limits."
 ---
 
 # Native build

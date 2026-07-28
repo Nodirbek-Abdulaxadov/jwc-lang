@@ -1,6 +1,7 @@
 ---
 sidebar_position: 1
 slug: /security
+description: "JWC's secure-by-default posture: what the runtime protects against out of the box, the hardening knobs it exposes, and how to report a vulnerability."
 ---
 
 # Security
@@ -77,7 +78,7 @@ directly. Behind a proxy / load balancer, list the proxy IP / prefix
 explicitly so the real client IP gets through but a hostile header
 can't forge one.
 
-See [reference/builtins](../reference/builtins.md#client_ip-and-trusted-proxies).
+See [reference/builtins](../reference/builtins.md#request-context).
 
 ## Request hardening
 

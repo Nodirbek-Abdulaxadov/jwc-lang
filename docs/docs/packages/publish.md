@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "Publish a JWC package to registry-jwc.1kb.uz: signing in, preparing the manifest, versioning rules and the publish command."
 ---
 
 # Publishing

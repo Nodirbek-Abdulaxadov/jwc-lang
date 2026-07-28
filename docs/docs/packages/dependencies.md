@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "Add dependencies from the JWC registry or a local path with jwc add, and how the lockfile pins resolved versions."
 ---
 
 # Dependencies

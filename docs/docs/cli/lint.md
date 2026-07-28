@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "The jwc lint warning catalog. Every Wxxx code, what triggers it and how to fix it. Run jwc lint --list-codes for the machine-readable version."
 ---
 
 # Lint codes

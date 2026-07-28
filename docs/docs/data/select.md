@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "select is a language construct, not a string. Filtering, ordering, joins, grouping, having and distinct — with column names checked at compile time."
 ---
 
 # select

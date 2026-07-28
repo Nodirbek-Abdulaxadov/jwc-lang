@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "Every jwc subcommand in one place — new, check, run, serve, build, test, lint, fmt, gen-sql, migrate and upgrade — with its flags and what it does."
 ---
 
 # Overview

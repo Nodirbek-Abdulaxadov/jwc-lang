@@ -1,5 +1,6 @@
 ---
 sidebar_position: 4
+description: "Writing rows in JWC: insert, update and delete, atomic update ... set, and how values are bound to their declared column types."
 ---
 
 # insert / update / delete

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 1
+description: "Every JWC built-in function with its arguments, return type and whether it is supported under jwc build --native. Generated from the compiler's own table."
 ---
 
 # Built-in functions

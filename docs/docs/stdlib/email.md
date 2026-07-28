@@ -1,5 +1,6 @@
 ---
 sidebar_position: 5
+description: "Send mail from JWC over SMTP with TLS (lettre + rustls). Configuration, the async send builtin, and attachments."
 ---
 
 # Email

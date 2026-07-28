@@ -1,5 +1,6 @@
 ---
 sidebar_position: 3
+description: "Call other services from JWC with the async HTTP client: GET, POST, headers, JSON bodies, timeouts and response handling."
 ---
 
 # HTTP client

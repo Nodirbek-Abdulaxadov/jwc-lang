@@ -1,13 +1,16 @@
 ---
 slug: /
 sidebar_position: 1
+sidebar_label: Introduction
+title: "A backend-first language for SQL-native APIs"
+description: "JWC is a Postgres-first backend language: entities compile straight to SQL and queries are part of the language, so there is no ORM, no DTO mapping and no repository boilerplate."
 ---
+
+# JWC
 
 <p align="center">
   <img src="/img/logo.png" alt="JWC" width="150" />
 </p>
-
-# JWC
 
 **Write web backends without hand-coding CRUD, without fighting an ORM, native-fast.**
 

@@ -1,5 +1,6 @@
 ---
 sidebar_position: 5
+description: "Real-time endpoints with route WS: accepting connections, sending and receiving frames, rooms, and connection lifecycle."
 ---
 
 # WebSockets

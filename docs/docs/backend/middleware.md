@@ -1,5 +1,6 @@
 ---
 sidebar_position: 2
+description: "Cross-cutting request handling in JWC: declaring middleware, attaching it to routes and groups, and the request and response phases."
 ---
 
 # Middleware
