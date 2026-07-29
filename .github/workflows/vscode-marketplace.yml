@@ -121,7 +121,7 @@ jobs:
 
       - name: Attach .vsix to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: vscode-extension/jwc-lang-${{ steps.ver.outputs.version }}.vsix
         env:
