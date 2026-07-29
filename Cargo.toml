@@ -89,7 +89,7 @@ opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "reqwest-client", "trace"], optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
-tracing-opentelemetry = { version = "0.28", optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 rust_decimal = { version = "1.42.1", default-features = false, features = ["db-postgres"] }
 bytes = "1"
 
