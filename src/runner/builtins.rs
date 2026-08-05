@@ -1442,6 +1442,425 @@ impl<'a> Vm<'a> {
         object.insert(field, value_to_json(&value));
         Ok(json_value.to_string())
     }
+
+    // ── console.* ────────────────────────────────────────────────────────
+
+    /// `console.write(s)` / `console.error(s)` — write to the process's real
+    /// stdout/stderr, right now.
+    ///
+    /// Deliberately NOT the `print` statement: `print` appends to
+    /// `Vm::output`, which `cmd::run` flushes only after `main()` returns and
+    /// which `dispatch` consumes as the implicit response body of a
+    /// fall-through route. This writes past both, which is what makes it the
+    /// correct way to log from inside a handler.
+    ///
+    /// No trailing newline — callers who want one pass it. The explicit
+    /// `flush()` matters because Rust's stdout is a `LineWriter`: a payload
+    /// with no `\n` would otherwise sit in the buffer and "immediate" would
+    /// be a lie on a pipe.
+    ///
+    /// Takes any value via `as_string()` rather than demanding `Value::Str`,
+    /// matching `print` — `console.write(42)` should not be a type error.
+    pub(super) async fn eval_console_write_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+        to_stderr: bool,
+    ) -> Result<Value> {
+        let name = if to_stderr {
+            "console.error"
+        } else {
+            "console.write"
+        };
+        if args.len() != 1 {
+            bail!("{name}(s) expects exactly 1 arg");
+        }
+        let s = self.eval_expr(&args[0], vars).await?.as_string();
+        use std::io::Write;
+        let res = if to_stderr {
+            let stream = std::io::stderr();
+            let mut lock = stream.lock();
+            lock.write_all(s.as_bytes()).and_then(|()| lock.flush())
+        } else {
+            let stream = std::io::stdout();
+            let mut lock = stream.lock();
+            lock.write_all(s.as_bytes()).and_then(|()| lock.flush())
+        };
+        res.with_context(|| format!("{name} failed"))?;
+        Ok(Value::Null)
+    }
+
+    /// `console.read()` — one line from stdin, trailing `\r?\n` stripped.
+    ///
+    /// `null` at EOF, never `""`: an empty string is a legitimate line (bare
+    /// Enter), so conflating the two makes `while console.read() != null`
+    /// unwritable and turns every read loop into an infinite one.
+    ///
+    /// `spawn_blocking` over `std::io::stdin()` rather than
+    /// `tokio::io::stdin()`: the tokio handle is fresh per call, so wrapping
+    /// it in a `BufReader` to get `read_line` drops whatever the reader read
+    /// ahead past the newline when it goes out of scope — consecutive calls
+    /// would silently lose input. `std::io::stdin()` is a process-global
+    /// buffered handle, so read-ahead survives.
+    pub(super) async fn eval_console_read_call(&mut self, args: &[Expr]) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("console.read() expects exactly 0 args");
+        }
+        let read = tokio::task::spawn_blocking(|| {
+            use std::io::BufRead;
+            let mut line = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .map(|n| (n, line))
+        })
+        .await
+        .map_err(|e| anyhow!("console.read() task failed: {e}"))?;
+        let (n, mut line) = read.context("console.read() failed")?;
+        if n == 0 {
+            return Ok(Value::Null);
+        }
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+        }
+        Ok(Value::Str(line))
+    }
+
+    // ── file.* / directory.* ─────────────────────────────────────────────
+    //
+    // Every real I/O failure below goes through `.with_context(...)` on the
+    // `io::Result`, which keeps the `io::Error` as the anyhow source so
+    // `classify_jwc_error`'s typed downcast can reach it. The arity and
+    // type-mismatch `bail!`s deliberately do NOT embed the path: they
+    // produce a bare anyhow with no `io::Error` in the chain, and
+    // `classify_jwc_error` would fall through to its substring scan — where
+    // a path like `/var/backups/app.sql` classifies as `DbError`.
+
+    /// Evaluate arg `idx` as a path string. Never puts the value into the
+    /// error message — see the note above.
+    async fn eval_path_arg(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+        idx: usize,
+        name: &str,
+    ) -> Result<String> {
+        match self.eval_expr(&args[idx], vars).await? {
+            Value::Str(s) => Ok(s),
+            other => bail!("{name}: path must be string, got {}", other.type_name()),
+        }
+    }
+
+    /// `file.read(path)` — whole-file read as a string.
+    ///
+    /// Raises rather than returning null on a missing file: `file.exists()`
+    /// is the existence probe, and a null return would conflate missing /
+    /// permission-denied / is-a-directory / not-UTF-8 into one value.
+    ///
+    /// `tokio::fs`, not `std::fs`: reachable from a route handler, so a slow
+    /// mount must not park a runtime worker.
+    pub(super) async fn eval_file_read_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("file.read(path) expects exactly 1 arg");
+        }
+        let path = self.eval_path_arg(args, vars, 0, "file.read(path)").await?;
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("file.read({path}) failed"))?;
+        Ok(Value::Str(contents))
+    }
+
+    /// `file.write(path, content)` — create or truncate.
+    /// `file.append(path, content)` — create if absent, else append.
+    pub(super) async fn eval_file_write_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+        append: bool,
+    ) -> Result<Value> {
+        let name = if append { "file.append" } else { "file.write" };
+        if args.len() != 2 {
+            bail!("{name}(path, content) expects exactly 2 args");
+        }
+        let path = self
+            .eval_path_arg(args, vars, 0, &format!("{name}(path, content)"))
+            .await?;
+        let content = self.eval_expr(&args[1], vars).await?.as_string();
+        if append {
+            use tokio::io::AsyncWriteExt;
+            let mut f = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .await
+                .with_context(|| format!("{name}({path}) failed"))?;
+            f.write_all(content.as_bytes())
+                .await
+                .with_context(|| format!("{name}({path}) failed"))?;
+        } else {
+            tokio::fs::write(&path, content.as_bytes())
+                .await
+                .with_context(|| format!("{name}({path}) failed"))?;
+        }
+        Ok(Value::Null)
+    }
+
+    /// `file.exists(path)` — true only for a regular file.
+    ///
+    /// Never raises: a permission error on the parent directory yields
+    /// `false`. That means `false` is "not visible to this process as a
+    /// file", not strictly "does not exist". `directory.exists` is the
+    /// mirror for directories, so the pair answers "what is this" in one
+    /// call each.
+    pub(super) async fn eval_fs_exists_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+        want_dir: bool,
+    ) -> Result<Value> {
+        let name = if want_dir {
+            "directory.exists"
+        } else {
+            "file.exists"
+        };
+        if args.len() != 1 {
+            bail!("{name}(path) expects exactly 1 arg");
+        }
+        let path = self
+            .eval_path_arg(args, vars, 0, &format!("{name}(path)"))
+            .await?;
+        let found = match tokio::fs::metadata(&path).await {
+            Ok(md) => {
+                if want_dir {
+                    md.is_dir()
+                } else {
+                    md.is_file()
+                }
+            }
+            Err(_) => false,
+        };
+        Ok(Value::Bool(found))
+    }
+
+    /// `file.delete(path)` — raises if absent. Idempotent delete is
+    /// `if (file.exists(p)) { file.delete(p); }`, which says what it means.
+    pub(super) async fn eval_file_delete_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("file.delete(path) expects exactly 1 arg");
+        }
+        let path = self
+            .eval_path_arg(args, vars, 0, "file.delete(path)")
+            .await?;
+        tokio::fs::remove_file(&path)
+            .await
+            .with_context(|| format!("file.delete({path}) failed"))?;
+        Ok(Value::Null)
+    }
+
+    /// `file.copy(src, dst)` — overwrites `dst`.
+    pub(super) async fn eval_file_copy_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("file.copy(src, dst) expects exactly 2 args");
+        }
+        let src = self
+            .eval_path_arg(args, vars, 0, "file.copy(src, dst)")
+            .await?;
+        let dst = self
+            .eval_path_arg(args, vars, 1, "file.copy(src, dst)")
+            .await?;
+        tokio::fs::copy(&src, &dst)
+            .await
+            .with_context(|| format!("file.copy({src} -> {dst}) failed"))?;
+        Ok(Value::Null)
+    }
+
+    /// `file.move(src, dst)` — overwrites `dst`, works across filesystems.
+    ///
+    /// `rename` returns `EXDEV` across devices (a `/tmp` → volume move, an
+    /// overlayfs → bind-mount move — routine in containers) and on Windows
+    /// fails when `dst` exists. A blanket "on any error, copy instead" would
+    /// turn a missing-source `NotFound` into a confusing copy error, so the
+    /// fallback is gated to leave genuine source problems alone. This is
+    /// what `mv` does.
+    pub(super) async fn eval_file_move_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("file.move(src, dst) expects exactly 2 args");
+        }
+        let src = self
+            .eval_path_arg(args, vars, 0, "file.move(src, dst)")
+            .await?;
+        let dst = self
+            .eval_path_arg(args, vars, 1, "file.move(src, dst)")
+            .await?;
+        match tokio::fs::rename(&src, &dst).await {
+            Ok(()) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                return Err(e).with_context(|| format!("file.move({src} -> {dst}) failed"));
+            }
+            Err(_) => {
+                tokio::fs::copy(&src, &dst).await.with_context(|| {
+                    format!("file.move({src} -> {dst}): cross-device copy failed")
+                })?;
+                tokio::fs::remove_file(&src)
+                    .await
+                    .with_context(|| format!("file.move({src} -> {dst}): source unlink failed"))?;
+            }
+        }
+        Ok(Value::Null)
+    }
+
+    /// `file.size(path)` — size in bytes.
+    pub(super) async fn eval_file_size_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("file.size(path) expects exactly 1 arg");
+        }
+        let path = self.eval_path_arg(args, vars, 0, "file.size(path)").await?;
+        let md = tokio::fs::metadata(&path)
+            .await
+            .with_context(|| format!("file.size({path}) failed"))?;
+        Ok(Value::Int(md.len() as i64))
+    }
+
+    /// `file.lines(path)` — file split on `\r?\n`.
+    ///
+    /// A trailing newline does NOT produce a final empty element: a
+    /// well-formed text file ends with `\n`, and surfacing that as an extra
+    /// blank line makes every `for` over the result off by one.
+    pub(super) async fn eval_file_lines_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("file.lines(path) expects exactly 1 arg");
+        }
+        let path = self
+            .eval_path_arg(args, vars, 0, "file.lines(path)")
+            .await?;
+        let contents = tokio::fs::read_to_string(&path)
+            .await
+            .with_context(|| format!("file.lines({path}) failed"))?;
+        let lines: Vec<Value> = contents
+            .lines()
+            .map(|l| Value::Str(l.to_string()))
+            .collect();
+        Ok(Value::Array(lines))
+    }
+
+    /// `directory.list(path)` — entry names, sorted.
+    ///
+    /// Names, not full paths: matches `ls` / `os.listdir` / `readdirSync`,
+    /// and `path + "/" + name` reconstructs a full path trivially while the
+    /// reverse is awkward in JWC's string surface.
+    ///
+    /// The sort is part of the contract, not an implementation detail:
+    /// `read_dir` order is filesystem-dependent (ext4 hands entries back in
+    /// hash order), so without it every golden test is flaky and every
+    /// generated listing is non-reproducible.
+    ///
+    /// Non-UTF-8 names come through `to_string_lossy` rather than being
+    /// skipped — a name with U+FFFD in it is debuggable, a silently missing
+    /// entry is not. Such a name will not round-trip back into `file.read`.
+    pub(super) async fn eval_directory_list_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("directory.list(path) expects exactly 1 arg");
+        }
+        let path = self
+            .eval_path_arg(args, vars, 0, "directory.list(path)")
+            .await?;
+        let mut rd = tokio::fs::read_dir(&path)
+            .await
+            .with_context(|| format!("directory.list({path}) failed"))?;
+        let mut names: Vec<String> = Vec::new();
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .with_context(|| format!("directory.list({path}) failed"))?
+        {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(Value::Array(names.into_iter().map(Value::Str).collect()))
+    }
+
+    /// `directory.create(path)` — recursive and idempotent
+    /// (`create_dir_all`). Plain `create_dir` fails on the single most
+    /// common call (`directory.create("out/reports")` where `out` is
+    /// absent) and again when the target already exists, which turns every
+    /// "ensure the directory" into an exists-check dance.
+    pub(super) async fn eval_directory_create_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("directory.create(path) expects exactly 1 arg");
+        }
+        let path = self
+            .eval_path_arg(args, vars, 0, "directory.create(path)")
+            .await?;
+        tokio::fs::create_dir_all(&path)
+            .await
+            .with_context(|| format!("directory.create({path}) failed"))?;
+        Ok(Value::Null)
+    }
+
+    /// `directory.delete(path)` — NOT recursive.
+    ///
+    /// `remove_dir`, so a non-empty directory is an error. Paths here are
+    /// unrestricted by design, and a recursive variant would make
+    /// `directory.delete(query_param("d"))` a one-call `rm -rf`. Callers who
+    /// genuinely want a tree walk can drive it with `directory.list`. The
+    /// asymmetry with the recursive `directory.create` is deliberate:
+    /// creating too much is recoverable, deleting too much is not.
+    pub(super) async fn eval_directory_delete_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            bail!("directory.delete(path) expects exactly 1 arg");
+        }
+        let path = self
+            .eval_path_arg(args, vars, 0, "directory.delete(path)")
+            .await?;
+        tokio::fs::remove_dir(&path)
+            .await
+            .with_context(|| format!("directory.delete({path}) failed"))?;
+        Ok(Value::Null)
+    }
 }
 
 /// Char-based string slice shared by `substring` / `take`. Negative `start`

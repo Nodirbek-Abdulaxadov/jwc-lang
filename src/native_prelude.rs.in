@@ -181,6 +181,295 @@ fn jwc_print(v: V) {
     println!("{}", v);
 }
 
+/// `console.write(s)` / `console.error(s)` — immediate write, no newline.
+///
+/// Synchronous on purpose. `tokio::io::stdout()` keeps its own buffer, so
+/// interleaving it with `jwc_print`'s `println!` would reorder output
+/// *within* a native binary — strictly worse than the cross-backend
+/// ordering difference we already document. This uses the same
+/// `std::io::Stdout` handle `println!` does, so the two interleave
+/// correctly here.
+///
+/// They still do NOT interleave under `jwc run`, where `print` buffers into
+/// `Vm::output` and flushes after `main()` returns. See
+/// `docs/docs/stdlib/io.md`.
+fn jwc_b_console_write(v: V) -> V {
+    jwc_console_out(v, false)
+}
+
+fn jwc_b_console_error(v: V) -> V {
+    jwc_console_out(v, true)
+}
+
+fn jwc_console_out(v: V, to_stderr: bool) -> V {
+    use std::io::Write;
+    let s = v.to_string();
+    let res = if to_stderr {
+        let stream = std::io::stderr();
+        let mut lock = stream.lock();
+        lock.write_all(s.as_bytes()).and_then(|()| lock.flush())
+    } else {
+        let stream = std::io::stdout();
+        let mut lock = stream.lock();
+        lock.write_all(s.as_bytes()).and_then(|()| lock.flush())
+    };
+    if let Err(e) = res {
+        let op = if to_stderr {
+            "console.error"
+        } else {
+            "console.write"
+        };
+        jwc_io_panic(op, "", e);
+    }
+    V::Null
+}
+
+/// Panic with the exact JWC error kind as a literal prefix.
+///
+/// `jwc_classify_error` prefix-matches this marker BEFORE its lowercase
+/// substring scan, so the kind is decided by the errno and never by the
+/// path text — `file.read("/var/backups/app.sql")` must not come back as
+/// `DbError`. `jwc_error_value` surfaces the whole string as `e.message`,
+/// which is why the operation and subject stay in it.
+#[cold]
+#[inline(never)]
+fn jwc_io_panic(op: &str, subject: &str, e: std::io::Error) -> ! {
+    use std::io::ErrorKind;
+    let kind = match e.kind() {
+        ErrorKind::NotFound => "IoError.NotFound",
+        ErrorKind::PermissionDenied => "IoError.PermissionDenied",
+        ErrorKind::AlreadyExists => "IoError.AlreadyExists",
+        _ => "IoError",
+    };
+    panic!("{}: {}({}) failed: {}", kind, op, subject, e);
+}
+
+/// `console.read()` — one line from stdin, trailing `\r?\n` stripped,
+/// `V::Null` at EOF.
+///
+/// `spawn_blocking` over `std::io::stdin()` rather than
+/// `tokio::io::stdin()`: the tokio handle is fresh per call, so a per-call
+/// `BufReader` drops whatever it read ahead past the newline, and
+/// consecutive calls silently lose input. `std::io::stdin()` is a
+/// process-global buffered handle.
+async fn jwc_b_console_read() -> V {
+    let joined = tokio::task::spawn_blocking(|| {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).map(|n| (n, line))
+    })
+    .await;
+    let read = match joined {
+        Ok(r) => r,
+        Err(e) => panic!("IoError: console.read() task failed: {}", e),
+    };
+    let (n, mut line) = match read {
+        Ok(v) => v,
+        Err(e) => jwc_io_panic("console.read", "", e),
+    };
+    if n == 0 {
+        return V::Null;
+    }
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    v_str(line)
+}
+
+// --- file.* / directory.* -------------------------------------------------
+//
+// Paths reach the OS verbatim; see `docs/spec/threat-model.md`. Errors
+// panic (caught by the route wrapper and by `try`/`catch` codegen) rather
+// than returning an in-band error string the way `jwc_b_http_get` does —
+// an error string would ship as a 200 response body, and a panic is what
+// makes native `catch (e: IoError)` work at all.
+
+fn jwc_io_path(v: V, op: &str) -> JwcStr {
+    match v {
+        V::Str(s) => s,
+        other => panic!("{}() path must be a string, got {:?}", op, other),
+    }
+}
+
+async fn jwc_b_file_read(path: V) -> V {
+    let p = jwc_io_path(path, "file.read");
+    match tokio::fs::read_to_string(p.as_ref()).await {
+        Ok(contents) => v_str(contents),
+        Err(e) => jwc_io_panic("file.read", p.as_ref(), e),
+    }
+}
+
+async fn jwc_b_file_write(path: V, content: V) -> V {
+    let p = jwc_io_path(path, "file.write");
+    let body = content.to_string();
+    match tokio::fs::write(p.as_ref(), body.as_bytes()).await {
+        Ok(()) => V::Null,
+        Err(e) => jwc_io_panic("file.write", p.as_ref(), e),
+    }
+}
+
+async fn jwc_b_file_append(path: V, content: V) -> V {
+    use tokio::io::AsyncWriteExt;
+    let p = jwc_io_path(path, "file.append");
+    let body = content.to_string();
+    let mut f = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p.as_ref())
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => jwc_io_panic("file.append", p.as_ref(), e),
+    };
+    match f.write_all(body.as_bytes()).await {
+        Ok(()) => V::Null,
+        Err(e) => jwc_io_panic("file.append", p.as_ref(), e),
+    }
+}
+
+/// `file.exists` is true only for a regular file, `directory.exists` only
+/// for a directory. Neither raises: a permission error on the parent yields
+/// `false`, so `false` means "not visible to this process as that thing".
+async fn jwc_b_file_exists(path: V) -> V {
+    let p = jwc_io_path(path, "file.exists");
+    let found = match tokio::fs::metadata(p.as_ref()).await {
+        Ok(md) => md.is_file(),
+        Err(_) => false,
+    };
+    V::Bool(found)
+}
+
+async fn jwc_b_directory_exists(path: V) -> V {
+    let p = jwc_io_path(path, "directory.exists");
+    let found = match tokio::fs::metadata(p.as_ref()).await {
+        Ok(md) => md.is_dir(),
+        Err(_) => false,
+    };
+    V::Bool(found)
+}
+
+async fn jwc_b_file_delete(path: V) -> V {
+    let p = jwc_io_path(path, "file.delete");
+    match tokio::fs::remove_file(p.as_ref()).await {
+        Ok(()) => V::Null,
+        Err(e) => jwc_io_panic("file.delete", p.as_ref(), e),
+    }
+}
+
+async fn jwc_b_file_copy(src: V, dst: V) -> V {
+    let s = jwc_io_path(src, "file.copy");
+    let d = jwc_io_path(dst, "file.copy");
+    match tokio::fs::copy(s.as_ref(), d.as_ref()).await {
+        Ok(_) => V::Null,
+        Err(e) => jwc_io_panic("file.copy", s.as_ref(), e),
+    }
+}
+
+/// `rename` returns `EXDEV` across filesystems (a `/tmp` → volume move, an
+/// overlayfs → bind-mount move — routine in containers) and on Windows
+/// fails when `dst` exists. The copy fallback is gated so a genuine source
+/// problem isn't papered over as a confusing copy error. This is what `mv`
+/// does.
+async fn jwc_b_file_move(src: V, dst: V) -> V {
+    let s = jwc_io_path(src, "file.move");
+    let d = jwc_io_path(dst, "file.move");
+    match tokio::fs::rename(s.as_ref(), d.as_ref()).await {
+        Ok(()) => return V::Null,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            jwc_io_panic("file.move", s.as_ref(), e)
+        }
+        Err(_) => {}
+    }
+    if let Err(e) = tokio::fs::copy(s.as_ref(), d.as_ref()).await {
+        jwc_io_panic("file.move", s.as_ref(), e);
+    }
+    match tokio::fs::remove_file(s.as_ref()).await {
+        Ok(()) => V::Null,
+        Err(e) => jwc_io_panic("file.move", s.as_ref(), e),
+    }
+}
+
+async fn jwc_b_file_size(path: V) -> V {
+    let p = jwc_io_path(path, "file.size");
+    match tokio::fs::metadata(p.as_ref()).await {
+        Ok(md) => V::Int(md.len() as i64),
+        Err(e) => jwc_io_panic("file.size", p.as_ref(), e),
+    }
+}
+
+/// A trailing newline does NOT produce a final empty element — a
+/// well-formed text file ends with `\n`, and surfacing that as a blank line
+/// makes every `for` over the result off by one. `str::lines` handles both
+/// `\n` and `\r\n`.
+async fn jwc_b_file_lines(path: V) -> V {
+    let p = jwc_io_path(path, "file.lines");
+    match tokio::fs::read_to_string(p.as_ref()).await {
+        // `to_string()` per line is required, not sloppy: `JwcStr` is
+        // `Cow<'static, str>`, and `lines()` borrows from `contents`, which
+        // dies at the end of this function.
+        Ok(contents) => v_arr(
+            contents
+                .lines()
+                .map(|l| v_str(l.to_string()))
+                .collect::<JwcArr>(),
+        ),
+        Err(e) => jwc_io_panic("file.lines", p.as_ref(), e),
+    }
+}
+
+/// Entry names, sorted. The sort is part of the contract, not an
+/// implementation detail: ext4 hands entries back in hash order, so an
+/// unsorted listing makes every golden test flaky and every generated
+/// listing non-reproducible.
+async fn jwc_b_directory_list(path: V) -> V {
+    let p = jwc_io_path(path, "directory.list");
+    let mut rd = match tokio::fs::read_dir(p.as_ref()).await {
+        Ok(rd) => rd,
+        Err(e) => jwc_io_panic("directory.list", p.as_ref(), e),
+    };
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        match rd.next_entry().await {
+            Ok(Some(entry)) => names.push(entry.file_name().to_string_lossy().into_owned()),
+            Ok(None) => break,
+            Err(e) => jwc_io_panic("directory.list", p.as_ref(), e),
+        }
+    }
+    names.sort();
+    v_arr(names.into_iter().map(v_str).collect::<JwcArr>())
+}
+
+/// Recursive and idempotent. Plain `create_dir` fails on the most common
+/// call (`directory.create("out/reports")` where `out` is absent) and again
+/// when the target exists.
+async fn jwc_b_directory_create(path: V) -> V {
+    let p = jwc_io_path(path, "directory.create");
+    match tokio::fs::create_dir_all(p.as_ref()).await {
+        Ok(()) => V::Null,
+        Err(e) => jwc_io_panic("directory.create", p.as_ref(), e),
+    }
+}
+
+/// NOT recursive. Paths here are unrestricted by design, and a recursive
+/// variant would make `directory.delete(query_param("d"))` a one-call
+/// `rm -rf`. The asymmetry with the recursive `directory.create` is
+/// deliberate: creating too much is recoverable, deleting too much is not.
+async fn jwc_b_directory_delete(path: V) -> V {
+    let p = jwc_io_path(path, "directory.delete");
+    match tokio::fs::remove_dir(p.as_ref()).await {
+        Ok(()) => V::Null,
+        Err(e) => jwc_io_panic("directory.delete", p.as_ref(), e),
+    }
+}
+
 fn jwc_truthy(v: &V) -> bool {
     match v {
         V::Null => false,
@@ -229,6 +518,23 @@ fn jwc_take_return() -> Option<V> {
 #[cold]
 #[inline(never)]
 fn jwc_classify_error(msg: &str) -> &'static str {
+    // The I/O builtins panic with the exact kind as a literal prefix
+    // (`"IoError.NotFound: file.read(...) failed: ..."`), and this is
+    // checked on the RAW message before the lowercase substring scan below.
+    // That ordering is load-bearing: a path like `/var/backups/app.sql`
+    // would otherwise trip the DbError branch, and one containing `url` or
+    // `http` the HttpError branch. Subtypes precede the bare parent so the
+    // longest match wins.
+    for kind in [
+        "IoError.NotFound",
+        "IoError.PermissionDenied",
+        "IoError.AlreadyExists",
+        "IoError",
+    ] {
+        if msg.starts_with(kind) {
+            return kind;
+        }
+    }
     let lc = msg.to_ascii_lowercase();
     let has = |needles: &[&str]| -> bool { needles.iter().any(|n| lc.contains(n)) };
     if has(&[
@@ -277,7 +583,18 @@ fn jwc_catch_type_matches(catch_type: Option<&str>, kind: &str) -> bool {
     match catch_type {
         None => true,
         Some("Error") => true,
-        Some(t) => t == kind,
+        Some(t) if t == kind => true,
+        // A parent kind catches its dotted children, mirroring
+        // `runner::catch_type_matches`. This side used to do an exact
+        // compare only, so `catch (e: DbError)` silently missed every
+        // `DbError.*` subtype in an AOT binary while catching them fine
+        // under `jwc run`. Bare prefix overlap (`Db` vs `DbError`) must
+        // still not match, hence the explicit `.` check.
+        Some(t) => {
+            kind.len() > t.len()
+                && kind.as_bytes().get(t.len()) == Some(&b'.')
+                && kind.starts_with(t)
+        }
     }
 }
 

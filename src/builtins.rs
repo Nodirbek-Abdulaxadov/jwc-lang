@@ -557,6 +557,145 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         max_args: Some(2),
         native: true,
     },
+    // ── Console I/O (native) ─────────────────────────────────────────────
+    //
+    // Dotted names work because the parser flattens `a.b(...)` into a single
+    // `Expr::Call` name, so `lookup` / `is_builtin` / the E022 arity check
+    // all see the literal string "console.write". Native codegen maps the
+    // `.` to `_` in `builtin_fn_name` (`native_build.rs`), giving
+    // `jwc_b_console_write`.
+    //
+    // `console.write` / `console.error` write through IMMEDIATELY. The
+    // `print` statement does NOT: it appends to `Vm::output`, which
+    // `cmd::run` flushes only after `main()` returns (`runner/exec.rs`,
+    // `cmd/run.rs`) and which `dispatch` consumes as the implicit response
+    // body of a fall-through route. Native `jwc_print` is a bare `println!`,
+    // so mixing the two forms orders differently on the two backends.
+    // Documented in `docs/docs/stdlib/io.md`; don't "fix" one side alone.
+    BuiltinDef {
+        name: "console.write",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "console.error",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "console.read",
+        aliases: &[],
+        min_args: 0,
+        max_args: Some(0),
+        native: true,
+    },
+    // ── File + directory I/O (native) ────────────────────────────────────
+    //
+    // Paths reach the OS verbatim — no jail, no allowlist, no root env var.
+    // A route that does `file.read(path_param("f"))` is a local-file-include
+    // vulnerability in the application, and that is the application author's
+    // problem by design. Recorded as an accepted risk in
+    // `docs/spec/threat-model.md`, NOT as an oversight.
+    //
+    // All of these are async (`tokio::fs`, so a slow mount can't park a
+    // reactor worker mid-request). Every one MUST also appear in the
+    // `is_async_builtin` list in `native_build.rs` or codegen emits the call
+    // without `.await` and the generated crate fails to compile.
+    BuiltinDef {
+        name: "file.read",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.write",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.append",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.exists",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.delete",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.copy",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.move",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.size",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "file.lines",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "directory.list",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "directory.create",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "directory.exists",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "directory.delete",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
     // ── Interpreter-only built-ins (native: false) ───────────────────────
     // Dispatched by the interpreter's `Expr::Call` arm but NOT accepted by
     // native AOT codegen. Listing them here was previously omitted; doing so

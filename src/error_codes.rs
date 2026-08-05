@@ -39,6 +39,10 @@ pub const LINT_WARNINGS: &[DiagnosticCode] = &[
     ),
     d("W005", "user-declared function shadows a built-in name"),
     d("W006", "unreachable statement after top-level `return`"),
+    d(
+        "W007",
+        "`console.read()` in a route or middleware body — stdin is not request input",
+    ),
 ];
 
 /// Validator + parser errors — fatal, raised via `bail!`. Today many of

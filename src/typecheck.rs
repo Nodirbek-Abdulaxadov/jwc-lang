@@ -747,6 +747,25 @@ mod tests {
             ("not_found", 0, Some(1)),
             ("unauthorized", 0, Some(1)),
             ("forbidden", 0, Some(1)),
+            // Console + file I/O. Dotted names are ordinary strings here —
+            // the parser flattens `a.b(...)` into one `Expr::Call` name, so
+            // `lookup` sees the literal "console.write".
+            ("console.write", 1, Some(1)),
+            ("console.error", 1, Some(1)),
+            ("console.read", 0, Some(0)),
+            ("file.read", 1, Some(1)),
+            ("file.write", 2, Some(2)),
+            ("file.append", 2, Some(2)),
+            ("file.exists", 1, Some(1)),
+            ("file.delete", 1, Some(1)),
+            ("file.copy", 2, Some(2)),
+            ("file.move", 2, Some(2)),
+            ("file.size", 1, Some(1)),
+            ("file.lines", 1, Some(1)),
+            ("directory.list", 1, Some(1)),
+            ("directory.create", 1, Some(1)),
+            ("directory.exists", 1, Some(1)),
+            ("directory.delete", 1, Some(1)),
         ] {
             let def = builtins::lookup(name).unwrap_or_else(|| panic!("no builtin row: {name}"));
             assert_eq!(def.min_args, min, "min_args drifted for {name}");

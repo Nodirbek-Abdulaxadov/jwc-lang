@@ -9,11 +9,11 @@ description: "Every JWC built-in function with its arguments, return type and wh
 > or editing a builtin, run:
 >
 > ```bash
-> cargo run --bin gen-builtins-doc > docs/docs/reference/builtins.md
+> cargo run --bin gen_builtins_doc > docs/docs/reference/builtins.md
 > ```
 >
-> CI verifies this file matches the registry via `tests/builtins_doc_sync.rs`;
-> PRs that add a builtin without regenerating the doc fail.
+> `tests/builtins_doc_sync.rs` compares this file against the registry byte for
+> byte. Run it after adding a builtin — the workflow's test job does not.
 
 Columns:
 
@@ -114,12 +114,40 @@ Columns:
 | `fetch_json` | — | 1 | ✅ |
 | `http_post` | — | 1..3 | — |
 
+## Console I/O
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `console.write` | — | 1 | ✅ |
+| `console.error` | — | 1 | ✅ |
+| `console.read` | — | 0 | ✅ |
+
+## Files + directories
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `file.read` | — | 1 | ✅ |
+| `file.write` | — | 2 | ✅ |
+| `file.append` | — | 2 | ✅ |
+| `file.exists` | — | 1 | ✅ |
+| `file.delete` | — | 1 | ✅ |
+| `file.copy` | — | 2 | ✅ |
+| `file.move` | — | 2 | ✅ |
+| `file.size` | — | 1 | ✅ |
+| `file.lines` | — | 1 | ✅ |
+| `directory.list` | — | 1 | ✅ |
+| `directory.create` | — | 1 | ✅ |
+| `directory.exists` | — | 1 | ✅ |
+| `directory.delete` | — | 1 | ✅ |
+
 ## Environment + coercion
 
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `env` | — | 1 | ✅ |
 | `int` | — | 1 | ✅ |
+| `random_int` | — | 1..2 | ✅ |
+| `serve` | — | 0..1 | ✅ |
 
 ## Time + identifiers
 

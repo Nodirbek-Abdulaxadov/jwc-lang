@@ -57,6 +57,15 @@ Lowered cleanly to Rust + tokio + a thin axum-shaped HTTP layer:
 - **Control flow / locals.** `let`, assignment, `if`/`while`/`for in`,
   `break`/`continue`/`return`, `print`, `push`, string ops, JSON
   parse/stringify.
+- **Console + filesystem.** `console.write`, `console.error`,
+  `console.read`; the whole `file.*` family (`read`, `write`, `append`,
+  `exists`, `delete`, `copy`, `move`, `size`, `lines`) and `directory.*`
+  (`list`, `create`, `exists`, `delete`). The file/directory ops are
+  `tokio::fs`-backed `async fn`s in the prelude, so each one must also be
+  listed in `native_build.rs::is_async_builtin` — a missing entry emits the
+  call without `.await` and the *generated* crate fails to compile.
+  `tests/native_emit.rs::emit_rust_source_awaits_async_io_builtins` guards
+  that.
 
 The bench repo's `_my/jwc-app/main.jwc` exercises this entire surface in
 one program — if the bench suite's `jwc check` is green on a target
@@ -105,6 +114,37 @@ If a feature is needed in AOT, the work item is "lift it from
 `runner/builtins.rs` into `native_build.rs` BUILTINS + emit a
 real lowering" — see the CLAUDE.md note at the top of `native_build.rs`
 for the contract.
+
+## Known interpreter / native divergences
+
+Cases where both backends run the program but observably differ. These are
+not "not yet ported" — they are behaviours that differ by construction, and
+each is either accepted or already fixed as noted.
+
+- **`print` ordering against `console.write`.** `print` appends to
+  `Vm::output`, which `cmd::run` flushes only after `main()` returns;
+  `console.write` writes to the process stdout immediately. Native
+  `jwc_print` is a bare `println!`, so it has nothing to reorder. A
+  program doing `console.write("a"); print("b"); console.write("c");`
+  prints `a c b` under `jwc run` and `a b c` from a native binary. Not
+  fixed: making `print` immediate would change the "fall-through route
+  body becomes the response" behaviour that `runner/dispatch.rs` relies
+  on. Documented for users in `docs/docs/stdlib/io.md`; the guidance is to
+  pick one per program. Pinned by
+  `tests/conformance/cases/case_console_write_bypasses_print_buffer.jwc`.
+
+- **`print` inside a route body.** Under the interpreter a fall-through
+  route body returns whatever it `print`-ed as the HTTP response.
+  `console.write` never participates in the response on either backend,
+  which is what makes it the correct way to log from a handler.
+
+- **Parent `catch` matching — FIXED.** `jwc_catch_type_matches` in the
+  native prelude compared the catch type to the error kind with `==`, so
+  `catch (e: DbError)` silently missed every `DbError.*` subtype in an AOT
+  binary while catching them fine under `jwc run`. It now mirrors
+  `runner::catch_type_matches` and matches dotted children. This changed
+  behaviour for existing native builds that catch `DbError` / `HttpError`
+  / `JwtError` — they now catch strictly more than before.
 
 ## Future — items the native mirror could close next
 
