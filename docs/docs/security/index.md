@@ -90,6 +90,43 @@ See [reference/builtins](../reference/builtins.md#request-context).
 
 See [deployment/env-vars](../deployment/env-vars.md#http-server-hardening).
 
+## Filesystem paths are not restricted
+
+Unlike outbound HTTP, which has `JWC_HTTP_ALLOWLIST` above, the
+`file.*` and `directory.*` builtins have **no equivalent knob**. Paths go
+to the operating system exactly as written — no jail, no allowlist, no
+root setting. That is a deliberate design decision, not a gap waiting to
+be filled.
+
+The consequence is that a path built from request data is a
+local-file-include or an arbitrary write:
+
+```jwc no-compile
+route GET "api/download" {
+    return json(file.read(query_param("path")));   // serves /etc/passwd
+}
+```
+
+Route `{param}` capture does reject segments equal to `.` / `..` or
+containing a slash, so those are harder to abuse — but `query_param()`,
+`header()` and `body()` get no such screening, and nothing rejects an
+absolute path.
+
+What to do instead:
+
+- Validate the value against a known set before it reaches a path, or
+  keep request data out of paths entirely and derive the filename
+  server-side.
+- Run the process as a dedicated user with only the directories it needs
+  visible — a restrictive mount namespace is the real containment here,
+  not anything the language does.
+- `directory.delete` is non-recursive on purpose, so there is no
+  single-call tree removal even if a path does leak through.
+
+Recorded as an accepted risk in
+[`docs/spec/threat-model.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/threat-model.md)
+row 6. Per-builtin detail: [Console + files](../stdlib/io.md).
+
 ## Reporting a vulnerability
 
 Don't open a public issue. Follow the disclosure flow in

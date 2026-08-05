@@ -906,10 +906,15 @@ route GET "/slow/{ms}" {
 - DB calls use `deadpool-postgres` + `tokio-postgres`; pooled connections
   are checked out asynchronously.
 - Async builtins: `sleep_ms(ms)`, `http_get(url)`, `http_post(...)`,
-  `fetch_json(url)`, `ws_recv()`, `ws_send(msg)`, `enqueue(...)`. Inside an
+  `fetch_json(url)`, `ws_recv()`, `ws_send(msg)`, `enqueue(...)`,
+  `console.read()`, and every `file.*` / `directory.*` call. Inside an
   `async function` you `await` them; the parser also accepts them
   bare-form, in which case the runtime drives the future on a per-call
   basis.
+- The filesystem builtins are `tokio::fs`-backed for this reason: a slow
+  mount inside a handler yields instead of parking a worker.
+  `console.write` / `console.error` are the deliberate exception — they
+  are synchronous, so they interleave correctly with `print`'s own writes.
 - User-defined `async function`s compose normally — `await fetchUser(...)`
   inside another `async function` propagates suspension.
 

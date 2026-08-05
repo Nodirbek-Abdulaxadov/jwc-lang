@@ -47,8 +47,12 @@ under `src/`:
 - `parser.rs` — recursive-descent parser. Also hosts `validate_program`,
   which re-walks the AST for compile-time dbcontext/entity/column checks.
 - `ast.rs` — every AST node lives here.
-- `runner.rs` — the async tree-walking interpreter `Vm` (`#[async_recursion]`).
-  All built-ins live in `call_builtin` / `call_function`.
+- `runner/` — the async tree-walking interpreter `Vm` (`#[async_recursion]`).
+  Split across `mod.rs`, `eval.rs`, `builtins.rs`, `dispatch.rs`, `exec.rs`,
+  `sql.rs`, `types.rs`, `util.rs`, `validation.rs`. There is no
+  `call_builtin` function: dispatch is the `Expr::Call` arm of
+  `Vm::eval_expr` in `eval.rs`, and the bodies are `eval_*_call` methods in
+  `builtins.rs`.
 - `engine.rs` — `deadpool-postgres` + `tokio-postgres` pool, prepared
   statement cache, optional TTL result cache, TLS via `tokio-postgres-rustls`.
 - `server.rs` — axum + tokio HTTP server; each request is `tokio::spawn`'d.
@@ -213,37 +217,78 @@ of them produces a "works in `jwc run` but breaks under `jwc build
 --native`" regression, or a builtin that has no spec entry and no
 test pinning its contract. The recipe below is the full checklist:
 
-1. **Interpreter** — `src/runner/builtins.rs` (or `src/runner/mod.rs::Vm::call_builtin`).
-   Wire the new name to a function returning a `Value`. Async if it
-   suspends (DB, HTTP, sleep). Null-propagation rule: if every other
-   string builtin returns `null` on `null` input, yours should too.
+0. **Registry** — `src/builtins.rs::BUILTIN_DEFS`.
+   Add a row: name, aliases, `min_args`, `max_args`, and `native`. Set
+   `native: true` only once the AOT impl in step 3 exists —
+   `native_builtin_names()` derives the entire AOT whitelist from that
+   flag, so there is no separate list to edit. Arity here is enforced as
+   E022 by `typecheck::typecheck_program`, and it must agree with your
+   own runtime guard in step 1.
 
-2. **Validator (optional, recommended)** — `src/parser.rs::validate_program`.
-   If the builtin has type-checkable invariants (arg count, declared
-   arg types), assert them at compile time and bail with a numbered
-   E-code so the message is grep-friendly. See E011 / E012 / E013 for
-   the prefix shape.
+   Prefer **no aliases**. Each alias needs its own `jwc_b_<alias>` in the
+   prelude (only five camelCase names are remapped in `builtin_fn_name`);
+   `jwc_b_raw` exists purely as a copy of `jwc_b_response` for this
+   reason.
 
-3. **Native AOT codegen** — `src/native_build.rs`.
-   Add the builtin name to the `BUILTINS` allow-list so
-   `jwc build --native` accepts the call instead of rejecting it as
-   unknown. If the call needs a non-trivial body, emit the helper
-   into `src/native_prelude.rs.in` (or its `_db.rs.in` sibling for
-   DB-touching code) as `fn jwc_b_<name>(...)`. Don't add a new
-   `V::Variant` here — the codegen has 25+ V match arms in the
-   prelude that need updating for each new variant; reach for an
-   existing variant (e.g. `V::Str(JwcStr::from(...))`) instead.
+1. **Interpreter** — dispatch arm in `src/runner/eval.rs`'s `Expr::Call`
+   chain, body as an `eval_*_call` method in `src/runner/builtins.rs`.
+   Async if it suspends (DB, HTTP, sleep, filesystem). Null-propagation
+   rule: if every other string builtin returns `null` on `null` input,
+   yours should too.
+
+   If the name is one a user program might plausibly declare itself, add
+   the `!self.functions.contains_key(...)` guard the way `substring` /
+   `take` / the `console.*` / `file.*` families do. Native codegen already
+   prefers a same-named user function, so without the guard the two
+   backends resolve the same source to different code.
+
+2. **Validator (optional, recommended)** — `src/parser/validate.rs`.
+   If the builtin has type-checkable invariants beyond arity, assert them
+   at compile time and bail with a numbered E-code so the message is
+   grep-friendly. See E011 / E012 / E013 for the prefix shape. (Arity
+   itself is already covered by step 0.)
+
+3. **Native AOT codegen** — `src/native_prelude.rs.in`.
+   Emit the helper as `fn jwc_b_<name>(...)` (or its `_db.rs.in` /
+   `_crypto.rs.in` sibling). Don't add a new `V::Variant` — the codegen
+   has 25+ V match arms in the prelude that need updating for each new
+   variant; reach for an existing variant (e.g.
+   `V::Str(JwcStr::from(...))`) instead.
+
+   **If the helper is `async`, add its name to the `is_async_builtin`
+   `matches!` in `src/native_build.rs`.** This list is not derived from
+   the registry. Miss it and codegen emits the call without `.await`; the
+   *generated* crate then fails to compile, and no test in this repo
+   catches it, because neither `conformance.rs` nor `native_parity.rs`
+   builds emitted source. `tests/native_emit.rs` has an await-guard you
+   can extend. A new crypto builtin additionally needs its name in
+   `program_uses_crypto`, or the prelude isn't included at all.
 
 4. **Spec entry** — `docs/spec/builtins.md`.
    Use the entry template (signature, errors, notes, tests). The
    `Tests:` field names the conformance case(s) that pin the
    contract — write the test in step 5 and back-fill the name here.
 
-5. **User-facing docs** — `docs/builtins.md` (the existing
-   hand-maintained reference) AND `docs/docs/...` (docusaurus tree)
-   if the builtin belongs to a documented surface (HTTP / DB /
-   queue / observability). At v1.0 the generated reference replaces
-   the hand-maintained one; until then, keep both in sync.
+5. **User-facing docs** — two steps, and the first one bites.
+
+   Add the name to a `GROUPS` predicate in
+   `src/bin/gen_builtins_doc.rs`, then regenerate:
+
+   ```bash
+   cargo run --bin gen_builtins_doc > docs/docs/reference/builtins.md
+   ```
+
+   **A def matching no group predicate is silently dropped from the
+   generated page, and `tests/builtins_doc_sync.rs` still passes** —
+   generator and checked-in file agree on the omission. `serve` and
+   `random_int` were invisible this way for several releases. Verify with
+   a `grep` for your builtin in the regenerated file, not with the sync
+   test.
+
+   Then add prose to the matching page under `docs/docs/stdlib/` if the
+   builtin belongs to a documented surface (HTTP / DB / queue / files /
+   observability). Mark illustrative snippets ` ```jwc no-compile ` —
+   `tests/docs_parse.rs` compiles every bare ` ```jwc ` block.
 
 6. **Conformance case** — `tests/conformance/cases/case_<name>.jwc`
    + `case_<name>.stdout.txt`. Register the case name in
