@@ -3,6 +3,12 @@
 All notable changes to the **JWC Language** VS Code extension are documented
 here. The extension version tracks the JWC compiler version it ships against.
 
+## 0.8.8 — Tracks the compiler's 0.8.8 release
+
+No editor-facing changes. The compiler side makes `int()` raise on input
+that isn't a number instead of quietly answering `0`, and adds
+`console.writeln`. See the root `CHANGELOG.md`.
+
 ## 0.8.7 — Console and filesystem built-ins
 
 Editor support for the sixteen new built-ins the compiler gained in this

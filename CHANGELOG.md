@@ -3,7 +3,7 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.8] — int() stops lying, and console.writeln
 
 ### BREAKING
 
