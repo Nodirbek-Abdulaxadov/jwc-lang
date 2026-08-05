@@ -603,12 +603,17 @@ impl<'a> Vm<'a> {
                 if name.eq_ignore_ascii_case("console.write")
                     && !self.functions.contains_key(&name.to_lowercase())
                 {
-                    return self.eval_console_write_call(args, vars, false).await;
+                    return self.eval_console_write_call(args, vars, false, false).await;
+                }
+                if name.eq_ignore_ascii_case("console.writeln")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_console_write_call(args, vars, false, true).await;
                 }
                 if name.eq_ignore_ascii_case("console.error")
                     && !self.functions.contains_key(&name.to_lowercase())
                 {
-                    return self.eval_console_write_call(args, vars, true).await;
+                    return self.eval_console_write_call(args, vars, true, false).await;
                 }
                 if name.eq_ignore_ascii_case("console.read")
                     && !self.functions.contains_key(&name.to_lowercase())
@@ -772,6 +777,27 @@ impl<'a> Vm<'a> {
                 }
 
                 // ── `int(v)` — coerce to integer (mirrors native jwc_b_int) ──
+                // `int(v)` — coerce to integer.
+                //
+                // Two behaviours changed here, both because the old ones hid
+                // real bugs:
+                //
+                // 1. Strings are TRIMMED before parsing. `console.read()`
+                //    hands back whatever the terminal gave, and a single
+                //    trailing space used to be enough to make `int` answer 0.
+                //    `query_param` / `header` values pick up stray whitespace
+                //    the same way.
+                //
+                // 2. An unparseable string RAISES instead of answering 0.
+                //    `int("abc")` and `int("0")` used to be indistinguishable,
+                //    so bad input propagated as a plausible-looking number.
+                //    The message carries "type error" so `classify_jwc_error`
+                //    files it as ValidationError and `catch (e: ValidationError)`
+                //    can reach it.
+                //
+                // `null` propagates as `null` rather than raising, matching
+                // every other value-shaping builtin — that keeps `int` usable
+                // in nullable flows like `int(query_param("page"))`.
                 if name.eq_ignore_ascii_case("int") {
                     if args.len() != 1 {
                         bail!("int(v) expects exactly 1 arg");
@@ -779,9 +805,23 @@ impl<'a> Vm<'a> {
                     let n = match self.eval_expr(&args[0], vars).await? {
                         Value::Int(n) => n,
                         Value::Float(f) => f as i64,
-                        Value::Str(s) => s.parse::<i64>().unwrap_or(0),
                         Value::Bool(b) => i64::from(b),
-                        _ => 0,
+                        Value::Null => return Ok(Value::Null),
+                        Value::Str(s) => {
+                            let t = s.trim();
+                            match t.parse::<i64>() {
+                                Ok(n) => n,
+                                Err(_) => bail!(
+                                    "int({s:?}): type error — not an integer. \
+                                     Use a guard if the value may be absent or \
+                                     non-numeric."
+                                ),
+                            }
+                        }
+                        other => bail!(
+                            "int(v): type error — cannot convert {} to int",
+                            other.type_name()
+                        ),
                     };
                     return Ok(Value::Int(n));
                 }

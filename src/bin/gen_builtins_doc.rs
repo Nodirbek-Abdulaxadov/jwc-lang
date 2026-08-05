@@ -234,7 +234,12 @@ const GROUPS: &[Group] = &[
     },
     Group {
         title: "Console I/O",
-        predicate: |d| matches!(d.name, "console.write" | "console.error" | "console.read"),
+        predicate: |d| {
+            matches!(
+                d.name,
+                "console.write" | "console.writeln" | "console.error" | "console.read"
+            )
+        },
     },
     Group {
         title: "Files + directories",

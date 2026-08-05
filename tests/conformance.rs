@@ -231,6 +231,7 @@ const REGISTERED_CASES: &[&str] = &[
     "case_hash",
     "case_if_else",
     "case_int_overflow",
+    "case_int_strict",
     "case_json",
     "case_json_helpers",
     "case_literals",
@@ -311,6 +312,7 @@ mod cases {
     conformance_test!(case_hash);
     conformance_test!(case_if_else);
     conformance_test!(case_int_overflow);
+    conformance_test!(case_int_strict);
     conformance_test!(case_json);
     conformance_test!(case_json_helpers);
     conformance_test!(case_literals);

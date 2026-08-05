@@ -324,13 +324,15 @@ the response, which is what makes it safe to call from a handler. Mixing
 the two reorders output differently on each backend; see
 `docs/spec/aot-scope.md` § Known interpreter / native divergences.
 
-### `console.write`, `console.error`
+### `console.write`, `console.writeln`, `console.error`
 
 ```
-Signature: console.write(v: any) -> null
-           console.error(v: any) -> null
+Signature: console.write(v: any)   -> null
+           console.writeln(v: any) -> null
+           console.error(v: any)   -> null
 Errors:    IoError.* if the stream cannot be written (closed pipe, ENOSPC)
-Notes:     no trailing newline is appended — pass one if you want it.
+Notes:     `writeln` is `write` plus a trailing newline; `write` and
+           `error` append nothing — pass one if you want it.
            Accepts any value, stringified the same way `print` does.
            Flushed explicitly, because Rust's stdout is line-buffered and
            a payload without a newline would otherwise sit in the buffer.

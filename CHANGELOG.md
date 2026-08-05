@@ -3,6 +3,45 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.8] — int() stops lying, and console.writeln
+
+### BREAKING
+
+**`int(v)` no longer answers `0` for input that isn't a number.** An
+unparseable string now raises, with a message carrying `type error` so it
+classifies as `ValidationError` and `catch (e: ValidationError)` reaches
+it. Previously `int("abc")` and `int("0")` were indistinguishable, so bad
+input travelled on looking like a real number.
+
+Two softenings ship with it, both aimed at the case that surfaced this:
+
+- **Strings are trimmed before parsing.** `console.read()` hands back
+  whatever the terminal gave, and a single trailing space was enough to
+  make `int` answer `0`. `query_param` / `header` values pick up stray
+  whitespace the same way. `int(" 42 ")` is now `42`.
+- **`null` propagates instead of becoming `0`.** `int(null)` is `null`, so
+  `int(query_param("page"))` stays usable when the parameter is absent.
+
+Call sites that may receive absent or non-numeric input need a guard. The
+shipped examples already had one (`if (port_env != "")`); the one that did
+not is `int(query_param("count", "10"))` in `examples/csv-export`, which
+now returns a catchable error for `?count=abc` instead of silently
+computing on zero.
+
+### Added
+
+**`console.writeln(v)`** — `console.write` plus a trailing newline. The
+common case, and without it the newline tempts you back to `print`, whose
+output goes to the buffer rather than the terminal.
+
+### Fixed
+
+**The `env` default pattern in the stdlib docs never worked.**
+`int(env("MAX_ITEMS") || "20")` fails with `'or' expects bool, got
+string` — `||` is boolean-only in JWC, and `env()` returns the empty
+string for an unset variable rather than `null`, so neither half of that
+line was right. Replaced with an explicit `!= ""` guard.
+
 ## [0.8.7] — the filesystem and the terminal
 
 ### Added

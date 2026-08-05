@@ -8,7 +8,7 @@ description: "The remaining JWC built-ins: environment variables with defaults, 
 | Built-in | Returns | Notes |
 |---|---|---|
 | `env(key)` | `string?` | process env var, `null` if unset |
-| `int(v)` | `int` | coerces to int: string→int parse (`0` on bad input, never throws); truncates floats; `true`/`false` → `1`/`0` |
+| `int(v)` | `int?` | coerces to int. Strings are **trimmed** then parsed, and an unparseable one **raises** `ValidationError` — it does not answer `0`. Truncates floats; `true`/`false` → `1`/`0`; `null` passes through as `null` |
 | `uuid()` | `string` | new UUID v4 |
 | `now()` | `string` | ISO 8601 UTC, e.g. `2026-05-23T20:34:00Z` |
 | `unix_timestamp()` | `int` | Unix seconds (UTC) |
@@ -35,8 +35,12 @@ which is exactly why mixing them orders differently on the two backends.
 ## Patterns
 
 ```jwc no-compile
-// optional env with default
-let max = int(env("MAX_ITEMS") || "20");
+// optional env with default.
+// `||` is boolean-only in JWC, so compare explicitly — `env()` returns the
+// empty string when the variable is unset, not null.
+let raw = env("MAX_ITEMS");
+let max = 20;
+if (raw != "") { max = int(raw); }
 
 // jwt with absolute exp
 let exp = unix_timestamp() + 24 * 3600;
@@ -46,4 +50,6 @@ let token = jwt_sign(
 );
 ```
 
-(`||` is logical-or; `env(...)` returning `null` falls through to the default string.)
+Two things that trip people up here: `||` takes booleans only, so it cannot
+be used to supply a default value; and `env()` returns the **empty string**
+for an unset variable, never `null`. Guard with `!= ""`.

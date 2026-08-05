@@ -751,6 +751,7 @@ mod tests {
             // the parser flattens `a.b(...)` into one `Expr::Call` name, so
             // `lookup` sees the literal "console.write".
             ("console.write", 1, Some(1)),
+            ("console.writeln", 1, Some(1)),
             ("console.error", 1, Some(1)),
             ("console.read", 0, Some(0)),
             ("file.read", 1, Some(1)),
