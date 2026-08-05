@@ -1445,8 +1445,13 @@ impl<'a> Vm<'a> {
 
     // ── console.* ────────────────────────────────────────────────────────
 
-    /// `console.write(s)` / `console.error(s)` — write to the process's real
-    /// stdout/stderr, right now.
+    /// `console.write(s)` / `console.writeln(s)` / `console.error(s)` —
+    /// write to the process's real stdout/stderr, right now.
+    ///
+    /// `writeln` is `write` plus a trailing newline. It exists because that
+    /// is the common case, and because reaching for `print` to get the
+    /// newline lands you in the buffer instead — which is the whole thing
+    /// this family is here to avoid.
     ///
     /// Deliberately NOT the `print` statement: `print` appends to
     /// `Vm::output`, which `cmd::run` flushes only after `main()` returns and
@@ -1466,16 +1471,20 @@ impl<'a> Vm<'a> {
         args: &[Expr],
         vars: &mut HashMap<String, Value>,
         to_stderr: bool,
+        newline: bool,
     ) -> Result<Value> {
-        let name = if to_stderr {
-            "console.error"
-        } else {
-            "console.write"
+        let name = match (to_stderr, newline) {
+            (true, _) => "console.error",
+            (false, true) => "console.writeln",
+            (false, false) => "console.write",
         };
         if args.len() != 1 {
             bail!("{name}(s) expects exactly 1 arg");
         }
-        let s = self.eval_expr(&args[0], vars).await?.as_string();
+        let mut s = self.eval_expr(&args[0], vars).await?.as_string();
+        if newline {
+            s.push('\n');
+        }
         use std::io::Write;
         let res = if to_stderr {
             let stream = std::io::stderr();

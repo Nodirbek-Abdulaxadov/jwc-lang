@@ -580,6 +580,13 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         native: true,
     },
     BuiltinDef {
+        name: "console.writeln",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
         name: "console.error",
         aliases: &[],
         min_args: 1,

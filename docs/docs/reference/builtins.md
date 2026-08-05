@@ -119,6 +119,7 @@ Columns:
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `console.write` | — | 1 | ✅ |
+| `console.writeln` | — | 1 | ✅ |
 | `console.error` | — | 1 | ✅ |
 | `console.read` | — | 0 | ✅ |
 

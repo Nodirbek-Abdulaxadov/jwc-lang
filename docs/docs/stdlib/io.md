@@ -14,11 +14,44 @@ for the filesystem. All of them work under both `jwc run` and
 | Built-in | Returns | Notes |
 |---|---|---|
 | `console.write(v)` | `null` | writes to stdout **immediately**, no trailing newline |
-| `console.error(v)` | `null` | same, to stderr |
+| `console.writeln(v)` | `null` | same, plus a trailing newline |
+| `console.error(v)` | `null` | same as `write`, to stderr |
 | `console.read()` | `string?` | one line from stdin, trailing newline stripped; `null` at EOF |
 
 Any value works, not just strings — `console.write(42)` is fine, the same
 way `print` takes anything.
+
+Use `console.write` for a prompt you want the cursor to stay on, and
+`console.writeln` for everything else. Reaching for `print` to get the
+newline puts the text in the buffer instead, which is the thing this whole
+family exists to avoid.
+
+## Reading a number
+
+`console.read()` returns the line as written, minus the line terminator —
+it does **not** trim surrounding spaces. `int()` does trim before parsing,
+so the direct form is safe:
+
+```jwc no-compile
+console.write("Yoshingiz: ");
+let age = int(console.read());        // " 42 " parses fine
+```
+
+`int()` raises `ValidationError` on something that isn't a number, rather
+than quietly answering `0`, so a typo surfaces instead of travelling:
+
+```jwc no-compile
+try {
+    let age = int(console.read());
+    console.writeln("keyingi yil: " + (age + 1));
+} catch (e: ValidationError) {
+    console.error("raqam kiriting\n");
+}
+```
+
+At EOF `console.read()` gives `null`, and `int(null)` is `null` — so an
+unattended run does not raise, it just carries the absence forward. Check
+for it if that matters.
 
 ## file
 

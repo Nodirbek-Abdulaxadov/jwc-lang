@@ -194,16 +194,25 @@ fn jwc_print(v: V) {
 /// `Vm::output` and flushes after `main()` returns. See
 /// `docs/docs/stdlib/io.md`.
 fn jwc_b_console_write(v: V) -> V {
-    jwc_console_out(v, false)
+    jwc_console_out(v, false, false)
+}
+
+/// `write` plus a trailing newline — the common case, and the one that
+/// would otherwise tempt you back to `print` and its buffer.
+fn jwc_b_console_writeln(v: V) -> V {
+    jwc_console_out(v, false, true)
 }
 
 fn jwc_b_console_error(v: V) -> V {
-    jwc_console_out(v, true)
+    jwc_console_out(v, true, false)
 }
 
-fn jwc_console_out(v: V, to_stderr: bool) -> V {
+fn jwc_console_out(v: V, to_stderr: bool, newline: bool) -> V {
     use std::io::Write;
-    let s = v.to_string();
+    let mut s = v.to_string();
+    if newline {
+        s.push('\n');
+    }
     let res = if to_stderr {
         let stream = std::io::stderr();
         let mut lock = stream.lock();
@@ -214,10 +223,10 @@ fn jwc_console_out(v: V, to_stderr: bool) -> V {
         lock.write_all(s.as_bytes()).and_then(|()| lock.flush())
     };
     if let Err(e) = res {
-        let op = if to_stderr {
-            "console.error"
-        } else {
-            "console.write"
+        let op = match (to_stderr, newline) {
+            (true, _) => "console.error",
+            (false, true) => "console.writeln",
+            (false, false) => "console.write",
         };
         jwc_io_panic(op, "", e);
     }
@@ -1380,13 +1389,29 @@ fn jwc_b_env(name: V) -> V {
     v_str(std::env::var(n.as_ref()).unwrap_or_default())
 }
 
+/// Mirror of the interpreter's `int(v)` — see the note on the `"int"` arm in
+/// `runner/eval.rs`. Strings are trimmed before parsing (a trailing space
+/// from `console.read()` or a query param used to make this answer 0), an
+/// unparseable string panics rather than answering a plausible-looking 0,
+/// and `null` propagates so `int` stays usable in nullable flows.
+///
+/// The panic message carries "type error" so `jwc_classify_error` files it
+/// as ValidationError, matching the interpreter side.
 fn jwc_b_int(v: V) -> V {
     match v {
         V::Int(_) => v,
         V::Float(n) => V::Int(n as i64),
-        V::Str(s) => V::Int(s.parse::<i64>().unwrap_or(0)),
         V::Bool(b) => V::Int(if b { 1 } else { 0 }),
-        _ => V::Int(0),
+        V::Null => V::Null,
+        V::Str(ref s) => match s.trim().parse::<i64>() {
+            Ok(n) => V::Int(n),
+            Err(_) => panic!(
+                "int({:?}): type error — not an integer. Use a guard if the \
+                 value may be absent or non-numeric.",
+                s.as_ref()
+            ),
+        },
+        other => panic!("int(v): type error — cannot convert {:?} to int", other),
     }
 }
 

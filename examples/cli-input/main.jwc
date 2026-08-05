@@ -22,10 +22,10 @@ function main() {
     let yosh = console.read();
 
     let satr = "ism=" + ism + " yosh=" + yosh;
-    console.write(satr + "\n");
+    console.writeln(satr);
 
     // Append it to a log the caller can inspect afterwards.
     directory.create("out");
     file.append("out/kirish.log", satr + "\n");
-    console.write("yozildi: out/kirish.log (" + file.size("out/kirish.log") + " bayt)\n");
+    console.writeln("yozildi: out/kirish.log (" + file.size("out/kirish.log") + " bayt)");
 }

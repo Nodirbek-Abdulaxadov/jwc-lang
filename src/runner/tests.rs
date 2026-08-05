@@ -119,6 +119,103 @@ async fn directory_delete_refuses_a_non_empty_directory() {
     assert_eq!(out.output, "refused\n");
 }
 
+/// `int()` trims before parsing. A single trailing space used to make it
+/// answer 0, which is how a `console.read()` value silently became zero.
+#[tokio::test]
+async fn int_trims_before_parsing() {
+    let src = r#"
+            function main() {
+                print(int(" 42 "));
+                print(int("\t7\n"));
+                print(int("-3"));
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "42\n7\n-3\n");
+}
+
+/// An unparseable string raises instead of answering 0 — otherwise
+/// `int("abc")` and `int("0")` are indistinguishable and bad input travels
+/// on looking like a real number.
+#[tokio::test]
+async fn int_raises_on_unparseable_string() {
+    for bad in ["abc", "", "4.5", "12x"] {
+        let src = format!(
+            r#"
+            function main() {{
+                print(int("{bad}"));
+            }}
+            "#
+        );
+        let program = parse_program(&src).unwrap();
+        validate_program(&program).unwrap();
+        let err = run_main(&program)
+            .await
+            .expect_err(&format!("int({bad:?}) must raise"));
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("type error"),
+            "int({bad:?}) message should say 'type error', got: {msg}"
+        );
+    }
+}
+
+/// Catchable as ValidationError, so a handler can turn bad input into a
+/// 400 rather than a 500.
+#[tokio::test]
+async fn int_parse_failure_classifies_as_validation_error() {
+    let src = r#"
+            function main() {
+                try {
+                    print(int("abc"));
+                } catch (e: ValidationError) {
+                    print("caught");
+                }
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "caught\n");
+}
+
+/// `null` propagates rather than raising, so `int(query_param("page"))`
+/// stays usable when the parameter is absent.
+#[tokio::test]
+async fn int_propagates_null() {
+    let src = r#"
+            function main() {
+                let v = int(null);
+                print(v == null);
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "true\n");
+}
+
+/// The whole point of the change: a line read from stdin with stray
+/// whitespace parses instead of silently becoming 0.
+#[tokio::test]
+async fn console_writeln_appends_exactly_one_newline() {
+    // `console.*` bypasses `Vm::output`, so assert on the interpreter's
+    // buffer staying empty rather than on the text — the text goes to the
+    // real stdout and is not observable here.
+    let src = r#"
+            function main() {
+                console.writeln("x");
+                console.write("y");
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "", "console.* must not touch the print buffer");
+}
+
 #[tokio::test]
 async fn module_const_is_visible_in_main() {
     let src = r#"
