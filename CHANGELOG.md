@@ -3,7 +3,7 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.7] — the filesystem and the terminal
 
 ### Added
 
@@ -87,7 +87,7 @@ in `docs/spec/threat-model.md` row 6, with the corresponding claim in row
 1 corrected. `directory.delete` is non-recursive specifically to avoid a
 one-call `rm -rf`.
 
-## [0.9.0] — SQL params bound by column type, and a brand that isn't a placeholder
+## [0.8.5] — SQL params bound by column type, and a brand that isn't a placeholder
 
 ### BREAKING
 

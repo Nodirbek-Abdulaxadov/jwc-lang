@@ -3,7 +3,24 @@
 All notable changes to the **JWC Language** VS Code extension are documented
 here. The extension version tracks the JWC compiler version it ships against.
 
-## 0.9.0 — A logo of its own
+## 0.8.7 — Console and filesystem built-ins
+
+Editor support for the sixteen new built-ins the compiler gained in this
+release: `console.write` / `console.error` / `console.read`, the `file.*`
+family (`read`, `write`, `append`, `exists`, `delete`, `copy`, `move`,
+`size`, `lines`) and `directory.*` (`list`, `create`, `exists`, `delete`).
+
+- **Completion** comes for free — the language server reads the
+  compiler's own builtin table, so the new names and their arities appear
+  without an extension-side list to maintain.
+- **Syntax highlighting** did need the list: the grammar carries a
+  hardcoded builtin pattern. The dotted names are placed ahead of the
+  bare ones in the alternation, since a `file` alternative would
+  otherwise win the leftmost match over `file.read`.
+- **Typed catch** now offers the new `IoError` kind and its
+  `.NotFound` / `.PermissionDenied` / `.AlreadyExists` subtypes.
+
+## 0.8.5 — A logo of its own
 
 The extension ships a new icon: a teal hummingbird, replacing the purple
 one. It is the same mark the documentation site now uses for its favicon,
