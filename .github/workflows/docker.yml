@@ -17,7 +17,12 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAMESPACE: nodirbek-abdulaxadov
+  # Resolved from the repo owner at run time by the "Resolve image
+  # namespace" step — see the same note in docs.yml. Hardcoding
+  # `nodirbek-abdulaxadov` broke every push once the repo moved to the
+  # `just-web-code` org: the workflow token may only write packages under
+  # its own owner, so ghcr answered `permission_denied: The requested
+  # installation does not exist`.
 
 jobs:
   build-push:
@@ -36,6 +41,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # ghcr rejects an uppercase path segment, and this repo's previous
+      # owner (`Nodirbek-Abdulaxadov`) was mixed case — so lowercase it
+      # rather than interpolating `github.repository_owner` directly.
+      - name: Resolve image namespace
+        shell: bash
+        run: |
+          owner="${{ github.repository_owner }}"
+          echo "IMAGE_NAMESPACE=${owner,,}" >> "$GITHUB_ENV"
 
       - name: Compute version label
         id: ver

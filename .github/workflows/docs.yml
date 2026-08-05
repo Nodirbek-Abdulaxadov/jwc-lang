@@ -10,7 +10,13 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: nodirbek-abdulaxadov/jwc-docs
+  # Namespace is NOT hardcoded — it is resolved from the repo owner at run
+  # time by the "Resolve image name" step below, which sets IMAGE_NAME.
+  # It used to read `nodirbek-abdulaxadov/jwc-docs`; when the repo moved to
+  # the `just-web-code` org the push failed with `permission_denied: The
+  # requested installation does not exist`, because the workflow token can
+  # only write packages under its own owner.
+  IMAGE_REPO: jwc-docs
   GITOPS_REPO: musanna-soft/k8s-gitops
   GITOPS_FILE: apps/jwc-docs/deployment.yaml
 
@@ -24,6 +30,14 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      # ghcr rejects an uppercase path segment, and this repo's previous
+      # owner (`Nodirbek-Abdulaxadov`) was mixed case — so lowercase it
+      # rather than interpolating `github.repository_owner` directly.
+      - name: Resolve image name
+        run: |
+          owner="${{ github.repository_owner }}"
+          echo "IMAGE_NAME=${owner,,}/${IMAGE_REPO}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -65,11 +79,25 @@ jobs:
       - name: Update image tag
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          IMAGE_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${SHORT_SHA}"
+          IMAGE_TAG="${{ env.REGISTRY }}/${IMAGE_NAME}:main-${SHORT_SHA}"
           FILE="k8s-gitops/${{ env.GITOPS_FILE }}"
 
           echo "Updating $FILE → $IMAGE_TAG"
-          sed -i -E "s|(image:\s*${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:).*|\1main-${SHORT_SHA}|" "$FILE"
+
+          # Match on the image NAME only, not the full registry/namespace
+          # path. The previous pattern pinned the whole old path, so the
+          # first run after an owner change matched nothing, committed
+          # nothing, and exited 0 — a silent no-deploy. This rewrites the
+          # line whatever namespace it currently carries, so the migration
+          # heals itself on the next push.
+          sed -i -E "s|image:[[:space:]]*[^[:space:]]*/${IMAGE_REPO}:[^[:space:]]*|image: ${IMAGE_TAG}|g" "$FILE"
+
+          # A no-op sed is a deploy that silently doesn't happen. Fail loud.
+          if ! grep -qF "image: ${IMAGE_TAG}" "$FILE"; then
+            echo "::error ::sed did not update $FILE — no line matched '/${IMAGE_REPO}:'. Current image lines:"
+            grep -n "image:" "$FILE" || true
+            exit 1
+          fi
 
       - name: Commit and push changes
         run: |
