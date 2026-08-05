@@ -11,8 +11,10 @@ yanked = "deny"
 # .github/workflows/security.yml. cargo-audit scans Cargo.lock whole;
 # cargo-deny walks the reachable graph. An ID for a crate that resolves but
 # isn't reachable belongs only in the audit list — putting it here fails
-# cargo-deny with `advisory-not-detected`. RUSTSEC-2026-0097 (rand 0.9.2)
-# is the current example.
+# cargo-deny with `advisory-not-detected`. Current examples:
+# RUSTSEC-2026-0097 (rand 0.9.2) and RUSTSEC-2026-0235 (rkyv 0.7.46) —
+# both sit in Cargo.lock while `cargo tree -i <crate> --target all` prints
+# nothing, meaning no target or feature combination reaches them.
 ignore = [
     # TODO(security): hickory-proto 0.25.2 advisories — pulled exclusively
     # through reqwest -> hickory-resolver, which is pinned to 0.25.x upstream.
