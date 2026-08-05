@@ -96,13 +96,17 @@ for `gen-sql`).
   needs an enum variant plus parser support plus runner support.
 - `lint.rs` — pure AST walk; only emits warnings (unused functions, unused
   middleware). Never produces hard errors.
-- `runner.rs` — the interpreter `Vm`. Everything user code can do
-  (built-ins, control flow, route dispatch glue, validation, JSON coercion)
-  is implemented here. New built-in function? Add it inside the `match` in
-  `Vm::call_function` / `Vm::call_builtin`. The Vm is now **async**: the
-  recursive evaluator methods carry `#[async_recursion]`, so
-  `eval_expr` / `exec_block` / `call_function` are all `async fn` and must
-  be `.await`-ed.
+- `runner/` — the interpreter `Vm`, split across `mod.rs`, `eval.rs`,
+  `builtins.rs`, `dispatch.rs`, `exec.rs`, `sql.rs`, `types.rs`, `util.rs`,
+  `validation.rs`. Everything user code can do (built-ins, control flow,
+  route dispatch glue, validation, JSON coercion) lives here. There is **no
+  `call_builtin` function**: builtin dispatch is a chain of
+  `if name.eq_ignore_ascii_case(...)` in the `Expr::Call` arm of
+  `Vm::eval_expr` (`eval.rs`), and the bodies are `eval_*_call` methods in
+  `builtins.rs`. The arity/native table is `src/builtins.rs::BUILTIN_DEFS`.
+  The Vm is **async**: the recursive evaluator methods carry
+  `#[async_recursion]`, so `eval_expr` / `exec_block` / `call_function` are
+  all `async fn` and must be `.await`-ed.
 - `engine.rs` — the singleton DB layer (`ENGINE: OnceLock<JwcEngine>`).
   Wraps a `deadpool-postgres` async pool backed by `tokio-postgres` (TLS via
   `tokio-postgres-rustls` when `JWC_DB_TLS` is set), a prepared statement
@@ -115,7 +119,7 @@ for `gen-sql`).
 
 This is the single most important architectural fact:
 
-- `runner.rs` is fully async (`#[async_recursion]` on the recursive
+- `runner/` is fully async (`#[async_recursion]` on the recursive
   evaluator methods). `Vm::eval_expr` is an `async fn`; SQL calls await on
   the `deadpool-postgres` pool.
 - `server.rs` is built on axum + tokio. Every request is a `tokio::spawn`'d
@@ -125,10 +129,19 @@ This is the single most important architectural fact:
 - `async function` / `await` are real now (Phase 9). Suspending across an
   `.await` yields to the scheduler — concurrent requests no longer
   serialise on a worker thread.
-- When adding a new HTTP-facing async builtin, put the impl in
-  `runner.rs::call_builtin`, mark it async, and remember to also add it to
-  the BUILTINS list in `src/native_build.rs` so the native AOT codegen
-  accepts it (otherwise `jwc build --native` will reject the unknown call).
+- When adding a new async builtin (HTTP, filesystem, anything that
+  suspends), put the impl in `runner/builtins.rs`, wire the dispatch arm in
+  `runner/eval.rs`, and add the `BuiltinDef` row in `src/builtins.rs` with
+  `native: true` — that flag **is** the AOT whitelist, via
+  `native_builtin_names()`. There is no separate BUILTINS list in
+  `native_build.rs` any more.
+- **The one that bites:** an async builtin must ALSO be named in the
+  `is_async_builtin` `matches!` in `src/native_build.rs`. That list is not
+  derived from anything. Miss it and codegen emits the call without
+  `.await`, so the *generated* crate fails to compile — and no test in this
+  repo catches it, because neither `conformance.rs` nor `native_parity.rs`
+  builds emitted source. Verify with a real `jwc build --native`, or extend
+  the await-guard in `tests/native_emit.rs`.
 
 ### Migrations
 

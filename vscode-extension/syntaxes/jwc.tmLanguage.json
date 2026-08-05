@@ -492,7 +492,7 @@
         },
         {
           "comment": "Generic stdlib builtins (recognised by name when invoked)",
-          "match": "\\b(dispatch|path_param|query_param|header|setContext|set_context|request_body|setConnectionString|set_connection_string|env|print|serve|now|unix_timestamp|uuid|hash_password|verify_password|jwt_sign|jwt_verify|send_email|http_get|http_post|ws_send|ws_recv|ws_close|cache_get|cache_set|cache_del|cache_clear|register_job_handler|enqueue|job_count|raw_sql|db_query|set_json_field|json_parse|json_stringify|length|len|first|last|lower|upper|trim|contains|starts_with|ends_with|replace|split|push|pop|keys|values)\\s*\\(",
+          "match": "\\b(console\\.write|console\\.error|console\\.read|file\\.read|file\\.write|file\\.append|file\\.exists|file\\.delete|file\\.copy|file\\.move|file\\.size|file\\.lines|directory\\.list|directory\\.create|directory\\.exists|directory\\.delete|dispatch|path_param|query_param|header|setContext|set_context|request_body|setConnectionString|set_connection_string|env|print|serve|now|unix_timestamp|uuid|hash_password|verify_password|jwt_sign|jwt_verify|send_email|http_get|http_post|ws_send|ws_recv|ws_close|cache_get|cache_set|cache_del|cache_clear|register_job_handler|enqueue|job_count|raw_sql|db_query|set_json_field|json_parse|json_stringify|length|len|first|last|lower|upper|trim|contains|starts_with|ends_with|replace|split|push|pop|keys|values)\\s*\\(",
           "captures": {
             "1": { "name": "support.function.builtin.jwc" }
           }

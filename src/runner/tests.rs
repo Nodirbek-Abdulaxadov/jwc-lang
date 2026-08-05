@@ -28,6 +28,97 @@ async fn runs_main_and_prints_output() {
     assert_eq!(out.output, "Hello JWC\n7\n");
 }
 
+/// End-to-end round trip through the real `file.*` / `directory.*`
+/// builtins. Writes under `target/` (gitignored, and `cargo test` runs with
+/// cwd at the manifest root) in a directory unique to this test, because
+/// `cargo test` runs cases in parallel.
+///
+/// Asserts on `print` output rather than `console.write`: `print` lands in
+/// `Vm::output`, which is what `run_main` returns. `console.write` goes to
+/// the process stdout and is invisible here — that difference is the whole
+/// point of having both, and is documented in `docs/docs/stdlib/io.md`.
+#[tokio::test]
+async fn file_and_directory_builtins_round_trip() {
+    let src = r#"
+            function main() {
+                directory.create("target/jwc-io-unit/nested");
+                file.write("target/jwc-io-unit/nested/a.txt", "bir\niki\n");
+                print(file.read("target/jwc-io-unit/nested/a.txt"));
+                file.append("target/jwc-io-unit/nested/a.txt", "uch\n");
+                print(file.size("target/jwc-io-unit/nested/a.txt"));
+                print(length(file.lines("target/jwc-io-unit/nested/a.txt")));
+                file.copy("target/jwc-io-unit/nested/a.txt", "target/jwc-io-unit/nested/b.txt");
+                file.move("target/jwc-io-unit/nested/b.txt", "target/jwc-io-unit/nested/c.txt");
+                print(join(directory.list("target/jwc-io-unit/nested"), ","));
+                print(file.exists("target/jwc-io-unit/nested/a.txt"));
+                print(file.exists("target/jwc-io-unit/nested"));
+                print(directory.exists("target/jwc-io-unit/nested"));
+                file.delete("target/jwc-io-unit/nested/a.txt");
+                file.delete("target/jwc-io-unit/nested/c.txt");
+                directory.delete("target/jwc-io-unit/nested");
+                directory.delete("target/jwc-io-unit");
+                print(directory.exists("target/jwc-io-unit"));
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(
+        out.output,
+        // "bir\niki\n" is 8 bytes, + "uch\n" is 4 → 12.
+        // `file.lines` drops the trailing empty element, so 3 not 4.
+        // `directory.list` is sorted, so a before c.
+        // `file.exists` is false for a directory; `directory.exists` is true.
+        "bir\niki\n\n12\n3\na.txt,c.txt\ntrue\nfalse\ntrue\nfalse\n"
+    );
+}
+
+/// `file.read` on a missing path raises rather than returning null, and the
+/// raised error carries an `io::Error` so a typed catch can name it.
+#[tokio::test]
+async fn file_read_missing_raises_catchable_io_not_found() {
+    let src = r#"
+            function main() {
+                try {
+                    file.read("target/jwc-io-unit-missing/nope.sql");
+                    print("unreachable");
+                } catch (e: IoError.NotFound) {
+                    print("caught");
+                }
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "caught\n");
+}
+
+/// `directory.delete` is not recursive. A non-empty directory must fail
+/// rather than taking the tree with it — paths are unrestricted, so a
+/// recursive variant would make `directory.delete(query_param("d"))` a
+/// one-call `rm -rf`.
+#[tokio::test]
+async fn directory_delete_refuses_a_non_empty_directory() {
+    let src = r#"
+            function main() {
+                directory.create("target/jwc-io-unit-nonempty");
+                file.write("target/jwc-io-unit-nonempty/x.txt", "x");
+                try {
+                    directory.delete("target/jwc-io-unit-nonempty");
+                    print("deleted");
+                } catch (e) {
+                    print("refused");
+                }
+                file.delete("target/jwc-io-unit-nonempty/x.txt");
+                directory.delete("target/jwc-io-unit-nonempty");
+            }
+        "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap();
+    assert_eq!(out.output, "refused\n");
+}
+
 #[tokio::test]
 async fn module_const_is_visible_in_main() {
     let src = r#"
@@ -1701,6 +1792,58 @@ fn catch_type_matches_parent_catches_child() {
     ));
     // Parent also matches its own bare kind.
     assert!(catch_type_matches(Some("DbError"), "DbError"));
+    assert!(catch_type_matches(Some("IoError"), "IoError.NotFound"));
+    assert!(catch_type_matches(
+        Some("IoError"),
+        "IoError.PermissionDenied"
+    ));
+}
+
+/// `std::io::Error` is constructible from outside the crate (unlike
+/// `tokio_postgres::Error`), so these drive `classify_jwc_error`'s typed
+/// Pass-1 downcast directly rather than through a live failure.
+#[test]
+fn classify_jwc_error_maps_io_not_found() {
+    let io = std::io::Error::from(std::io::ErrorKind::NotFound);
+    let e = anyhow::Error::new(io).context("file.read(/nope) failed");
+    assert_eq!(classify_jwc_error(&e), "IoError.NotFound");
+}
+
+#[test]
+fn classify_jwc_error_maps_io_permission_denied() {
+    let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    let e = anyhow::Error::new(io).context("file.write(/etc/passwd) failed");
+    assert_eq!(classify_jwc_error(&e), "IoError.PermissionDenied");
+}
+
+/// The whole reason the `IoError` branch is a typed downcast rather than a
+/// substring match. Pass 2 reads `sql` as DbError, `url` / `http` as
+/// HttpError — and the file builtins put the path in the message, so a
+/// perfectly ordinary backup path would otherwise be misfiled.
+#[test]
+fn classify_jwc_error_io_beats_the_substring_scan_on_the_path() {
+    for path in [
+        "/var/backups/app.sql",
+        "/srv/url-shortener/config.txt",
+        "/opt/http-cache/index",
+    ] {
+        let io = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let e = anyhow::Error::new(io).context(format!("file.read({path}) failed"));
+        assert_eq!(
+            classify_jwc_error(&e),
+            "IoError.NotFound",
+            "path {path} was misclassified by the substring scan"
+        );
+    }
+}
+
+/// An io kind we don't have a subtype for stays on the bare parent rather
+/// than inventing one that would silently mismatch `catch (e: IoError.X)`.
+#[test]
+fn classify_jwc_error_unknown_io_kind_stays_on_the_parent() {
+    let io = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+    let e = anyhow::Error::new(io).context("file.write(/x) failed");
+    assert_eq!(classify_jwc_error(&e), "IoError");
 }
 
 #[test]

@@ -90,6 +90,10 @@ pub(crate) const JWC_ERROR_KINDS: &[&str] = &[
     "JwtError",
     "JwtError.InvalidSignature",
     "JwtError.Expired",
+    "IoError",
+    "IoError.NotFound",         // std::io::ErrorKind::NotFound
+    "IoError.PermissionDenied", // ErrorKind::PermissionDenied
+    "IoError.AlreadyExists",    // ErrorKind::AlreadyExists
 ];
 
 /// Classify an `anyhow::Error` into the most specific well-known JWC error
@@ -121,6 +125,20 @@ pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
         }
         if let Some(http) = cause.downcast_ref::<reqwest::Error>() {
             return classify_reqwest_error(http);
+        }
+        // Last in the loop body on purpose. `tokio_postgres::Error` and
+        // `reqwest::Error` both carry an `io::Error` source, and they appear
+        // EARLIER in the chain than that source — so the two arms above
+        // already win for those. Ordering this one last makes that a
+        // property of the code rather than of chain-walk luck.
+        //
+        // This must be a typed downcast, never a substring match: the file
+        // builtins put the path in the message, and Pass 2 below reads
+        // `sql` as DbError and `url` / `http` as HttpError. Without this
+        // arm, `file.read("/var/backups/app.sql")` failing would classify
+        // as `DbError`.
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return classify_io_error(io);
         }
     }
 
@@ -233,6 +251,21 @@ fn classify_reqwest_error(http: &reqwest::Error) -> &'static str {
         };
     }
     "HttpError"
+}
+
+/// Map a `std::io::Error` onto the most specific `IoError.*` subtype.
+///
+/// Deliberately narrow: only the three kinds a JWC program can act on
+/// differently. Everything else stays on the bare parent rather than
+/// getting a subtype that would silently mismatch a `catch (e: IoError.X)`.
+fn classify_io_error(e: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => "IoError.NotFound",
+        ErrorKind::PermissionDenied => "IoError.PermissionDenied",
+        ErrorKind::AlreadyExists => "IoError.AlreadyExists",
+        _ => "IoError",
+    }
 }
 
 /// Returns true when an error of `kind` should be caught by a `catch (e: T)`

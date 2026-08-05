@@ -339,3 +339,107 @@ fn select_lines(body: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// Guard on the `is_async_builtin` list in `native_build.rs`.
+///
+/// Every `file.*` / `directory.*` / `console.read` builtin is an `async fn`
+/// in the prelude, so codegen must emit `.await` on the call. Missing an
+/// entry in that `matches!` produces a `Future`-vs-`V` type error inside
+/// the *generated* crate, which only surfaces on a real `jwc build
+/// --native` — neither the conformance suite nor `native_parity` compiles
+/// emitted source. This test is the cheap version of that check.
+///
+/// `console.write` / `console.error` are deliberately synchronous, so they
+/// must NOT get `.await`; that direction is asserted too, because adding
+/// them to the async list would break the build just as thoroughly.
+#[test]
+fn emit_rust_source_awaits_async_io_builtins() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let src = r#"
+        function main() {
+            console.write("a");
+            console.error("b");
+            let line = console.read();
+            directory.create("d");
+            let t = file.read("d/x.txt");
+            file.write("d/x.txt", "y");
+            file.append("d/x.txt", "z");
+            let ex = file.exists("d/x.txt");
+            let sz = file.size("d/x.txt");
+            let ls = file.lines("d/x.txt");
+            file.copy("d/x.txt", "d/y.txt");
+            file.move("d/y.txt", "d/z.txt");
+            file.delete("d/z.txt");
+            let names = directory.list("d");
+            let de = directory.exists("d");
+            directory.delete("d");
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, root, "iotest", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    for name in [
+        "jwc_b_console_read",
+        "jwc_b_file_read",
+        "jwc_b_file_write",
+        "jwc_b_file_append",
+        "jwc_b_file_exists",
+        "jwc_b_file_delete",
+        "jwc_b_file_copy",
+        "jwc_b_file_move",
+        "jwc_b_file_size",
+        "jwc_b_file_lines",
+        "jwc_b_directory_list",
+        "jwc_b_directory_create",
+        "jwc_b_directory_exists",
+        "jwc_b_directory_delete",
+    ] {
+        // The call site inside `user_main`, not the `async fn` definition
+        // the prelude contributes — hence the `(` and the `.await` check on
+        // the same emitted line.
+        let called = body
+            .lines()
+            .filter(|l| l.contains(&format!("{name}(")) && !l.contains(&format!("fn {name}")))
+            .collect::<Vec<_>>();
+        assert!(!called.is_empty(), "{name} was never called in the output");
+        for line in called {
+            assert!(
+                line.contains(".await"),
+                "{name} emitted without `.await` — add it to `is_async_builtin` \
+                 in native_build.rs. Line: {line}"
+            );
+        }
+    }
+
+    // Sync direction, checked on a separate program so each console call is
+    // the only thing on its emitted line. In the program above the
+    // arguments are literals, but a nested async call would put an unrelated
+    // `.await` on the same line and make the assertion meaningless.
+    let tmp2 = tempfile::tempdir().expect("tempdir");
+    let sync_src = r#"
+        function main() {
+            console.write("a");
+            console.error("b");
+        }
+    "#;
+    let program2 = parse(sync_src);
+    let out2 = emit_rust_source(&program2, tmp2.path(), "synctest", false).expect("emit");
+    let body2 = fs::read_to_string(&out2).expect("read generated");
+
+    for name in ["jwc_b_console_write", "jwc_b_console_error"] {
+        let called = body2
+            .lines()
+            .filter(|l| l.contains(&format!("{name}(")) && !l.contains(&format!("fn {name}")))
+            .collect::<Vec<_>>();
+        assert!(!called.is_empty(), "{name} was never called in the output");
+        for line in called {
+            assert!(
+                !line.contains(".await"),
+                "{name} must not be awaited — it is synchronous, and adding it \
+                 to `is_async_builtin` breaks the generated crate. Line: {line}"
+            );
+        }
+    }
+}

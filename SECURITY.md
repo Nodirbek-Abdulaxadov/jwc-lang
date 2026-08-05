@@ -75,6 +75,14 @@ with write access to the project directory.
 - The `raw_sql(...)` builtin takes parameterised positional binds —
   string concatenation into the SQL is a footgun; prefer the typed
   `select` / `insert` / `update set` forms whenever possible.
+- The `file.*` / `directory.*` builtins pass their path argument to the
+  OS unchanged — there is no jail, allowlist or root setting. Building
+  a path out of request data is a local-file-include or an arbitrary
+  write; `file.read(query_param("path"))` will serve `/etc/passwd`.
+  Route `{param}` capture screens `.` / `..` / slashes, but
+  `query_param`, `header` and `body` do not. Validate before the value
+  reaches a path, and run the process as a dedicated user with only the
+  directories it needs. See `docs/spec/threat-model.md` row 6.
 - The HTTP `/metrics`, `/healthz`, `/readyz` endpoints are exposed by
   default. If your service is internet-facing without an ingress
   filter, register your own handlers for those paths (the built-ins

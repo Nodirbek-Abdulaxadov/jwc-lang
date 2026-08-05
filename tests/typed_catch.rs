@@ -20,6 +20,7 @@ const KNOWN_KINDS: &[&str] = &[
     "HttpError",
     "ValidationError",
     "TimeoutError",
+    "IoError",
 ];
 
 #[test]
@@ -44,6 +45,27 @@ fn every_known_kind_validates() {
         );
         validate_source(&src)
             .unwrap_or_else(|err| panic!("known kind `{kind}` should validate, got error: {err}"));
+    }
+}
+
+/// The dotted `IoError.*` subtypes must reach the validator's dotted-root
+/// acceptance path, the same as `DbError.*` / `HttpError.*` do.
+#[test]
+fn io_error_subtypes_validate() {
+    for kind in [
+        "IoError.NotFound",
+        "IoError.PermissionDenied",
+        "IoError.AlreadyExists",
+    ] {
+        let src = format!(
+            r#"
+            function main() {{
+                try {{ print(file.read("x.txt")); }} catch (e: {kind}) {{ print(e); }}
+            }}
+            "#
+        );
+        validate_source(&src)
+            .unwrap_or_else(|err| panic!("`{kind}` should validate, got error: {err}"));
     }
 }
 

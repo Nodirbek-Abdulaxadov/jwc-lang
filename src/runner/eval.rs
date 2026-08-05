@@ -586,6 +586,101 @@ impl<'a> Vm<'a> {
                     return self.eval_hmac_sha256_call(args, vars).await;
                 }
 
+                // ── console.* / file.* / directory.* ────────────────────
+                //
+                // Each guards on `!self.functions.contains_key(...)` — the
+                // same shape as `substring` / `take` above. Two reasons:
+                //
+                //   1. `console` / `file` / `directory` are ordinary names a
+                //      pre-existing program may already have declared as a
+                //      `dome`; stealing them silently breaks it.
+                //   2. Native codegen already prefers a same-named user
+                //      function (`native_build.rs` checks `ctx.funcs` before
+                //      `builtin_fn_name`), while this chain prefers the
+                //      builtin. Without the guard the two backends would
+                //      call *different* functions for the same source —
+                //      silently, and in opposite directions.
+                if name.eq_ignore_ascii_case("console.write")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_console_write_call(args, vars, false).await;
+                }
+                if name.eq_ignore_ascii_case("console.error")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_console_write_call(args, vars, true).await;
+                }
+                if name.eq_ignore_ascii_case("console.read")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_console_read_call(args).await;
+                }
+                if name.eq_ignore_ascii_case("file.read")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_read_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("file.write")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_write_call(args, vars, false).await;
+                }
+                if name.eq_ignore_ascii_case("file.append")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_write_call(args, vars, true).await;
+                }
+                if name.eq_ignore_ascii_case("file.exists")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_fs_exists_call(args, vars, false).await;
+                }
+                if name.eq_ignore_ascii_case("file.delete")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_delete_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("file.copy")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_copy_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("file.move")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_move_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("file.size")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_size_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("file.lines")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_file_lines_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("directory.list")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_directory_list_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("directory.create")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_directory_create_call(args, vars).await;
+                }
+                if name.eq_ignore_ascii_case("directory.exists")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_fs_exists_call(args, vars, true).await;
+                }
+                if name.eq_ignore_ascii_case("directory.delete")
+                    && !self.functions.contains_key(&name.to_lowercase())
+                {
+                    return self.eval_directory_delete_call(args, vars).await;
+                }
+
                 if name.eq_ignore_ascii_case("now") {
                     if !args.is_empty() {
                         bail!("now() expects no args");

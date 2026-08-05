@@ -220,10 +220,13 @@ const REGISTERED_CASES: &[&str] = &[
     "case_arrays",
     "case_bool_short_circuit",
     "case_catch_falls_through_when_type_mismatches",
+    "case_console_write_bypasses_print_buffer",
     "case_const",
     "case_equality",
-    "case_format_float",
+    "case_file_copy_move",
+    "case_file_io_round_trip",
     "case_for_loop",
+    "case_format_float",
     "case_functions",
     "case_hash",
     "case_if_else",
@@ -244,6 +247,7 @@ const REGISTERED_CASES: &[&str] = &[
     "case_substring",
     "case_try_catch",
     "case_typed_catch_db_error",
+    "case_typed_catch_io_error",
     "case_typed_catch_specific_subtype",
     "case_typed_catch_super_kind",
     "case_unary_not",
@@ -296,9 +300,12 @@ mod cases {
     conformance_test!(case_arrays);
     conformance_test!(case_bool_short_circuit);
     conformance_test!(case_catch_falls_through_when_type_mismatches);
+    conformance_test!(case_console_write_bypasses_print_buffer);
     conformance_test!(case_const);
     conformance_test!(case_equality);
     conformance_test!(case_format_float);
+    conformance_test!(case_file_copy_move);
+    conformance_test!(case_file_io_round_trip);
     conformance_test!(case_for_loop);
     conformance_test!(case_functions);
     conformance_test!(case_hash);
@@ -320,6 +327,7 @@ mod cases {
     conformance_test!(case_substring);
     conformance_test!(case_try_catch);
     conformance_test!(case_typed_catch_db_error);
+    conformance_test!(case_typed_catch_io_error);
     conformance_test!(case_typed_catch_specific_subtype);
     conformance_test!(case_typed_catch_super_kind);
     conformance_test!(case_unary_not);

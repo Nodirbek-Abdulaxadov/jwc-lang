@@ -1,0 +1,26 @@
+// Conformance: file.* / directory.* round trip.
+//
+// Writes under `target/` — gitignored, and the conformance harness runs
+// with cwd at CARGO_MANIFEST_DIR. The directory name is unique to this
+// case because `cargo test` runs cases in parallel, and `directory.list`
+// below would otherwise see another case's files.
+//
+// `file.lines` drops the trailing empty element, so a file ending in "\n"
+// reports the number of real lines. `directory.list` is sorted by
+// contract, which is what makes the listing below reproducible.
+function main() {
+    directory.create("target/jwc-conf-io-round/sub");
+    file.write("target/jwc-conf-io-round/sub/a.txt", "bir\niki\n");
+    print(file.read("target/jwc-conf-io-round/sub/a.txt"));
+    file.append("target/jwc-conf-io-round/sub/a.txt", "uch\n");
+    print(file.size("target/jwc-conf-io-round/sub/a.txt"));
+    print(length(file.lines("target/jwc-conf-io-round/sub/a.txt")));
+    print(file.exists("target/jwc-conf-io-round/sub/a.txt"));
+    print(file.exists("target/jwc-conf-io-round/sub"));
+    print(directory.exists("target/jwc-conf-io-round/sub"));
+    print(join(directory.list("target/jwc-conf-io-round/sub"), ","));
+    file.delete("target/jwc-conf-io-round/sub/a.txt");
+    directory.delete("target/jwc-conf-io-round/sub");
+    directory.delete("target/jwc-conf-io-round");
+    print(directory.exists("target/jwc-conf-io-round"));
+}

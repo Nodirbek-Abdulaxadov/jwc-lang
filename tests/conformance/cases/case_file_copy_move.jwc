@@ -1,0 +1,19 @@
+// Conformance: file.copy leaves the source, file.move removes it.
+//
+// `file.move` falls back to copy+unlink when `rename` reports a
+// cross-device or already-exists failure, so the observable contract is the
+// same on every platform: source gone, destination present, destination
+// overwritten if it existed.
+function main() {
+    directory.create("target/jwc-conf-io-cm");
+    file.write("target/jwc-conf-io-cm/a.txt", "asl");
+    file.copy("target/jwc-conf-io-cm/a.txt", "target/jwc-conf-io-cm/b.txt");
+    print(file.exists("target/jwc-conf-io-cm/a.txt"));
+    print(file.exists("target/jwc-conf-io-cm/b.txt"));
+    file.move("target/jwc-conf-io-cm/b.txt", "target/jwc-conf-io-cm/c.txt");
+    print(file.exists("target/jwc-conf-io-cm/b.txt"));
+    print(file.read("target/jwc-conf-io-cm/c.txt"));
+    file.delete("target/jwc-conf-io-cm/a.txt");
+    file.delete("target/jwc-conf-io-cm/c.txt");
+    directory.delete("target/jwc-conf-io-cm");
+}

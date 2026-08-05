@@ -1,0 +1,10 @@
+bir
+iki
+
+12
+3
+true
+false
+true
+a.txt
+false

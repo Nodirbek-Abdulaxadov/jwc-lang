@@ -314,6 +314,153 @@ new types.
 
 ---
 
+## Console I/O
+
+Immediate, unbuffered access to the process's own streams. Distinct from
+the `print` statement, which appends to an internal buffer that the
+interpreter flushes only after `main()` returns — and which a fall-through
+route body returns as the HTTP response. `console.*` never participates in
+the response, which is what makes it safe to call from a handler. Mixing
+the two reorders output differently on each backend; see
+`docs/spec/aot-scope.md` § Known interpreter / native divergences.
+
+### `console.write`, `console.error`
+
+```
+Signature: console.write(v: any) -> null
+           console.error(v: any) -> null
+Errors:    IoError.* if the stream cannot be written (closed pipe, ENOSPC)
+Notes:     no trailing newline is appended — pass one if you want it.
+           Accepts any value, stringified the same way `print` does.
+           Flushed explicitly, because Rust's stdout is line-buffered and
+           a payload without a newline would otherwise sit in the buffer.
+Tests:     case_console_write_bypasses_print_buffer
+```
+
+### `console.read`
+
+```
+Signature: console.read() -> string?
+Errors:    IoError if stdin cannot be read (e.g. non-UTF-8 bytes)
+Notes:     one line, trailing `\n` or `\r\n` stripped. Returns null at EOF
+           — NOT "", which is a legitimate empty line, and conflating the
+           two makes a read loop non-terminable.
+           Reads through the process-global stdin handle, so consecutive
+           calls do not lose buffered read-ahead.
+           Inside an HTTP route this is a mistake: stdin is not request
+           input, and on a terminal-launched server it blocks the request
+           (and every other request that calls it) until a human types.
+Tests:     examples/cli-input (parsed by tests/examples_parse.rs)
+```
+
+## File I/O
+
+**Paths are passed to the OS unchanged** — no jail, no allowlist, no root
+setting. Building a path from request data is a local-file-include or an
+arbitrary write. Recorded as an accepted risk in
+[`threat-model.md`](threat-model.md) row 6.
+
+The general rule for absent paths: **operations raise; the dedicated
+`exists` probes answer the question instead.** `file.read` on a missing
+file raises rather than returning null, because a null return would
+flatten "missing" / "permission denied" / "is a directory" / "not UTF-8"
+into one indistinguishable value. `directory.create` is the single
+deliberate exception — it is idempotent (see below).
+
+All file and directory operations are `tokio::fs`-backed, so they yield
+rather than parking a runtime worker when the underlying mount is slow.
+
+### `file.read`, `file.write`, `file.append`
+
+```
+Signature: file.read(path: string) -> string
+           file.write(path: string, content: any) -> null
+           file.append(path: string, content: any) -> null
+Errors:    IoError.NotFound        — read/append target's parent missing
+           IoError.PermissionDenied
+           IoError                 — is-a-directory, invalid UTF-8, ENOSPC
+Notes:     `read` is whole-file and UTF-8 only; there is no binary form.
+           `write` creates or truncates. `append` creates if absent.
+           `content` accepts any value and is stringified.
+Tests:     case_file_io_round_trip, case_typed_catch_io_error
+```
+
+### `file.exists`, `directory.exists`
+
+```
+Signature: file.exists(path: string) -> bool
+           directory.exists(path: string) -> bool
+Errors:    none — never raises
+Notes:     complements: `file.exists` is true only for a regular file,
+           `directory.exists` only for a directory, so exactly one holds
+           for any extant path. A permission error on the parent yields
+           false, so false means "not visible to this process as that
+           thing", not strictly "does not exist".
+Tests:     case_file_io_round_trip
+```
+
+### `file.delete`, `file.copy`, `file.move`
+
+```
+Signature: file.delete(path: string) -> null
+           file.copy(src: string, dst: string) -> null
+           file.move(src: string, dst: string) -> null
+Errors:    IoError.NotFound, IoError.PermissionDenied, IoError
+Notes:     `delete` raises on a missing file. Idempotent delete is
+           `if (file.exists(p)) { file.delete(p); }`.
+           `copy` and `move` both overwrite an existing destination.
+           `move` is `rename` with a gated copy+unlink fallback, so it
+           works across filesystems (EXDEV) and on Windows where rename
+           fails when the destination exists. The fallback does not fire
+           for NotFound / PermissionDenied on the source, so a genuine
+           source problem is not reported as a confusing copy error.
+Tests:     case_file_copy_move
+```
+
+### `file.size`, `file.lines`
+
+```
+Signature: file.size(path: string) -> int
+           file.lines(path: string) -> array
+Errors:    IoError.NotFound, IoError.PermissionDenied, IoError
+Notes:     `size` is bytes, not characters.
+           `lines` splits on `\n` and `\r\n`. A trailing newline does NOT
+           produce a final empty element — a well-formed text file ends
+           with one, and surfacing it would make every `for` over the
+           result off by one.
+Tests:     case_file_io_round_trip
+```
+
+### `directory.list`, `directory.create`, `directory.delete`
+
+```
+Signature: directory.list(path: string) -> array
+           directory.create(path: string) -> null
+           directory.delete(path: string) -> null
+Errors:    IoError.NotFound, IoError.PermissionDenied, IoError
+Notes:     `list` returns entry NAMES, not full paths, and is sorted
+           lexicographically. The sort is part of the contract, not an
+           implementation detail: readdir order is filesystem-dependent,
+           so without it any golden test is flaky and any generated
+           listing is non-reproducible. No `.` / `..`, no recursion.
+           Non-UTF-8 names come through lossily (U+FFFD) rather than
+           being skipped, and will not round-trip back into `file.read`.
+
+           `create` is recursive AND idempotent (`create_dir_all`) —
+           the one exception to the raise-on-absent rule above, because
+           plain `create_dir` fails both when the parent is missing and
+           when the target already exists.
+
+           `delete` is deliberately NOT recursive (`remove_dir`), so a
+           non-empty directory raises. Paths are unrestricted, and a
+           recursive variant would make `directory.delete(query_param("d"))`
+           a one-call `rm -rf`. Creating too much is recoverable;
+           deleting too much is not.
+Tests:     case_file_io_round_trip
+```
+
+---
+
 ## Removal / deprecation registry
 
 None yet. Deprecations will be recorded here AND in `CHANGELOG.md` per

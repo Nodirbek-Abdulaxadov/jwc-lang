@@ -58,6 +58,10 @@ const JWC_ERROR_KINDS: &[&str] = &[
     "JwtError",
     "JwtError.InvalidSignature",
     "JwtError.Expired",
+    "IoError",
+    "IoError.NotFound",
+    "IoError.PermissionDenied",
+    "IoError.AlreadyExists",
 ];
 
 /// One declaration site captured during indexing. Cross-file resolution maps

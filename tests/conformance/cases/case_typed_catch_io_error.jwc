@@ -1,0 +1,19 @@
+// Conformance: file.read on a missing path raises a catchable
+// IoError.NotFound.
+//
+// The path deliberately ends in `.sql`. `classify_jwc_error` has a
+// substring fallback that reads "sql" as DbError, so this case pins that
+// the IoError classification comes from the typed `std::io::Error`
+// downcast and not from the message text.
+//
+// Uses the exact dotted kind rather than the bare parent: the parent path
+// depends on `jwc_catch_type_matches`, and the conformance harness only
+// emits native source without compiling it, so an exact-kind case is what
+// both backends actually agree on here.
+function main() {
+    try {
+        print(file.read("target/jwc-conf-io-missing/backup.sql"));
+    } catch (e: IoError.NotFound) {
+        print("caught IoError.NotFound");
+    }
+}

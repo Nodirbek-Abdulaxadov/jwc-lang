@@ -3,7 +3,91 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.9.0] — SQL params bound by column type, and a brand that isn't a placeholder
+## [0.8.7] — the filesystem and the terminal
+
+### Added
+
+**Console and filesystem built-ins.** Sixteen new functions under three
+namespaces, working on both backends:
+
+- `console.write(v)` / `console.error(v)` — write to stdout / stderr
+  immediately, no trailing newline. `console.read()` — one line from
+  stdin, `null` at EOF.
+- `file.read`, `file.write`, `file.append`, `file.exists`, `file.delete`,
+  `file.copy`, `file.move`, `file.size`, `file.lines`.
+- `directory.list`, `directory.create`, `directory.exists`,
+  `directory.delete`.
+
+These are the first builtins with dotted names. That works because the
+parser already flattens `a.b(...)` into a single call name for `dome`
+namespaces; codegen maps the dot to an underscore
+(`console.write` → `jwc_b_console_write`). Each one defers to a
+same-named user function, so a project that already declares
+`dome file { ... }` keeps its own.
+
+The file and directory operations are `tokio::fs`-backed rather than
+`std::fs`, because they are reachable from a route handler and a slow
+mount must not park a runtime worker.
+
+`console.write` is not a second spelling of `print`. `print` appends to a
+buffer the interpreter flushes after `main()` returns, and a fall-through
+route body returns that buffer as the HTTP response; `console.write` goes
+straight to the process stdout and never becomes the response. That makes
+it the correct way to log from a handler — and means mixing the two
+reorders output differently under `jwc run` than in a native binary.
+Documented in `docs/docs/stdlib/io.md` and
+`docs/spec/aot-scope.md` § Known interpreter / native divergences.
+
+**`IoError` error kind, with `.NotFound`, `.PermissionDenied` and
+`.AlreadyExists` subtypes.** Classification comes from a typed
+`std::io::Error` downcast, never from the message text — the fallback
+substring scan reads `sql` as `DbError` and `url` / `http` as `HttpError`,
+so `file.read("/var/backups/app.sql")` failing would otherwise be
+reported as a database error.
+
+**Lint `W007`** — `console.read()` in a route or middleware body. stdin is
+not request input; the fix is `body()` / `query_param()` / `header()`. The
+same call in `main()` is the intended CLI use and does not warn.
+
+### Fixed
+
+**Native `catch (e: Parent)` now matches dotted subtypes.**
+`jwc_catch_type_matches` in the AOT prelude compared the catch type to the
+error kind with `==`, so `catch (e: DbError)` silently missed every
+`DbError.*` in a native binary while catching them fine under `jwc run`.
+Existing native builds that catch `DbError` / `HttpError` / `JwtError`
+now catch strictly more than before.
+
+**`serve` and `random_int` were missing from the generated builtins
+reference.** Neither matched any group predicate in the doc generator, and
+a def matching no predicate is dropped silently — the sync test still
+passes because generator and checked-in file agree on the omission.
+
+**The builtin-shadowing lint reported the wrong code.** It emitted `W006`,
+which is registered as "unreachable statement after top-level `return`", so
+`jwc lint --explain` printed an unrelated description and the registered
+`W005` was never emitted by anything. Its message also asserted that calls
+resolve to the user function, which is true only for `substring` / `take`
+and the new `console.*` / `file.*` / `directory.*` families — every other
+builtin wins over a same-named user function.
+
+**The documented regenerate command didn't work.** `gen_builtins_doc.rs`
+printed `cargo run --bin gen-builtins-doc` (hyphens) in its module docs
+and into the generated markdown itself; there is no `[[bin]]` entry, so
+cargo resolves the target by filename and only the underscore form runs.
+The same file also claimed CI verifies the doc, which it does not —
+`builtins_doc_sync` is not in the workflow's test list.
+
+### Security
+
+The `file.*` / `directory.*` builtins pass paths to the OS unchanged —
+no jail, no allowlist, no root setting. A path built from request data is
+a local-file-include or an arbitrary write. Recorded as an accepted risk
+in `docs/spec/threat-model.md` row 6, with the corresponding claim in row
+1 corrected. `directory.delete` is non-recursive specifically to avoid a
+one-call `rm -rf`.
+
+## [0.8.5] — SQL params bound by column type, and a brand that isn't a placeholder
 
 ### BREAKING
 

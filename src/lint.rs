@@ -252,21 +252,59 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
         }
     }
 
-    // W005 — user function shadows a built-in name. Calls resolve to the
-    // user function (interpreter looks user-defs first) so the built-in
-    // becomes silently unreachable; readers expecting `json(...)` /
-    // `length(...)` / etc. behaviour get a confusing surprise.
+    // W005 — user function shadows a built-in name. Which one actually wins
+    // depends on the built-in: most are matched before user functions in
+    // `eval_expr`'s call chain, so the USER function is what becomes
+    // unreachable. `substring` / `take` and the `console.*` / `file.*` /
+    // `directory.*` families check for a same-named user function first and
+    // defer to it. Either way one of the two is silently shadowed, which is
+    // what the warning is for.
+    //
+    // This used to emit "W006", which is registered as "unreachable
+    // statement after top-level `return`" — so `jwc lint --explain` printed
+    // the wrong description and W005 was never emitted at all.
     for function in &program.functions {
         if crate::builtins::is_builtin(&function.name)
             || crate::builtins::SPECIAL_BUILTINS.contains(&function.name.as_str())
         {
             warnings.push(LintWarning {
-                code: "W006",
+                code: "W005",
                 message: format!(
-                    "function '{}' shadows a built-in — calls resolve to the user-defined version, hiding the built-in",
+                    "function '{}' shadows a built-in of the same name — one of the two is unreachable",
                     function.name
                 ),
                 file_idx: Some(function.file_idx),
+            });
+        }
+    }
+
+    // W007 — `console.read()` inside a route or middleware body. stdin is
+    // not request input: use `body()` / `query_param()` / `header()`. Under
+    // a container or systemd stdin is usually closed and the call returns
+    // null, but on a terminal-launched server it blocks that request until
+    // somebody types — and because stdin is a process-wide lock, it blocks
+    // every other request that calls it too.
+    for route in &program.routes {
+        if block_calls_console_read(&route.body) {
+            warnings.push(LintWarning {
+                code: "W007",
+                message: format!(
+                    "route '{}' calls console.read() — stdin is not request input; use body(), query_param() or header()",
+                    route.path
+                ),
+                file_idx: Some(route.file_idx),
+            });
+        }
+    }
+    for mw in &program.middlewares {
+        if block_calls_console_read(&mw.body) {
+            warnings.push(LintWarning {
+                code: "W007",
+                message: format!(
+                    "middleware '{}' calls console.read() — stdin is not request input; use body(), query_param() or header()",
+                    mw.name
+                ),
+                file_idx: Some(mw.file_idx),
             });
         }
     }
@@ -364,6 +402,15 @@ fn collect_select_sites_expr(expr: &Expr, out: &mut Vec<(String, bool, Option<Wh
         }
         _ => {}
     }
+}
+
+/// True when `console.read()` appears anywhere in `stmts`. Reuses the
+/// existing call walker rather than adding a second traversal — names come
+/// back lowercased, and the parser flattens the dotted call into one string.
+fn block_calls_console_read(stmts: &[Stmt]) -> bool {
+    let mut calls = HashSet::new();
+    collect_calls(stmts, &mut calls);
+    calls.contains("console.read")
 }
 
 fn collect_calls(stmts: &[Stmt], out: &mut HashSet<String>) {
@@ -547,7 +594,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.code == "W006" && w.message.contains("json")),
+                .any(|w| w.code == "W005" && w.message.contains("json")),
             "expected W005 for shadowed built-in 'json', got: {warnings:?}"
         );
     }
@@ -686,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_after_return_is_w005() {
+    fn unreachable_after_return_is_w006() {
         let src = r#"
             function early() {
                 return 1;
@@ -701,7 +748,46 @@ mod tests {
             warnings
                 .iter()
                 .any(|w| w.code == "W006" && w.message.contains("early")),
-            "expected W005 for unreachable code, got: {warnings:?}"
+            "expected W006 for unreachable code, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn console_read_in_a_route_is_w007() {
+        let src = r#"
+            route GET "api/x" {
+                let s = console.read();
+                return json(s);
+            }
+            function main() { serve(8080); }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code == "W007" && w.message.contains("api/x")),
+            "expected W007 for console.read() in a route, got: {warnings:?}"
+        );
+    }
+
+    /// The same call in `main()` is the intended use — a CLI-shaped program
+    /// that never calls `serve()`. It must not warn.
+    #[test]
+    fn console_read_in_main_does_not_trigger_w007() {
+        let src = r#"
+            function main() {
+                let s = console.read();
+                print(s);
+            }
+        "#;
+        let program = parse_program(src).unwrap();
+        validate_program(&program).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            !warnings.iter().any(|w| w.code == "W007"),
+            "console.read() in main must not warn, got: {warnings:?}"
         );
     }
 

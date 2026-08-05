@@ -1,26 +1,32 @@
 //! Generate `docs/docs/reference/builtins.md` from `jwc::builtins::BUILTIN_DEFS`.
 //!
 //! Run:
-//!     cargo run --bin gen-builtins-doc > docs/docs/reference/builtins.md
+//!     cargo run --bin gen_builtins_doc > docs/docs/reference/builtins.md
 //!
 //! Or as part of CI:
-//!     cargo run --bin gen-builtins-doc | diff -q docs/docs/reference/builtins.md -
+//!     cargo run --bin gen_builtins_doc | diff -q docs/docs/reference/builtins.md -
 //!
 //! The generated markdown is grouped by category (string helpers, HTTP
 //! request, response helpers, etc.) and emits a table per group with
 //! columns: `Name | Aliases | Args | Native | Description`. The
 //! `Description` column is intentionally left as a placeholder
 //! (`—`) when no doc string is attached to the def; human-curated prose
-//! for those rows lives in `docs/builtins.md` (the legacy hand-edited
-//! source) until every def carries an inline doc string.
+//! for those rows lives in `docs/spec/builtins.md` until every def carries
+//! an inline doc string.
+//!
+//! Note: a def matching NO group predicate below is silently dropped from
+//! the output, and `builtins_doc_sync` still passes because generator and
+//! checked-in file agree on the omission. Adding a `BuiltinDef` row is not
+//! enough — put the name in a `GROUPS` predicate too.
 //!
 //! Why a binary instead of a `build.rs` step:
 //!   1. The output is checked-in so docs/* reads work offline.
-//!   2. `cargo run --bin gen-builtins-doc` is the *manual* regenerate
+//!   2. `cargo run --bin gen_builtins_doc` is the *manual* regenerate
 //!      command, run by docs maintainers after touching `src/builtins.rs`.
 //!   3. A unit test (`tests/builtins_doc_sync.rs`) asserts the checked-in
-//!      file matches the current generator output — so PRs that add a
-//!      builtin without regenerating the doc fail CI with a clear message.
+//!      file matches the current generator output. It is NOT in the
+//!      workflow's test list, so run it yourself after touching the
+//!      registry.
 
 use jwc::builtins::{BuiltinDef, BUILTIN_DEFS};
 
@@ -58,13 +64,13 @@ pub fn render_builtins_doc(defs: &[BuiltinDef]) -> String {
     out.push_str("> or editing a builtin, run:\n");
     out.push_str(">\n");
     out.push_str("> ```bash\n");
-    out.push_str("> cargo run --bin gen-builtins-doc > docs/docs/reference/builtins.md\n");
+    out.push_str("> cargo run --bin gen_builtins_doc > docs/docs/reference/builtins.md\n");
     out.push_str("> ```\n");
     out.push_str(">\n");
     out.push_str(
-        "> CI verifies this file matches the registry via `tests/builtins_doc_sync.rs`;\n",
+        "> `tests/builtins_doc_sync.rs` compares this file against the registry byte for\n",
     );
-    out.push_str("> PRs that add a builtin without regenerating the doc fail.\n\n");
+    out.push_str("> byte. Run it after adding a builtin — the workflow's test job does not.\n\n");
 
     out.push_str("Columns:\n\n");
     out.push_str(
@@ -227,8 +233,36 @@ const GROUPS: &[Group] = &[
         predicate: |d| matches!(d.name, "sleep_ms" | "http_get" | "http_post" | "fetch_json"),
     },
     Group {
+        title: "Console I/O",
+        predicate: |d| matches!(d.name, "console.write" | "console.error" | "console.read"),
+    },
+    Group {
+        title: "Files + directories",
+        predicate: |d| {
+            matches!(
+                d.name,
+                "file.read"
+                    | "file.write"
+                    | "file.append"
+                    | "file.exists"
+                    | "file.delete"
+                    | "file.copy"
+                    | "file.move"
+                    | "file.size"
+                    | "file.lines"
+                    | "directory.list"
+                    | "directory.create"
+                    | "directory.exists"
+                    | "directory.delete"
+            )
+        },
+    },
+    Group {
         title: "Environment + coercion",
-        predicate: |d| matches!(d.name, "env" | "int"),
+        // `serve` and `random_int` live here because nothing else fits and a
+        // def matching no group's predicate is silently dropped from the
+        // generated doc — both were invisible until this was noticed.
+        predicate: |d| matches!(d.name, "env" | "int" | "serve" | "random_int"),
     },
     Group {
         title: "Time + identifiers",

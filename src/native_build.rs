@@ -2005,7 +2005,12 @@ fn builtin_fn_name(name: &str) -> String {
         "badRequest" => "bad_request",
         _ => name,
     };
-    format!("jwc_b_{snake}")
+    // Namespaced builtins (`console.write`, `file.read`, `directory.list`)
+    // arrive with the dot intact — the parser flattens `a.b(...)` into a
+    // single call name. Map it to `_` so the emitted Rust identifier is
+    // valid: `jwc_b_console_write`. Same treatment `user_fn_name` gives
+    // `Dome.fn`.
+    format!("jwc_b_{}", snake.replace('.', "_"))
 }
 
 fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &CodegenCtx) {
@@ -3358,6 +3363,35 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                     | "ws_send"
                     | "ws_recv"
                     | "ws_close"
+                    // Console + file I/O. `console.read` is spawn_blocking
+                    // over the process-global `std::io::stdin` (a per-call
+                    // `tokio::io::stdin` + BufReader would drop read-ahead
+                    // bytes between calls); the file/directory ops are
+                    // `tokio::fs` so a slow mount can't park a worker.
+                    //
+                    // `console.write` / `console.error` are deliberately NOT
+                    // here — they are synchronous, which is what lets them
+                    // interleave correctly with `jwc_print`'s `println!`.
+                    //
+                    // Miss an entry and codegen emits the call without
+                    // `.await`; the generated crate then fails to compile
+                    // with a `Future` type error and no test in this repo
+                    // catches it, because neither `conformance.rs` nor
+                    // `native_parity.rs` builds the emitted source.
+                    | "console.read"
+                    | "file.read"
+                    | "file.write"
+                    | "file.append"
+                    | "file.exists"
+                    | "file.delete"
+                    | "file.copy"
+                    | "file.move"
+                    | "file.size"
+                    | "file.lines"
+                    | "directory.list"
+                    | "directory.create"
+                    | "directory.exists"
+                    | "directory.delete"
             );
             if is_user {
                 out.push_str(&user_fn_name(name));
