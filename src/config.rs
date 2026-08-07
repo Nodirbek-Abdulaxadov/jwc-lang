@@ -341,6 +341,31 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "",
         doc: "Comma-separated host allowlist for http_get/http_post/fetch_json; empty = no restriction.",
     },
+    EnvVar {
+        name: "JWC_HTTP_BLOCK_PRIVATE",
+        parse_kind: ParseKind::Bool,
+        default: "false",
+        doc: "Block loopback/private/link-local outbound hosts (incl. cloud metadata).",
+    },
+    // --- JWT verification --------------------------------------------------
+    EnvVar {
+        name: "JWC_JWT_LEEWAY_SECS",
+        parse_kind: ParseKind::DurationSecs,
+        default: "0",
+        doc: "Clock-skew tolerance applied to jwt_verify's exp/nbf checks.",
+    },
+    EnvVar {
+        name: "JWC_JWT_EXPECTED_ISS",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "Require this 'iss' claim in jwt_verify; empty = not checked.",
+    },
+    EnvVar {
+        name: "JWC_JWT_EXPECTED_AUD",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "Require this value in jwt_verify's 'aud' claim; empty = not checked.",
+    },
 ];
 
 /// Names whose rendered value must be masked.

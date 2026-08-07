@@ -199,8 +199,8 @@ Columns:
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `dispatch` | — | 2 | — |
-| `context` | — | 1 | — |
-| `setContext` | `set_context` | 2 | — |
+| `context` | — | 1 | ✅ |
+| `setContext` | `set_context` | 2 | ✅ |
 
 ## Background jobs
 

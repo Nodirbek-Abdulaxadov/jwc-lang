@@ -21,7 +21,7 @@ use crate::ast::Expr;
 // its ancestors.
 use super::sql::{boxed_params_to_refs, json_value_to_sql_param};
 use super::util::{
-    apply_headers_reqwest, assemble_url_from_pg_env, check_url_allowlisted,
+    apply_headers_reqwest, assemble_url_from_pg_env, check_outbound_url,
     connection_string_from_arg, http_response_to_json_string,
 };
 use super::*;
@@ -103,7 +103,7 @@ impl<'a> Vm<'a> {
                 other.type_name()
             ),
         };
-        check_url_allowlisted(&url)?;
+        check_outbound_url(&url)?;
 
         let headers_json = if let Some(arg) = args.get(1) {
             match self.eval_expr(arg, vars).await? {
@@ -145,7 +145,7 @@ impl<'a> Vm<'a> {
                 other.type_name()
             ),
         };
-        check_url_allowlisted(&url)?;
+        check_outbound_url(&url)?;
 
         let body_str = match args.get(1) {
             None => None,

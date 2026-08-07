@@ -1,0 +1,65 @@
+// Conformance: HS256 `jwt_sign` / `jwt_verify`.
+//
+// Pins the round-trip (claims survive sign -> verify), the token shape,
+// the `Bearer ` header tolerance, and the four rejection paths that must
+// each surface as a catchable `JwtError`: wrong secret, expired `exp`,
+// unreached `nbf`, and a structurally broken token.
+//
+// The `nbf` and multibyte cases are the regressions this file exists
+// for — `nbf` used to be parsed and ignored, and a multibyte
+// `Authorization` value used to panic inside the `Bearer ` strip.
+function main() {
+    let secret = "conformance-secret";
+
+    // Round-trip: every claim reads back unchanged.
+    let token = jwt_sign({ sub: "user-1", role: "admin" }, secret);
+    let claims = json_parse(jwt_verify(token, secret));
+    print(claims.sub);
+    print(claims.role);
+
+    // A compact JWT is exactly three dot-separated segments.
+    print(length(split(token, ".")));
+
+    // `jwt_verify` accepts a full Authorization header value.
+    let viaHeader = json_parse(jwt_verify("Bearer " + token, secret));
+    print(viaHeader.sub);
+
+    // Wrong secret -> signature mismatch.
+    try {
+        let bad = jwt_verify(token, "not-the-secret");
+        print("never");
+    } catch (e: JwtError) {
+        print("caught wrong-secret");
+    }
+
+    // `exp` in the past.
+    try {
+        let expired = jwt_sign({ sub: "u", exp: 1 }, secret);
+        let out = jwt_verify(expired, secret);
+        print("never");
+    } catch (e: JwtError) {
+        print("caught expired");
+    }
+
+    // `nbf` far in the future — the token is not valid yet.
+    try {
+        let early = jwt_sign({ sub: "u", nbf: 9999999999 }, secret);
+        let out = jwt_verify(early, secret);
+        print("never");
+    } catch (e: JwtError) {
+        print("caught not-yet-valid");
+    }
+
+    // A multibyte header value must be rejected, not panic.
+    try {
+        let out = jwt_verify("Кириллица.payload.sig", secret);
+        print("never");
+    } catch (e: JwtError) {
+        print("caught malformed");
+    }
+
+    // A token with no `exp` is a valid long-lived credential.
+    let apiKey = jwt_sign({ sub: "svc" }, secret);
+    let svc = json_parse(jwt_verify(apiKey, secret));
+    print(svc.sub);
+}

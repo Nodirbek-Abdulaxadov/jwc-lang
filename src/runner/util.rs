@@ -6,6 +6,7 @@
 //! runner (eval, sql, dispatch, ...) can pull them in via `use super::util::*`
 //! without dragging in heavier siblings.
 
+use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -270,6 +271,121 @@ pub(super) fn looks_like_uuid(s: &str) -> bool {
     true
 }
 
+/// Classify a URL host as pointing at the local machine or a private
+/// network — the destinations an SSRF payload aims at.
+///
+/// Covers loopback, RFC 1918 private space, link-local (which is where
+/// the `169.254.169.254` cloud metadata endpoint lives), carrier-grade
+/// NAT, the unspecified address, and the IPv6 equivalents `::1`,
+/// `fe80::/10` (link-local) and `fc00::/7` (unique local). IPv4-mapped
+/// IPv6 (`::ffff:127.0.0.1`) is unwrapped first so it can't be used to
+/// smuggle a v4 loopback past the v6 arm.
+///
+/// Literal-IP hosts only, plus the `localhost` name. A hostname that
+/// *resolves* to a private address is NOT caught: doing that safely
+/// requires resolving here and pinning the resolved address for the
+/// actual connection, otherwise the name can re-resolve between check
+/// and connect (DNS rebinding). This gate is a cheap, honest first
+/// line — pair it with `JWC_HTTP_ALLOWLIST` when the threat model
+/// includes an attacker who controls DNS.
+pub(super) fn host_is_private(host: &str) -> bool {
+    let bare = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+
+    if bare == "localhost" || bare.ends_with(".localhost") {
+        return true;
+    }
+
+    let ip: IpAddr = match bare.parse() {
+        Ok(ip) => ip,
+        // Not a literal address — see the DNS-rebinding note above.
+        Err(_) => return false,
+    };
+    ip_is_private(ip)
+}
+
+/// The address-family half of [`host_is_private`], split out so the
+/// classification is testable without going through URL parsing.
+pub(super) fn ip_is_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                // 100.64.0.0/10 — carrier-grade NAT (RFC 6598). Not
+                // covered by `is_private()`, still very much internal.
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+        }
+        IpAddr::V6(v6) => {
+            // Unwrap `::ffff:a.b.c.d` so a mapped v4 loopback is judged
+            // by the v4 rules rather than sliding through as "some v6".
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return ip_is_private(IpAddr::V4(mapped));
+            }
+            let segs = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // fe80::/10 link-local and fc00::/7 unique-local. Both
+                // predicates are still unstable in std, so match the
+                // prefixes directly.
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Opt-in SSRF guard: reject outbound URLs aimed at the local machine
+/// or a private network when `JWC_HTTP_BLOCK_PRIVATE` is set.
+///
+/// Off by default — plenty of JWC deployments legitimately call a
+/// sidecar on `127.0.0.1` or a service on the cluster's private range,
+/// and silently breaking those would be worse than the default-open
+/// posture. Turning it on is the right move for any handler that
+/// forwards a user-supplied URL.
+pub(super) fn check_url_not_private(url: &str) -> Result<()> {
+    static BLOCK_PRIVATE: OnceLock<bool> = OnceLock::new();
+    let blocking = *BLOCK_PRIVATE.get_or_init(|| {
+        std::env::var("JWC_HTTP_BLOCK_PRIVATE")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    });
+    if !blocking {
+        return Ok(());
+    }
+
+    let parsed = url::Url::parse(url)
+        .map_err(|e| anyhow!("http private-host guard: invalid URL '{url}': {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("http private-host guard: URL '{url}' has no host"))?;
+
+    if host_is_private(host) {
+        bail!(
+            "http private-host guard: host '{host}' is a loopback/private/link-local \
+             address and JWC_HTTP_BLOCK_PRIVATE is set"
+        );
+    }
+    Ok(())
+}
+
+/// The full outbound-URL gate: allowlist first, then the private-host
+/// guard. Both are opt-in and independent; a URL has to clear whichever
+/// ones are switched on before the request is dispatched.
+pub(super) fn check_outbound_url(url: &str) -> Result<()> {
+    check_url_allowlisted(url)?;
+    check_url_not_private(url)
+}
+
 /// SSRF allowlist gate for outbound HTTP builtins.
 ///
 /// Reads `JWC_HTTP_ALLOWLIST` (comma-separated hostnames) lazily and
@@ -399,5 +515,85 @@ mod tests {
         assert!(host_in_list(&list, "https://anywhere.example/").unwrap());
         let list = parse_allowlist_env(Some(""));
         assert!(host_in_list(&list, "https://anywhere.example/").unwrap());
+    }
+
+    // --- private-host classifier -------------------------------------
+    //
+    // `host_is_private` is a pure function, so unlike the allowlist gate
+    // above it can be exercised directly without any env juggling.
+
+    #[test]
+    fn private_host_blocks_ipv4_loopback_and_rfc1918() {
+        for host in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "10.0.0.7",
+            "172.16.4.2",
+            "172.31.255.254",
+            "192.168.1.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "100.64.0.1", // carrier-grade NAT
+        ] {
+            assert!(host_is_private(host), "expected {host} to be private");
+        }
+    }
+
+    #[test]
+    fn private_host_blocks_cloud_metadata_endpoint() {
+        // The single most-targeted SSRF destination: AWS/GCP/Azure all
+        // expose instance credentials on this link-local address.
+        assert!(host_is_private("169.254.169.254"));
+        assert!(host_is_private("169.254.0.1"));
+    }
+
+    #[test]
+    fn private_host_blocks_ipv6_local_ranges() {
+        for host in [
+            "::1",
+            "[::1]",
+            "::",
+            "fe80::1",           // link-local
+            "fe80::dead:beef",   // link-local
+            "febf::1",           // still fe80::/10
+            "fc00::1",           // unique local
+            "fd12:3456:789a::1", // unique local
+            "::ffff:127.0.0.1",  // IPv4-mapped loopback
+            "::ffff:10.0.0.1",   // IPv4-mapped RFC 1918
+        ] {
+            assert!(host_is_private(host), "expected {host} to be private");
+        }
+    }
+
+    #[test]
+    fn private_host_blocks_localhost_names() {
+        assert!(host_is_private("localhost"));
+        assert!(host_is_private("LOCALHOST"));
+        assert!(host_is_private("api.localhost"));
+    }
+
+    #[test]
+    fn private_host_allows_public_addresses() {
+        for host in [
+            "93.184.216.34", // example.com
+            "8.8.8.8",
+            "172.32.0.1",  // just outside 172.16/12
+            "172.15.0.1",  // just below 172.16/12
+            "100.128.0.1", // just outside 100.64/10
+            "2606:2800:220:1:248:1893:25c8:1946",
+            "api.example.com",
+            "example.org",
+        ] {
+            assert!(!host_is_private(host), "expected {host} to be public");
+        }
+    }
+
+    #[test]
+    fn private_host_does_not_resolve_dns_names() {
+        // Documented limitation: a name pointing at a private address is
+        // not caught, because checking it safely means pinning the
+        // resolved address for the connection too. `JWC_HTTP_ALLOWLIST`
+        // is the answer when DNS is part of the threat model.
+        assert!(!host_is_private("internal.corp.example"));
     }
 }

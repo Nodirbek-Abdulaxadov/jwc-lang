@@ -234,6 +234,7 @@ const REGISTERED_CASES: &[&str] = &[
     "case_int_strict",
     "case_json",
     "case_json_helpers",
+    "case_jwt",
     "case_literals",
     "case_misc_helpers",
     "case_nested_object_literal",
@@ -315,6 +316,7 @@ mod cases {
     conformance_test!(case_int_strict);
     conformance_test!(case_json);
     conformance_test!(case_json_helpers);
+    conformance_test!(case_jwt);
     conformance_test!(case_literals);
     conformance_test!(case_misc_helpers);
     conformance_test!(case_nested_object_literal);
