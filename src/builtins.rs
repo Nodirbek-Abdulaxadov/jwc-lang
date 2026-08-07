@@ -721,14 +721,14 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         aliases: &[],
         min_args: 1,
         max_args: Some(1),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "setContext",
         aliases: &["set_context"],
         min_args: 2,
         max_args: Some(2),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "http_post",

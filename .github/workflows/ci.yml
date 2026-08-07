@@ -28,8 +28,12 @@ jobs:
       - name: Cargo build
         run: cargo build --workspace --all-targets
 
+      # `conformance` and `native_parity` are the two suites that pin
+      # language semantics and interpreter/AOT agreement, and neither was
+      # in this list — so a case could rot for a release without anything
+      # going red. Both are no-DB and finish in well under a second.
       - name: Cargo test (no DB)
-        run: cargo test --lib --test typed_catch --test imports --test native_emit --test examples_parse --test fmt_idempotency
+        run: cargo test --lib --test typed_catch --test imports --test native_emit --test examples_parse --test fmt_idempotency --test conformance --test native_parity --test builtins_doc_sync
 
       # First-release rollout: `jwc fmt --check` against the bundled fixture
       # roots. `continue-on-error` keeps drift from blocking unrelated PRs

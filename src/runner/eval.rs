@@ -866,7 +866,7 @@ impl<'a> Vm<'a> {
                             other.type_name()
                         ),
                     };
-                    super::util::check_url_allowlisted(&url)?;
+                    super::util::check_outbound_url(&url)?;
                     let resp = http_client()
                         .get(&url)
                         .send()

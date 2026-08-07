@@ -546,6 +546,21 @@ fn jwc_classify_error(msg: &str) -> &'static str {
     }
     let lc = msg.to_ascii_lowercase();
     let has = |needles: &[&str]| -> bool { needles.iter().any(|n| lc.contains(n)) };
+    // JWT first, mirroring `runner::classify_jwc_error`: these substrings
+    // are distinctive and have to win before the generic ValidationError
+    // catch-all, or `jwt_verify: signature mismatch` files as a validation
+    // failure. Without this branch the native backend classified every
+    // `jwt_verify` panic as a bare `Error`, so `catch (e: JwtError)`
+    // matched under `jwc run` and silently missed under `--native`.
+    if has(&["jwt_verify", "jwt_sign", "jwt:"]) {
+        if has(&["token expired", "'exp' claim"]) {
+            return "JwtError.Expired";
+        }
+        if has(&["signature mismatch", "invalid base64", "hs256"]) {
+            return "JwtError.InvalidSignature";
+        }
+        return "JwtError";
+    }
     if has(&[
         "validate body",
         "validation failed",
@@ -1496,6 +1511,17 @@ struct Request {
     /// through happens-before via the surrounding await boundary; we
     /// don't need stronger ordering here).
     response_status: std::sync::atomic::AtomicU16,
+    /// Request-scoped key/value bag behind `setContext(k, v)` /
+    /// `context(k)` — the channel a `middleware` uses to hand verified
+    /// JWT claims to the handler that runs after it.
+    ///
+    /// The interpreter keeps this as a plain `HashMap` field on the `Vm`
+    /// because one `Vm` serves one request. Native has no `Vm`: built-ins
+    /// are free functions reaching for `CURRENT_REQUEST`, so the bag lives
+    /// on the request and takes a `Mutex` to stay `Sync` across the
+    /// `.await` points inside a handler. Uncontended in practice — one
+    /// task owns a request — so the lock is a relaxed CAS, not a stall.
+    context: std::sync::Mutex<JwcObj>,
 }
 
 tokio::task_local! {
@@ -1569,6 +1595,77 @@ fn jwc_b_response_status() -> V {
             s => V::Int(i64::from(s)),
         }
     })
+}
+
+// `context(key)` / `setContext(key, value)` — the request-scoped bag that
+// carries values from a `middleware` to the handler behind it. Both used
+// to be rejected by native codegen, which meant the single most common
+// auth shape in JWC —
+//
+// (NB: keep the phrase the `native_emit` suite greps for out of this
+// comment — the whole prelude is concatenated into the emitted source,
+// so prose here is searchable text in every generated crate.)
+//
+//     middleware auth { setContext("userId", jwt_verify(...)?.sub) }
+//     route GET "/me" { return { id: context("userId") }; }
+//
+// — refused to compile under `jwc build --native`. Mirrors
+// `runner::builtins::eval_context_get_call` / `eval_context_set_call`:
+// a missing key reads back `V::Null` rather than panicking.
+//
+// Outside a request the pair still has to work, because the interpreter's
+// bag is a plain field on the `Vm` and `main()` gets a `Vm` like any
+// route does — so `setContext` in `main()` reads back in `main()`. The
+// task-local is empty there, so those calls fall through to a process
+// global. Requests never touch the global: each one carries its own bag
+// on the `Request`, which is what keeps one caller's claims from leaking
+// into another's handler.
+fn jwc_global_context() -> &'static std::sync::Mutex<JwcObj> {
+    static GLOBAL: std::sync::OnceLock<std::sync::Mutex<JwcObj>> = std::sync::OnceLock::new();
+    GLOBAL.get_or_init(|| std::sync::Mutex::new(JwcObj::default()))
+}
+
+fn jwc_b_context(key: V) -> V {
+    let k = match key {
+        V::Str(s) => s,
+        other => panic!("context(key): key must be string, got {:?}", other),
+    };
+    // A poisoned lock means another task panicked mid-write. That panic
+    // is already travelling to `catch_unwind`; reading the bag as empty
+    // is the graceful degradation, not a second panic.
+    let read = |map: &std::sync::Mutex<JwcObj>| match map.lock() {
+        Ok(m) => m.get(k.as_ref()).cloned().unwrap_or(V::Null),
+        Err(_) => V::Null,
+    };
+    match CURRENT_REQUEST.try_with(|req| read(&req.context)) {
+        Ok(v) => v,
+        Err(_) => read(jwc_global_context()),
+    }
+}
+
+fn jwc_b_setContext(key: V, value: V) -> V {
+    let k = match key {
+        V::Str(s) => s.into_owned(),
+        other => panic!("setContext(key, value): key must be string, got {:?}", other),
+    };
+    let stored = CURRENT_REQUEST.try_with(|req| {
+        if let Ok(mut m) = req.context.lock() {
+            m.insert(k.clone(), value.clone());
+        }
+    });
+    if stored.is_err() {
+        if let Ok(mut m) = jwc_global_context().lock() {
+            m.insert(k, value);
+        }
+    }
+    V::Null
+}
+
+/// `set_context` is a declared alias of `setContext` in `BUILTIN_DEFS`,
+/// and codegen mangles a call by the name the user wrote — so the
+/// snake_case spelling needs its own symbol.
+fn jwc_b_set_context(key: V, value: V) -> V {
+    jwc_b_setContext(key, value)
 }
 
 /// Set the current request's response status. Called from the route
@@ -2148,6 +2245,23 @@ async fn jwc_cors_middleware(
 
 // --- HTTP server (axum-based, HTTP/1.1 + keep-alive) -------------------------
 
+/// Request body cap. Mirrors `server.rs::parse_max_body_bytes` exactly,
+/// including the axum-default 2 MiB when `JWC_MAX_BODY_BYTES` is unset
+/// and the `0` escape hatch for deployments behind a proxy that already
+/// enforces a size. `None` means "no limit".
+const JWC_DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+fn jwc_max_body_bytes() -> Option<usize> {
+    match std::env::var("JWC_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(JWC_DEFAULT_MAX_BODY_BYTES),
+    }
+}
+
 struct HttpServer {
     port: u16,
     router: Arc<Router>,
@@ -2175,6 +2289,14 @@ impl HttpServer {
                 let cors = cors.clone();
                 async move { jwc_cors_middleware(cors, req, next).await }
             }));
+        }
+        // Body-size cap, same contract as `server.rs::build_router`: a
+        // native binary used to buffer an unbounded `curl -d @huge.bin`
+        // straight into the `Bytes` extractor, so one client could OOM
+        // the process — a limit the interpreter has had all along.
+        match jwc_max_body_bytes() {
+            Some(max) => app = app.layer(axum::extract::DefaultBodyLimit::max(max)),
+            None => app = app.layer(axum::extract::DefaultBodyLimit::disable()),
         }
         // Prefer dual-stack so a Node dev proxy resolving `localhost` to `::1`
         // can connect; fall back to IPv4 on hosts with no IPv6 stack.
@@ -2323,6 +2445,7 @@ async fn handle_axum_request(
         http_version_11: true,
         started_at: std::time::Instant::now(),
         response_status: std::sync::atomic::AtomicU16::new(0),
+        context: std::sync::Mutex::new(JwcObj::default()),
     });
 
     let result_v = CURRENT_REQUEST
@@ -2426,12 +2549,95 @@ fn jwc_check_url_allowlisted(url: &str) -> Result<(), String> {
     ))
 }
 
+/// Native-AOT mirror of `runner::util::ip_is_private`.
+fn jwc_ip_is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                // 100.64.0.0/10 carrier-grade NAT (RFC 6598).
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return jwc_ip_is_private(std::net::IpAddr::V4(mapped));
+            }
+            let segs = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // fe80::/10 link-local, fc00::/7 unique-local.
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Native-AOT mirror of `runner::util::host_is_private`. Literal IPs and
+/// the `localhost` name only — a hostname that resolves to a private
+/// address is deliberately not caught here; see the interpreter side for
+/// the DNS-rebinding reasoning.
+fn jwc_host_is_private(host: &str) -> bool {
+    let bare = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if bare == "localhost" || bare.ends_with(".localhost") {
+        return true;
+    }
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => jwc_ip_is_private(ip),
+        Err(_) => false,
+    }
+}
+
+/// Native-AOT mirror of `runner::util::check_url_not_private`. Opt-in
+/// via `JWC_HTTP_BLOCK_PRIVATE`; off by default.
+fn jwc_check_url_not_private(url: &str) -> Result<(), String> {
+    static BLOCK_PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let blocking = *BLOCK_PRIVATE.get_or_init(|| {
+        std::env::var("JWC_HTTP_BLOCK_PRIVATE")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    });
+    if !blocking {
+        return Ok(());
+    }
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("http private-host guard: invalid URL '{url}': {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("http private-host guard: URL '{url}' has no host"))?;
+    if jwc_host_is_private(host) {
+        return Err(format!(
+            "http private-host guard: host '{host}' is a loopback/private/link-local \
+             address and JWC_HTTP_BLOCK_PRIVATE is set"
+        ));
+    }
+    Ok(())
+}
+
+/// Allowlist first, then the private-host guard — same order and same
+/// opt-in semantics as `runner::util::check_outbound_url`.
+fn jwc_check_outbound_url(url: &str) -> Result<(), String> {
+    jwc_check_url_allowlisted(url)?;
+    jwc_check_url_not_private(url)
+}
+
 async fn jwc_b_http_get(url: V) -> V {
     let u = match url {
         V::Str(s) => s,
         other => return v_str(format!("http_get: url must be a string, got {:?}", other)),
     };
-    if let Err(msg) = jwc_check_url_allowlisted(u.as_ref()) {
+    if let Err(msg) = jwc_check_outbound_url(u.as_ref()) {
         return v_str(msg);
     }
     match jwc_http_client().get(u.as_ref()).send().await {

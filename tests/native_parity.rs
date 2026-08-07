@@ -276,6 +276,40 @@ const CASES: &[Case] = &[
         expected_output: "1\nBrand\n",
         expected_emit_contains: &["jwc_print(", "\"Brand\""],
     },
+    // `jwt_sign` / `jwt_verify` parity. The interpreter's stdout is the
+    // golden value; the emit assertions pin that codegen routes both
+    // calls at the crypto-prelude implementations rather than rejecting
+    // them. `jwt_verify` returns the payload JSON, so the round-trip is
+    // observable without leaking the (secret-dependent) token itself
+    // into the expected output.
+    Case {
+        name: "jwt_sign_verify_round_trip",
+        source: r#"
+            function main() {
+                let token = jwt_sign({ sub: "user-1" }, "s3cret");
+                let claims = json_parse(jwt_verify(token, "s3cret"));
+                print(claims.sub);
+                print(length(split(token, ".")));
+            }
+        "#,
+        expected_output: "user-1\n3\n",
+        expected_emit_contains: &["jwc_b_jwt_sign(", "jwc_b_jwt_verify(", "jwc_print("],
+    },
+    // The middleware -> handler context hand-off, which is the reason
+    // `context` / `setContext` had to become native-capable: this is the
+    // shape every JWT-authenticated JWC route uses.
+    Case {
+        name: "context_round_trip",
+        source: r#"
+            function main() {
+                setContext("userId", "u-42");
+                print(context("userId"));
+                print(context("missing"));
+            }
+        "#,
+        expected_output: "u-42\nnull\n",
+        expected_emit_contains: &["jwc_b_setContext(", "jwc_b_context("],
+    },
 ];
 
 #[tokio::test]
