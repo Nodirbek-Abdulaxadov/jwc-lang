@@ -417,7 +417,7 @@ use crate::engine;
 
 static REQWEST_CLIENT: StdOnceLock<reqwest::Client> = StdOnceLock::new();
 
-pub(super) fn http_client() -> &'static reqwest::Client {
+pub fn http_client() -> &'static reqwest::Client {
     REQWEST_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .build()

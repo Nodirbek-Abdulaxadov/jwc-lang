@@ -237,6 +237,60 @@ impl<'a> Vm<'a> {
         Ok(Value::Str(crate::jwt::verify_hs256(&token, &secret)?))
     }
 
+    /// `jwt_verify_jwks(token, jwks_url)` — RS256 verification against an
+    /// OIDC provider's published key set.
+    ///
+    /// Deliberately a separate built-in rather than a third argument on
+    /// `jwt_verify`: that one's second parameter is a shared secret, and
+    /// overloading it to sometimes mean "a URL to fetch a public key
+    /// from" is the kind of ambiguity that ends in an algorithm-confusion
+    /// bug. The two never share a code path beyond claim validation.
+    ///
+    /// `exp` / `nbf` / `iss` / `aud` are checked exactly as they are for
+    /// HS256 — same `VerifyOptions`, same env vars.
+    pub(super) async fn eval_jwt_verify_jwks_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if args.len() != 2 {
+            bail!("jwt_verify_jwks(token, jwks_url) expects exactly 2 args");
+        }
+        let token = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            other => bail!(
+                "jwt_verify_jwks(token, jwks_url): token must be string, got {}",
+                other.type_name()
+            ),
+        };
+        let jwks_url = match self.eval_expr(&args[1], vars).await? {
+            Value::Str(s) => s,
+            other => bail!(
+                "jwt_verify_jwks(token, jwks_url): jwks_url must be string, got {}",
+                other.type_name()
+            ),
+        };
+        // The JWKS URL is normally operator config rather than request
+        // data, but it goes through the same outbound gate as every other
+        // HTTP built-in so one policy covers all egress. Note for
+        // internal identity providers: `JWC_HTTP_BLOCK_PRIVATE` would
+        // block the fetch, so leave it off (or allowlist the host) when
+        // the IdP lives on a private network.
+        check_outbound_url(&jwks_url)?;
+
+        // Read `kid` from the header BEFORE any signature check — that is
+        // what picks the key. Nothing from the unverified payload is
+        // trusted or returned unless the signature checks out.
+        let split = crate::jwt::split_token(&token)?;
+        let kid = split.kid().map(str::to_string);
+        drop(split);
+
+        let key = crate::jwks::rsa_key_for(&jwks_url, kid.as_deref()).await?;
+        Ok(Value::Str(crate::jwt::verify_rs256(
+            &token, &key.n, &key.e,
+        )?))
+    }
+
     pub(super) async fn eval_ws_send_call(
         &mut self,
         args: &[Expr],

@@ -154,11 +154,39 @@ pub fn verify_hs256(token: &str, secret: &str) -> Result<String> {
     verify_hs256_with(token, secret, env_verify_options())
 }
 
-/// [`verify_hs256`] with the claim policy supplied by the caller rather
-/// than read from the environment.
-pub fn verify_hs256_with(token: &str, secret: &str, opts: &VerifyOptions) -> Result<String> {
-    // Tolerate a full `Authorization` header value — strip an optional
-    // `Bearer ` scheme prefix so callers can pass the header straight through.
+/// The parsed pieces of a compact JWS: the three raw segments plus the
+/// decoded JOSE header. Splitting this out lets the RS256 path read `kid`
+/// (to pick a JWKS key) before it has any key material to verify with —
+/// the HS256 path never needed that, because the secret is passed in.
+pub struct SplitToken<'a> {
+    pub header: JsonValue,
+    pub signing_input: String,
+    pub payload_b64: &'a str,
+    pub signature: Vec<u8>,
+}
+
+impl SplitToken<'_> {
+    /// `alg` from the JOSE header, or `"none"` when absent. Never trust
+    /// this to pick a verification key — it is attacker-controlled. It is
+    /// only ever compared against the algorithm the caller already
+    /// decided to accept.
+    pub fn alg(&self) -> &str {
+        self.header
+            .get("alg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+    }
+
+    /// `kid` from the JOSE header, when the issuer published one.
+    pub fn kid(&self) -> Option<&str> {
+        self.header.get("kid").and_then(|v| v.as_str())
+    }
+}
+
+/// Split a compact JWS into its segments and decode the JOSE header.
+/// Tolerates a leading `Bearer ` so an `Authorization` value can be
+/// passed straight through.
+pub fn split_token(token: &str) -> Result<SplitToken<'_>> {
     let token = strip_bearer_prefix(token);
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
@@ -171,31 +199,57 @@ pub fn verify_hs256_with(token: &str, secret: &str, opts: &VerifyOptions) -> Res
     let header: JsonValue = serde_json::from_slice(&header_bytes)
         .map_err(|_| anyhow!("jwt_verify: header is not JSON"))?;
 
-    let alg = header.get("alg").and_then(|v| v.as_str()).unwrap_or("none");
-    if alg != "HS256" {
-        bail!("jwt_verify: only HS256 is supported, got '{alg}'");
-    }
-
-    let signing_input = format!("{}.{}", parts[0], parts[1]);
     let signature = URL_SAFE_NO_PAD
         .decode(parts[2])
         .map_err(|_| anyhow!("jwt_verify: invalid base64 in signature"))?;
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .map_err(|e| anyhow!("jwt_verify: invalid secret: {e}"))?;
-    mac.update(signing_input.as_bytes());
-    mac.verify_slice(&signature)
-        .map_err(|_| anyhow!("jwt_verify: signature mismatch"))?;
+    Ok(SplitToken {
+        header,
+        signing_input: format!("{}.{}", parts[0], parts[1]),
+        payload_b64: parts[1],
+        signature,
+    })
+}
 
+/// Decode the payload segment into normalized JSON. Called only after a
+/// signature has been verified — decoding an unverified payload and
+/// acting on it is the classic JWT footgun.
+fn decode_payload(payload_b64: &str) -> Result<JsonValue> {
     let payload_bytes = URL_SAFE_NO_PAD
-        .decode(parts[1])
+        .decode(payload_b64)
         .map_err(|_| anyhow!("jwt_verify: invalid base64 in payload"))?;
     let payload_str = String::from_utf8(payload_bytes)
         .map_err(|_| anyhow!("jwt_verify: payload is not valid UTF-8"))?;
-    // Round-trip to normalize JSON formatting.
-    let parsed: JsonValue = serde_json::from_str(&payload_str)
-        .map_err(|_| anyhow!("jwt_verify: payload is not valid JSON"))?;
+    serde_json::from_str(&payload_str).map_err(|_| anyhow!("jwt_verify: payload is not valid JSON"))
+}
 
+/// [`verify_hs256`] with the claim policy supplied by the caller rather
+/// than read from the environment.
+pub fn verify_hs256_with(token: &str, secret: &str, opts: &VerifyOptions) -> Result<String> {
+    let split = split_token(token)?;
+
+    let alg = split.alg();
+    if alg != "HS256" {
+        bail!("jwt_verify: only HS256 is supported, got '{alg}'");
+    }
+
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .map_err(|e| anyhow!("jwt_verify: invalid secret: {e}"))?;
+    mac.update(split.signing_input.as_bytes());
+    mac.verify_slice(&split.signature)
+        .map_err(|_| anyhow!("jwt_verify: signature mismatch"))?;
+
+    let parsed = decode_payload(split.payload_b64)?;
+    validate_claims(&parsed, opts)?;
+    Ok(parsed.to_string())
+}
+
+/// Verify the registered claims of an already signature-checked payload.
+///
+/// Shared by every algorithm so HS256 and RS256 cannot drift apart on
+/// what counts as a valid token — the signature step is the only part
+/// that differs between them.
+pub fn validate_claims(parsed: &JsonValue, opts: &VerifyOptions) -> Result<()> {
     let now = unix_now_secs();
     let leeway = opts.leeway_secs.max(0);
 
@@ -203,7 +257,7 @@ pub fn verify_hs256_with(token: &str, secret: &str, opts: &VerifyOptions) -> Res
     // so non-expiring tokens (long-lived API keys, machine-to-machine)
     // keep working. Present-but-past `exp` surfaces as a classifiable
     // `JwtError.Expired` (see `runner::JWC_ERROR_KINDS`).
-    if let Some(exp_secs) = numeric_claim(&parsed, "exp")? {
+    if let Some(exp_secs) = numeric_claim(parsed, "exp")? {
         if exp_secs.saturating_add(leeway) <= now {
             bail!("jwt_verify: token expired (exp={exp_secs}, now={now})");
         }
@@ -212,7 +266,7 @@ pub fn verify_hs256_with(token: &str, secret: &str, opts: &VerifyOptions) -> Res
     // `nbf` ("not before") went unchecked until now, so a token minted
     // for a future activation window was accepted the moment it was
     // issued. Same shape as `exp`: absent is fine, present is enforced.
-    if let Some(nbf_secs) = numeric_claim(&parsed, "nbf")? {
+    if let Some(nbf_secs) = numeric_claim(parsed, "nbf")? {
         if nbf_secs.saturating_sub(leeway) > now {
             bail!("jwt_verify: token not yet valid (nbf={nbf_secs}, now={now})");
         }
@@ -222,7 +276,7 @@ pub fn verify_hs256_with(token: &str, secret: &str, opts: &VerifyOptions) -> Res
     // enforced: a token issued slightly in the future is a clock-skew
     // artefact, not an attack, and `nbf` is the claim that exists to
     // express an activation time.
-    let _ = numeric_claim(&parsed, "iat")?;
+    let _ = numeric_claim(parsed, "iat")?;
 
     if let Some(expected) = opts.expected_iss.as_deref() {
         match parsed.get("iss").and_then(|v| v.as_str()) {
@@ -240,6 +294,54 @@ pub fn verify_hs256_with(token: &str, secret: &str, opts: &VerifyOptions) -> Res
         }
     }
 
+    Ok(())
+}
+
+/// [`verify_rs256_with`] using the claim policy from the environment.
+pub fn verify_rs256(token: &str, n_b64: &str, e_b64: &str) -> Result<String> {
+    verify_rs256_with(token, n_b64, e_b64, env_verify_options())
+}
+
+/// Verify an RS256 JWT against an RSA public key given as the raw JWK
+/// `n` (modulus) and `e` (exponent) components, both base64url.
+///
+/// `ring` is already in the dependency tree via rustls, so this adds no
+/// new native crypto build. `RSA_PKCS1_2048_8192_SHA256` is the algorithm
+/// every OIDC provider means by `RS256`; keys shorter than 2048 bits are
+/// rejected by ring itself, which is the correct floor in 2026.
+pub fn verify_rs256_with(
+    token: &str,
+    n_b64: &str,
+    e_b64: &str,
+    opts: &VerifyOptions,
+) -> Result<String> {
+    let split = split_token(token)?;
+
+    // The header's `alg` is attacker-controlled, so this is a guard
+    // against an algorithm-confusion downgrade, not a key selector: the
+    // caller has already committed to RSA key material.
+    let alg = split.alg();
+    if alg != "RS256" {
+        bail!("jwt_verify: expected RS256, got '{alg}'");
+    }
+
+    let n = URL_SAFE_NO_PAD
+        .decode(n_b64)
+        .map_err(|_| anyhow!("jwt_verify: JWKS key has invalid base64 in 'n'"))?;
+    let e = URL_SAFE_NO_PAD
+        .decode(e_b64)
+        .map_err(|_| anyhow!("jwt_verify: JWKS key has invalid base64 in 'e'"))?;
+
+    ring::signature::RsaPublicKeyComponents { n: &n, e: &e }
+        .verify(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            split.signing_input.as_bytes(),
+            &split.signature,
+        )
+        .map_err(|_| anyhow!("jwt_verify: signature mismatch"))?;
+
+    let parsed = decode_payload(split.payload_b64)?;
+    validate_claims(&parsed, opts)?;
     Ok(parsed.to_string())
 }
 
@@ -511,6 +613,151 @@ mod tests {
         // exactly as it did before any of this landed.
         let token = sign_hs256(r#"{"sub":"u","iss":"whoever","aud":["anything"]}"#, "k").unwrap();
         assert!(verify_hs256_with(&token, "k", &VerifyOptions::default()).is_ok());
+    }
+
+    // --- RS256 ------------------------------------------------------
+    //
+    // Fixture generated once with `openssl genrsa 2048`; the private key
+    // is not kept. The token carries no `exp`, so these tests never
+    // start failing on a calendar boundary. Claim shapes mirror what
+    // OpenIddict actually emits: `aud` as an array, `role` repeated.
+
+    const RS256_TOKEN: &str = concat!(
+        "eyJhbGciOiJSUzI1NiIsInR5cCI6ImF0K2p3dCIsImtpZCI6InRlc3Qta2V5LTEifQ.",
+        "eyJzdWIiOiJ1c2VyLTEiLCJpc3MiOiJodHRwczovL2lkcC50ZXN0LyIsImF1ZCI6WyJt",
+        "dXNhbm5hLnBsYXRmb3JtIiwibXVzYW5uYS5ocm0iXSwic2NvcGUiOiJwbGF0Zm9ybS5h",
+        "cGkiLCJyb2xlIjpbImFkbWluIiwidXNlciJdfQ.",
+        "k1bHNFGowLcrfMlkq0_ljVzGHo9GAwAjaX4_Ti-GaBdBiJOR96v4vPkOhtH7NY3I1KXZ",
+        "fgU3QU44i6EIcPayb6LJBxuvpTp9Vj1ZFoDniqvb347fE_OQ6jG-bog_pEc8t6H2Pvpe",
+        "JCR9ih4XW5v_95rw860hwJ576rQI5FwH7xlJhazpqDVdszWntsqt95aECEPZn24sg9gi",
+        "cIZCW2lhnbueQAPgzKKFenWtQPgC49UfErIgZED3Kg0YWBprC0TKihe99gU4uMwdIv41",
+        "o3cWieve0Em2o2ph3jrbq0mh4xJvyL92xS0cTonYtZq3LG5uoKlagZHIz_mkHHLgyZME",
+        "kw"
+    );
+
+    const RS256_N: &str = concat!(
+        "1p2ClcL3mcKMiTytkQ3dZgP10Yu3SN8fKBjIaNTNsIXAUb36H9Cc1WAnfMnwJOVd9zZ3",
+        "E-Qc0MQEohgi0qsQDSE_oefNTCxAK70s1RGjt_7yc7j6_zuuY6czqGkMlxGtOP7V8jit",
+        "x8YJYDy9zkfB-oZOkCFP9xX2QpDT1B3khrJtSz4eARvrlugWspoHQWobYlvRXe4j-XS9",
+        "bu6G-OWqDeOVb6lGFLD-bkHmfXuuoEawJpqSWDYiUWi_PFHC5ZDf5Eu31tKvmdhww4cQ",
+        "xM-iT8mcTMjTOFpLjCpVWMZuQzDDjCtkTXb5vGG6cC4NWU9N4o9DAPk3WVIgFnTD7PkE",
+        "Hw"
+    );
+
+    const RS256_E: &str = "AQAB";
+
+    #[test]
+    fn rs256_verifies_a_real_token() {
+        let decoded =
+            verify_rs256_with(RS256_TOKEN, RS256_N, RS256_E, &VerifyOptions::default()).unwrap();
+        let claims: JsonValue = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(claims["sub"], "user-1");
+        assert_eq!(claims["iss"], "https://idp.test/");
+    }
+
+    #[test]
+    fn rs256_reads_kid_from_the_header() {
+        let split = split_token(RS256_TOKEN).unwrap();
+        assert_eq!(split.kid(), Some("test-key-1"));
+        assert_eq!(split.alg(), "RS256");
+    }
+
+    #[test]
+    fn rs256_tolerates_bearer_prefix() {
+        let header = format!("Bearer {RS256_TOKEN}");
+        assert!(verify_rs256_with(&header, RS256_N, RS256_E, &VerifyOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn rs256_rejects_a_tampered_signature() {
+        // Flip a byte inside the signature rather than at its end: the
+        // final base64 character of a 256-byte signature carries only a
+        // couple of significant bits, so editing it tends to produce
+        // invalid base64 and exercise the decoder instead of the
+        // verifier.
+        let (head, sig) = RS256_TOKEN.rsplit_once('.').unwrap();
+        let mut sig_bytes = sig.as_bytes().to_vec();
+        sig_bytes[0] = if sig_bytes[0] == b'a' { b'b' } else { b'a' };
+        let tampered = format!("{head}.{}", String::from_utf8(sig_bytes).unwrap());
+        let err = verify_rs256_with(&tampered, RS256_N, RS256_E, &VerifyOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signature mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn rs256_rejects_a_tampered_payload() {
+        // Re-encode the payload with an escalated role. The signature
+        // covers header+payload, so this must not verify.
+        let split = split_token(RS256_TOKEN).unwrap();
+        let forged_payload = URL_SAFE_NO_PAD.encode(r#"{"sub":"admin","role":["superuser"]}"#);
+        let head = split.signing_input.split('.').next().unwrap().to_string();
+        let sig = RS256_TOKEN.rsplit('.').next().unwrap();
+        let forged = format!("{head}.{forged_payload}.{sig}");
+        let err = verify_rs256_with(&forged, RS256_N, RS256_E, &VerifyOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signature mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn rs256_rejects_algorithm_downgrade_in_the_header() {
+        // Algorithm confusion: a token claiming HS256 must not be
+        // accepted by the RSA path even though the caller supplied RSA
+        // key material.
+        let forged_header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let mut parts = RS256_TOKEN.split('.');
+        let _ = parts.next();
+        let payload = parts.next().unwrap();
+        let sig = parts.next().unwrap();
+        let forged = format!("{forged_header}.{payload}.{sig}");
+        let err = verify_rs256_with(&forged, RS256_N, RS256_E, &VerifyOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected RS256"), "got: {err}");
+    }
+
+    #[test]
+    fn rs256_applies_the_same_claim_policy_as_hs256() {
+        // `aud` is an array here — the token must match on membership.
+        let ok = VerifyOptions {
+            expected_iss: Some("https://idp.test/".to_string()),
+            expected_aud: Some("musanna.hrm".to_string()),
+            ..VerifyOptions::default()
+        };
+        assert!(verify_rs256_with(RS256_TOKEN, RS256_N, RS256_E, &ok).is_ok());
+
+        let wrong_aud = VerifyOptions {
+            expected_aud: Some("someone.else".to_string()),
+            ..VerifyOptions::default()
+        };
+        let err = verify_rs256_with(RS256_TOKEN, RS256_N, RS256_E, &wrong_aud)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("audience mismatch"), "got: {err}");
+
+        // Trailing slash on `iss` is significant — a mismatch must fail.
+        let no_slash = VerifyOptions {
+            expected_iss: Some("https://idp.test".to_string()),
+            ..VerifyOptions::default()
+        };
+        let err = verify_rs256_with(RS256_TOKEN, RS256_N, RS256_E, &no_slash)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("issuer mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn rs256_rejects_malformed_key_components() {
+        let err = verify_rs256_with(
+            RS256_TOKEN,
+            "!!!not-base64!!!",
+            RS256_E,
+            &VerifyOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("invalid base64 in 'n'"), "got: {err}");
     }
 
     #[test]

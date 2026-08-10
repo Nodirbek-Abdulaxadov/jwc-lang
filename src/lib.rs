@@ -43,6 +43,7 @@ pub mod error_report;
 pub mod fmt;
 pub mod hash;
 pub mod http_error;
+pub mod jwks;
 pub mod jwt;
 pub mod lexer;
 pub mod lint;

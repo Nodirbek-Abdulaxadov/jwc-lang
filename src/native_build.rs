@@ -738,6 +738,7 @@ fn program_uses_crypto(program: &Program) -> bool {
                         | "verify_password"
                         | "jwt_sign"
                         | "jwt_verify"
+                        | "jwt_verify_jwks"
                 ) {
                     return true;
                 }
@@ -3359,6 +3360,9 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                 "sleep_ms"
                     | "http_get"
                     | "fetch_json"
+                    // RS256 verification fetches the issuer's JWKS, so it
+                    // suspends like any other outbound call.
+                    | "jwt_verify_jwks"
                     | "setConnectionString"
                     | "ws_send"
                     | "ws_recv"
@@ -4448,6 +4452,10 @@ fn render_cargo_toml(
         deps.push_str("argon2 = { version = \"0.5\", features = [\"std\"] }\n");
         // JWT segments are base64url without padding.
         deps.push_str("base64 = \"0.22\"\n");
+        // RS256 (OIDC) verification. Already in the tree via reqwest's
+        // rustls-tls, but `ring::signature` is only nameable from a
+        // direct dependency.
+        deps.push_str("ring = \"0.17\"\n");
     }
     // Phase A4 (PERF_PLAN.md): global allocator. mimalloc on Windows
     // sidesteps the notoriously slow `HeapAlloc` / `HeapFree` path that

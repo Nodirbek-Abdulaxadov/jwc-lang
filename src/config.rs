@@ -366,6 +366,18 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "",
         doc: "Require this value in jwt_verify's 'aud' claim; empty = not checked.",
     },
+    EnvVar {
+        name: "JWC_JWT_JWKS_TTL_SECS",
+        parse_kind: ParseKind::DurationSecs,
+        default: "300",
+        doc: "How long a fetched JWKS key set stays cached.",
+    },
+    EnvVar {
+        name: "JWC_JWT_JWKS_MIN_REFETCH_SECS",
+        parse_kind: ParseKind::DurationSecs,
+        default: "60",
+        doc: "Floor between forced JWKS refetches on an unknown 'kid' (DoS guard).",
+    },
 ];
 
 /// Names whose rendered value must be masked.

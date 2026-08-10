@@ -401,6 +401,10 @@ impl<'a> Vm<'a> {
                     return self.eval_jwt_sign_call(args, vars).await;
                 }
 
+                if name.eq_ignore_ascii_case("jwt_verify_jwks") {
+                    return self.eval_jwt_verify_jwks_call(args, vars).await;
+                }
+
                 if name.eq_ignore_ascii_case("jwt_verify") {
                     return self.eval_jwt_verify_call(args, vars).await;
                 }

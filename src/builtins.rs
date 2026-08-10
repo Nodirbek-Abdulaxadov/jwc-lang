@@ -752,6 +752,13 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         native: true,
     },
     BuiltinDef {
+        name: "jwt_verify_jwks",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
+    BuiltinDef {
         name: "hash_password",
         aliases: &[],
         min_args: 1,
