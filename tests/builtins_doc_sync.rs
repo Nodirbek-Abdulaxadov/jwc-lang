@@ -10,6 +10,30 @@ use std::path::PathBuf;
 #[path = "../src/bin/gen_builtins_doc.rs"]
 mod gen;
 
+/// Every registered builtin must actually appear in the rendered page.
+///
+/// The generator emits rows by walking `GROUPS` and filtering the registry
+/// with each group's predicate, so a builtin matching no predicate is
+/// dropped in silence — and `builtins_doc_matches_generator_output` cannot
+/// see it, because both sides of that comparison drop it identically. That
+/// is how `jwt_verify_jwks` shipped into the registry and stayed missing
+/// from the reference page while every test stayed green.
+#[test]
+fn every_builtin_appears_in_the_rendered_doc() {
+    let rendered = gen::render_builtins_doc(jwc::builtins::BUILTIN_DEFS);
+    let missing: Vec<&str> = jwc::builtins::BUILTIN_DEFS
+        .iter()
+        .map(|d| d.name)
+        .filter(|name| !rendered.contains(&format!("| `{name}` |")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these builtins are in BUILTIN_DEFS but no GROUPS predicate in \
+         src/bin/gen_builtins_doc.rs matches them, so they are silently \
+         absent from the reference page: {missing:?}"
+    );
+}
+
 #[test]
 fn builtins_doc_matches_generator_output() {
     let expected = gen::render_builtins_doc(jwc::builtins::BUILTIN_DEFS);

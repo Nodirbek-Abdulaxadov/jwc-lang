@@ -374,6 +374,8 @@ fn emit_rust_source_awaits_async_io_builtins() {
             let names = directory.list("d");
             let de = directory.exists("d");
             directory.delete("d");
+            // RS256 verification fetches the issuer's JWKS, so it suspends.
+            let claims = jwt_verify_jwks("tok", "https://idp.test/jwks");
         }
     "#;
     let program = parse(src);
@@ -381,6 +383,7 @@ fn emit_rust_source_awaits_async_io_builtins() {
     let body = fs::read_to_string(&out).expect("read generated");
 
     for name in [
+        "jwc_b_jwt_verify_jwks",
         "jwc_b_console_read",
         "jwc_b_file_read",
         "jwc_b_file_write",

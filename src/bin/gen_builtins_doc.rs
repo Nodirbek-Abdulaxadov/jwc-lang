@@ -299,6 +299,7 @@ const GROUPS: &[Group] = &[
                     | "verify_password"
                     | "jwt_sign"
                     | "jwt_verify"
+                    | "jwt_verify_jwks"
             )
         },
     },

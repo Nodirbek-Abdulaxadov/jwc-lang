@@ -185,6 +185,7 @@ Columns:
 | `hmac_sha256` | — | 2 | ✅ |
 | `jwt_sign` | — | 2 | ✅ |
 | `jwt_verify` | — | 2 | ✅ |
+| `jwt_verify_jwks` | — | 2 | ✅ |
 | `hash_password` | — | 1 | ✅ |
 | `verify_password` | — | 2 | ✅ |
 

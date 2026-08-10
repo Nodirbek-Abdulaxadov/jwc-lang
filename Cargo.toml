@@ -57,6 +57,10 @@ futures-util = "0.3"
 clap = { version = "4", features = ["derive"] }
 deadpool-postgres = "0.14"
 hmac = "0.12"
+# RS256 (OIDC) signature verification. Already compiled as part of the
+# tree via rustls, so naming it directly costs no extra build — but it
+# must be a direct dependency for `ring::signature` to be nameable.
+ring = "0.17"
 lazy_static = "1.5.0"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 native-tls = "0.2"
