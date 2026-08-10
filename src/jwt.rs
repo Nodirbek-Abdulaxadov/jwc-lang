@@ -78,6 +78,15 @@ pub struct VerifyOptions {
     /// When set, the token's `aud` claim must be present and must either
     /// equal this value (string form) or contain it (array form).
     pub expected_aud: Option<String>,
+    /// Reject a token that carries no `exp` at all.
+    ///
+    /// `jwt_verify` leaves this off: an HS256 token with no expiry is a
+    /// deliberate shape (long-lived machine key) and rejecting it would
+    /// break existing programs. `jwt_verify_jwks` turns it on, because an
+    /// OIDC provider always stamps `exp` on an access token — one that
+    /// arrives without it is anomalous, and accepting it would mean
+    /// honouring a credential that can never expire.
+    pub require_exp: bool,
 }
 
 impl VerifyOptions {
@@ -103,6 +112,7 @@ impl VerifyOptions {
                 .unwrap_or(0),
             expected_iss: non_empty("JWC_JWT_EXPECTED_ISS"),
             expected_aud: non_empty("JWC_JWT_EXPECTED_AUD"),
+            require_exp: false,
         }
     }
 }
@@ -257,10 +267,16 @@ pub fn validate_claims(parsed: &JsonValue, opts: &VerifyOptions) -> Result<()> {
     // so non-expiring tokens (long-lived API keys, machine-to-machine)
     // keep working. Present-but-past `exp` surfaces as a classifiable
     // `JwtError.Expired` (see `runner::JWC_ERROR_KINDS`).
-    if let Some(exp_secs) = numeric_claim(parsed, "exp")? {
-        if exp_secs.saturating_add(leeway) <= now {
-            bail!("jwt_verify: token expired (exp={exp_secs}, now={now})");
+    match numeric_claim(parsed, "exp")? {
+        Some(exp_secs) => {
+            if exp_secs.saturating_add(leeway) <= now {
+                bail!("jwt_verify: token expired (exp={exp_secs}, now={now})");
+            }
         }
+        None if opts.require_exp => {
+            bail!("jwt_verify: token has no 'exp' claim");
+        }
+        None => {}
     }
 
     // `nbf` ("not before") went unchecked until now, so a token minted
@@ -297,9 +313,14 @@ pub fn validate_claims(parsed: &JsonValue, opts: &VerifyOptions) -> Result<()> {
     Ok(())
 }
 
-/// [`verify_rs256_with`] using the claim policy from the environment.
+/// [`verify_rs256_with`] using the claim policy from the environment,
+/// plus the RS256-only requirement that `exp` be present.
 pub fn verify_rs256(token: &str, n_b64: &str, e_b64: &str) -> Result<String> {
-    verify_rs256_with(token, n_b64, e_b64, env_verify_options())
+    let opts = VerifyOptions {
+        require_exp: true,
+        ..env_verify_options().clone()
+    };
+    verify_rs256_with(token, n_b64, e_b64, &opts)
 }
 
 /// Verify an RS256 JWT against an RSA public key given as the raw JWK
@@ -745,6 +766,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("issuer mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn rs256_requires_exp_when_asked() {
+        // `jwt_verify_jwks` sets `require_exp`: an OIDC access token
+        // always carries `exp`, so one without it is anomalous and would
+        // otherwise be a credential that never expires.
+        let strict = VerifyOptions {
+            require_exp: true,
+            ..VerifyOptions::default()
+        };
+        // The RS256 fixture deliberately has no `exp`.
+        let err = verify_rs256_with(RS256_TOKEN, RS256_N, RS256_E, &strict)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no 'exp' claim"), "got: {err}");
+
+        // ...and the same token passes when the requirement is off, which
+        // is what keeps `jwt_verify` (HS256, long-lived machine keys)
+        // working unchanged.
+        assert!(
+            verify_rs256_with(RS256_TOKEN, RS256_N, RS256_E, &VerifyOptions::default()).is_ok()
+        );
+    }
+
+    #[test]
+    fn hs256_still_accepts_a_token_without_exp() {
+        // Regression guard on the split: `require_exp` must not leak into
+        // the HS256 path.
+        let token = sign_hs256(r#"{"sub":"svc"}"#, "k").unwrap();
+        assert!(verify_hs256(&token, "k").is_ok());
     }
 
     #[test]
