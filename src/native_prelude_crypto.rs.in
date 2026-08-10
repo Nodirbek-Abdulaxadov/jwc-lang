@@ -241,14 +241,22 @@ fn jwc_jwt_verify_hs256(token: &str, secret: &str) -> Result<String, String> {
     let parsed: serde_json::Value = serde_json::from_str(&payload_str)
         .map_err(|_| "jwt_verify: payload is not valid JSON".to_string())?;
 
-    jwc_jwt_validate_claims(&parsed)?;
+    jwc_jwt_validate_claims(&parsed, false)?;
     Ok(parsed.to_string())
 }
 
 /// Registered-claim validation, shared by HS256 and RS256 so the two
 /// algorithms cannot drift on what counts as a valid token. Mirrors
 /// `crate::jwt::validate_claims`.
-fn jwc_jwt_validate_claims(parsed: &serde_json::Value) -> Result<(), String> {
+///
+/// `require_exp` is off for HS256 (a token with no expiry is a deliberate
+/// long-lived machine-key shape) and on for the JWKS/RS256 path, where an
+/// OIDC access token without `exp` is anomalous and would otherwise be a
+/// credential that never expires.
+fn jwc_jwt_validate_claims(
+    parsed: &serde_json::Value,
+    require_exp: bool,
+) -> Result<(), String> {
     let opts = jwc_jwt_verify_options();
     let leeway = opts.leeway_secs.max(0);
     let now = std::time::SystemTime::now()
@@ -258,13 +266,19 @@ fn jwc_jwt_validate_claims(parsed: &serde_json::Value) -> Result<(), String> {
 
     // `exp` is enforced when present; absent `exp` stays valid so
     // non-expiring machine-to-machine tokens keep working.
-    if let Some(exp_secs) = jwc_jwt_numeric_claim(parsed, "exp")? {
-        if exp_secs.saturating_add(leeway) <= now {
-            return Err(format!(
-                "jwt_verify: token expired (exp={}, now={})",
-                exp_secs, now
-            ));
+    match jwc_jwt_numeric_claim(parsed, "exp")? {
+        Some(exp_secs) => {
+            if exp_secs.saturating_add(leeway) <= now {
+                return Err(format!(
+                    "jwt_verify: token expired (exp={}, now={})",
+                    exp_secs, now
+                ));
+            }
         }
+        None if require_exp => {
+            return Err("jwt_verify: token has no 'exp' claim".to_string());
+        }
+        None => {}
     }
 
     // `nbf` — a token minted for a future activation window must not be
@@ -594,7 +608,7 @@ fn jwc_jwt_verify_rs256(token: &str, n_b64: &str, e_b64: &str) -> Result<String,
     let parsed: serde_json::Value = serde_json::from_str(&payload_str)
         .map_err(|_| "jwt_verify: payload is not valid JSON".to_string())?;
 
-    jwc_jwt_validate_claims(&parsed)?;
+    jwc_jwt_validate_claims(&parsed, true)?;
     Ok(parsed.to_string())
 }
 
