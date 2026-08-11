@@ -458,7 +458,22 @@ pub fn load_project_from_root_with(root: &Path, opts: LoadOpts) -> Result<Loaded
     let manifest: JwcProject = serde_json::from_str(&manifest_json)
         .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
 
-    let source_files = collect_jwc_files(root)?;
+    // A package's own `tests/` is skipped for the same reason a
+    // dependency's is (see `collect_dep_jwc_files`): `ecosystem.md` §3.7
+    // says conformance cases live at `tests/case_*.jwc` and that
+    // `jwc test` should run in the package root, but each case defines
+    // its own `main()`, so merging them fails the load with `E015:
+    // Duplicate function name: main` — meaning no spec-shaped package
+    // could be linted or tested.
+    //
+    // Gated on `type: "pkg"` deliberately. An app that keeps real source
+    // under `tests/` keeps compiling it exactly as before; only projects
+    // that have opted into being a package get the new rule.
+    let source_files = if matches!(manifest.kind, ProjectKind::Pkg) {
+        collect_dep_jwc_files(root)?
+    } else {
+        collect_jwc_files(root)?
+    };
     if source_files.is_empty() {
         bail!("No .jwc source files found in project root");
     }
@@ -516,7 +531,7 @@ pub fn load_project_from_root_with(root: &Path, opts: LoadOpts) -> Result<Loaded
 /// explicit `namespace` declaration get the package name as their default
 /// namespace so two deps with a clashing simple name don't collide.
 fn merge_dep_package(program: &mut Program, pkg: &crate::resolver::ResolvedPackage) -> Result<()> {
-    let pkg_files = collect_jwc_files(&pkg.source_path).unwrap_or_default();
+    let pkg_files = collect_dep_jwc_files(&pkg.source_path).unwrap_or_default();
     for path in &pkg_files {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -614,6 +629,33 @@ pub fn merge_program(combined: &mut Program, mut incoming: Program) -> Result<()
         combined.error_handler = Some(eh);
     }
     Ok(())
+}
+
+/// Source discovery for a **dependency** package.
+///
+/// Same as [`collect_jwc_files`] but skips the package's own `tests/`
+/// directory. `docs/spec/ecosystem.md` §3.7 tells package authors to ship
+/// conformance cases as `tests/case_*.jwc`, and each of those defines its
+/// own `main()` so it can be run. Merging them into the consumer's program
+/// means every such package fails its dependents with `E015: Duplicate
+/// function name: main` — via a path dependency and via the registry
+/// alike, since `jwc publish` includes `tests/` in the tarball.
+///
+/// Scoped to dependencies on purpose: a package's tests are never part of
+/// the surface it exports, but the *root* project's `tests/` is still the
+/// author's own code and keeps loading as before.
+fn collect_dep_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let all = collect_jwc_files(root)?;
+    Ok(all
+        .into_iter()
+        .filter(|p| {
+            p.strip_prefix(root)
+                .ok()
+                .and_then(|rel| rel.components().next())
+                .map(|first| !first.as_os_str().eq_ignore_ascii_case("tests"))
+                .unwrap_or(true)
+        })
+        .collect())
 }
 
 fn collect_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -725,6 +767,44 @@ mod tests {
             std::process::id(),
             nanos
         ))
+    }
+
+    /// `ecosystem.md` §3.7 puts a package's conformance cases at
+    /// `tests/case_*.jwc`, each with its own `main()` so it can be run.
+    /// Loading those into the consumer — or into the package's own
+    /// `jwc lint` / `jwc test` — fails with `E015: Duplicate function
+    /// name: main`, which made the documented layout unusable.
+    #[test]
+    fn dep_source_discovery_skips_the_package_tests_dir() {
+        let dir = unique_tmp_dir("deptests");
+        std::fs::create_dir_all(dir.join("tests")).expect("mkdir tests");
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir src");
+        std::fs::write(dir.join("main.jwc"), "namespace p;\n").expect("write main");
+        std::fs::write(dir.join("src").join("more.jwc"), "namespace p;\n").expect("write more");
+        std::fs::write(
+            dir.join("tests").join("case_a.jwc"),
+            "function main() { print(\"a\"); }\n",
+        )
+        .expect("write case");
+
+        let all = collect_jwc_files(&dir).expect("collect all");
+        let dep = collect_dep_jwc_files(&dir).expect("collect dep");
+
+        assert_eq!(all.len(), 3, "plain walk sees every file: {all:?}");
+        assert_eq!(dep.len(), 2, "dep walk drops tests/: {dep:?}");
+        assert!(
+            !dep.iter().any(|p| p.to_string_lossy().contains("case_a")),
+            "tests/ must not reach a consumer: {dep:?}"
+        );
+        // Only a top-level `tests/` is skipped — a `src/tests.jwc` file or
+        // a nested `src/tests/` is the author's own code, not the
+        // conformance directory the spec reserves.
+        assert!(
+            dep.iter().any(|p| p.to_string_lossy().contains("more")),
+            "non-tests sources must survive: {dep:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

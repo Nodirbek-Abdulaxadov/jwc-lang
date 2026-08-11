@@ -58,6 +58,14 @@ pub fn lint_program(program: &Program) -> Vec<LintWarning> {
     called.insert("main".to_string());
 
     for function in &program.functions {
+        // `public` is an export, not a call site. A library's whole point
+        // is functions its consumers call, and no walk of this program can
+        // see those — so flagging them would make every package report its
+        // entire API as dead code, which is noise that trains authors to
+        // ignore W001. `private` and unmarked functions are still checked.
+        if matches!(function.visibility, crate::ast::Visibility::Public) {
+            continue;
+        }
         if !called.contains(&function.name.to_lowercase()) {
             warnings.push(LintWarning {
                 code: "W001",
@@ -581,6 +589,35 @@ fn collect_calls_where(wc: &WhereExpr, out: &mut std::collections::HashSet<Strin
 mod tests {
     use super::*;
     use crate::parser::{parse_program, validate_program};
+
+    /// A library exports functions its own sources never call — that is
+    /// what `public` means. Reporting them as dead code made every
+    /// spec-shaped package emit one W001 per exported function.
+    #[test]
+    fn public_functions_are_not_reported_as_dead_code() {
+        let src = r#"
+            namespace mylib;
+            public function exported(x: string): string { return x; }
+            private function helper(x: string): string { return x; }
+            public function also_exported(): int { return 1; }
+        "#;
+        let program = parse_program(src).unwrap();
+        let warnings = lint_program(&program);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.code == "W001" && w.message.contains("exported")),
+            "public functions must not be flagged as unused, got: {warnings:?}"
+        );
+        // `private` is still checked — nothing in this program calls it,
+        // and nothing outside the package can.
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.code == "W001" && w.message.contains("helper")),
+            "an uncalled private function is still dead code, got: {warnings:?}"
+        );
+    }
 
     #[test]
     fn function_shadowing_builtin_is_w005() {

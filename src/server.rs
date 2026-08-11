@@ -520,7 +520,7 @@ async fn handle_readyz() -> Response {
     // than one taken out of the load-balancer rotation.
     if crate::redis_engine::is_enabled() {
         if let Err(e) = crate::redis_engine::ping().await {
-            return readyz_db_failure(format!("redis ping: {e}"));
+            return readyz_failure("redis", format!("ping: {e}"));
         }
     }
     // No DB configured → readiness is just process-alive (nothing to
@@ -546,7 +546,7 @@ async fn handle_readyz() -> Response {
             );
             resp
         }
-        Err(e) => readyz_db_failure(format!("ping: {e}")),
+        Err(e) => readyz_failure("db", format!("ping: {e}")),
     }
 }
 
@@ -728,9 +728,15 @@ async fn handle_docs() -> Response {
     resp
 }
 
-fn readyz_db_failure(detail: String) -> Response {
+/// 503 body for a failed readiness probe.
+///
+/// `subsystem` names the JSON key so an operator parsing `/readyz` can tell
+/// a Redis outage from a database one — both used to report under `"db"`,
+/// which mis-attributes the failure to whichever subsystem the reader
+/// assumes.
+fn readyz_failure(subsystem: &str, detail: String) -> Response {
     let escaped = detail.replace('"', "'");
-    let body = format!("{{\"status\":\"not_ready\",\"db\":\"{escaped}\"}}");
+    let body = format!("{{\"status\":\"not_ready\",\"{subsystem}\":\"{escaped}\"}}");
     let mut resp = Response::new(body.into());
     *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
     resp.headers_mut().insert(

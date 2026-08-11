@@ -53,6 +53,30 @@ See [`docs/docs/deployment/redis.md`](docs/docs/deployment/redis.md).
   print in full, because the redaction needles matched `DATABASE_URL` but
   had no entry for Redis.
 
+### Fixed
+
+- **A package's `tests/` no longer breaks its consumers.** `ecosystem.md`
+  §3.7 tells package authors to ship conformance cases as
+  `tests/case_*.jwc`, each with its own `main()` so it can be run — but
+  source discovery merged those into whatever depended on the package,
+  failing the load with `E015: Duplicate function name: main`. Via a path
+  dependency and via the registry alike, since `jwc publish` includes
+  `tests/` in the tarball. A dependency's top-level `tests/` is now
+  skipped, as is a `type: "pkg"` project's own when it loads itself, so
+  `jwc lint` / `jwc test` work in a package root. An app's `tests/` is
+  untouched.
+
+- **W001 no longer reports a library's public API as dead code.**
+  `public` is an export; no walk of the package's own sources can see the
+  consumers that call it, so every spec-shaped package emitted one
+  "defined but never called" warning per exported function. `private` and
+  unmarked functions are still checked.
+
+- **`/readyz` names the subsystem that failed.** The 503 body reported
+  every failure under a `"db"` key, so a Redis outage read as a database
+  one. It now emits `{"status":"not_ready","redis":"..."}` or `"db"` as
+  appropriate.
+
 ### Internal
 
 - The three copies of the "does this program call built-in X?" AST walk in
