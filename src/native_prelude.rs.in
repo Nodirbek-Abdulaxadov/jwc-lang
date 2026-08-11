@@ -2030,9 +2030,28 @@ fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
             return (status, body, ct, headers);
         }
     }
+    // Everything that did NOT come through `text()` / `html()` /
+    // `response()` — i.e. every handler that just returns a value — gets
+    // `application/json`, matching `server.rs`:
+    //
+    //     let ct = content_type.as_deref().unwrap_or("application/json");
+    //
+    // A bare `V::Str` used to be guessed as `text/plain`, which is wrong
+    // for the common case of a handler that hand-builds a JSON document
+    // and returns the string: jwc-shortener's `/openapi.json` served
+    // `text/plain` natively and `application/json` under the interpreter,
+    // so Swagger UI refused the spec from the native binary only.
+    //
+    // A handler that genuinely wants another type says so — `text(v)`,
+    // `html(v)`, or `response(v, "image/svg+xml")` — and takes the
+    // marker path above instead.
+    //
+    // `V::Null` (handler fell off the end, or returned nothing) is the
+    // JSON document `null`, not an empty body, again mirroring the
+    // interpreter's `response_str.unwrap_or_else(|| "null".to_string())`.
     match v {
-        V::Str(s) => (200, s.into_owned(), "text/plain; charset=utf-8".to_string(), Vec::new()),
-        V::Null => (200, String::new(), "text/plain; charset=utf-8".to_string(), Vec::new()),
+        V::Str(s) => (200, s.into_owned(), "application/json".to_string(), Vec::new()),
+        V::Null => (200, "null".to_string(), "application/json".to_string(), Vec::new()),
         other => (200, jwc_to_json(&other), "application/json".to_string(), Vec::new()),
     }
 }

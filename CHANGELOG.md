@@ -3,6 +3,71 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.3] — The rest of the native-parity gaps
+
+Everything here is `--native` catching up to the interpreter. Each one
+returned a well-formed response with the wrong contents, status, or header,
+which is why they read as application bugs rather than compiler faults.
+
+### Fixed
+
+**`validate body` failures were served as HTTP 200.** Codegen returned a
+bare `{error, fields, status: 400}` object; `jwc_to_response` has no reason
+to treat that as anything but a plain JSON value, so the status line said
+`200 OK` while the body claimed 400. Any client branching on `res.ok` read
+a rejected signup as a successful one. Native now answers with the shared
+envelope through `make_response(400, …)` — `{code, details, error, status}`,
+byte for byte what `http_error::validation_failed` produces.
+
+The per-rule messages moved with it. Native emitted `minLength 3` where the
+interpreter writes `minLength(3)`, reported *every* failing rule per field
+where `run_validation_rules` breaks on the first, and silently skipped type
+errors: `{"name": 5}` passed `minLength(3)` and `{"age": "abc"}` passed
+`min(18)`, both because the emitted check only looked at the arm it wanted.
+
+**A short-circuiting middleware skipped the after-chain.** `dispatch.rs`
+breaks out of the request-phase loop on the first middleware that answers,
+then runs the after-chain over every declared middleware anyway. Native's
+`return __mw` jumped straight out of `route_N_inner` — the same class of bug
+as the route-body `return` fixed in 0.9.2, one layer up. jwc-shortener
+served 92,675 rate-limited requests and wrote zero `api_call` rows, so
+throttling was invisible in the analytics. The short-circuit response is now
+parked and stands in for the route body, which also means `response_status()`
+inside `after { }` reads the 429 rather than a handler status that never
+happened. Routes with no after-block anywhere in the chain keep the flat
+early `return` and pay nothing.
+
+**Bare string and null responses got the wrong content-type.** `server.rs`
+defaults every response without an explicit type to `application/json`;
+native guessed `text/plain; charset=utf-8` for a `V::Str`. A handler that
+hand-builds a JSON document and returns the string — jwc-shortener's
+`/openapi.json` — served the right bytes under the wrong header, and Swagger
+UI refused the spec from the native binary only. A handler that returns
+nothing now sends the JSON document `null` rather than an empty body, also
+matching the interpreter. Handlers wanting another type say so with
+`text(v)`, `html(v)`, or `response(v, "image/svg+xml")`.
+
+**`select … first` results read back as null.** `jwc_get_field` handled
+`V::Object` and `V::Record` and sent everything else to `_ => V::Null`, but a
+row from the database arrives as `V::RawJson` and a dynamic object as
+`V::Str`. Every field read off a query result was empty under `--native`;
+jwc-shortener's `/api/links/{code}` served nulls in production. `datetime`
+columns were read as `String` in the same path — `TIMESTAMPTZ` has no
+`FromSql for String`, so the read could only fail, and `unwrap_or_default`
+turned the failure into `""`.
+
+**`redis_eval` re-uploaded the script on every call.** It issued a plain
+`EVAL`, so a rate limiter running one script per request put the script's
+bytes on the wire forever. Both backends now use `redis::Script`, which
+sends `EVALSHA` and falls back once on `NOSCRIPT`.
+
+### Added
+
+**Redis pool gauges on native `/metrics`.** `jwc_redis_pool_size` /
+`_available` / `_max_size` / `_waiting`, alongside the Postgres pool series
+the endpoint already published. Absent rather than zeroed when Redis is not
+configured, matching the interpreter.
+
 ## [0.9.2] — Request logging off the critical path, and three native-parity fixes
 
 ### Fixed

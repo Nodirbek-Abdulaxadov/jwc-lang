@@ -1849,24 +1849,55 @@ fn emit_route_handler(
     // panic guard always wraps this call.
     out.push_str(&format!("\nasync fn route_{idx}_inner() -> V {{\n"));
     out.push_str("    {\n");
-    for mw in &route.middlewares {
-        out.push_str(&format!(
-            "        {{ let __mw = {}().await; if !matches!(__mw, V::Null) {{ return __mw; }} }}\n",
-            middleware_fn_name(mw),
-        ));
+    if has_after_in_chain {
+        // A short-circuiting middleware parks its response instead of
+        // returning, because `return` here would jump past the after-chain
+        // exactly the way an inline route body's `return` used to.
+        //
+        // `dispatch.rs` breaks out of the request-phase loop on the first
+        // middleware that answers, then runs the after-chain over **every**
+        // declared middleware regardless — so a throttled request still
+        // reaches the metrics block. Native's `return __mw` skipped it:
+        // jwc-shortener served 92,675 rate-limited requests and wrote zero
+        // `api_call` rows, making throttling invisible to analytics.
+        //
+        // `jwc_set_response_status` below reads the parked value, so
+        // `response_status()` inside `after { }` sees the 429 rather than
+        // the handler status that never happened.
+        out.push_str("        let mut __short: Option<V> = None;\n");
+        for mw in &route.middlewares {
+            out.push_str(&format!(
+                "        if __short.is_none() {{ let __mw = {}().await; if !matches!(__mw, V::Null) {{ __short = Some(__mw); }} }}\n",
+                middleware_fn_name(mw),
+            ));
+        }
+    } else {
+        // No after-block anywhere in the chain: nothing observes the
+        // difference, so keep the flat early `return` and skip the Option.
+        for mw in &route.middlewares {
+            out.push_str(&format!(
+                "        {{ let __mw = {}().await; if !matches!(__mw, V::Null) {{ return __mw; }} }}\n",
+                middleware_fn_name(mw),
+            ));
+        }
     }
     // Capture the handler result so the after-chain can run on the way
     // out. The variable is shared between the handler call and the
     // after-block dispatch below.
     if let Some(handler) = &route.handler {
         let args = handler_arg_exprs(handler, ctx);
-        out.push_str(&format!(
-            "        let __resp = {}({}).await;\n",
-            user_fn_name(handler),
-            args
-        ));
+        let call = format!("{}({}).await", user_fn_name(handler), args);
+        if has_after_in_chain {
+            out.push_str(&format!(
+                "        let __resp = if let Some(__s) = __short {{ __s }} else {{ {call} }};\n"
+            ));
+        } else {
+            out.push_str(&format!("        let __resp = {call};\n"));
+        }
     } else if body_in_own_fn {
-        out.push_str(&format!("        let __resp = route_{idx}_body().await;\n"));
+        out.push_str(&format!(
+            "        let __resp = if let Some(__s) = __short {{ __s }} else {{ route_{idx}_body().await }};\n"
+        ));
     } else {
         out.push_str("        let __resp = {\n");
         for stmt in &route.body {
@@ -2474,44 +2505,82 @@ fn emit_validate_body(
     out.push_str("let __body = jwc_b_body();\n");
     out.push_str(&inner);
     out.push_str("let mut __errors: JwcObj = JwcObj::default();\n");
+    // One `__err` slot per field, and every rule guarded on it being
+    // empty: `runner::validation::run_validation_rules` `break`s out of a
+    // field's rule list on the first failure, so exactly one message per
+    // field reaches the client. Codegen used to insert unconditionally,
+    // which let a later rule overwrite an earlier one — `age: min(100),
+    // max(10)` on `age: 50` reported `max(10)` natively and `min(100)`
+    // under the interpreter.
     for field in fields {
         let fname = field.name.replace('"', "\\\"");
         out.push_str(&inner);
+        out.push_str("{\n");
+        let f_in = format!("{inner}    ");
+        out.push_str(&f_in);
         out.push_str(&format!(
             "let __field = jwc_get_field(&__body, \"{}\");\n",
             fname
         ));
+        out.push_str(&f_in);
+        out.push_str("let mut __err: Option<String> = None;\n");
         for rule in &field.rules {
-            out.push_str(&inner);
+            out.push_str(&f_in);
+            out.push_str("if __err.is_none() ");
             match rule {
                 crate::ast::ValidateRule::Required => {
-                    out.push_str(&format!(
-                        "if matches!(__field, V::Null) {{ __errors.insert(\"{f}\".to_string(), v_str(\"required\")); }}\n",
-                        f = fname,
-                    ));
+                    out.push_str(
+                        "{ if matches!(__field, V::Null) { __err = Some(\"required\".to_string()); } }\n",
+                    );
                 }
+                // The non-string arm is not dead weight: the interpreter
+                // reports `minLength(3): not a string` for `{"name": 5}`,
+                // where codegen's old `if let V::Str` simply fell through
+                // and passed a number off as valid.
                 crate::ast::ValidateRule::MinLength(n) => {
                     out.push_str(&format!(
-                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() < {n} {{ __errors.insert(\"{f}\".to_string(), v_str(\"minLength {n}\")); }} }}\n",
-                        n = n, f = fname,
+                        "{{ match &__field {{\n\
+                         {f_in}    V::Str(__s) => {{ if __s.chars().count() < {n} {{ __err = Some(\"minLength({n})\".to_string()); }} }}\n\
+                         {f_in}    V::Null => {{}}\n\
+                         {f_in}    _ => {{ __err = Some(\"minLength({n}): not a string\".to_string()); }}\n\
+                         {f_in}}} }}\n",
+                        f_in = f_in, n = n,
                     ));
                 }
                 crate::ast::ValidateRule::MaxLength(n) => {
                     out.push_str(&format!(
-                        "if let V::Str(ref __s) = __field {{ if __s.chars().count() > {n} {{ __errors.insert(\"{f}\".to_string(), v_str(\"maxLength {n}\")); }} }}\n",
-                        n = n, f = fname,
+                        "{{ match &__field {{\n\
+                         {f_in}    V::Str(__s) => {{ if __s.chars().count() > {n} {{ __err = Some(\"maxLength({n})\".to_string()); }} }}\n\
+                         {f_in}    V::Null => {{}}\n\
+                         {f_in}    _ => {{ __err = Some(\"maxLength({n}): not a string\".to_string()); }}\n\
+                         {f_in}}} }}\n",
+                        f_in = f_in, n = n,
                     ));
                 }
+                // Matched on `V::Int | V::Float` rather than run through
+                // `jwc_to_float`, which also parses strings and returns
+                // `None` for anything unparseable — so `{"age": "abc"}`
+                // slipped past `min(18)` natively. The interpreter
+                // accepts only `JsonValue::Number` and reports every
+                // other non-null type as `min(18): not a number`.
                 crate::ast::ValidateRule::Min(v) => {
                     out.push_str(&format!(
-                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n < {v}_f64 {{ __errors.insert(\"{f}\".to_string(), v_str(\"min {v}\")); }} }} }}\n",
-                        v = v, f = fname,
+                        "{{ match &__field {{\n\
+                         {f_in}    V::Int(_) | V::Float(_) => {{ if jwc_to_float(&__field).unwrap_or(0.0) < {v}_f64 {{ __err = Some(\"min({v})\".to_string()); }} }}\n\
+                         {f_in}    V::Null => {{}}\n\
+                         {f_in}    _ => {{ __err = Some(\"min({v}): not a number\".to_string()); }}\n\
+                         {f_in}}} }}\n",
+                        f_in = f_in, v = v,
                     ));
                 }
                 crate::ast::ValidateRule::Max(v) => {
                     out.push_str(&format!(
-                        "{{ if let Some(__n) = jwc_to_float(&__field) {{ if __n > {v}_f64 {{ __errors.insert(\"{f}\".to_string(), v_str(\"max {v}\")); }} }} }}\n",
-                        v = v, f = fname,
+                        "{{ match &__field {{\n\
+                         {f_in}    V::Int(_) | V::Float(_) => {{ if jwc_to_float(&__field).unwrap_or(0.0) > {v}_f64 {{ __err = Some(\"max({v})\".to_string()); }} }}\n\
+                         {f_in}    V::Null => {{}}\n\
+                         {f_in}    _ => {{ __err = Some(\"max({v}): not a number\".to_string()); }}\n\
+                         {f_in}}} }}\n",
+                        f_in = f_in, v = v,
                     ));
                 }
                 crate::ast::ValidateRule::Pattern(src) => {
@@ -2548,39 +2617,66 @@ fn emit_validate_body(
                     let esc = src.replace('\\', "\\\\").replace('"', "\\\"");
                     out.push_str(&format!(
                         "{{ static __RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();\n\
-                         {inner}    match &__field {{\n\
-                         {inner}        V::Null => {{}}\n\
-                         {inner}        V::Str(__s) => {{\n\
-                         {inner}            let __re = __RE.get_or_init(|| regex::Regex::new({pat}).expect(\"INVARIANT: validate pattern is a literal checked at compile time\"));\n\
-                         {inner}            if !__re.is_match(__s) {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern({esc})\")); }}\n\
-                         {inner}        }}\n\
-                         {inner}        _ => {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern({esc}): not a string\")); }}\n\
-                         {inner}    }} }}\n",
-                        inner = inner,
+                         {f_in}    match &__field {{\n\
+                         {f_in}        V::Null => {{}}\n\
+                         {f_in}        V::Str(__s) => {{\n\
+                         {f_in}            let __re = __RE.get_or_init(|| regex::Regex::new({pat}).expect(\"INVARIANT: validate pattern is a literal checked at compile time\"));\n\
+                         {f_in}            if !__re.is_match(__s) {{ __err = Some(\"pattern({esc})\".to_string()); }}\n\
+                         {f_in}        }}\n\
+                         {f_in}        _ => {{ __err = Some(\"pattern({esc}): not a string\".to_string()); }}\n\
+                         {f_in}    }} }}\n",
+                        f_in = f_in,
                         pat = pat,
                         esc = esc,
-                        f = fname,
                     ));
                 }
             }
         }
+        out.push_str(&f_in);
+        out.push_str(&format!(
+            "if let Some(__m) = __err {{ __errors.insert(\"{f}\".to_string(), v_str(__m)); }}\n",
+            f = fname,
+        ));
+        out.push_str(&inner);
+        out.push_str("}\n");
     }
     out.push_str(&inner);
     out.push_str("if !__errors.is_empty() {\n");
     let inner2 = format!("{inner}    ");
+    // The interpreter answers a failed `validate body` with the shared
+    // error envelope — `http_error::validation_failed` → HTTP 400 and
+    // `{code, details, error, status}`. Codegen used to hand back a bare
+    // object with `error`/`fields`/`status`, which axum then served as
+    // **HTTP 200**: the body claimed 400, the status line said OK, and any
+    // client branching on `res.ok` treated a rejected signup as success.
+    //
+    // `make_response` carries the real status through
+    // `jwc_to_response`, and `jwc_write_json` sorts keys, so the emitted
+    // bytes match the interpreter's `serde_json::Map` (BTreeMap) ordering
+    // exactly. `details` is unconditional here because this branch only
+    // runs when `__errors` is non-empty — the same condition under which
+    // `envelope()` attaches it.
     out.push_str(&inner2);
     out.push_str("let mut __payload: JwcObj = JwcObj::default();\n");
     out.push_str(&inner2);
+    out.push_str("__payload.insert(\"code\".to_string(), v_str(\"validation_failed\"));\n");
+    out.push_str(&inner2);
+    out.push_str("__payload.insert(\"details\".to_string(), v_obj(__errors));\n");
+    out.push_str(&inner2);
+    out.push_str(
+        "__payload.insert(\"error\".to_string(), v_str(\"Request body failed validation\"));\n",
+    );
+    out.push_str(&inner2);
     out.push_str("__payload.insert(\"status\".to_string(), V::Int(400));\n");
     out.push_str(&inner2);
-    out.push_str("__payload.insert(\"error\".to_string(), v_str(\"Validation failed\"));\n");
-    out.push_str(&inner2);
-    out.push_str("__payload.insert(\"fields\".to_string(), v_obj(__errors));\n");
+    out.push_str(
+        "let __resp = make_response(400, jwc_to_json(&v_obj(__payload)), \"application/json\");\n",
+    );
     out.push_str(&inner2);
     if ctx.in_closure() {
-        out.push_str("{ jwc_set_return(v_obj(__payload)); return V::Null; }\n");
+        out.push_str("{ jwc_set_return(__resp); return V::Null; }\n");
     } else {
-        out.push_str("return v_obj(__payload);\n");
+        out.push_str("return __resp;\n");
     }
     out.push_str(&inner);
     out.push_str("}\n");
