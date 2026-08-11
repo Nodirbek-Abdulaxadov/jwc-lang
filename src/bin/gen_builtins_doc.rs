@@ -283,6 +283,10 @@ const GROUPS: &[Group] = &[
         },
     },
     Group {
+        title: "Redis (shared cache)",
+        predicate: |d| d.name.starts_with("redis_"),
+    },
+    Group {
         title: "Arrays",
         predicate: |d| matches!(d.name, "range" | "push" | "join"),
     },

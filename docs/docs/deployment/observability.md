@@ -19,7 +19,7 @@ own route at the same path:
 | Path | What it does | Use it for |
 |---|---|---|
 | `/healthz` | Always 200 `{"status":"ok"}`. Process-alive only — no DB round-trip. | k8s `livenessProbe` |
-| `/readyz` | Runs a real `engine::ping()` (pool checkout + `SELECT 1`) when a DB is configured; returns 200 `{"status":"ready","db":"ok"}` on success, 503 + error detail on failure. When no DB is configured, falls back to process-alive. | k8s `readinessProbe`, load-balancer health checks |
+| `/readyz` | Runs a real `engine::ping()` (pool checkout + `SELECT 1`) when a DB is configured, and a Redis `PING` when `JWC_REDIS_URL` is set; returns 200 `{"status":"ready","db":"ok"}` on success, 503 + error detail on failure. The 503 body names the failing subsystem — `{"status":"not_ready","redis":"..."}` vs `"db"` — so a Redis outage isn't misread as a database one. With neither configured, falls back to process-alive. | k8s `readinessProbe`, load-balancer health checks |
 
 The distinction matters: a pod with a flaky DB should keep being
 restarted (`liveness` = green) only as long as it can still serve other

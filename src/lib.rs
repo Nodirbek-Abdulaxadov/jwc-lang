@@ -58,6 +58,7 @@ pub mod password;
 pub mod pkg_cache;
 pub mod project;
 pub mod queue;
+pub mod redis_engine;
 pub mod registry;
 pub mod resolver;
 pub mod runner;

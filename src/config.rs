@@ -150,6 +150,32 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "postgres",
         doc: "Admin DB used by `migrate` to create the target DB.",
     },
+    // --- Redis -------------------------------------------------------------
+    EnvVar {
+        name: "JWC_REDIS_URL",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "Redis connection string; empty disables the redis_* built-ins. \
+              Use rediss:// for TLS.",
+    },
+    EnvVar {
+        name: "JWC_REDIS_POOL_SIZE",
+        parse_kind: ParseKind::Usize,
+        default: "64",
+        doc: "Max connections in the deadpool-redis pool.",
+    },
+    EnvVar {
+        name: "JWC_REDIS_RETRY_MAX_ATTEMPTS",
+        parse_kind: ParseKind::U32,
+        default: "3",
+        doc: "Transient-error retry ceiling for Redis commands.",
+    },
+    EnvVar {
+        name: "JWC_REDIS_RETRY_BACKOFF_MS",
+        parse_kind: ParseKind::U32,
+        default: "100",
+        doc: "Base Redis retry backoff (ms); doubles each attempt.",
+    },
     // --- Server ------------------------------------------------------------
     EnvVar {
         name: "JWC_SERVER_WORKERS",
@@ -381,7 +407,19 @@ pub const REGISTRY: &[EnvVar] = &[
 ];
 
 /// Names whose rendered value must be masked.
-const REDACT_NEEDLES: &[&str] = &["PASSWORD", "SECRET", "TOKEN", "KEY", "JWT", "DATABASE_URL"];
+// `REDIS_URL` earns its place for the same reason as `DATABASE_URL`: the
+// value is a connection string whose userinfo carries a password
+// (`redis://:hunter2@host:6379`), and on Redis the bare-password form with
+// no username is the common one.
+const REDACT_NEEDLES: &[&str] = &[
+    "PASSWORD",
+    "SECRET",
+    "TOKEN",
+    "KEY",
+    "JWT",
+    "DATABASE_URL",
+    "REDIS_URL",
+];
 
 fn name_is_secret(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
@@ -715,6 +753,11 @@ mod tests {
         assert!(name_is_secret("JWC_DATABASE_URL"));
         assert!(name_is_secret("JWC_API_KEY"));
         assert!(name_is_secret("JWC_JWT_SIGNING"));
+        // `redis://:hunter2@host` puts a password in the value.
+        assert!(name_is_secret("JWC_REDIS_URL"));
+        // ...but the other Redis knobs are plain numbers — redacting them
+        // would hide useful info from `jwc config` for no benefit.
+        assert!(!name_is_secret("JWC_REDIS_POOL_SIZE"));
         assert!(!name_is_secret("JWC_PORT"));
         assert!(!name_is_secret("JWC_LOG_FORMAT"));
     }

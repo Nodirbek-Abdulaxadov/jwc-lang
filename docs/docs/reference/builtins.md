@@ -167,6 +167,20 @@ Columns:
 | `cache_del` | — | 1 | ✅ |
 | `cache_clear` | — | 0 | ✅ |
 
+## Redis (shared cache)
+
+| Name | Aliases | Args | Native |
+|---|---|---|---|
+| `redis_get` | — | 1 | ✅ |
+| `redis_set` | — | 3 | ✅ |
+| `redis_del` | — | 1 | ✅ |
+| `redis_exists` | — | 1 | ✅ |
+| `redis_incr` | — | 1 | ✅ |
+| `redis_expire` | — | 2 | ✅ |
+| `redis_eval` | — | 3 | ✅ |
+| `redis_ping` | — | 0 | ✅ |
+| `redis_enabled` | — | 0 | ✅ |
+
 ## Arrays
 
 | Name | Aliases | Args | Native |

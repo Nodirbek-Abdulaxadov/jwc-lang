@@ -32,6 +32,21 @@ The boot table is printed by default. Suppress it with
 
 Cross-link: [data/dbcontext](../data/dbcontext.md), [deployment/migrations](./migrations.md).
 
+## Redis
+
+Only read by binaries built with `--features redis`. A build without the
+feature warns at boot if `JWC_REDIS_URL` is set, then carries on with the
+`redis_*` built-ins failing — see [deployment/redis](./redis.md).
+
+| Var | Default | Description | Since |
+|---|---|---|---|
+| `JWC_REDIS_URL` | _(unset)_ | Redis connection string; unset disables the `redis_*` built-ins. Use `rediss://` for TLS. No bare `REDIS_URL` fallback — see [deployment/redis](./redis.md). | v0.8.9 |
+| `JWC_REDIS_POOL_SIZE` | `64` | Max connections in the deadpool-redis pool. `0` is ignored (a zero-size pool never hands out a connection). | v0.8.9 |
+| `JWC_REDIS_RETRY_MAX_ATTEMPTS` | `3` | Transient-error retry ceiling (dropped connection, timeout, `LOADING`, cluster `MOVED`/`ASK`). `1` disables retries. | v0.8.9 |
+| `JWC_REDIS_RETRY_BACKOFF_MS` | `100` | Base Redis retry backoff in milliseconds; doubles per attempt. | v0.8.9 |
+
+Cross-link: [deployment/redis](./redis.md).
+
 ## HTTP server hardening
 
 | Var | Default | Description | Since |

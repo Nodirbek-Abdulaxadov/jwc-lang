@@ -379,7 +379,15 @@ Ushbu band'lar uchun PR'lar yopiladi yoki forka tavsiya etiladi.
     Phase 9 da to'liq async frame I/O.
   - ✅ Background queue: `register_job_handler` / `enqueue` / `job_count`
     (Phase 8).
-  - ⬜ Qoldi: Redis-backed cache, Storage (S3), SSE.
+  - ✅ Redis (core tier, `ecosystem.md` Faza 1): `redis_get/set/del/
+    exists/incr/expire/eval/ping/enabled` — `--features redis` ortida,
+    interpreter + `--native` ikkalasida. `rediss://` TLS, deadpool,
+    `/readyz` probe va `jwc_redis_pool_*` metrikalari bilan.
+    ⬜ Qoldi: `redis_lpush` / `redis_brpop` — `brpop` bloklovchi
+    operatsiya bo'lgani uchun (pool slotini timeout davomida ushlab
+    turadi) durable queue'ning Redis backend'i bilan birga ko'riladi,
+    KV cache bilan emas.
+  - ⬜ Qoldi: Storage (S3), SSE.
 - **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
 - **JWC Hub:** `hub.jwc.dev` — paket registry.
 - **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.

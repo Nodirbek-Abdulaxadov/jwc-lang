@@ -3,6 +3,89 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — Redis
+
+### Added
+
+**Redis, as a core-tier driver** (`docs/spec/ecosystem.md` Faza 1). Nine
+built-ins — `redis_get`, `redis_set`, `redis_del`, `redis_exists`,
+`redis_incr`, `redis_expire`, `redis_eval`, `redis_ping`,
+`redis_enabled` — in both the interpreter and `jwc build --native`.
+
+This is the shared-state counterpart to the in-process `cache_*` family.
+Same key/value shape and the same `ttl_secs == 0 means no expiry` contract,
+so code can move between them, but the state lives in Redis and every
+replica sees it. A rate limit that read 100/min per pod now reads 100/min
+across the deployment.
+
+Redis is behind a **`redis` Cargo feature, off by default**, so the default
+build pulls in neither `redis` nor `deadpool-redis`. The built-in *rows* are
+not gated — gating them would make `jwc check` accept or reject the same
+program depending on how the binary was compiled. A binary built without
+the feature warns at boot when `JWC_REDIS_URL` is set, then fails
+`redis_*` calls with a message naming the missing flag.
+
+- `rediss://` TLS via rustls with bundled webpki roots, so it works in a
+  scratch/distroless container.
+- Transient failures (dropped connection, timeout, `LOADING`, cluster
+  `MOVED`/`ASK`) retry with exponential backoff; permanent ones don't.
+- New error kinds: `RedisError`, `RedisError.ConnectionFailure`,
+  `RedisError.TimedOut`, `RedisError.NoScript`, `RedisError.LoadingError`.
+- `/readyz` probes Redis **only when configured**, so already-deployed apps
+  keep their existing readiness behaviour on upgrade.
+- `/metrics` gains `jwc_redis_pool_{size,available,max_size,waiting}`,
+  emitted only when Redis is configured.
+- New env vars: `JWC_REDIS_URL`, `JWC_REDIS_POOL_SIZE`,
+  `JWC_REDIS_RETRY_MAX_ATTEMPTS`, `JWC_REDIS_RETRY_BACKOFF_MS`.
+  `JWC_REDIS_URL` is redacted by `jwc config` — its userinfo carries a
+  password.
+
+`redis_lpush` / `redis_brpop` are deliberately absent: `BRPOP` blocks,
+holding a pool connection for its whole timeout and starving the pool it
+came from. Both belong with the durable queue's Redis backend.
+
+See [`docs/docs/deployment/redis.md`](docs/docs/deployment/redis.md).
+
+### Changed
+
+- **`JWC_REDIS_URL` joins the `jwc config` redaction list.** It was
+  previously possible for a connection string with an inline password to
+  print in full, because the redaction needles matched `DATABASE_URL` but
+  had no entry for Redis.
+
+### Fixed
+
+- **A package's `tests/` no longer breaks its consumers.** `ecosystem.md`
+  §3.7 tells package authors to ship conformance cases as
+  `tests/case_*.jwc`, each with its own `main()` so it can be run — but
+  source discovery merged those into whatever depended on the package,
+  failing the load with `E015: Duplicate function name: main`. Via a path
+  dependency and via the registry alike, since `jwc publish` includes
+  `tests/` in the tarball. A dependency's top-level `tests/` is now
+  skipped, as is a `type: "pkg"` project's own when it loads itself, so
+  `jwc lint` / `jwc test` work in a package root. An app's `tests/` is
+  untouched.
+
+- **W001 no longer reports a library's public API as dead code.**
+  `public` is an export; no walk of the package's own sources can see the
+  consumers that call it, so every spec-shaped package emitted one
+  "defined but never called" warning per exported function. `private` and
+  unmarked functions are still checked.
+
+- **`/readyz` names the subsystem that failed.** The 503 body reported
+  every failure under a `"db"` key, so a Redis outage read as a database
+  one. It now emits `{"status":"not_ready","redis":"..."}` or `"db"` as
+  appropriate.
+
+### Internal
+
+- The three copies of the "does this program call built-in X?" AST walk in
+  `native_build.rs` are now one `CallScan` over a name list. The copies
+  differed only in their name lists, so every new `Expr` variant had to be
+  remembered in each of them — and a missed one silently under-reports a
+  dependency, leaving a prelude fragment out of a generated crate that then
+  fails to compile.
+
 ## [0.8.8] — int() stops lying, and console.writeln
 
 ### BREAKING
