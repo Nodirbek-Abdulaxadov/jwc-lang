@@ -643,3 +643,77 @@ fn emit_rust_source_lowers_log_insert_to_the_buffered_push() {
         "buffered push must not be awaited"
     );
 }
+
+/// A route body ending in `return` must not skip the after-chain.
+///
+/// `Stmt::Return` lowers to a real Rust `return`. Emitted inline into
+/// `route_N_inner`, that jumped over the response-status capture and every
+/// `_after()` call — so a middleware `after { }` block never ran on a native
+/// build. Nearly every route ends in `return`, so this was not an edge case:
+/// jwc-shortener served 3.5M requests and logged exactly zero rows.
+///
+/// Nothing caught it. The emitted source still *contains* the `_after()`
+/// call — just after a `return` — so a substring assertion passes while the
+/// code is unreachable. This test checks reachability instead: no `return`
+/// may sit between binding `__resp` and the after-call.
+#[test]
+fn emit_rust_source_keeps_the_after_block_reachable_past_a_return() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        middleware Tracker {
+        }
+        after {
+            let s = response_status();
+        }
+        route GET "/" use Tracker {
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "afterret", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    // The call site, not the `fn mw_tracker_after()` definition — that is
+    // emitted earlier in the file and would match first.
+    let after_call = body
+        .find("let _ = mw_tracker_after().await;")
+        .expect("after-chain call missing entirely");
+    let resp_bind = body.find("let __resp =").expect("__resp binding missing");
+    assert!(
+        resp_bind < after_call,
+        "__resp must be bound before the after-chain runs"
+    );
+    let between = &body[resp_bind..after_call];
+    assert!(
+        !between.contains("return "),
+        "a `return` between binding __resp and the after-call makes the \
+         after-block unreachable; body must be lifted into its own fn:\n{between}"
+    );
+    // The lifted body is what makes that true.
+    assert!(
+        body.contains("async fn route_0_body()"),
+        "route body was not lifted into its own fn"
+    );
+}
+
+/// The lift is conditional: a route with no after-chain keeps the flat
+/// inline shape, so the common case pays neither an extra function nor an
+/// extra await.
+#[test]
+fn emit_rust_source_keeps_bodies_inline_without_an_after_chain() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        route GET "/" {
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "noafter", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        !body.contains("async fn route_0_body()"),
+        "a route with no after-chain must not pay for the lifted body"
+    );
+}

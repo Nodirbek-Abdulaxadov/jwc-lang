@@ -1725,6 +1725,41 @@ fn emit_route_handler(
     // reference middlewares by name; we resolve them against the
     // already-flattened decl list `CodegenCtx` carries.
     let mw_decls: Vec<&crate::ast::MiddlewareDecl> = ctx.middlewares.to_vec();
+
+    let has_after_in_chain = route
+        .middlewares
+        .iter()
+        .any(|mw| middleware_has_after(mw, &mw_decls));
+    // An inline route body emitted straight into `route_{idx}_inner` is
+    // wrong as soon as the chain has an `after` block: `Stmt::Return`
+    // lowers to a real Rust `return` (see `emit_stmt`), which exits
+    // `route_{idx}_inner` outright — past the response-status capture and
+    // past every `_after()` call. Every route that ends in `return` — which
+    // is nearly all of them — silently skipped its after-phase.
+    //
+    // Lifting the body into its own `async fn` puts the `return` inside a
+    // function whose only job is to produce the response, so the caller
+    // resumes normally and runs the after-chain.
+    //
+    // The other candidate fix — reusing the `ctx.in_closure()` path, which
+    // parks the value via `jwc_set_return` instead of returning — is
+    // unsound here. `JWC_RETURN_SLOT` is a `thread_local!`, and the
+    // after-chain awaits; on a multi-threaded runtime the task can resume
+    // on a different worker, where the slot is empty (or holds another
+    // request's value).
+    //
+    // Routes with no after-chain keep the flat inline shape and pay
+    // nothing — no extra function, no extra await.
+    let body_in_own_fn = has_after_in_chain && route.handler.is_none();
+    if body_in_own_fn {
+        out.push_str(&format!("\nasync fn route_{idx}_body() -> V {{\n"));
+        for stmt in &route.body {
+            emit_stmt(out, stmt, 1, ctx);
+        }
+        out.push_str("    if let Some(__r) = jwc_take_return() { __r } else { V::Null }\n");
+        out.push_str("}\n");
+    }
+
     // Plain `async fn`, not a boxed future: `route_{idx}` below boxes once
     // for the dispatch table, and this is the only caller. Boxing here as
     // well would put a second allocation on every request now that the
@@ -1747,6 +1782,8 @@ fn emit_route_handler(
             user_fn_name(handler),
             args
         ));
+    } else if body_in_own_fn {
+        out.push_str(&format!("        let __resp = route_{idx}_body().await;\n"));
     } else {
         out.push_str("        let __resp = {\n");
         for stmt in &route.body {
@@ -1767,10 +1804,6 @@ fn emit_route_handler(
     // overhead (~50ns: V match + atomic store) that nothing reads.
     // Concretely: a stateless route like `route GET "/ping" { return "pong"; }`
     // with no middleware emits zero Phase-5 instrumentation now.
-    let has_after_in_chain = route
-        .middlewares
-        .iter()
-        .any(|mw| middleware_has_after(mw, &mw_decls));
     if has_after_in_chain {
         out.push_str("        jwc_set_response_status(jwc_status_of(&__resp));\n");
         // Response-phase middleware: reverse order so an outer `after` can
