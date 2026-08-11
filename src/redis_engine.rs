@@ -396,20 +396,33 @@ mod imp {
     /// back as its first element — scripts meant for `redis_eval` should
     /// return a scalar, or `cjson.encode(...)` a structure.
     pub async fn eval(script: &str, keys: &[String], args: &[String]) -> Result<Option<String>> {
+        // `Script` sends EVALSHA and falls back to EVAL once, on NOSCRIPT.
+        // Plain `EVAL` re-uploads the script body on *every* call — for the
+        // rate-limit script that is ~130 bytes per request, and a caller
+        // running one script per request pays it forever.
+        //
+        // The SHA1 is computed locally per call rather than cached. That is
+        // microseconds against a network round-trip, and caching would mean
+        // holding a map keyed by script text for scripts that arrive from
+        // user code at runtime — the memory is unbounded, the win is not.
+        //
+        // The fallback matters on a restarted or failed-over Redis, whose
+        // script cache is empty: the first call after that takes two
+        // round-trips instead of one, then the SHA is warm again.
         retry_with_backoff(|| async {
             let mut conn = get_connection().await?;
-            let mut cmd = redis::cmd("EVAL");
-            cmd.arg(script).arg(keys.len());
+            let s = redis::Script::new(script);
+            let mut invocation = s.prepare_invoke();
             for k in keys {
-                cmd.arg(k);
+                invocation.key(k);
             }
             for a in args {
-                cmd.arg(a);
+                invocation.arg(a);
             }
-            let raw: redis::Value = cmd
-                .query_async(&mut conn)
+            let raw: redis::Value = invocation
+                .invoke_async(&mut conn)
                 .await
-                .with_context(|| "Redis EVAL failed")?;
+                .with_context(|| "Redis EVALSHA/EVAL failed")?;
             Ok(redis_value_to_string(&raw))
         })
         .await

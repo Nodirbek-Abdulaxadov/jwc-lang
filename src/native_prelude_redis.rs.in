@@ -274,15 +274,21 @@ async fn jwc_b_redis_eval(script: V, keys_json: V, args_json: V) -> V {
     let keys = jwc_redis_string_array(keys_json, "redis_eval", "keys_json");
     let argv = jwc_redis_string_array(args_json, "redis_eval", "args_json");
     let mut conn = jwc_redis_conn("redis_eval").await;
-    let mut cmd = redis::cmd("EVAL");
-    cmd.arg(src.as_ref()).arg(keys.len());
+    // EVALSHA with a one-shot EVAL fallback on NOSCRIPT, matching
+    // `redis_engine::eval` on the interpreter side. Plain `EVAL` re-uploads
+    // the script body on every call; a rate limiter running one script per
+    // request pays that forever. The SHA1 is computed locally per call —
+    // microseconds against a round-trip, and no unbounded cache keyed by
+    // script text.
+    let script = redis::Script::new(src.as_ref());
+    let mut invocation = script.prepare_invoke();
     for k in &keys {
-        cmd.arg(k);
+        invocation.key(k);
     }
     for a in &argv {
-        cmd.arg(a);
+        invocation.arg(a);
     }
-    match cmd.query_async::<redis::Value>(&mut conn).await {
+    match invocation.invoke_async::<redis::Value>(&mut conn).await {
         Ok(raw) => jwc_redis_value_to_v(&raw),
         Err(e) => jwc_redis_panic("redis_eval", e),
     }
