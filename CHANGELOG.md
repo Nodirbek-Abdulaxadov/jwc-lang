@@ -3,9 +3,49 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.2] — Request logging off the critical path, and three native-parity fixes
+
+### Fixed
+
+**`pattern(...)` was not enforced under `--native`.** `emit_validate_body`
+compiled the rule to an is-it-a-string check and discarded the regex, because
+the generated crate had no regex dependency. Every other rule was emitted
+faithfully, so the gap was invisible: `jwc check` accepted it, the interpreter
+honoured it, only the shipped binary ignored it. A program using `pattern` as
+a security boundary had none — jwc-shortener's native build accepted
+`javascript:` URLs and redirected to them. `regex` is now a conditional
+dependency gated on the program using `pattern`, compiled once per call site
+behind a `OnceLock`. Semantics now match `runner::validation` exactly,
+including a null field passing (that is `required`'s job) — which the old
+codegen also got wrong, in the other direction.
+
+**Middleware `after { }` blocks never ran under `--native`.** A route body's
+`return` lowers to a real Rust `return`, and the body was emitted inline into
+`route_N_inner`, so it exited past the response-status capture and the whole
+after-chain. Nearly every route ends in `return`, so the response phase simply
+did not happen. Route bodies with an after-chain are now lifted into their own
+`async fn`.
+
+**Source discovery walked into nested projects.** A vendored dependency —
+a subdirectory with its own manifest — was loaded twice: once as a plain
+project source, landing in `<root>` because package files declare no namespace
+of their own, and once through dependency resolution. The duplicate broke
+visibility, so the package's own call to a `private` helper failed with
+`E021`. jwc-shortener had been unbuildable with its own compiler.
+
+**Feature detection was blind to two places.** `program_calls_any` did not walk
+middleware `after_body`, and did not recurse into `savepoint { }`. Harmless
+while every AOT prelude shipped unconditionally; a real fault now that they are
+gated, since codegen would emit a call to a `jwc_b_*` that was never included.
 
 ### Added
+
+**`GET /metrics` on native builds.** Serves the buffered-writer series and the
+Postgres pool. Registered before the user's routes — the router returns the
+first match, so a catch-all like `route GET "/{code}"` otherwise swallows it —
+and skipped entirely when the program declares its own `/metrics`, matching
+`server.rs::route_owned_by_user`. Narrower than the interpreter's endpoint:
+request counters live in `ServerMetrics` and have no native counterpart.
 
 **`log_insert(Entity, record)` — buffered, batched telemetry writes.** A
 request-logging middleware that calls `insert` puts a database round-trip on

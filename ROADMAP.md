@@ -4,7 +4,7 @@
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
 >
-> Joriy holat: **v0.9.0** — Phase 0–11 yopildi, native query-layer parity bor.
+> Joriy holat: **v0.9.2** — Phase 0–11 yopildi, native query-layer parity bor.
 > v0.7.0 real ilovalardan (MyWallet, jwc-shortener) kelgan feedback bo'yicha
 > DSL/editor/HTTP-kontrakt tuzatishlari; v0.8.0 query layer (where'dan
 > `and`/`or` jimgina yo'qolishi, having'da agregatlar, `select distinct`);
@@ -650,7 +650,7 @@ Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
 
 ## 1.0 gacha yo'l xaritasi
 
-Hozirgi holat: Phase 0–11 yopildi (v0.9.0). Query Layer tugadi, native
+Hozirgi holat: Phase 0–11 yopildi (v0.9.2). Query Layer tugadi, native
 parity bor. Qolgani — quyidagi olti reliz.
 
 Tartib bitta prinsipga bo'ysunadi: **buzuvchi o'zgarishlar erta, ergonomika
@@ -675,6 +675,11 @@ breaking o'zgarish 0.10–0.13 ichida tugashi shart.
 ✅ v0.9.0 →  Redis core-tier driver: `redis_*` builtinlari (interpreter +
              `--native`), `rediss://` TLS, `/readyz` probe va
              `jwc_redis_pool_*` metrikalari. `--features redis` ortida.
+✅ v0.9.2 →  `log_insert` — buferlangan, batchli telemetriya yozuvi
+             (so'rov yo'lidan tashqarida) + native'da `/metrics`.
+             Uchta native-parity tuzatmasi: `pattern(...)` endi haqiqatan
+             bajariladi (xavfsizlik), `after { }` bloklari ishlaydi,
+             vendored paket ikki marta yuklanmaydi.
    v0.10.0→  Entity DSL: default / private / server / enum / composite pk
    v0.11.0→  Mapper: new X from Y / patch / class validatsiyasi / check
    v0.12.0→  Til ergonomikasi: body().x / xs[0] / throw / default param

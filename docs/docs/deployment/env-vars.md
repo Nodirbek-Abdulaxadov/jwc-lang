@@ -44,9 +44,9 @@ feature warns at boot if `JWC_REDIS_URL` is set, then carries on with the
 | `JWC_REDIS_POOL_SIZE` | `64` | Max connections in the deadpool-redis pool. `0` is ignored (a zero-size pool never hands out a connection). | v0.9.0 |
 | `JWC_REDIS_RETRY_MAX_ATTEMPTS` | `3` | Transient-error retry ceiling (dropped connection, timeout, `LOADING`, cluster `MOVED`/`ASK`). `1` disables retries. | v0.9.0 |
 | `JWC_REDIS_RETRY_BACKOFF_MS` | `100` | Base Redis retry backoff in milliseconds; doubles per attempt. | v0.9.0 |
-| `JWC_LOG_QUEUE` | `10000` | Channel capacity for `log_insert`. Once full, rows are **dropped** rather than queued without bound — watch `jwc_log_dropped_total`. | _unreleased_ |
-| `JWC_LOG_BATCH` | `500` | Rows merged into one multi-row `INSERT`. Postgres caps a statement at 65535 bound parameters, so this × column count must stay under that. | _unreleased_ |
-| `JWC_LOG_FLUSH_MS` | `200` | Longest a `log_insert` row waits before being written. Also the bound on how much telemetry a crash can lose. | _unreleased_ |
+| `JWC_LOG_QUEUE` | `10000` | Channel capacity for `log_insert`. Once full, rows are **dropped** rather than queued without bound — watch `jwc_log_dropped_total`. | v0.9.2 |
+| `JWC_LOG_BATCH` | `500` | Rows merged into one multi-row `INSERT`. Postgres caps a statement at 65535 bound parameters, so this × column count must stay under that. | v0.9.2 |
+| `JWC_LOG_FLUSH_MS` | `200` | Longest a `log_insert` row waits before being written. Also the bound on how much telemetry a crash can lose. | v0.9.2 |
 
 Cross-link: [deployment/redis](./redis.md).
 
