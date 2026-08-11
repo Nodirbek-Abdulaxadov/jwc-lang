@@ -659,12 +659,18 @@ impl CallScan<'_> {
                 offset,
                 ..
             } => {
-                where_clause.as_deref().map(|w| self.where_expr(w)).unwrap_or(false)
+                where_clause
+                    .as_deref()
+                    .map(|w| self.where_expr(w))
+                    .unwrap_or(false)
                     || limit.as_deref().map(|e| self.expr(e)).unwrap_or(false)
                     || offset.as_deref().map(|e| self.expr(e)).unwrap_or(false)
             }
             Expr::DbCount { where_clause, .. } | Expr::DbAggregate { where_clause, .. } => {
-                where_clause.as_deref().map(|w| self.where_expr(w)).unwrap_or(false)
+                where_clause
+                    .as_deref()
+                    .map(|w| self.where_expr(w))
+                    .unwrap_or(false)
             }
             _ => false,
         }
@@ -4340,7 +4346,13 @@ fn scaffold_workspace(
     let cargo_toml = workspace.join("Cargo.toml");
     std::fs::write(
         &cargo_toml,
-        render_cargo_toml(app_name, needs_db, needs_http_client, needs_crypto, needs_redis),
+        render_cargo_toml(
+            app_name,
+            needs_db,
+            needs_http_client,
+            needs_crypto,
+            needs_redis,
+        ),
     )
     .with_context(|| format!("Failed to write {}", cargo_toml.display()))?;
 

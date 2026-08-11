@@ -65,8 +65,16 @@ jobs:
             echo "label=dev-$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
           fi
 
+      # `--features redis` is what puts the redis_* driver in the shipped
+      # binary. Without it every release prints "built without Redis
+      # support" at boot when JWC_REDIS_URL is set, and the built-ins fail
+      # — the feature exists in the tree but reaches nobody.
+      #
+      # Safe across the matrix: the feature's TLS is rustls with bundled
+      # webpki roots, and `ring` is already a direct dependency, so musl
+      # gains no new C toolchain requirement.
       - name: Build
-        run: cargo build --release --bin jwc --bin jwc-lsp --target ${{ matrix.target }}
+        run: cargo build --release --features redis --bin jwc --bin jwc-lsp --target ${{ matrix.target }}
 
       - name: Strip (linux)
         if: runner.os == 'Linux'
