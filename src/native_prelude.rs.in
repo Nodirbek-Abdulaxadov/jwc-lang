@@ -889,6 +889,41 @@ fn jwc_get_field(v: &V, k: &str) -> V {
             .position(|f| f.as_ref() == k)
             .map(|i| values[i].clone())
             .unwrap_or(V::Null),
+        // A row read back from the database arrives as `RawJson` — the whole
+        // point of that variant is to skip building an FxHashMap for a value
+        // that is usually written straight back out. A dynamic object
+        // (`json_parse` output, an object literal with computed keys) travels
+        // as `Str`. Both used to fall through to `_ => V::Null`, so
+        //
+        //     let link = select Link from AppDb.Link where ... first;
+        //     return ok({ code: link.code, url: link.url });
+        //
+        // answered `{"code":null,"url":null}` on a native build while the
+        // interpreter returned the row. Not an edge case: every field read
+        // off a `select ... first` was empty, and the shape was right, so it
+        // looked like missing data rather than a compiler bug. jwc-shortener
+        // worked around it by rewriting the route in `raw_sql`.
+        //
+        // Parsing per access is O(n) in the payload. That is the honest cost
+        // of the lazy representation and it only lands on code that actually
+        // reads a field; a caller returning the row whole still pays nothing.
+        V::RawJson(s) | V::Str(s) => match jwc_from_json(s.as_ref()) {
+            Ok(parsed) => match parsed {
+                // One level only — the parse produced an owned value, so
+                // recursing would re-parse a nested RawJson that cannot
+                // occur here.
+                V::Object(m) => m.get(k).cloned().unwrap_or(V::Null),
+                V::Record { field_names, values } => field_names
+                    .iter()
+                    .position(|f| f.as_ref() == k)
+                    .map(|i| values[i].clone())
+                    .unwrap_or(V::Null),
+                _ => V::Null,
+            },
+            // Not JSON at all — a plain string field read is a miss, which
+            // is what the Object arm returns for an absent key.
+            Err(_) => V::Null,
+        },
         _ => V::Null,
     }
 }

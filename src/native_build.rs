@@ -1560,6 +1560,28 @@ fn read_field_from_row(idx: usize, f: &EntityField) -> String {
         PgKind::Bool => "bool",
         PgKind::Timestamp | PgKind::Str => "String",
     };
+    // `TIMESTAMPTZ` has no `FromSql for String`, so reading it as one always
+    // fails — and `unwrap_or_default` then turns the failure into `""`. The
+    // column came back empty on every row, silently, while the shape of the
+    // response stayed right: jwc-shortener's `/api/links/{code}` answered
+    // `"created_at":""` for links that had a timestamp in the table.
+    //
+    // Read it as `DateTime<Utc>` and render RFC 3339 — what `jwc_row_to_v`
+    // produces on the dynamic path — so the monomorphized struct, the
+    // generic row reader, and the interpreter all agree.
+    if matches!(f.pg, PgKind::Timestamp) {
+        return if f.is_nullable {
+            format!(
+                "row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>({idx}).ok().flatten().map(|d| d.to_rfc3339())",
+                idx = idx
+            )
+        } else {
+            format!(
+                "row.try_get::<_, chrono::DateTime<chrono::Utc>>({idx}).map(|d| d.to_rfc3339()).unwrap_or_default()",
+                idx = idx
+            )
+        };
+    }
     if f.is_nullable {
         format!(
             "row.try_get::<_, Option<{ty}>>({idx}).unwrap_or(None)",

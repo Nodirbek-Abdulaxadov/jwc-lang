@@ -872,3 +872,33 @@ fn emit_rust_source_stubs_redis_metrics_without_redis() {
         "the Redis prelude must not be emitted for a program that never touches Redis"
     );
 }
+
+/// A `datetime` column must not be read as `String`.
+///
+/// `TIMESTAMPTZ` has no `FromSql for String`, so the read always failed and
+/// `unwrap_or_default` turned the failure into `""` — every timestamp came
+/// back empty, silently, with the response shape still correct.
+#[test]
+fn emit_rust_source_reads_timestamps_as_datetime_not_string() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Link of AppDb {
+            code varchar(8) pk;
+            created_at datetime;
+        }
+        function one() { return select Link from AppDb.Link first; }
+        function main() { one(); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "ts", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("chrono::DateTime<chrono::Utc>>(1).map(|d| d.to_rfc3339())"),
+        "timestamp column must be read as DateTime and rendered RFC 3339"
+    );
+    assert!(
+        !body.contains("try_get::<_, String>(1)"),
+        "timestamp column must not be read as String — that read can only fail"
+    );
+}
