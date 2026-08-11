@@ -794,7 +794,7 @@ fn program_uses_pattern(program: &Program) -> bool {
     }
     program_stmt_blocks(program)
         .iter()
-        .any(|b| b.iter().any(|s| has(s)))
+        .any(|b| b.iter().any(has))
 }
 
 /// Outbound-HTTP built-ins: pull `reqwest` into the generated Cargo.toml.
@@ -2506,6 +2506,13 @@ fn emit_validate_body(
                     // so a bad one fails on the first request every time
                     // rather than on unlucky input. `validate_program`
                     // rejects an uncompilable pattern before codegen.
+                    // `{:?}` renders the pattern as a valid Rust string
+                    // literal (escaping backslashes, which regexes are full
+                    // of); `esc` is the same source escaped for the JSON
+                    // error message. Bound here rather than inline because
+                    // clippy rejects `format!` inside `format!` args.
+                    let pat = format!("{:?}", src);
+                    let esc = src.replace('\\', "\\\\").replace('"', "\\\"");
                     out.push_str(&format!(
                         "{{ static __RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();\n\
                          {inner}    match &__field {{\n\
@@ -2517,8 +2524,8 @@ fn emit_validate_body(
                          {inner}        _ => {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern({esc}): not a string\")); }}\n\
                          {inner}    }} }}\n",
                         inner = inner,
-                        pat = format!("{:?}", src),
-                        esc = src.replace('\\', "\\\\").replace('"', "\\\""),
+                        pat = pat,
+                        esc = esc,
                         f = fname,
                     ));
                 }
