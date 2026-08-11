@@ -62,7 +62,7 @@ fn shared_redis_url() -> Option<&'static str> {
             // rather than returning `Err` — the same trap documented in
             // `integration_db.rs`. Catch it so the skip is real.
             std::panic::catch_unwind(|| {
-                let container = Redis::default().start().ok()?;
+                let container = Redis.start().ok()?;
                 let port = container.get_host_port_ipv4(6379).ok()?;
                 let url = format!("redis://127.0.0.1:{port}");
                 std::env::set_var("JWC_REDIS_URL", &url);
@@ -126,9 +126,13 @@ async fn zero_ttl_means_no_expiry() {
     };
 
     redis_engine::set("forever", "v", 0).await.unwrap();
-    let ttl = redis_engine::eval("return redis.call('TTL', KEYS[1])", &["forever".into()], &[])
-        .await
-        .unwrap();
+    let ttl = redis_engine::eval(
+        "return redis.call('TTL', KEYS[1])",
+        &["forever".into()],
+        &[],
+    )
+    .await
+    .unwrap();
     // -1 is Redis for "key exists, no expiry set".
     assert_eq!(ttl.as_deref(), Some("-1"));
 
@@ -204,7 +208,10 @@ async fn eval_nil_reply_is_none_not_empty_string() {
 
     // An empty string, by contrast, really is an empty string.
     redis_engine::set("empty", "", 0).await.unwrap();
-    assert_eq!(redis_engine::get("empty").await.unwrap(), Some(String::new()));
+    assert_eq!(
+        redis_engine::get("empty").await.unwrap(),
+        Some(String::new())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -142,12 +142,8 @@ mod imp {
     fn build_pool(url: &str) -> Result<Pool> {
         let mut cfg = RedisConfig::from_url(url);
         cfg.pool = Some(PoolConfig::new(parse_pool_size()));
-        cfg.create_pool(Some(Runtime::Tokio1)).with_context(|| {
-            format!(
-                "Failed to create Redis pool for {}",
-                scrub_redis_url(url)
-            )
-        })
+        cfg.create_pool(Some(Runtime::Tokio1))
+            .with_context(|| format!("Failed to create Redis pool for {}", scrub_redis_url(url)))
     }
 
     /// Initialise the pool from `JWC_REDIS_URL`.
@@ -502,11 +498,7 @@ mod imp {
         Err(feature_disabled())
     }
 
-    pub async fn eval(
-        _script: &str,
-        _keys: &[String],
-        _args: &[String],
-    ) -> Result<Option<String>> {
+    pub async fn eval(_script: &str, _keys: &[String], _args: &[String]) -> Result<Option<String>> {
         Err(feature_disabled())
     }
 }

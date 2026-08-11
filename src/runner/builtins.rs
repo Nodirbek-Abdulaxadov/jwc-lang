@@ -618,9 +618,7 @@ impl<'a> Vm<'a> {
         }
         let key = self.redis_str_arg(args, 0, vars, SIG, "key").await?;
         let ttl = self.redis_ttl_arg(args, 1, vars, SIG).await?;
-        Ok(Value::Bool(
-            crate::redis_engine::expire(&key, ttl).await?,
-        ))
+        Ok(Value::Bool(crate::redis_engine::expire(&key, ttl).await?))
     }
 
     pub(super) async fn eval_redis_eval_call(

@@ -25,6 +25,13 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `--features redis` is a second compilation of a large chunk of the
+      # tree (redis_engine, the runner arms, the AOT prelude), and none of
+      # it was reachable from the default build — so a clippy failure or a
+      # `#[cfg]`-only type error in that code shipped green.
+      - name: Cargo clippy (redis feature)
+        run: cargo clippy --workspace --all-targets --features redis -- -D warnings
+
       - name: Cargo build
         run: cargo build --workspace --all-targets
 
@@ -34,6 +41,13 @@ jobs:
       # going red. Both are no-DB and finish in well under a second.
       - name: Cargo test (no DB)
         run: cargo test --lib --test typed_catch --test imports --test native_emit --test examples_parse --test fmt_idempotency --test conformance --test native_parity --test builtins_doc_sync
+
+      # Both configurations matter: the redis_* built-ins are always in
+      # BUILTIN_DEFS, and the code behind them is either the real driver or
+      # a set of stubs depending on the feature. Only the default build was
+      # ever tested, so the stub half was the only half covered.
+      - name: Cargo test (redis feature, no server)
+        run: cargo test --features redis --lib --test native_emit --test builtins_doc_sync
 
       # First-release rollout: `jwc fmt --check` against the bundled fixture
       # roots. `continue-on-error` keeps drift from blocking unrelated PRs
@@ -95,3 +109,39 @@ jobs:
         env:
           JWC_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
         run: cargo test --test integration_db -- --nocapture
+
+  # Same reasoning as `query-differential` above: the no-server jobs only
+  # prove the code compiles and the stubs behave. Every command this driver
+  # sends — TTL semantics, nil-vs-empty-string, EVAL's KEYS/ARGV framing —
+  # is a claim about what a real server does, and nothing verified any of
+  # it. A service container rather than testcontainers, so there is no
+  # Docker-in-Docker to fail.
+  redis-integration:
+    name: redis driver vs a real server
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Takes the service container through `JWC_TEST_REDIS_URL`. Without
+      # it the suite skips every test and still reports ok — a skip is not
+      # a pass, so this variable is what makes the job mean anything.
+      - name: Redis integration suite
+        env:
+          JWC_TEST_REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --features redis --test integration_redis -- --nocapture
