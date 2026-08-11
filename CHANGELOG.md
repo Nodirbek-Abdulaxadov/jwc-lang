@@ -3,6 +3,58 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+**`log_insert(Entity, record)` — buffered, batched telemetry writes.** A
+request-logging middleware that calls `insert` puts a database round-trip on
+the critical path: `runner/dispatch.rs` awaits middleware `after { }` blocks
+*before* `dispatch_route` returns, so the client waits for its own log row.
+`log_insert` hands the row to a bounded channel and a single background
+consumer writes it in batches.
+
+One consumer, not a task per row — spawning per row fixes latency and nothing
+else: the same number of `INSERT`s still run, they compete for the pool that
+real requests need, and a traffic spike spawns unbounded background work.
+A bounded channel gives batching, one connection, and an explicit policy when
+the writer falls behind.
+
+Durability is the trade: rows are lost on crash (at most `JWC_LOG_FLUSH_MS`
+worth) and dropped under sustained overload. That is why this is a separate
+built-in rather than a mode of `insert` — the call site states which
+semantics it wants. Drops are counted, not silent.
+
+- New env vars `JWC_LOG_QUEUE` / `JWC_LOG_BATCH` / `JWC_LOG_FLUSH_MS`.
+- New `/metrics` series: `jwc_log_queue_depth`, `jwc_log_queue_capacity`,
+  `jwc_log_dropped_total`, `jwc_log_written_total`, `jwc_log_failed_total`,
+  `jwc_log_batches_total` — absent entirely until the writer runs, so "not
+  buffering" reads differently from "buffering nothing".
+- New `error[E023]`: the entity argument must be a string literal, because
+  both backends resolve its schema at build time.
+- Works identically under `jwc run` and `jwc build --native`.
+
+### Changed
+
+**`http_get` / `fetch_json` moved into their own AOT prelude block.** They
+were emitted unconditionally, so `reqwest` was a dependency of every
+generated crate and a hello-world compiled reqwest → hyper → h2 → tower →
+rustls before the linker discarded it. LTO recovered the binary size; nothing
+recovered the compile time. `needs_http_client` had been computed and then
+thrown away with `let _ =` — it is now honoured, and `url` follows the same
+gate.
+
+Crypto still pulls the block in: the JWKS fetch calls `jwc_http_client` and
+`jwc_check_outbound_url`, so `needs_crypto` implies HTTP whether or not the
+program calls `http_get` itself.
+
+**Generated crates enumerate their tokio features** instead of taking
+`features = ["full"]`. The prelude genuinely uses most of it — `fs` for the
+file built-ins, `io-std` for `console.*`, `signal` for graceful shutdown,
+`macros` for the emitted `#[tokio::main]` — so only `process` and
+`parking_lot` fall out. A small win next to dropping reqwest, but the
+manifest now says what the crate actually uses.
+
 ## [0.9.0] — Redis, as a core-tier driver
 
 ### Added

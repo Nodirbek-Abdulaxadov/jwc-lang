@@ -580,6 +580,27 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         max_args: Some(0),
         native: true,
     },
+    // ── Buffered telemetry write (native) ────────────────────────────────
+    //
+    // `log_insert(Entity, record)` queues a row for the batched writer in
+    // `src/log_writer.rs` instead of writing it inline. Deliberately a
+    // separate name rather than a mode of `insert`: the durability contract
+    // is different (rows are lost on crash, and dropped rather than queued
+    // without bound when the writer falls behind), and that difference
+    // belongs at the call site where someone reading the handler can see it.
+    //
+    // The one built-in here that is intentionally NOT async. `try_send` on a
+    // bounded channel never suspends, and that is the entire point — this
+    // runs on the request path. It must therefore stay out of the
+    // `is_async_builtin` list in `native_build.rs`, so codegen emits the
+    // call without `.await` and the prelude mirror stays a plain `fn`.
+    BuiltinDef {
+        name: "log_insert",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
     // ── Raw SQL escape hatch (native) ────────────────────────────────────
     BuiltinDef {
         name: "raw_sql",

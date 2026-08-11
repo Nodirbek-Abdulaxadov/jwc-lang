@@ -220,7 +220,11 @@ const GROUPS: &[Group] = &[
         predicate: |d| {
             matches!(
                 d.name,
-                "setConnectionString" | "set_connection_string" | "raw_sql" | "db_query"
+                "setConnectionString"
+                    | "set_connection_string"
+                    | "raw_sql"
+                    | "db_query"
+                    | "log_insert"
             )
         },
     },

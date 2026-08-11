@@ -445,6 +445,17 @@ fn check_call(expr: &Expr, fns: &FnTable) -> Result<()> {
                 args.len()
             );
         }
+        // `log_insert(Entity, record)` resolves the entity's schema at
+        // build time — `native_build.rs::emit_log_insert` binds each column
+        // with the `jwc_param_*` helper for its declared type. A computed
+        // entity name has nothing to resolve, so it is rejected here rather
+        // than in codegen: caught this way, `jwc check` reports it for both
+        // backends instead of the native build failing alone.
+        if name.eq_ignore_ascii_case("log_insert") && !matches!(args.first(), Some(Expr::Str(_))) {
+            bail!(
+                "error[E023]: log_insert(Entity, record): first argument must be a string literal naming the entity"
+            );
+        }
         // A built-in shadows any same-named user function in the
         // interpreter's dispatch order, so stop here — the E019/E020
         // user-function checks below don't apply.

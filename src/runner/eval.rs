@@ -443,6 +443,10 @@ impl<'a> Vm<'a> {
                     return self.eval_cache_clear_call(args, vars).await;
                 }
 
+                if name.eq_ignore_ascii_case("log_insert") {
+                    return self.eval_log_insert_call(args, vars).await;
+                }
+
                 if name.eq_ignore_ascii_case("redis_get") {
                     return self.eval_redis_get_call(args, vars).await;
                 }

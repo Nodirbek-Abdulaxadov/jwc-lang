@@ -488,6 +488,64 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
+    // ── Buffered telemetry write ─────────────────────────────────────────
+
+    /// `log_insert(Entity, record)` — queue a row for the batched writer
+    /// instead of writing it inline.
+    ///
+    /// `async fn` only because every arm of the built-in dispatch is; the
+    /// body never suspends. Evaluating the arguments awaits, the push
+    /// itself is a `try_send` on a bounded channel. That is what makes this
+    /// usable from a middleware `after { }` block, which `dispatch.rs`
+    /// awaits *before* the response reaches the client — an inline `insert`
+    /// there puts a database round-trip on every request's clock.
+    ///
+    /// Returns `true` when queued, `false` when dropped (writer not
+    /// running, or the channel is full because the drain loop is behind).
+    /// The boolean is deliberately returned rather than raised: a caller
+    /// that wants to react can, and one that ignores it — the common case
+    /// for telemetry — is not forced into a `try`.
+    pub(super) async fn eval_log_insert_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "log_insert(Entity, record)";
+        if args.len() != 2 {
+            bail!("{SIG} expects exactly 2 args");
+        }
+        let entity = match self.eval_expr(&args[0], vars).await? {
+            Value::Str(s) => s,
+            other => bail!(
+                "{SIG}: first arg must be the entity name as a string, got {}",
+                other.type_name()
+            ),
+        };
+        let record = self.eval_expr(&args[1], vars).await?;
+        // Records and arrays render as JSON via `as_string`; a `Str` is
+        // taken as already-encoded JSON, matching what `insert` accepts
+        // through `get_var_as_json`.
+        let json = match &record {
+            Value::Str(s) => s.clone(),
+            Value::Record { .. } => record.as_string(),
+            other => bail!(
+                "{SIG}: second arg must be an object, got {}",
+                other.type_name()
+            ),
+        };
+        // Resolved here rather than in the drain loop: the writer runs
+        // outside any `Vm` and has no access to the model table, and binding
+        // a `timestamptz` or `numeric` column depends on the declared type.
+        let col_types = self
+            .models
+            .get(&entity.to_lowercase())
+            .map(|m| super::sql::column_types_for_fields(&m.fields))
+            .unwrap_or_default();
+        let table = crate::sql::to_snake_case(&entity);
+        let queued = crate::log_writer::try_push(table, json, col_types);
+        Ok(Value::Bool(queued))
+    }
+
     // ── Redis ────────────────────────────────────────────────────────────
     //
     // Thin argument-marshalling over `crate::redis_engine`. The shape of

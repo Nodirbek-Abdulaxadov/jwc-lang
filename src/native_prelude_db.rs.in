@@ -440,3 +440,158 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
         V::Int(affected as i64)
     }
 }
+
+// --- buffered telemetry writes: log_insert ------------------------------------
+//
+// AOT mirror of `src/log_writer.rs`. Same contract, same env vars, same
+// drop-on-full policy — see that module for why the shape is one consumer
+// draining a bounded channel rather than a task per row.
+//
+// The difference from the interpreter is where typing happens: codegen
+// already resolved the entity's schema and bound each column with the right
+// `jwc_param_*` helper, so a queued row arrives as finished `DbParams`. The
+// drain loop only has to renumber placeholders when it merges rows into one
+// statement.
+
+struct JwcLogRow {
+    /// Static `INSERT INTO "t" (cols...) VALUES ` half, emitted by codegen.
+    prefix: &'static str,
+    /// Columns per row — how many placeholders each tuple needs.
+    ncols: usize,
+    params: DbParams,
+}
+
+struct JwcLogWriter {
+    tx: tokio::sync::mpsc::Sender<JwcLogRow>,
+    dropped: std::sync::atomic::AtomicU64,
+    capacity: usize,
+}
+
+static JWC_LOG: OnceLock<JwcLogWriter> = OnceLock::new();
+
+fn jwc_log_env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
+/// Queue one row. Never suspends: this is called from request handlers,
+/// including middleware `after { }` blocks that run before the response is
+/// flushed. Returns `V::Bool(false)` when the row was dropped.
+///
+/// The writer starts on first use rather than at boot — `jwc_log_push` is
+/// only ever reached from inside the tokio runtime, so `tokio::spawn` is
+/// safe here and no wiring in `main` is needed.
+fn jwc_log_push(prefix: &'static str, ncols: usize, params: DbParams) -> V {
+    let w = JWC_LOG.get_or_init(|| {
+        let queue = jwc_log_env_usize("JWC_LOG_QUEUE", 10_000);
+        let batch = jwc_log_env_usize("JWC_LOG_BATCH", 500);
+        let flush_ms = jwc_log_env_usize("JWC_LOG_FLUSH_MS", 200) as u64;
+        let (tx, rx) = tokio::sync::mpsc::channel::<JwcLogRow>(queue);
+        tokio::spawn(jwc_log_drain(
+            rx,
+            batch,
+            std::time::Duration::from_millis(flush_ms),
+        ));
+        JwcLogWriter {
+            tx,
+            dropped: std::sync::atomic::AtomicU64::new(0),
+            capacity: queue,
+        }
+    });
+    match w.tx.try_send(JwcLogRow {
+        prefix,
+        ncols,
+        params,
+    }) {
+        Ok(()) => V::Bool(true),
+        Err(_) => {
+            w.dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            V::Bool(false)
+        }
+    }
+}
+
+/// Queue depth / dropped count for `/metrics`. `None` before the first push.
+fn jwc_log_stats() -> Option<(usize, usize, u64)> {
+    let w = JWC_LOG.get()?;
+    Some((
+        w.capacity.saturating_sub(w.tx.capacity()),
+        w.capacity,
+        w.dropped.load(std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
+async fn jwc_log_drain(
+    mut rx: tokio::sync::mpsc::Receiver<JwcLogRow>,
+    batch: usize,
+    flush: std::time::Duration,
+) {
+    let mut pending: Vec<JwcLogRow> = Vec::with_capacity(batch);
+    let mut ticker = tokio::time::interval(flush);
+    // Without this a slow write is followed by a burst of catch-up ticks,
+    // each flushing an empty buffer.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            got = rx.recv() => match got {
+                Some(row) => {
+                    pending.push(row);
+                    if pending.len() >= batch {
+                        jwc_log_flush(&mut pending).await;
+                    }
+                }
+                None => {
+                    jwc_log_flush(&mut pending).await;
+                    return;
+                }
+            },
+            _ = ticker.tick() => jwc_log_flush(&mut pending).await,
+        }
+    }
+}
+
+/// Group by statement prefix, then write one multi-row INSERT per group.
+/// Rows from two different entities cannot share a `VALUES` list, and the
+/// prefix is what distinguishes them.
+async fn jwc_log_flush(pending: &mut Vec<JwcLogRow>) {
+    if pending.is_empty() {
+        return;
+    }
+    let mut groups: std::collections::HashMap<(&'static str, usize), Vec<DbParams>> =
+        std::collections::HashMap::new();
+    for row in pending.drain(..) {
+        groups
+            .entry((row.prefix, row.ncols))
+            .or_default()
+            .push(row.params);
+    }
+    for ((prefix, ncols), rows) in groups {
+        let mut sql = String::from(prefix);
+        let mut flat: DbParams = Vec::with_capacity(rows.len() * ncols);
+        let mut next = 1usize;
+        for (i, params) in rows.into_iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push('(');
+            for c in 0..ncols {
+                if c > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&format!("${}", next));
+                next += 1;
+            }
+            sql.push(')');
+            flat.extend(params);
+        }
+        sql.push(';');
+        // `jwc_db_exec` already reports its own failures; a telemetry write
+        // has no caller to propagate to and must never take the process
+        // down.
+        let _ = jwc_db_exec(&sql, flat).await;
+    }
+}

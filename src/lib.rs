@@ -49,6 +49,7 @@ pub mod lexer;
 pub mod lint;
 pub mod lockfile;
 pub mod locks;
+pub mod log_writer;
 pub mod migrate;
 pub mod native_build;
 pub mod native_ir;

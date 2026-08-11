@@ -535,3 +535,111 @@ fn emit_rust_source_omits_redis_prelude_when_unused() {
          redis_* built-in"
     );
 }
+
+/// The HTTP prelude carries `reqwest` into the generated crate's manifest,
+/// so a program that never reaches `http_get` must not receive it. This is
+/// the guard on the split: adding a `reqwest` call back into
+/// `native_prelude.rs.in` would put the whole hyper / rustls subtree back on
+/// every hello-world's compile, and nothing else in the suite would notice.
+#[test]
+fn emit_rust_source_omits_http_prelude_when_unused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            console.write("no outbound http here");
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "nohttp", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        !body.contains("fn jwc_http_client()"),
+        "HTTP prelude was concatenated into a program that never calls an \
+         outbound-HTTP built-in"
+    );
+    assert!(
+        !body.contains("reqwest::"),
+        "generated source references reqwest without the HTTP prelude"
+    );
+}
+
+/// ...and is emitted when the program does call one.
+#[test]
+fn emit_rust_source_includes_http_prelude_when_used() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            let body = http_get("https://example.com");
+            console.write(body);
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "withhttp", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_http_client()"),
+        "HTTP prelude missing from a program that calls http_get"
+    );
+}
+
+/// The crypto prelude's JWKS fetch calls `jwc_http_client` and
+/// `jwc_check_outbound_url`, so crypto must drag the HTTP prelude in even
+/// when the program never calls `http_get` itself. Without this the
+/// generated crate fails to compile on unresolved names.
+#[test]
+fn emit_rust_source_includes_http_prelude_for_crypto_programs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            let token = jwt_sign("{\"sub\":\"1\"}", "secret");
+            console.write(token);
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "crypto", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_check_outbound_url("),
+        "crypto prelude emitted without the HTTP helpers it calls"
+    );
+}
+
+/// `log_insert` lowers to the buffered push, not to `jwc_db_exec`. If it
+/// ever regresses to a direct exec the latency win is silently gone — the
+/// program still works, which is exactly why this needs a test.
+#[test]
+fn emit_rust_source_lowers_log_insert_to_the_buffered_push() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity ApiCall of AppDb {
+            id int pk serial;
+            path varchar(255);
+            status int;
+        }
+        function main() {
+            let row = new ApiCall();
+            row.path = "/x";
+            row.status = 200;
+            log_insert("ApiCall", row);
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "logins", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("jwc_log_push("),
+        "log_insert did not lower to the buffered push"
+    );
+    // Auto-increment columns are excluded, matching `emit_db_insert`.
+    assert!(
+        body.contains("INSERT INTO \\\"api_call\\\" (\\\"path\\\", \\\"status\\\") VALUES "),
+        "unexpected statement prefix for the buffered insert"
+    );
+    // Sync by construction: a `.await` here would mean the push suspends on
+    // the request path, which defeats the point.
+    assert!(
+        !body.contains("jwc_log_push(") || !body.contains("jwc_log_push(\"...\").await"),
+        "buffered push must not be awaited"
+    );
+}

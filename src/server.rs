@@ -358,7 +358,9 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
         println!("{}", crate::config::render(&rows));
     }
 
-    if std::env::var("DATABASE_URL").is_ok() || std::env::var("JWC_DATABASE_URL").is_ok() {
+    let db_configured =
+        std::env::var("DATABASE_URL").is_ok() || std::env::var("JWC_DATABASE_URL").is_ok();
+    if db_configured {
         engine::init_engine_from_env()?;
     }
 
@@ -380,6 +382,14 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
         .thread_name("jwc-server")
         .build()
         .map_err(|e| anyhow!("Failed to build tokio runtime: {e}"))?;
+
+    // The buffered `log_insert` sink. Started inside the runtime because it
+    // spawns its drain task, and only when a database is configured — with
+    // no pool to write to there is nothing for it to drain.
+    if db_configured {
+        let _rt_guard = rt.enter();
+        crate::log_writer::init();
+    }
 
     let (ws_shutdown_tx, ws_shutdown_rx) = watch::channel(false);
 
@@ -617,6 +627,42 @@ async fn handle_metrics(State(state): State<AppState>) -> Response {
         );
         body.push_str("# TYPE jwc_redis_pool_waiting gauge\n");
         body.push_str(&format!("jwc_redis_pool_waiting {}\n", pool.waiting));
+    }
+
+    // Buffered `log_insert` sink. Same absent-rather-than-zeroed rule: no
+    // series at all until the writer is running, so "not buffering" reads
+    // differently from "buffering nothing".
+    //
+    // `jwc_log_dropped_total` is the one to alert on. Rows are dropped when
+    // the channel fills, which means the drain loop is behind — raise
+    // JWC_LOG_QUEUE for bursts, or JWC_LOG_BATCH if the database is the
+    // bottleneck. A steadily climbing queue depth with no drops yet is the
+    // early warning for the same condition.
+    if let Some(log) = crate::log_writer::stats() {
+        body.push_str("# HELP jwc_log_queue_depth Rows queued for the buffered log writer.\n");
+        body.push_str("# TYPE jwc_log_queue_depth gauge\n");
+        body.push_str(&format!("jwc_log_queue_depth {}\n", log.queue_depth));
+        body.push_str(
+            "# HELP jwc_log_queue_capacity Channel ceiling for the buffered log writer (JWC_LOG_QUEUE).\n",
+        );
+        body.push_str("# TYPE jwc_log_queue_capacity gauge\n");
+        body.push_str(&format!("jwc_log_queue_capacity {}\n", log.queue_capacity));
+        body.push_str(
+            "# HELP jwc_log_dropped_total Rows discarded because the log channel was full.\n",
+        );
+        body.push_str("# TYPE jwc_log_dropped_total counter\n");
+        body.push_str(&format!("jwc_log_dropped_total {}\n", log.dropped));
+        body.push_str(
+            "# HELP jwc_log_written_total Rows successfully written by the log writer.\n",
+        );
+        body.push_str("# TYPE jwc_log_written_total counter\n");
+        body.push_str(&format!("jwc_log_written_total {}\n", log.written));
+        body.push_str("# HELP jwc_log_failed_total Rows the log writer could not persist.\n");
+        body.push_str("# TYPE jwc_log_failed_total counter\n");
+        body.push_str(&format!("jwc_log_failed_total {}\n", log.failed));
+        body.push_str("# HELP jwc_log_batches_total Batch INSERTs issued by the log writer.\n");
+        body.push_str("# TYPE jwc_log_batches_total counter\n");
+        body.push_str(&format!("jwc_log_batches_total {}\n", log.batches));
     }
 
     let mut resp = Response::new(body.into());

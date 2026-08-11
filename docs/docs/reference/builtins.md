@@ -93,6 +93,7 @@ Columns:
 | Name | Aliases | Args | Native |
 |---|---|---|---|
 | `setConnectionString` | — | 0..1 | ✅ |
+| `log_insert` | — | 2 | ✅ |
 | `raw_sql` | — | 1..2 | ✅ |
 | `db_query` | — | 1 | — |
 | `set_connection_string` | — | 0..1 | — |

@@ -842,7 +842,13 @@ pub fn compile_with_target(
     let needs_http_client = program_uses_http_client(program);
     let needs_crypto = program_uses_crypto(program);
     let needs_redis = program_uses_redis(program);
-    let rust_src = codegen(program, needs_db, needs_crypto, needs_redis)?;
+    let rust_src = codegen(
+        program,
+        needs_db,
+        needs_http_client,
+        needs_crypto,
+        needs_redis,
+    )?;
     let workspace = scaffold_workspace(
         root,
         app_name,
@@ -876,9 +882,16 @@ pub fn emit_rust_source(
     reject_unsupported(program)?;
 
     let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
+    let needs_http_client = program_uses_http_client(program);
     let needs_crypto = program_uses_crypto(program);
     let needs_redis = program_uses_redis(program);
-    let rust_src = codegen(program, needs_db, needs_crypto, needs_redis)?;
+    let rust_src = codegen(
+        program,
+        needs_db,
+        needs_http_client,
+        needs_crypto,
+        needs_redis,
+    )?;
 
     let profile = if release { "release" } else { "debug" };
     let out_dir = root.join("bin").join(profile);
@@ -1180,12 +1193,14 @@ fn unsupported(what: &str) -> String {
 const PRELUDE: &str = include_str!("native_prelude.rs.in");
 const PRELUDE_DB: &str = include_str!("native_prelude_db.rs.in");
 const PRELUDE_WS: &str = include_str!("native_prelude_ws.rs.in");
+const PRELUDE_HTTP: &str = include_str!("native_prelude_http.rs.in");
 const PRELUDE_CRYPTO: &str = include_str!("native_prelude_crypto.rs.in");
 const PRELUDE_REDIS: &str = include_str!("native_prelude_redis.rs.in");
 
 fn codegen(
     program: &Program,
     needs_db: bool,
+    needs_http_client: bool,
     needs_crypto: bool,
     needs_redis: bool,
 ) -> Result<String> {
@@ -1213,6 +1228,15 @@ fn codegen(
     if needs_ws {
         out.push('\n');
         out.push_str(PRELUDE_WS);
+    }
+    // The crypto prelude's JWKS fetch calls `jwc_http_client` and
+    // `jwc_check_outbound_url`, so crypto implies HTTP whether or not the
+    // program itself calls `http_get`. Emitting crypto without this block
+    // fails codegen with unresolved names, not a subtle bug — but the
+    // condition belongs here rather than in a comment on the caller.
+    if needs_http_client || needs_crypto {
+        out.push('\n');
+        out.push_str(PRELUDE_HTTP);
     }
     if needs_crypto {
         out.push('\n');
@@ -2500,6 +2524,89 @@ fn emit_db_insert(out: &mut String, pad: &str, var: &str, table: &str, ctx: &Cod
     out.push_str("}\n");
 }
 
+/// `log_insert(Entity, record)` — the buffered counterpart to
+/// `emit_db_insert`.
+///
+/// Same column resolution and the same `jwc_param_*` binding, but instead of
+/// `jwc_db_exec` the row goes into the prelude's bounded channel for a drain
+/// task to batch. Params are bound *here*, at the call site, rather than
+/// carried as JSON and typed later: codegen already knows the entity's
+/// schema, so the drain loop never has to.
+///
+/// The statement is emitted as a static prefix (`INSERT INTO "t" (...)
+/// VALUES `) plus a column count, so the drain loop can number placeholders
+/// across however many rows it merges into one statement.
+///
+/// The entity must be a string literal — the schema lookup happens at
+/// compile time. `validate_program` rejects a non-literal for both backends,
+/// so reaching the `compile_error!` here means validation was bypassed.
+fn emit_log_insert(out: &mut String, args: &[Expr], ctx: &CodegenCtx) {
+    let entity = match &args[0] {
+        Expr::Str(s) => s.clone(),
+        _ => {
+            out.push_str(
+                "compile_error!(\"log_insert(Entity, record): first arg must be a string literal naming the entity\")",
+            );
+            return;
+        }
+    };
+    let meta = match ctx.entities.get(&entity).or_else(|| {
+        ctx.entities
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(&entity))
+            .map(|(_, v)| v)
+    }) {
+        Some(m) => m,
+        None => {
+            out.push_str(&format!(
+                "compile_error!(\"log_insert into unknown entity {}\")",
+                entity
+            ));
+            return;
+        }
+    };
+    let cols: Vec<&EntityField> = meta
+        .fields
+        .iter()
+        .filter(|f| !f.is_auto_increment)
+        .collect();
+    if cols.is_empty() {
+        out.push_str(&format!(
+            "compile_error!(\"log_insert: entity {} has no insertable columns\")",
+            entity
+        ));
+        return;
+    }
+
+    let mut prefix = format!("INSERT INTO \"{}\" (", meta.table);
+    for (i, f) in cols.iter().enumerate() {
+        if i > 0 {
+            prefix.push_str(", ");
+        }
+        prefix.push_str(&format!("\"{}\"", f.name));
+    }
+    prefix.push_str(") VALUES ");
+
+    out.push_str("{ let __var = &");
+    emit_expr(out, &args[1], ctx);
+    out.push_str("; let __params: DbParams = vec![");
+    for (i, f) in cols.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&format!(
+            "{helper}(jwc_get_field(__var, \"{name}\"))",
+            helper = helper_for_kind(f.pg),
+            name = f.name,
+        ));
+    }
+    out.push_str(&format!(
+        "]; jwc_log_push(\"{}\", {}, __params) }}",
+        escape_sql(&prefix),
+        cols.len(),
+    ));
+}
+
 fn emit_db_update(out: &mut String, pad: &str, var: &str, table: &str, ctx: &CodegenCtx) {
     let meta = match ctx.entities.get(table) {
         Some(m) => m,
@@ -3314,6 +3421,13 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                         "compile_error!(\"push(arr, x): first arg must be an array variable\")",
                     ),
                 }
+                return;
+            }
+            // `log_insert` resolves its entity's schema at compile time, so
+            // it can't go through the generic `jwc_b_*` path — see
+            // `emit_log_insert`.
+            if name.eq_ignore_ascii_case("log_insert") && args.len() == 2 {
+                emit_log_insert(out, args, ctx);
                 return;
             }
             let is_user = ctx.funcs.contains(name);
@@ -4375,9 +4489,12 @@ fn render_cargo_toml(
     needs_crypto: bool,
     needs_redis: bool,
 ) -> String {
-    // reqwest is always included because the prelude contains the http_get /
-    // fetch_json helpers unconditionally — gating them by feature would require
-    // splitting the prelude. `needs_http_client` is kept for future use.
+    // `http_get` / `fetch_json` and their SSRF guards live in
+    // `native_prelude_http.rs.in`, so `reqwest` is a dependency only of
+    // programs that can reach it. Before the split the prelude carried them
+    // unconditionally and every hello-world compiled reqwest → hyper → h2 →
+    // tower → rustls before the linker discarded it: LTO recovered the
+    // binary size, but nothing recovered the compile time.
     //
     // TODO(phase-10.6): the manifest is currently target-agnostic. Future
     // iterations may want to toggle reqwest's TLS backend per target
@@ -4386,9 +4503,21 @@ fn render_cargo_toml(
     // size-sensitive cross builds. Keep this single shared manifest as
     // long as the matrix is small — multiplying it per target is an
     // anti-feature.
-    let _ = needs_http_client;
+    // `reqwest` and `url` follow the HTTP prelude: crypto pulls it in for the
+    // JWKS fetch even when the program never calls `http_get`, so the
+    // condition here must match the one in `codegen`.
+    let needs_http = needs_http_client || needs_crypto;
+
     let mut deps = String::new();
-    deps.push_str("tokio = { version = \"1\", features = [\"full\"] }\n");
+    // Enumerated rather than `features = ["full"]`. The list is what the
+    // prelude actually touches: `fs` for the `file.*` / `directory.*`
+    // built-ins, `io-std` for `console.*`, `signal` for graceful shutdown,
+    // `macros` for the emitted `#[tokio::main]`. Only `process` and
+    // `parking_lot` fall out — a small win next to dropping reqwest, but it
+    // keeps the manifest honest about what the generated crate uses.
+    deps.push_str(
+        "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\", \"net\", \"time\", \"sync\", \"io-util\", \"io-std\", \"fs\", \"signal\"] }\n",
+    );
     deps.push_str("futures = \"0.3\"\n");
     deps.push_str("axum = { version = \"0.7\", features = [\"http2\"] }\n");
     // Already in the tree via tokio; named explicitly so the listener can
@@ -4397,9 +4526,11 @@ fn render_cargo_toml(
     // unreachable on 127.0.0.1, which is what every container health check
     // and load generator dials.
     deps.push_str("socket2 = \"0.5\"\n");
-    deps.push_str(
-        "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"json\"] }\n",
-    );
+    if needs_http {
+        deps.push_str(
+            "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"json\"] }\n",
+        );
+    }
     // `uuid()` and `now()` are always-on built-ins; ship the supporting
     // crates unconditionally. Combined wire weight is ~50 KB stripped, far
     // below the noise floor of axum + reqwest + tokio.
@@ -4409,12 +4540,15 @@ fn render_cargo_toml(
     // Hot-path V::Object payload is an FxHashMap (Phase A1 of PERF_PLAN.md):
     // O(1) lookup + fxhash, replacing BTreeMap's O(log n) + node alloc cost.
     deps.push_str("rustc-hash = \"2\"\n");
-    // The prelude uses these unconditionally — `serde_json` for JSON body
-    // validation / `json_*` builtins, `url` for the SSRF host-allowlist parse
-    // in `http_get`. They must be direct deps or every native build fails
-    // with `E0433: unresolved module or unlinked crate`.
+    // `serde_json` stays unconditional — the base prelude uses it for JSON
+    // body validation and the `json_*` builtins, so it must be a direct dep
+    // or every native build fails with `E0433: unresolved module or unlinked
+    // crate`. `url` does not: its only use is the SSRF host-allowlist parse,
+    // which moved into the HTTP prelude alongside `http_get`.
     deps.push_str("serde_json = \"1\"\n");
-    deps.push_str("url = \"2\"\n");
+    if needs_http {
+        deps.push_str("url = \"2\"\n");
+    }
     if needs_db {
         // `with-chrono-0_4` plugs `chrono::DateTime` into tokio-postgres'
         // ToSql/FromSql so `jwc_param_timestamp` can bind directly to
