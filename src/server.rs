@@ -380,6 +380,21 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
         .worker_threads(worker_count)
         .enable_all()
         .thread_name("jwc-server")
+        // tokio's default worker stack is 2 MiB, which an unoptimised build
+        // of the evaluator does not fit into. `eval_expr` / `exec_block` /
+        // `call_function` are `#[async_recursion]`, so a route body nests one
+        // boxed future per expression node, and a debug build's frames are
+        // several times an optimised build's. jwc-shortener's redirect route
+        // — a ten-term `or` chain, a `raw_sql`, two middlewares — overflowed
+        // and aborted the process on the first request under
+        // `cargo run -- serve`, while the same route served fine from a
+        // release build. That reads as "the app is broken" when it is only
+        // the debug profile.
+        //
+        // 8 MiB is address space, not memory: Linux commits stack pages
+        // lazily, so a worker that never recurses deeply still touches the
+        // same few pages it does today.
+        .thread_stack_size(8 * 1024 * 1024)
         .build()
         .map_err(|e| anyhow!("Failed to build tokio runtime: {e}"))?;
 

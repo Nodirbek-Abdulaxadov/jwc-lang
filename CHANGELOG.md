@@ -61,6 +61,15 @@ turned the failure into `""`.
 bytes on the wire forever. Both backends now use `redis::Script`, which
 sends `EVALSHA` and falls back once on `NOSCRIPT`.
 
+**`cargo run -- serve` aborted on a stack overflow.** tokio's default
+worker stack is 2 MiB, and the `#[async_recursion]` evaluator nests one
+boxed future per expression node — which fits in an optimised build and
+does not fit in a debug one. jwc-shortener's redirect route overflowed and
+killed the process on the *first* request under a debug build while serving
+normally from a release build, which reads as a broken application rather
+than a profile artefact. Server workers now get 8 MiB, which on Linux is
+address space rather than committed memory.
+
 ### Added
 
 **Redis pool gauges on native `/metrics`.** `jwc_redis_pool_size` /
