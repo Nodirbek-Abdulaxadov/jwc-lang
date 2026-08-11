@@ -443,6 +443,42 @@ impl<'a> Vm<'a> {
                     return self.eval_cache_clear_call(args, vars).await;
                 }
 
+                if name.eq_ignore_ascii_case("redis_get") {
+                    return self.eval_redis_get_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_set") {
+                    return self.eval_redis_set_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_del") {
+                    return self.eval_redis_del_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_exists") {
+                    return self.eval_redis_exists_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_incr") {
+                    return self.eval_redis_incr_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_expire") {
+                    return self.eval_redis_expire_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_eval") {
+                    return self.eval_redis_eval_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_ping") {
+                    return self.eval_redis_ping_call(args, vars).await;
+                }
+
+                if name.eq_ignore_ascii_case("redis_enabled") {
+                    return self.eval_redis_enabled_call(args, vars).await;
+                }
+
                 if name.eq_ignore_ascii_case("send_email") {
                     return self.eval_send_email_call(args, vars).await;
                 }

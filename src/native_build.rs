@@ -610,18 +610,34 @@ pub struct CompileReport {
     pub workspace: PathBuf,
 }
 
-/// Scan the AST to decide whether the generated Cargo.toml needs `reqwest`.
-/// True when any block contains a call to `sleep_ms` / `http_get` / `fetch_json`.
-fn program_uses_http_client(program: &Program) -> bool {
-    fn walk_expr(e: &Expr) -> bool {
+/// AST scanner behind the `needs_*` codegen flags: does any executable
+/// block call one of `names`?
+///
+/// Walks every statement body the emitted crate can actually run —
+/// functions (which is where a `main` block lands), routes, middlewares and
+/// the error handler. `consts` are skipped deliberately: a const
+/// initialiser is restricted to constant expressions, so it cannot reach a
+/// built-in.
+///
+/// This walk used to be copy-pasted once per flag, the copies differing
+/// only in their name list — so each new `Expr` variant had to be
+/// remembered in every copy, and a missed one silently under-reported the
+/// dependency (a prelude fragment left out, and a generated crate that
+/// doesn't compile).
+struct CallScan<'a> {
+    names: &'a [&'a str],
+}
+
+impl CallScan<'_> {
+    fn expr(&self, e: &Expr) -> bool {
         match e {
             Expr::Call { name, args } => {
-                if matches!(name.as_str(), "sleep_ms" | "http_get" | "fetch_json") {
+                if self.names.contains(&name.as_str()) {
                     return true;
                 }
-                args.iter().any(walk_expr)
+                args.iter().any(|e| self.expr(e))
             }
-            Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => walk_expr(inner),
+            Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => self.expr(inner),
             Expr::Add(a, b)
             | Expr::Sub(a, b)
             | Expr::Mul(a, b)
@@ -634,214 +650,144 @@ fn program_uses_http_client(program: &Program) -> bool {
             | Expr::Gt(a, b)
             | Expr::Gte(a, b)
             | Expr::And(a, b)
-            | Expr::Or(a, b) => walk_expr(a) || walk_expr(b),
-            Expr::ObjectLit(pairs) => pairs.iter().any(|(_, v)| walk_expr(v)),
-            Expr::ArrayLit(items) => items.iter().any(walk_expr),
+            | Expr::Or(a, b) => self.expr(a) || self.expr(b),
+            Expr::ObjectLit(pairs) => pairs.iter().any(|(_, v)| self.expr(v)),
+            Expr::ArrayLit(items) => items.iter().any(|e| self.expr(e)),
             Expr::DbSelect {
                 where_clause,
                 limit,
                 offset,
                 ..
             } => {
-                where_clause.as_deref().map(walk_where).unwrap_or(false)
-                    || limit.as_deref().map(walk_expr).unwrap_or(false)
-                    || offset.as_deref().map(walk_expr).unwrap_or(false)
+                where_clause.as_deref().map(|w| self.where_expr(w)).unwrap_or(false)
+                    || limit.as_deref().map(|e| self.expr(e)).unwrap_or(false)
+                    || offset.as_deref().map(|e| self.expr(e)).unwrap_or(false)
             }
             Expr::DbCount { where_clause, .. } | Expr::DbAggregate { where_clause, .. } => {
-                where_clause.as_deref().map(walk_where).unwrap_or(false)
+                where_clause.as_deref().map(|w| self.where_expr(w)).unwrap_or(false)
             }
             _ => false,
         }
     }
-    fn walk_where(w: &crate::ast::WhereExpr) -> bool {
+    fn where_expr(&self, w: &crate::ast::WhereExpr) -> bool {
         use crate::ast::WhereExpr;
         match w {
-            WhereExpr::Atom(a) => walk_expr(&a.rhs),
-            WhereExpr::AggAtom { rhs, .. } => walk_expr(rhs),
-            WhereExpr::And(l, r) | WhereExpr::Or(l, r) => walk_where(l) || walk_where(r),
-            WhereExpr::InList { values, .. } => values.iter().any(walk_expr),
-            WhereExpr::Between { low, high, .. } => walk_expr(low) || walk_expr(high),
+            WhereExpr::Atom(a) => self.expr(&a.rhs),
+            WhereExpr::AggAtom { rhs, .. } => self.expr(rhs),
+            WhereExpr::And(l, r) | WhereExpr::Or(l, r) => self.where_expr(l) || self.where_expr(r),
+            WhereExpr::InList { values, .. } => values.iter().any(|e| self.expr(e)),
+            WhereExpr::Between { low, high, .. } => self.expr(low) || self.expr(high),
         }
     }
-    fn walk_stmt(s: &Stmt) -> bool {
+    fn stmt(&self, s: &Stmt) -> bool {
         match s {
             Stmt::Let { value, .. }
             | Stmt::Assign { value, .. }
             | Stmt::FieldAssign { value, .. }
             | Stmt::Print(value)
-            | Stmt::Expr(value) => walk_expr(value),
+            | Stmt::Expr(value) => self.expr(value),
             Stmt::If {
                 cond,
                 then_body,
                 else_body,
             } => {
-                walk_expr(cond)
-                    || then_body.iter().any(walk_stmt)
+                self.expr(cond)
+                    || then_body.iter().any(|s| self.stmt(s))
                     || else_body
                         .as_ref()
-                        .map(|b| b.iter().any(walk_stmt))
+                        .map(|b| b.iter().any(|s| self.stmt(s)))
                         .unwrap_or(false)
             }
-            Stmt::While { cond, body } => walk_expr(cond) || body.iter().any(walk_stmt),
-            Stmt::ForIn { iter, body, .. } => walk_expr(iter) || body.iter().any(walk_stmt),
-            Stmt::Return(Some(e)) => walk_expr(e),
+            Stmt::While { cond, body } => self.expr(cond) || body.iter().any(|s| self.stmt(s)),
+            Stmt::ForIn { iter, body, .. } => self.expr(iter) || body.iter().any(|s| self.stmt(s)),
+            Stmt::Return(Some(e)) => self.expr(e),
             Stmt::Try {
                 body, catch_body, ..
-            } => body.iter().any(walk_stmt) || catch_body.iter().any(walk_stmt),
-            Stmt::Transaction { body } => body.iter().any(walk_stmt),
-            Stmt::DbDeleteWhere { where_clause, .. } => walk_where(where_clause),
+            } => body.iter().any(|s| self.stmt(s)) || catch_body.iter().any(|s| self.stmt(s)),
+            Stmt::Transaction { body } => body.iter().any(|s| self.stmt(s)),
+            Stmt::DbDeleteWhere { where_clause, .. } => self.where_expr(where_clause),
             Stmt::DbUpdateSet {
                 assignments,
                 where_clause,
                 ..
-            } => assignments.iter().any(|(_, e)| walk_expr(e)) || walk_where(where_clause),
+            } => assignments.iter().any(|(_, e)| self.expr(e)) || self.where_expr(where_clause),
             _ => false,
         }
     }
+}
+
+/// True when `program` calls any built-in in `names`.
+fn program_calls_any(program: &Program, names: &[&str]) -> bool {
+    let scan = CallScan { names };
     for f in &program.functions {
-        if f.body.iter().any(walk_stmt) {
+        if f.body.iter().any(|s| scan.stmt(s)) {
             return true;
         }
     }
     for r in &program.routes {
-        if r.body.iter().any(walk_stmt) {
+        if r.body.iter().any(|s| scan.stmt(s)) {
             return true;
         }
     }
     for m in &program.middlewares {
-        if m.body.iter().any(walk_stmt) {
+        if m.body.iter().any(|s| scan.stmt(s)) {
             return true;
         }
     }
     if let Some(eh) = &program.error_handler {
-        if eh.body.iter().any(walk_stmt) {
+        if eh.body.iter().any(|s| scan.stmt(s)) {
             return true;
         }
     }
     false
 }
 
-/// Scan the AST to decide whether the generated Cargo.toml needs the crypto
-/// crates (`sha2`/`sha1`/`md-5`/`hmac`/`argon2`) and whether to concatenate
-/// `native_prelude_crypto.rs.in`. True when any call names a hash built-in.
+/// Outbound-HTTP built-ins: pull `reqwest` into the generated Cargo.toml.
+const HTTP_CLIENT_BUILTINS: &[&str] = &["sleep_ms", "http_get", "fetch_json"];
+
+/// Crypto built-ins: pull `sha2`/`sha1`/`md-5`/`hmac`/`argon2`/`base64`/
+/// `ring` into the generated Cargo.toml and concatenate
+/// `native_prelude_crypto.rs.in`.
+const CRYPTO_BUILTINS: &[&str] = &[
+    "sha256",
+    "sha1",
+    "md5",
+    "hmac_sha256",
+    "hash_password",
+    "verify_password",
+    "jwt_sign",
+    "jwt_verify",
+    "jwt_verify_jwks",
+];
+
+/// Redis built-ins: pull `redis`/`deadpool-redis` into the generated
+/// Cargo.toml and concatenate `native_prelude_redis.rs.in`.
+///
+/// Must stay in sync with the `redis_*` rows in `crate::builtins` and with
+/// the `is_async_builtin` list below — `tests/native_emit.rs` pins all
+/// three against each other.
+const REDIS_BUILTINS: &[&str] = &[
+    "redis_get",
+    "redis_set",
+    "redis_del",
+    "redis_exists",
+    "redis_incr",
+    "redis_expire",
+    "redis_eval",
+    "redis_ping",
+    "redis_enabled",
+];
+
+fn program_uses_http_client(program: &Program) -> bool {
+    program_calls_any(program, HTTP_CLIENT_BUILTINS)
+}
+
 fn program_uses_crypto(program: &Program) -> bool {
-    fn walk_expr(e: &Expr) -> bool {
-        match e {
-            Expr::Call { name, args } => {
-                if matches!(
-                    name.as_str(),
-                    "sha256"
-                        | "sha1"
-                        | "md5"
-                        | "hmac_sha256"
-                        | "hash_password"
-                        | "verify_password"
-                        | "jwt_sign"
-                        | "jwt_verify"
-                        | "jwt_verify_jwks"
-                ) {
-                    return true;
-                }
-                args.iter().any(walk_expr)
-            }
-            Expr::Await(inner) | Expr::Not(inner) | Expr::Neg(inner) => walk_expr(inner),
-            Expr::Add(a, b)
-            | Expr::Sub(a, b)
-            | Expr::Mul(a, b)
-            | Expr::Div(a, b)
-            | Expr::Mod(a, b)
-            | Expr::Eq(a, b)
-            | Expr::Neq(a, b)
-            | Expr::Lt(a, b)
-            | Expr::Lte(a, b)
-            | Expr::Gt(a, b)
-            | Expr::Gte(a, b)
-            | Expr::And(a, b)
-            | Expr::Or(a, b) => walk_expr(a) || walk_expr(b),
-            Expr::ObjectLit(pairs) => pairs.iter().any(|(_, v)| walk_expr(v)),
-            Expr::ArrayLit(items) => items.iter().any(walk_expr),
-            Expr::DbSelect {
-                where_clause,
-                limit,
-                offset,
-                ..
-            } => {
-                where_clause.as_deref().map(walk_where).unwrap_or(false)
-                    || limit.as_deref().map(walk_expr).unwrap_or(false)
-                    || offset.as_deref().map(walk_expr).unwrap_or(false)
-            }
-            Expr::DbCount { where_clause, .. } | Expr::DbAggregate { where_clause, .. } => {
-                where_clause.as_deref().map(walk_where).unwrap_or(false)
-            }
-            _ => false,
-        }
-    }
-    fn walk_where(w: &crate::ast::WhereExpr) -> bool {
-        use crate::ast::WhereExpr;
-        match w {
-            WhereExpr::Atom(a) => walk_expr(&a.rhs),
-            WhereExpr::AggAtom { rhs, .. } => walk_expr(rhs),
-            WhereExpr::And(l, r) | WhereExpr::Or(l, r) => walk_where(l) || walk_where(r),
-            WhereExpr::InList { values, .. } => values.iter().any(walk_expr),
-            WhereExpr::Between { low, high, .. } => walk_expr(low) || walk_expr(high),
-        }
-    }
-    fn walk_stmt(s: &Stmt) -> bool {
-        match s {
-            Stmt::Let { value, .. }
-            | Stmt::Assign { value, .. }
-            | Stmt::FieldAssign { value, .. }
-            | Stmt::Print(value)
-            | Stmt::Expr(value) => walk_expr(value),
-            Stmt::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
-                walk_expr(cond)
-                    || then_body.iter().any(walk_stmt)
-                    || else_body
-                        .as_ref()
-                        .map(|b| b.iter().any(walk_stmt))
-                        .unwrap_or(false)
-            }
-            Stmt::While { cond, body } => walk_expr(cond) || body.iter().any(walk_stmt),
-            Stmt::ForIn { iter, body, .. } => walk_expr(iter) || body.iter().any(walk_stmt),
-            Stmt::Return(Some(e)) => walk_expr(e),
-            Stmt::Try {
-                body, catch_body, ..
-            } => body.iter().any(walk_stmt) || catch_body.iter().any(walk_stmt),
-            Stmt::Transaction { body } => body.iter().any(walk_stmt),
-            Stmt::DbDeleteWhere { where_clause, .. } => walk_where(where_clause),
-            Stmt::DbUpdateSet {
-                assignments,
-                where_clause,
-                ..
-            } => assignments.iter().any(|(_, e)| walk_expr(e)) || walk_where(where_clause),
-            _ => false,
-        }
-    }
-    for f in &program.functions {
-        if f.body.iter().any(walk_stmt) {
-            return true;
-        }
-    }
-    for r in &program.routes {
-        if r.body.iter().any(walk_stmt) {
-            return true;
-        }
-    }
-    for m in &program.middlewares {
-        if m.body.iter().any(walk_stmt) {
-            return true;
-        }
-    }
-    if let Some(eh) = &program.error_handler {
-        if eh.body.iter().any(walk_stmt) {
-            return true;
-        }
-    }
-    false
+    program_calls_any(program, CRYPTO_BUILTINS)
+}
+
+fn program_uses_redis(program: &Program) -> bool {
+    program_calls_any(program, REDIS_BUILTINS)
 }
 
 pub fn compile(
@@ -889,7 +835,8 @@ pub fn compile_with_target(
     let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
     let needs_http_client = program_uses_http_client(program);
     let needs_crypto = program_uses_crypto(program);
-    let rust_src = codegen(program, needs_db, needs_crypto)?;
+    let needs_redis = program_uses_redis(program);
+    let rust_src = codegen(program, needs_db, needs_crypto, needs_redis)?;
     let workspace = scaffold_workspace(
         root,
         app_name,
@@ -897,6 +844,7 @@ pub fn compile_with_target(
         needs_db,
         needs_http_client,
         needs_crypto,
+        needs_redis,
     )?;
     let bin = invoke_cargo(&cargo, &workspace, app_name, release, target)?;
     let final_path = copy_to_project_bin(root, &bin, release, target)?;
@@ -923,7 +871,8 @@ pub fn emit_rust_source(
 
     let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
     let needs_crypto = program_uses_crypto(program);
-    let rust_src = codegen(program, needs_db, needs_crypto)?;
+    let needs_redis = program_uses_redis(program);
+    let rust_src = codegen(program, needs_db, needs_crypto, needs_redis)?;
 
     let profile = if release { "release" } else { "debug" };
     let out_dir = root.join("bin").join(profile);
@@ -1226,8 +1175,14 @@ const PRELUDE: &str = include_str!("native_prelude.rs.in");
 const PRELUDE_DB: &str = include_str!("native_prelude_db.rs.in");
 const PRELUDE_WS: &str = include_str!("native_prelude_ws.rs.in");
 const PRELUDE_CRYPTO: &str = include_str!("native_prelude_crypto.rs.in");
+const PRELUDE_REDIS: &str = include_str!("native_prelude_redis.rs.in");
 
-fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<String> {
+fn codegen(
+    program: &Program,
+    needs_db: bool,
+    needs_crypto: bool,
+    needs_redis: bool,
+) -> Result<String> {
     // `program` is already a flattened Program (see compile()) — every
     // FunctionDecl/Stmt::Call references functions by their resolved FQN.
     let known_funcs: HashSet<String> = program
@@ -1256,6 +1211,10 @@ fn codegen(program: &Program, needs_db: bool, needs_crypto: bool) -> Result<Stri
     if needs_crypto {
         out.push('\n');
         out.push_str(PRELUDE_CRYPTO);
+    }
+    if needs_redis {
+        out.push('\n');
+        out.push_str(PRELUDE_REDIS);
     }
     out.push('\n');
 
@@ -3396,6 +3355,20 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                     | "directory.create"
                     | "directory.exists"
                     | "directory.delete"
+                    // Redis. Every command is a network round-trip on a
+                    // pooled connection, so all nine suspend — including
+                    // `redis_enabled`, which does no I/O itself but shares
+                    // the `async fn` shape of its siblings so the emitted
+                    // call site doesn't need a special case.
+                    | "redis_get"
+                    | "redis_set"
+                    | "redis_del"
+                    | "redis_exists"
+                    | "redis_incr"
+                    | "redis_expire"
+                    | "redis_eval"
+                    | "redis_ping"
+                    | "redis_enabled"
             );
             if is_user {
                 out.push_str(&user_fn_name(name));
@@ -4357,6 +4330,7 @@ fn scaffold_workspace(
     needs_db: bool,
     needs_http_client: bool,
     needs_crypto: bool,
+    needs_redis: bool,
 ) -> Result<PathBuf> {
     let workspace = root.join(BUILD_DIR_NAME);
     let src_dir = workspace.join("src");
@@ -4366,7 +4340,7 @@ fn scaffold_workspace(
     let cargo_toml = workspace.join("Cargo.toml");
     std::fs::write(
         &cargo_toml,
-        render_cargo_toml(app_name, needs_db, needs_http_client, needs_crypto),
+        render_cargo_toml(app_name, needs_db, needs_http_client, needs_crypto, needs_redis),
     )
     .with_context(|| format!("Failed to write {}", cargo_toml.display()))?;
 
@@ -4387,6 +4361,7 @@ fn render_cargo_toml(
     needs_db: bool,
     needs_http_client: bool,
     needs_crypto: bool,
+    needs_redis: bool,
 ) -> String {
     // reqwest is always included because the prelude contains the http_get /
     // fetch_json helpers unconditionally — gating them by feature would require
@@ -4456,6 +4431,18 @@ fn render_cargo_toml(
         // rustls-tls, but `ring::signature` is only nameable from a
         // direct dependency.
         deps.push_str("ring = \"0.17\"\n");
+    }
+    if needs_redis {
+        // Must match the feature set in the compiler's own Cargo.toml, or
+        // a program behaves differently under `jwc run` and `--native`.
+        // `tokio-rustls-comp` + webpki roots so `rediss://` works in a
+        // scratch container; `script` powers `redis_eval`.
+        deps.push_str(
+            "redis = { version = \"0.27\", default-features = false, features = [\"tokio-comp\", \"tokio-rustls-comp\", \"tls-rustls-webpki-roots\", \"script\", \"keep-alive\"] }\n",
+        );
+        deps.push_str(
+            "deadpool-redis = { version = \"0.18\", default-features = false, features = [\"rt_tokio_1\"] }\n",
+        );
     }
     // Phase A4 (PERF_PLAN.md): global allocator. mimalloc on Windows
     // sidesteps the notoriously slow `HeapAlloc` / `HeapFree` path that

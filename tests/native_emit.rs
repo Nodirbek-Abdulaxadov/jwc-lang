@@ -446,3 +446,92 @@ fn emit_rust_source_awaits_async_io_builtins() {
         }
     }
 }
+
+/// Same guard as above, for the Redis built-ins — plus a check that the
+/// Redis prelude fragment actually gets concatenated.
+///
+/// The coverage assertion is the point: the exercised set is compared
+/// against every `redis_*` row in `BUILTIN_DEFS`, so adding a tenth Redis
+/// built-in without teaching `is_async_builtin` about it fails here rather
+/// than in a user's `jwc build --native`.
+#[test]
+fn emit_rust_source_awaits_redis_builtins() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            let on = redis_enabled();
+            let up = redis_ping();
+            let v = redis_get("k");
+            redis_set("k", "v", 60);
+            let n = redis_del("k");
+            let has = redis_exists("k");
+            let c = redis_incr("hits");
+            let ok = redis_expire("hits", 60);
+            let r = redis_eval("return 1", "[]", "[]");
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "redistest", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    // The prelude fragment must be present, or every call below resolves
+    // to nothing and the generated crate fails on unknown functions.
+    assert!(
+        body.contains("fn jwc_redis_pool()"),
+        "native_prelude_redis.rs.in was not concatenated — check \
+         `program_uses_redis` / REDIS_BUILTINS in native_build.rs"
+    );
+
+    let exercised: Vec<&str> = jwc::builtins::BUILTIN_DEFS
+        .iter()
+        .map(|d| d.name)
+        .filter(|n| n.starts_with("redis_"))
+        .collect();
+    assert_eq!(
+        exercised.len(),
+        9,
+        "the Redis built-in set changed; add the new call to this test's \
+         program so its `.await` is covered: {exercised:?}"
+    );
+
+    for name in exercised {
+        let emitted = format!("jwc_b_{name}");
+        let called = body
+            .lines()
+            .filter(|l| l.contains(&format!("{emitted}(")) && !l.contains(&format!("fn {emitted}")))
+            .collect::<Vec<_>>();
+        assert!(
+            !called.is_empty(),
+            "{emitted} was never called in the output"
+        );
+        for line in called {
+            assert!(
+                line.contains(".await"),
+                "{emitted} emitted without `.await` — add it to \
+                 `is_async_builtin` in native_build.rs. Line: {line}"
+            );
+        }
+    }
+}
+
+/// A program with no `redis_*` call must not drag the Redis prelude (and
+/// therefore the `redis` / `deadpool-redis` crates) into the generated
+/// binary. Guards the `program_uses_redis` gate against being wired to a
+/// constant `true`.
+#[test]
+fn emit_rust_source_omits_redis_prelude_when_unused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            console.write("no redis here");
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "noredis", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        !body.contains("fn jwc_redis_pool()"),
+        "Redis prelude was concatenated into a program that never calls a \
+         redis_* built-in"
+    );
+}

@@ -97,8 +97,30 @@ tracing-opentelemetry = { version = "0.28", optional = true }
 rust_decimal = { version = "1.42.1", default-features = false, features = ["db-postgres"] }
 bytes = "1"
 
+# Optional Redis driver (ecosystem.md Faza 1, core tier). Gated behind the
+# `redis` Cargo feature so the default build doesn't pull these in. The
+# runtime trigger is the `JWC_REDIS_URL` env var — feature `redis` only
+# controls whether the driver is compiled. The `redis_*` built-ins are
+# always present in `BUILTIN_DEFS` (so `jwc check` / typecheck arity and
+# the generated builtins doc don't shift with build flags); without the
+# feature their bodies raise `RedisError` at call time.
+#
+# `default-features = false` drops the crate's sync client and its
+# `aio`-adjacent extras we don't use; `tokio-comp` plugs the async
+# connection into our tokio runtime, `script` powers `redis_eval`.
+#
+# `tokio-rustls-comp` + `tls-rustls-webpki-roots` make `rediss://` URLs
+# work, which every managed Redis (Upstash, ElastiCache in-transit,
+# Redis Cloud) requires. rustls — not native-tls — because the rest of
+# the tree already links rustls via reqwest/lettre; webpki roots because
+# the runtime ships in scratch/distroless containers with no system
+# trust store to read.
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "tls-rustls-webpki-roots", "script", "keep-alive"], optional = true }
+deadpool-redis = { version = "0.18", default-features = false, features = ["rt_tokio_1"], optional = true }
+
 [features]
 default = []
+redis = ["dep:redis", "dep:deadpool-redis"]
 otlp = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
@@ -110,7 +132,7 @@ otlp = [
 
 [dev-dependencies]
 testcontainers = { version = "0.20", features = ["blocking"] }
-testcontainers-modules = { version = "0.8", features = ["postgres", "blocking"] }
+testcontainers-modules = { version = "0.8", features = ["postgres", "redis", "blocking"] }
 tempfile = "3"
 
 # musl release builds pull openssl-sys transitively (native-tls /

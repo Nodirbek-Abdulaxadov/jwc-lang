@@ -488,6 +488,192 @@ impl<'a> Vm<'a> {
         Ok(Value::Void)
     }
 
+    // ── Redis ────────────────────────────────────────────────────────────
+    //
+    // Thin argument-marshalling over `crate::redis_engine`. The shape of
+    // each mirrors its `cache_*` sibling above — same argument order, same
+    // return types — so `redis` package code can pick between them at
+    // runtime without its own callers seeing a difference.
+    //
+    // Every one of these suspends, so each needs a matching entry in
+    // `native_build.rs::is_async_builtin`.
+
+    /// Shared string-argument marshaller for the single-key Redis calls.
+    ///
+    /// Factored out because eight of the nine built-ins start with the
+    /// same "evaluate arg N, demand a string, name the built-in in the
+    /// type error" preamble, and copying it eight times is how the
+    /// messages drift out of sync with the names.
+    async fn redis_str_arg(
+        &mut self,
+        args: &[Expr],
+        idx: usize,
+        vars: &mut HashMap<String, Value>,
+        sig: &str,
+        param: &str,
+    ) -> Result<String> {
+        match self.eval_expr(&args[idx], vars).await? {
+            Value::Str(s) => Ok(s),
+            other => bail!("{sig}: {param} must be string, got {}", other.type_name()),
+        }
+    }
+
+    /// Shared TTL marshaller — rejects negatives the way `cache_set` does.
+    async fn redis_ttl_arg(
+        &mut self,
+        args: &[Expr],
+        idx: usize,
+        vars: &mut HashMap<String, Value>,
+        sig: &str,
+    ) -> Result<i64> {
+        match self.eval_expr(&args[idx], vars).await? {
+            Value::Int(n) if n >= 0 => Ok(n),
+            Value::Int(n) => bail!("{sig}: ttl_secs must be >= 0, got {n}"),
+            other => bail!("{sig}: ttl_secs must be int, got {}", other.type_name()),
+        }
+    }
+
+    pub(super) async fn eval_redis_get_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "redis_get(key)";
+        if args.len() != 1 {
+            bail!("{SIG} expects exactly 1 arg");
+        }
+        let key = self.redis_str_arg(args, 0, vars, SIG, "key").await?;
+        match crate::redis_engine::get(&key).await? {
+            Some(v) => Ok(Value::Str(v)),
+            None => Ok(Value::Null),
+        }
+    }
+
+    pub(super) async fn eval_redis_set_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "redis_set(key, value, ttl_secs)";
+        if args.len() != 3 {
+            bail!("{SIG} expects exactly 3 args");
+        }
+        let key = self.redis_str_arg(args, 0, vars, SIG, "key").await?;
+        let value = self.redis_str_arg(args, 1, vars, SIG, "value").await?;
+        let ttl = self.redis_ttl_arg(args, 2, vars, SIG).await?;
+        crate::redis_engine::set(&key, &value, ttl as u64).await?;
+        Ok(Value::Void)
+    }
+
+    pub(super) async fn eval_redis_del_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "redis_del(key)";
+        if args.len() != 1 {
+            bail!("{SIG} expects exactly 1 arg");
+        }
+        let key = self.redis_str_arg(args, 0, vars, SIG, "key").await?;
+        // Returns the deleted count rather than `cache_del`'s Void: on a
+        // shared cache "was it actually there?" is answerable and worth
+        // answering, whereas the in-process one is the only writer.
+        Ok(Value::Int(crate::redis_engine::del(&key).await?))
+    }
+
+    pub(super) async fn eval_redis_exists_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "redis_exists(key)";
+        if args.len() != 1 {
+            bail!("{SIG} expects exactly 1 arg");
+        }
+        let key = self.redis_str_arg(args, 0, vars, SIG, "key").await?;
+        Ok(Value::Bool(crate::redis_engine::exists(&key).await?))
+    }
+
+    pub(super) async fn eval_redis_incr_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "redis_incr(key)";
+        if args.len() != 1 {
+            bail!("{SIG} expects exactly 1 arg");
+        }
+        let key = self.redis_str_arg(args, 0, vars, SIG, "key").await?;
+        Ok(Value::Int(crate::redis_engine::incr(&key).await?))
+    }
+
+    pub(super) async fn eval_redis_expire_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "redis_expire(key, ttl_secs)";
+        if args.len() != 2 {
+            bail!("{SIG} expects exactly 2 args");
+        }
+        let key = self.redis_str_arg(args, 0, vars, SIG, "key").await?;
+        let ttl = self.redis_ttl_arg(args, 1, vars, SIG).await?;
+        Ok(Value::Bool(
+            crate::redis_engine::expire(&key, ttl).await?,
+        ))
+    }
+
+    pub(super) async fn eval_redis_eval_call(
+        &mut self,
+        args: &[Expr],
+        vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        const SIG: &str = "redis_eval(script, keys_json, args_json)";
+        if args.len() != 3 {
+            bail!("{SIG} expects exactly 3 args");
+        }
+        let script = self.redis_str_arg(args, 0, vars, SIG, "script").await?;
+        let keys_json = self.redis_str_arg(args, 1, vars, SIG, "keys_json").await?;
+        let args_json = self.redis_str_arg(args, 2, vars, SIG, "args_json").await?;
+        let keys = parse_redis_string_array(&keys_json, SIG, "keys_json")?;
+        let argv = parse_redis_string_array(&args_json, SIG, "args_json")?;
+        match crate::redis_engine::eval(&script, &keys, &argv).await? {
+            Some(v) => Ok(Value::Str(v)),
+            None => Ok(Value::Null),
+        }
+    }
+
+    pub(super) async fn eval_redis_ping_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("redis_ping() expects no args");
+        }
+        // Reports reachability as a bool rather than propagating the
+        // error, so a health route can branch on it without wrapping the
+        // call in `try { }`. The error text still reaches the operator via
+        // `/readyz`, which calls `redis_engine::ping` directly.
+        Ok(Value::Bool(crate::redis_engine::ping().await.is_ok()))
+    }
+
+    pub(super) async fn eval_redis_enabled_call(
+        &mut self,
+        args: &[Expr],
+        _vars: &mut HashMap<String, Value>,
+    ) -> Result<Value> {
+        if !args.is_empty() {
+            bail!("redis_enabled() expects no args");
+        }
+        // Deliberately does NOT round-trip to the server: this is the
+        // "is Redis configured for this process" question that the `redis`
+        // package's fallback branches on, and it has to be cheap enough to
+        // call on every cache read.
+        crate::redis_engine::init_redis_from_env()?;
+        Ok(Value::Bool(crate::redis_engine::is_enabled()))
+    }
+
     pub(super) async fn eval_send_email_call(
         &mut self,
         args: &[Expr],
@@ -1924,6 +2110,44 @@ impl<'a> Vm<'a> {
             .with_context(|| format!("directory.delete({path}) failed"))?;
         Ok(Value::Null)
     }
+}
+
+/// Parse a `redis_eval` KEYS / ARGV argument: a JSON array of scalars.
+///
+/// JWC has no list-of-string value to pass here — `Value::Array` exists but
+/// object/array literals reach built-ins as JSON text — so both operands
+/// cross as a JSON string, which is also what `json_stringify` produces if
+/// the caller builds the list dynamically.
+///
+/// Numbers and booleans are accepted and stringified because Redis is
+/// typeless on the wire (`ARGV[1]` is always a string in Lua), so making
+/// the caller pre-quote a limit or a window would be pure ceremony. Nested
+/// arrays and objects are rejected — there is no sensible flattening, and
+/// silently `to_string()`-ing them would send Lua a JSON blob the script
+/// almost certainly didn't mean to receive.
+fn parse_redis_string_array(raw: &str, sig: &str, param: &str) -> Result<Vec<String>> {
+    let parsed: JsonValue = serde_json::from_str(raw)
+        .with_context(|| format!("{sig}: {param} must be a JSON array, got {raw:?}"))?;
+    let JsonValue::Array(items) = parsed else {
+        bail!("{sig}: {param} must be a JSON array, got {raw:?}");
+    };
+    items
+        .into_iter()
+        .map(|item| match item {
+            JsonValue::String(s) => Ok(s),
+            JsonValue::Number(n) => Ok(n.to_string()),
+            JsonValue::Bool(b) => Ok(b.to_string()),
+            other => bail!(
+                "{sig}: {param} entries must be string, number or bool, got {}",
+                match other {
+                    JsonValue::Null => "null",
+                    JsonValue::Array(_) => "array",
+                    JsonValue::Object(_) => "object",
+                    _ => unreachable!(),
+                }
+            ),
+        })
+        .collect()
 }
 
 /// Char-based string slice shared by `substring` / `take`. Negative `start`

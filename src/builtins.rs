@@ -498,6 +498,88 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         max_args: Some(0),
         native: true,
     },
+    // ── Redis (native, shared across processes) ──────────────────────────
+    //
+    // The cross-process counterpart to `cache_*` above: same key/value
+    // shape and the same `ttl_secs == 0 means no expiry` contract, so the
+    // `redis` package can fall back from one to the other without the
+    // meaning of an argument changing.
+    //
+    // These rows are NOT behind `#[cfg(feature = "redis")]`, deliberately.
+    // `BUILTIN_DEFS` feeds typecheck arity (E022), the LSP completion list
+    // and the generated `docs/docs/reference/builtins.md` — if the rows
+    // came and went with a build flag, `jwc check` would accept or reject
+    // the same program depending on how the binary was compiled, and
+    // `tests/builtins_doc_sync.rs` would pass or fail for the same reason.
+    // Only the *implementation* is feature-gated (`src/redis_engine.rs`);
+    // without it these raise an error naming the missing build flag.
+    //
+    // All of them are async, so every one MUST also appear in the
+    // `is_async_builtin` list in `native_build.rs` — see the note above the
+    // file built-ins.
+    BuiltinDef {
+        name: "redis_get",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_set",
+        aliases: &[],
+        min_args: 3,
+        max_args: Some(3),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_del",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_exists",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_incr",
+        aliases: &[],
+        min_args: 1,
+        max_args: Some(1),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_expire",
+        aliases: &[],
+        min_args: 2,
+        max_args: Some(2),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_eval",
+        aliases: &[],
+        min_args: 3,
+        max_args: Some(3),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_ping",
+        aliases: &[],
+        min_args: 0,
+        max_args: Some(0),
+        native: true,
+    },
+    BuiltinDef {
+        name: "redis_enabled",
+        aliases: &[],
+        min_args: 0,
+        max_args: Some(0),
+        native: true,
+    },
     // ── Raw SQL escape hatch (native) ────────────────────────────────────
     BuiltinDef {
         name: "raw_sql",

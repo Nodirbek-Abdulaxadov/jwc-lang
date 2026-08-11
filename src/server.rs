@@ -362,6 +362,12 @@ pub fn serve(program: &Program, port: u16, request_logging: bool) -> Result<()> 
         engine::init_engine_from_env()?;
     }
 
+    // Redis is optional, so this is unconditional: with no `JWC_REDIS_URL`
+    // it is a no-op, and with a malformed one it fails the boot here
+    // rather than letting every request rediscover the typo. Building the
+    // pool eagerly also means the first cache read doesn't pay for it.
+    crate::redis_engine::init_from_env()?;
+
     let shared_program = Arc::new(program.clone());
     queue::init_queue(Arc::clone(&shared_program));
 
@@ -503,6 +509,20 @@ async fn handle_healthz() -> Response {
 /// check, so probes stayed green through a database outage; this closes
 /// that gap by default.
 async fn handle_readyz() -> Response {
+    // Redis first, and only when it is actually configured — an app with
+    // no `JWC_REDIS_URL` must keep the readiness behaviour it had before
+    // Redis existed, or every already-deployed instance starts failing
+    // its probe on upgrade.
+    //
+    // A configured-but-unreachable Redis IS a readiness failure: the
+    // reason to configure it is shared state (rate limits, sessions), and
+    // an instance that silently degrades to per-process behaviour is worse
+    // than one taken out of the load-balancer rotation.
+    if crate::redis_engine::is_enabled() {
+        if let Err(e) = crate::redis_engine::ping().await {
+            return readyz_db_failure(format!("redis ping: {e}"));
+        }
+    }
     // No DB configured → readiness is just process-alive (nothing to
     // probe). Avoid wedging the gate on a missing env var.
     if std::env::var("DATABASE_URL").is_err() && std::env::var("JWC_DATABASE_URL").is_err() {
@@ -571,6 +591,32 @@ async fn handle_metrics(State(state): State<AppState>) -> Response {
         );
         body.push_str("# TYPE jwc_db_pool_waiting gauge\n");
         body.push_str(&format!("jwc_db_pool_waiting {}\n", pool.waiting));
+    }
+
+    // Redis pool saturation. Same rule as the DB gauges above: absent
+    // rather than zeroed when Redis isn't configured, so a dashboard can
+    // tell "no Redis" from "Redis with an empty pool".
+    if let Some(pool) = crate::redis_engine::pool_status() {
+        body.push_str(
+            "# HELP jwc_redis_pool_size Number of connections currently held by the deadpool-redis pool.\n",
+        );
+        body.push_str("# TYPE jwc_redis_pool_size gauge\n");
+        body.push_str(&format!("jwc_redis_pool_size {}\n", pool.size));
+        body.push_str(
+            "# HELP jwc_redis_pool_available Idle Redis connections immediately checkout-able.\n",
+        );
+        body.push_str("# TYPE jwc_redis_pool_available gauge\n");
+        body.push_str(&format!("jwc_redis_pool_available {}\n", pool.available));
+        body.push_str(
+            "# HELP jwc_redis_pool_max_size Configured Redis pool ceiling (JWC_REDIS_POOL_SIZE).\n",
+        );
+        body.push_str("# TYPE jwc_redis_pool_max_size gauge\n");
+        body.push_str(&format!("jwc_redis_pool_max_size {}\n", pool.max_size));
+        body.push_str(
+            "# HELP jwc_redis_pool_waiting Tasks queued for a Redis pool slot — non-zero means contention.\n",
+        );
+        body.push_str("# TYPE jwc_redis_pool_waiting gauge\n");
+        body.push_str(&format!("jwc_redis_pool_waiting {}\n", pool.waiting));
     }
 
     let mut resp = Response::new(body.into());

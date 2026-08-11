@@ -94,6 +94,11 @@ pub(crate) const JWC_ERROR_KINDS: &[&str] = &[
     "IoError.NotFound",         // std::io::ErrorKind::NotFound
     "IoError.PermissionDenied", // ErrorKind::PermissionDenied
     "IoError.AlreadyExists",    // ErrorKind::AlreadyExists
+    "RedisError",
+    "RedisError.ConnectionFailure", // socket dropped / IO error
+    "RedisError.TimedOut",          // RedisError::is_timeout()
+    "RedisError.NoScript",          // NOSCRIPT — EVALSHA of an unloaded script
+    "RedisError.LoadingError",      // server still loading its dataset
 ];
 
 /// Classify an `anyhow::Error` into the most specific well-known JWC error
@@ -125,6 +130,16 @@ pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
         }
         if let Some(http) = cause.downcast_ref::<reqwest::Error>() {
             return classify_reqwest_error(http);
+        }
+        // Ahead of the `io::Error` arm for the same reason as the two
+        // above: a dropped Redis socket surfaces as a `RedisError` whose
+        // source is an `io::Error`, and `IoError.NotFound` for a cache
+        // miss would be actively misleading. Also ahead of Pass 2, whose
+        // DbError substring list contains "pool" and "no connection" —
+        // both of which appear verbatim in Redis pool errors.
+        #[cfg(feature = "redis")]
+        if let Some(r) = cause.downcast_ref::<redis::RedisError>() {
+            return classify_redis_error(r);
         }
         // Last in the loop body on purpose. `tokio_postgres::Error` and
         // `reqwest::Error` both carry an `io::Error` source, and they appear
@@ -173,6 +188,14 @@ pub(crate) fn classify_jwc_error(e: &anyhow::Error) -> &'static str {
         "type error",
     ]) {
         return "ValidationError";
+    }
+    // Ahead of the DbError block below, which claims "deadpool", "pool"
+    // and "no connection" — all of which appear in Redis pool failures.
+    // This also covers the built-without-`--features redis` error, whose
+    // text is plain `anyhow!` with no `RedisError` to downcast, so
+    // `catch (e: RedisError)` fires on it too.
+    if has(&["redis_", "redis:", " redis ", "rediss://", "redis://"]) {
+        return "RedisError";
     }
     if has(&[
         "deadpool",
@@ -265,6 +288,32 @@ fn classify_io_error(e: &std::io::Error) -> &'static str {
         ErrorKind::PermissionDenied => "IoError.PermissionDenied",
         ErrorKind::AlreadyExists => "IoError.AlreadyExists",
         _ => "IoError",
+    }
+}
+
+/// Map a `redis::RedisError` onto a `JWC_ERROR_KINDS` entry.
+///
+/// Must stay in step with `jwc_redis_panic` in
+/// `native_prelude_redis.rs.in` — the interpreter and the AOT binary have
+/// to agree on which kind a given failure produces, or the same
+/// `catch (e: RedisError.TimedOut)` fires in one runtime and not the other.
+///
+/// Anything not named here falls back to the bare `"RedisError"` parent
+/// rather than a guessed subtype, so `catch (e: RedisError)` still fires
+/// while `catch (e: RedisError.NoScript)` doesn't silently swallow an
+/// unrelated failure.
+#[cfg(feature = "redis")]
+fn classify_redis_error(e: &redis::RedisError) -> &'static str {
+    if e.is_connection_dropped() || e.is_io_error() {
+        return "RedisError.ConnectionFailure";
+    }
+    if e.is_timeout() {
+        return "RedisError.TimedOut";
+    }
+    match e.kind() {
+        redis::ErrorKind::BusyLoadingError => "RedisError.LoadingError",
+        redis::ErrorKind::NoScriptError => "RedisError.NoScript",
+        _ => "RedisError",
     }
 }
 
