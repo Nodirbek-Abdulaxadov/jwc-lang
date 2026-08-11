@@ -4,7 +4,7 @@
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
 >
-> Joriy holat: **v0.8.9** — Phase 0–11 yopildi, native query-layer parity bor.
+> Joriy holat: **v0.9.0** — Phase 0–11 yopildi, native query-layer parity bor.
 > v0.7.0 real ilovalardan (MyWallet, jwc-shortener) kelgan feedback bo'yicha
 > DSL/editor/HTTP-kontrakt tuzatishlari; v0.8.0 query layer (where'dan
 > `and`/`or` jimgina yo'qolishi, having'da agregatlar, `select distinct`);
@@ -650,12 +650,12 @@ Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
 
 ## 1.0 gacha yo'l xaritasi
 
-Hozirgi holat: Phase 0–11 yopildi (v0.8.9). Query Layer tugadi, native
+Hozirgi holat: Phase 0–11 yopildi (v0.9.0). Query Layer tugadi, native
 parity bor. Qolgani — quyidagi olti reliz.
 
 Tartib bitta prinsipga bo'ysunadi: **buzuvchi o'zgarishlar erta, ergonomika
 keyin, ishonch doimiy.** 1.0 sintaksisni muzlatadi, demak har qanday
-breaking o'zgarish 0.9–0.12 ichida tugashi shart.
+breaking o'zgarish 0.10–0.13 ichida tugashi shart.
 
 ```
 ✅ v0.5.0 →  Query Layer yadrosi (eager-load + grouped agg)
@@ -670,23 +670,23 @@ breaking o'zgarish 0.9–0.12 ichida tugashi shart.
              aritetini `jwc check` da rad etish) + brending
 ✅ v0.8.7 →  console/fayl builtinlari: `console.*`, `file.*`, `directory.*`
              + `IoError` xato turi (qo'shimcha, breaking emas)
-✅ v0.8.9 →  Redis core-tier driver: `redis_*` builtinlari (interpreter +
-             `--native`), `rediss://` TLS, `/readyz` probe va
-             `jwc_redis_pool_*` metrikalari. `--features redis` ortida.
 ✅ v0.8.8 →  `console.writeln` + `int()` endi trim qiladi va parse bo'lmasa
              xato beradi (0 qaytarmaydi) — BREAKING
-   v0.9.0 →  Entity DSL: default / private / server / enum / composite pk
-   v0.10.0→  Mapper: new X from Y / patch / class validatsiyasi / check
-   v0.11.0→  Til ergonomikasi: body().x / xs[0] / throw / default param
-   v0.12.0→  Query layer yakuni: ko'p ustunli orderby / LEFT JOIN / subquery
-   v0.13.0→  `jwc test` — haqiqiy test framework
+✅ v0.9.0 →  Redis core-tier driver: `redis_*` builtinlari (interpreter +
+             `--native`), `rediss://` TLS, `/readyz` probe va
+             `jwc_redis_pool_*` metrikalari. `--features redis` ortida.
+   v0.10.0→  Entity DSL: default / private / server / enum / composite pk
+   v0.11.0→  Mapper: new X from Y / patch / class validatsiyasi / check
+   v0.12.0→  Til ergonomikasi: body().x / xs[0] / throw / default param
+   v0.13.0→  Query layer yakuni: ko'p ustunli orderby / LEFT JOIN / subquery
+   v0.14.0→  `jwc test` — haqiqiy test framework
    v1.0.0-rc.1 → ishonch: differensial qamrov, audit, soak, pilot ko'chirish
    v1.0.0 →  sintaksis muzlaydi. Breaking faqat 2.0 da
 ```
 
 ---
 
-### v0.9.0 — Entity DSL: default'lar va chegaralar
+### v0.10.0 — Entity DSL: default'lar va chegaralar
 
 Birinchi, chunki mapper'ning butun ma'nosi "qaysi ustun avtomatik to'ladi,
 qaysi biri taqiqlangan" degan savolga bog'liq. Buni oldin belgilamasak,
@@ -705,7 +705,7 @@ mapper semantikasini ikki marta ta'riflashga to'g'ri keladi.
 > Bu ataylab: default xavfsiz tomonga buriladi, proyeksiya esa xavfsizlik
 > uchun emas, trafik uchun yoziladigan bo'ladi.
 
-### v0.10.0 — Mapper
+### v0.11.0 — Mapper
 
 80 ustunli entity uchun router ichida 80 qator o'zlashtirish yozilmasin.
 Chiqish tomonini `select` proyeksiyasi allaqachon hal qiladi — bu reliz
@@ -732,7 +732,7 @@ Mass-assignment himoyasi til darajasida: `{"id":1,"role":"admin"}` yuborilsa
 o'sha maydonlar jimgina tashlanadi. Bugun bunga to'siq — dasturchining har
 maydonni qo'lda yozgani, ya'ni himoya diqqatga bog'liq.
 
-### v0.11.0 — Til ergonomikasi
+### v0.12.0 — Til ergonomikasi
 
 Har bir handler'da seziladigan, additive (breaking emas):
 
@@ -742,7 +742,7 @@ Har bir handler'da seziladigan, additive (breaking emas):
 - default parametr qiymatlari
 - `for i, x in xs`
 
-### v0.12.0 — Query layer yakuni
+### v0.13.0 — Query layer yakuni
 
 - **Ko'p ustunli `orderby`** — bugun parser bitta ustun oladi; jadval UI'si
   uchun majburiy
@@ -754,7 +754,7 @@ Har bir handler'da seziladigan, additive (breaking emas):
 
 Window funksiya, CTE, `union` — `raw_sql` da qoladi (Non-goal).
 
-### v0.13.0 — `jwc test`
+### v0.14.0 — `jwc test`
 
 Eng katta strukturaviy bo'shliq: bugun `jwc test` faqat validatsiya qiladi,
 ya'ni **JWC'da yozilgan kodni JWC'da test qilib bo'lmaydi**. 1.0 tili uchun
@@ -795,7 +795,7 @@ ustun o'rniga affected-count qaytarishi, native'da decimal `null` bo'lib
 kelishi. Va ularning hech biri foydalanuvchi shikoyatidan kelmadi —
 qaralganda topildi.
 
-Shuning uchun v0.9.0 dan boshlab: **har bir yangi query shakli differensial
+Shuning uchun v0.10.0 dan boshlab: **har bir yangi query shakli differensial
 testsiz tugallangan hisoblanmaydi.** Qo'lda yozilgan SQL bilan natija
 solishtirilmasa, u "ishlaydi" deb aytilmaydi. Unit test SQL matnini
 tekshiradi, matn esa har doim to'g'ri ko'rinadi.
