@@ -627,6 +627,17 @@ fn jwc_metrics_body() -> String {
         out.push_str(&format!("jwc_log_dropped_total {}\n", dropped));
     }
 
+    // Redis lives in its own prelude, which is only concatenated for
+    // programs that call a `redis_*` built-in. Codegen emits
+    // `jwc_redis_metrics_hook` either way — forwarding to the real thing
+    // when that prelude is present, returning empty when it is not.
+    //
+    // Without this the endpoint reported `jwc_log_*` and `jwc_db_pool_*` and
+    // silently nothing for Redis, which is worse than not reporting at all:
+    // the absence reads as "Redis is not configured" when it may just be
+    // unimplemented. That misreading cost a production debugging session.
+    out.push_str(&jwc_redis_metrics_hook());
+
     if let Some(pool) = DB_POOL.get() {
         let st = pool.status();
         out.push_str("# HELP jwc_db_pool_size Connections held by the deadpool-postgres pool.\n");

@@ -309,3 +309,29 @@ async fn jwc_b_redis_ping() -> V {
 async fn jwc_b_redis_enabled() -> V {
     V::Bool(jwc_redis_pool().is_some())
 }
+
+/// Prometheus text for the Redis pool, or an empty string when Redis is not
+/// configured — the same absent-rather-than-zeroed rule the other gauges
+/// follow, so "no Redis" reads differently from "Redis with an idle pool".
+///
+/// Reached from `jwc_metrics_body` through the `jwc_redis_metrics_hook`
+/// shim that codegen emits, because this file is only concatenated for
+/// programs that call a `redis_*` built-in and `jwc_metrics_body` lives in
+/// the DB prelude, which is not.
+fn jwc_redis_metrics() -> String {
+    let Some(pool) = jwc_redis_pool().as_ref() else {
+        return String::new();
+    };
+    let st = pool.status();
+    let mut out = String::new();
+    out.push_str("# HELP jwc_redis_pool_size Connections held by the deadpool-redis pool.\n");
+    out.push_str("# TYPE jwc_redis_pool_size gauge\n");
+    out.push_str(&format!("jwc_redis_pool_size {}\n", st.size));
+    out.push_str("# HELP jwc_redis_pool_available Idle Redis connections immediately checkout-able.\n");
+    out.push_str("# TYPE jwc_redis_pool_available gauge\n");
+    out.push_str(&format!("jwc_redis_pool_available {}\n", st.available));
+    out.push_str("# HELP jwc_redis_pool_max_size Configured Redis pool ceiling (JWC_REDIS_POOL_SIZE).\n");
+    out.push_str("# TYPE jwc_redis_pool_max_size gauge\n");
+    out.push_str(&format!("jwc_redis_pool_max_size {}\n", st.max_size));
+    out
+}

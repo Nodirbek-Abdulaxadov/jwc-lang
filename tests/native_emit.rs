@@ -818,3 +818,57 @@ fn emit_rust_source_lets_a_user_metrics_route_win() {
         "the user's own /metrics route must be the one registered"
     );
 }
+
+/// `/metrics` lives in the DB prelude; the Redis gauges live in the Redis
+/// one, which is only emitted for programs that call a `redis_*` built-in.
+/// A shim bridges them, so `jwc_metrics_body` can call it unconditionally.
+///
+/// Without it the endpoint reported the log writer and the Postgres pool and
+/// silently nothing for Redis — worse than omitting the endpoint, because
+/// the absence reads as "Redis is not configured" when it is really "not
+/// implemented". That misreading cost a production debugging session: the
+/// service was talking to Redis the whole time.
+#[test]
+fn emit_rust_source_bridges_redis_metrics_when_redis_is_used() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Hit of AppDb { id int pk; }
+        route GET "/" {
+            let ok = redis_ping();
+            return json({ ok: ok });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "redismet", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_redis_metrics_hook() -> String { jwc_redis_metrics() }"),
+        "the hook must forward to the real gauges when Redis is compiled in"
+    );
+}
+
+/// ...and returns empty when it is not, so the DB prelude's unconditional
+/// call still resolves.
+#[test]
+fn emit_rust_source_stubs_redis_metrics_without_redis() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Hit of AppDb { id int pk; }
+        route GET "/" { return json({ ok: true }); }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "noredismet", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_redis_metrics_hook() -> String { String::new() }"),
+        "the hook must stub out when the Redis prelude is absent"
+    );
+    assert!(
+        !body.contains("fn jwc_redis_metrics()"),
+        "the Redis prelude must not be emitted for a program that never touches Redis"
+    );
+}

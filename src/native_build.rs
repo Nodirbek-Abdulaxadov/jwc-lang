@@ -1296,6 +1296,17 @@ fn codegen(
         out.push('\n');
         out.push_str(PRELUDE_REDIS);
     }
+    // `/metrics` lives in the DB prelude but the Redis gauges live in the
+    // Redis one, which is conditional. This shim is the seam: it forwards
+    // when Redis is compiled in and returns empty when it is not, so
+    // `jwc_metrics_body` can call it unconditionally.
+    if needs_db {
+        out.push_str(if needs_redis {
+            "\nfn jwc_redis_metrics_hook() -> String { jwc_redis_metrics() }\n"
+        } else {
+            "\nfn jwc_redis_metrics_hook() -> String { String::new() }\n"
+        });
+    }
     out.push('\n');
 
     // Phase 1 spike — struct monomorphization. Every `entity` gets a
