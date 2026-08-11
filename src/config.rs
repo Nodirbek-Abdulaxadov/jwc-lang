@@ -176,6 +176,25 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "100",
         doc: "Base Redis retry backoff (ms); doubles each attempt.",
     },
+    // --- Buffered log writer -----------------------------------------------
+    EnvVar {
+        name: "JWC_LOG_QUEUE",
+        parse_kind: ParseKind::Usize,
+        default: "10000",
+        doc: "Channel capacity for log_insert; rows are dropped once full.",
+    },
+    EnvVar {
+        name: "JWC_LOG_BATCH",
+        parse_kind: ParseKind::Usize,
+        default: "500",
+        doc: "Rows per batched INSERT from the log writer.",
+    },
+    EnvVar {
+        name: "JWC_LOG_FLUSH_MS",
+        parse_kind: ParseKind::DurationMs,
+        default: "200",
+        doc: "Longest a log_insert row waits before being written (ms).",
+    },
     // --- Server ------------------------------------------------------------
     EnvVar {
         name: "JWC_SERVER_WORKERS",

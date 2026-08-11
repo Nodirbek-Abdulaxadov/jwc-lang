@@ -3,6 +3,98 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.2] — Request logging off the critical path, and three native-parity fixes
+
+### Fixed
+
+**`pattern(...)` was not enforced under `--native`.** `emit_validate_body`
+compiled the rule to an is-it-a-string check and discarded the regex, because
+the generated crate had no regex dependency. Every other rule was emitted
+faithfully, so the gap was invisible: `jwc check` accepted it, the interpreter
+honoured it, only the shipped binary ignored it. A program using `pattern` as
+a security boundary had none — jwc-shortener's native build accepted
+`javascript:` URLs and redirected to them. `regex` is now a conditional
+dependency gated on the program using `pattern`, compiled once per call site
+behind a `OnceLock`. Semantics now match `runner::validation` exactly,
+including a null field passing (that is `required`'s job) — which the old
+codegen also got wrong, in the other direction.
+
+**Middleware `after { }` blocks never ran under `--native`.** A route body's
+`return` lowers to a real Rust `return`, and the body was emitted inline into
+`route_N_inner`, so it exited past the response-status capture and the whole
+after-chain. Nearly every route ends in `return`, so the response phase simply
+did not happen. Route bodies with an after-chain are now lifted into their own
+`async fn`.
+
+**Source discovery walked into nested projects.** A vendored dependency —
+a subdirectory with its own manifest — was loaded twice: once as a plain
+project source, landing in `<root>` because package files declare no namespace
+of their own, and once through dependency resolution. The duplicate broke
+visibility, so the package's own call to a `private` helper failed with
+`E021`. jwc-shortener had been unbuildable with its own compiler.
+
+**Feature detection was blind to two places.** `program_calls_any` did not walk
+middleware `after_body`, and did not recurse into `savepoint { }`. Harmless
+while every AOT prelude shipped unconditionally; a real fault now that they are
+gated, since codegen would emit a call to a `jwc_b_*` that was never included.
+
+### Added
+
+**`GET /metrics` on native builds.** Serves the buffered-writer series and the
+Postgres pool. Registered before the user's routes — the router returns the
+first match, so a catch-all like `route GET "/{code}"` otherwise swallows it —
+and skipped entirely when the program declares its own `/metrics`, matching
+`server.rs::route_owned_by_user`. Narrower than the interpreter's endpoint:
+request counters live in `ServerMetrics` and have no native counterpart.
+
+**`log_insert(Entity, record)` — buffered, batched telemetry writes.** A
+request-logging middleware that calls `insert` puts a database round-trip on
+the critical path: `runner/dispatch.rs` awaits middleware `after { }` blocks
+*before* `dispatch_route` returns, so the client waits for its own log row.
+`log_insert` hands the row to a bounded channel and a single background
+consumer writes it in batches.
+
+One consumer, not a task per row — spawning per row fixes latency and nothing
+else: the same number of `INSERT`s still run, they compete for the pool that
+real requests need, and a traffic spike spawns unbounded background work.
+A bounded channel gives batching, one connection, and an explicit policy when
+the writer falls behind.
+
+Durability is the trade: rows are lost on crash (at most `JWC_LOG_FLUSH_MS`
+worth) and dropped under sustained overload. That is why this is a separate
+built-in rather than a mode of `insert` — the call site states which
+semantics it wants. Drops are counted, not silent.
+
+- New env vars `JWC_LOG_QUEUE` / `JWC_LOG_BATCH` / `JWC_LOG_FLUSH_MS`.
+- New `/metrics` series: `jwc_log_queue_depth`, `jwc_log_queue_capacity`,
+  `jwc_log_dropped_total`, `jwc_log_written_total`, `jwc_log_failed_total`,
+  `jwc_log_batches_total` — absent entirely until the writer runs, so "not
+  buffering" reads differently from "buffering nothing".
+- New `error[E023]`: the entity argument must be a string literal, because
+  both backends resolve its schema at build time.
+- Works identically under `jwc run` and `jwc build --native`.
+
+### Changed
+
+**`http_get` / `fetch_json` moved into their own AOT prelude block.** They
+were emitted unconditionally, so `reqwest` was a dependency of every
+generated crate and a hello-world compiled reqwest → hyper → h2 → tower →
+rustls before the linker discarded it. LTO recovered the binary size; nothing
+recovered the compile time. `needs_http_client` had been computed and then
+thrown away with `let _ =` — it is now honoured, and `url` follows the same
+gate.
+
+Crypto still pulls the block in: the JWKS fetch calls `jwc_http_client` and
+`jwc_check_outbound_url`, so `needs_crypto` implies HTTP whether or not the
+program calls `http_get` itself.
+
+**Generated crates enumerate their tokio features** instead of taking
+`features = ["full"]`. The prelude genuinely uses most of it — `fs` for the
+file built-ins, `io-std` for `console.*`, `signal` for graceful shutdown,
+`macros` for the emitted `#[tokio::main]` — so only `process` and
+`parking_lot` fall out. A small win next to dropping reqwest, but the
+manifest now says what the crate actually uses.
+
 ## [0.9.0] — Redis, as a core-tier driver
 
 ### Added

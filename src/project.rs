@@ -694,6 +694,24 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             if name.eq_ignore_ascii_case("bin") || name.eq_ignore_ascii_case("target") {
                 continue;
             }
+            // A subdirectory carrying its own manifest is a separate project
+            // — a vendored package, or a nested app. Its sources belong to
+            // it, not to the parent's flat namespace.
+            //
+            // Without this, a vendored dependency is loaded twice: once here
+            // as a plain project source (landing in `<root>`, because the
+            // package's files declare no `namespace` of their own — the
+            // loader assigns one from the package name) and once through
+            // dependency resolution under that package namespace. The
+            // duplicate is not merely redundant, it breaks visibility: a
+            // package-internal `private` helper resolves to the `<root>`
+            // copy and E021 fires on the package's own call to it.
+            //
+            // `.git` is skipped for the obvious reason — it holds no `.jwc`
+            // sources, only a large tree to walk.
+            if name == ".git" || find_manifest_in_dir(&path).is_some() {
+                continue;
+            }
             walk(root, &path, out)?;
             continue;
         }
@@ -802,6 +820,80 @@ mod tests {
         assert!(
             dep.iter().any(|p| p.to_string_lossy().contains("more")),
             "non-tests sources must survive: {dep:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A vendored dependency sits inside the consumer's tree but carries its
+    /// own manifest. Walking into it loads the package twice — once as a
+    /// plain project source (landing in `<root>`, since a package's files
+    /// declare no namespace of their own) and once through dependency
+    /// resolution under the package namespace.
+    ///
+    /// The duplicate is not merely redundant. It breaks visibility: the
+    /// package's own call to a `private` helper resolves to the `<root>`
+    /// copy and fails with `E021: ... is private to namespace '<root>' and
+    /// cannot be called from '<pkg>'`. jwc-shortener hit exactly this with a
+    /// vendored `qr-lite/`, and the failure names the package's internals,
+    /// which points anywhere but at the real cause.
+    #[test]
+    fn source_discovery_skips_nested_projects() {
+        let dir = unique_tmp_dir("nested");
+        std::fs::create_dir_all(dir.join("vendored")).expect("mkdir vendored");
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir src");
+        std::fs::write(dir.join("main.jwc"), "namespace p;\n").expect("write main");
+        std::fs::write(dir.join("src").join("more.jwc"), "namespace p;\n").expect("write more");
+        // The marker: a subdirectory with its own manifest.
+        std::fs::write(
+            dir.join("vendored").join("vendored.jwcproj"),
+            "{\"name\":\"vendored\",\"type\":\"pkg\",\"version\":\"0.1.0\"}\n",
+        )
+        .expect("write nested manifest");
+        std::fs::write(
+            dir.join("vendored").join("main.jwc"),
+            "private function helper() { return 1; }\n",
+        )
+        .expect("write nested source");
+
+        let found = collect_jwc_files(&dir).expect("collect");
+
+        assert!(
+            !found
+                .iter()
+                .any(|p| p.to_string_lossy().contains("vendored")),
+            "a subdirectory with its own manifest must not be walked: {found:?}"
+        );
+        assert_eq!(
+            found.len(),
+            2,
+            "the consumer's own sources still load: {found:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The legacy `jwcproj.json` marks a nested project just as `*.jwcproj`
+    /// does — `find_manifest_in_dir` accepts both, so the skip must too.
+    #[test]
+    fn source_discovery_skips_nested_projects_with_legacy_manifest() {
+        let dir = unique_tmp_dir("nestedlegacy");
+        std::fs::create_dir_all(dir.join("vendored")).expect("mkdir vendored");
+        std::fs::write(dir.join("main.jwc"), "namespace p;\n").expect("write main");
+        std::fs::write(
+            dir.join("vendored").join(PROJECT_FILE),
+            "{\"name\":\"vendored\",\"type\":\"pkg\",\"version\":\"0.1.0\"}\n",
+        )
+        .expect("write legacy manifest");
+        std::fs::write(dir.join("vendored").join("main.jwc"), "namespace v;\n")
+            .expect("write nested source");
+
+        let found = collect_jwc_files(&dir).expect("collect");
+
+        assert_eq!(
+            found.len(),
+            1,
+            "legacy manifest must mark a nested project: {found:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

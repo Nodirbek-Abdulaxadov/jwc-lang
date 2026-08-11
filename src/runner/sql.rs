@@ -98,6 +98,83 @@ pub(super) fn build_insert_sql(
     ), params))
 }
 
+/// Build one `INSERT INTO "table" (...) VALUES (...), (...), ...;` binding
+/// every row in `rows` as `(json, col_types)`.
+///
+/// Every row must carry the same field set — `log_writer` guarantees this by
+/// grouping on a column signature before calling in, because a multi-row
+/// `VALUES` list has one column list for all rows. A mismatch is still
+/// checked here rather than trusted: silently binding a row against the
+/// wrong column order would write plausible-looking garbage.
+///
+/// No `RETURNING`: the buffered path has no caller waiting for the row back,
+/// and the `row_to_json` CTE that `build_insert_sql` uses would cost a
+/// serialisation per row for a result nobody reads.
+pub(crate) fn build_batch_insert_sql(
+    table: &str,
+    rows: &[(&str, &HashMap<String, String>)],
+) -> Result<(String, Vec<Box<dyn ToSql + Sync + Send>>)> {
+    if rows.is_empty() {
+        bail!("batch insert: no rows");
+    }
+    // Column order comes from the first row and is reused for the rest, so
+    // placeholders and params stay aligned.
+    let first: serde_json::Value =
+        serde_json::from_str(rows[0].0).with_context(|| "batch insert: value is not valid JSON")?;
+    let first_obj = first
+        .as_object()
+        .ok_or_else(|| anyhow!("batch insert: value must be a JSON object"))?;
+    if first_obj.is_empty() {
+        bail!("batch insert: object has no fields to insert");
+    }
+    let mut columns: Vec<String> = first_obj.keys().cloned().collect();
+    columns.sort();
+
+    let quoted: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c)).collect();
+    let mut params: Vec<Box<dyn ToSql + Sync + Send>> =
+        Vec::with_capacity(rows.len() * columns.len());
+    let mut tuples: Vec<String> = Vec::with_capacity(rows.len());
+    let mut next_param = 1usize;
+
+    for (json_str, col_types) in rows {
+        let doc: serde_json::Value = serde_json::from_str(json_str)
+            .with_context(|| "batch insert: value is not valid JSON")?;
+        let obj = doc
+            .as_object()
+            .ok_or_else(|| anyhow!("batch insert: value must be a JSON object"))?;
+        if obj.len() != columns.len() {
+            bail!(
+                "batch insert: rows disagree on column count ({} vs {})",
+                obj.len(),
+                columns.len()
+            );
+        }
+        let mut placeholders: Vec<String> = Vec::with_capacity(columns.len());
+        for col in &columns {
+            let v = obj
+                .get(col)
+                .ok_or_else(|| anyhow!("batch insert: row is missing column '{}'", col))?;
+            params.push(json_value_to_sql_param_typed(
+                v,
+                col_types.get(col).map(|s| s.as_str()),
+            ));
+            placeholders.push(format!("${}", next_param));
+            next_param += 1;
+        }
+        tuples.push(format!("({})", placeholders.join(", ")));
+    }
+
+    Ok((
+        format!(
+            "INSERT INTO \"{}\" ({}) VALUES {};",
+            table,
+            quoted.join(", "),
+            tuples.join(", "),
+        ),
+        params,
+    ))
+}
+
 /// Build `UPDATE "table" SET ... WHERE <pk-cols> = ... RETURNING *;` from a
 /// JSON object string. PK columns are excluded from the SET clause and used in
 /// the WHERE filter; with composite PKs all of them are required in the JSON.

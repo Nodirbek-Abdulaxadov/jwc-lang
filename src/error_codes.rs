@@ -128,6 +128,10 @@ pub const VALIDATOR_ERRORS: &[DiagnosticCode] = &[
         "E022",
         "wrong number of arguments at a built-in call site",
     ),
+    d(
+        "E023",
+        "built-in argument must be a literal the compiler can resolve at build time",
+    ),
 ];
 
 /// Lookup a warning code → description. Returns `None` for unknown
@@ -250,7 +254,7 @@ mod tests {
         // Update this list when wiring a new bail to a code.
         let parser_emitted = [
             "E011", "E012", "E013", "E014", "E015", "E016", "E017", "E018", "E019", "E020", "E021",
-            "E022",
+            "E022", "E023",
         ];
         for code in parser_emitted {
             assert!(

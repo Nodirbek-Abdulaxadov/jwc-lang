@@ -535,3 +535,286 @@ fn emit_rust_source_omits_redis_prelude_when_unused() {
          redis_* built-in"
     );
 }
+
+/// The HTTP prelude carries `reqwest` into the generated crate's manifest,
+/// so a program that never reaches `http_get` must not receive it. This is
+/// the guard on the split: adding a `reqwest` call back into
+/// `native_prelude.rs.in` would put the whole hyper / rustls subtree back on
+/// every hello-world's compile, and nothing else in the suite would notice.
+#[test]
+fn emit_rust_source_omits_http_prelude_when_unused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            console.write("no outbound http here");
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "nohttp", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        !body.contains("fn jwc_http_client()"),
+        "HTTP prelude was concatenated into a program that never calls an \
+         outbound-HTTP built-in"
+    );
+    assert!(
+        !body.contains("reqwest::"),
+        "generated source references reqwest without the HTTP prelude"
+    );
+}
+
+/// ...and is emitted when the program does call one.
+#[test]
+fn emit_rust_source_includes_http_prelude_when_used() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            let body = http_get("https://example.com");
+            console.write(body);
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "withhttp", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_http_client()"),
+        "HTTP prelude missing from a program that calls http_get"
+    );
+}
+
+/// The crypto prelude's JWKS fetch calls `jwc_http_client` and
+/// `jwc_check_outbound_url`, so crypto must drag the HTTP prelude in even
+/// when the program never calls `http_get` itself. Without this the
+/// generated crate fails to compile on unresolved names.
+#[test]
+fn emit_rust_source_includes_http_prelude_for_crypto_programs() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            let token = jwt_sign("{\"sub\":\"1\"}", "secret");
+            console.write(token);
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "crypto", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_check_outbound_url("),
+        "crypto prelude emitted without the HTTP helpers it calls"
+    );
+}
+
+/// `log_insert` lowers to the buffered push, not to `jwc_db_exec`. If it
+/// ever regresses to a direct exec the latency win is silently gone — the
+/// program still works, which is exactly why this needs a test.
+#[test]
+fn emit_rust_source_lowers_log_insert_to_the_buffered_push() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity ApiCall of AppDb {
+            id int pk serial;
+            path varchar(255);
+            status int;
+        }
+        function main() {
+            let row = new ApiCall();
+            row.path = "/x";
+            row.status = 200;
+            log_insert("ApiCall", row);
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "logins", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("jwc_log_push("),
+        "log_insert did not lower to the buffered push"
+    );
+    // Auto-increment columns are excluded, matching `emit_db_insert`.
+    assert!(
+        body.contains("INSERT INTO \\\"api_call\\\" (\\\"path\\\", \\\"status\\\") VALUES "),
+        "unexpected statement prefix for the buffered insert"
+    );
+    // Sync by construction: a `.await` here would mean the push suspends on
+    // the request path, which defeats the point.
+    assert!(
+        !body.contains("jwc_log_push(") || !body.contains("jwc_log_push(\"...\").await"),
+        "buffered push must not be awaited"
+    );
+}
+
+/// A route body ending in `return` must not skip the after-chain.
+///
+/// `Stmt::Return` lowers to a real Rust `return`. Emitted inline into
+/// `route_N_inner`, that jumped over the response-status capture and every
+/// `_after()` call — so a middleware `after { }` block never ran on a native
+/// build. Nearly every route ends in `return`, so this was not an edge case:
+/// jwc-shortener served 3.5M requests and logged exactly zero rows.
+///
+/// Nothing caught it. The emitted source still *contains* the `_after()`
+/// call — just after a `return` — so a substring assertion passes while the
+/// code is unreachable. This test checks reachability instead: no `return`
+/// may sit between binding `__resp` and the after-call.
+#[test]
+fn emit_rust_source_keeps_the_after_block_reachable_past_a_return() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        middleware Tracker {
+        }
+        after {
+            let s = response_status();
+        }
+        route GET "/" use Tracker {
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "afterret", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    // The call site, not the `fn mw_tracker_after()` definition — that is
+    // emitted earlier in the file and would match first.
+    let after_call = body
+        .find("let _ = mw_tracker_after().await;")
+        .expect("after-chain call missing entirely");
+    let resp_bind = body.find("let __resp =").expect("__resp binding missing");
+    assert!(
+        resp_bind < after_call,
+        "__resp must be bound before the after-chain runs"
+    );
+    let between = &body[resp_bind..after_call];
+    assert!(
+        !between.contains("return "),
+        "a `return` between binding __resp and the after-call makes the \
+         after-block unreachable; body must be lifted into its own fn:\n{between}"
+    );
+    // The lifted body is what makes that true.
+    assert!(
+        body.contains("async fn route_0_body()"),
+        "route body was not lifted into its own fn"
+    );
+}
+
+/// The lift is conditional: a route with no after-chain keeps the flat
+/// inline shape, so the common case pays neither an extra function nor an
+/// extra await.
+#[test]
+fn emit_rust_source_keeps_bodies_inline_without_an_after_chain() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        route GET "/" {
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "noafter", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        !body.contains("async fn route_0_body()"),
+        "a route with no after-chain must not pay for the lifted body"
+    );
+}
+
+/// `pattern(...)` must compile to a real regex match, not a type check.
+///
+/// It used to degrade to "is this a string" because the generated crate had
+/// no regex dependency — so a rule written as a security boundary held in
+/// the interpreter and silently did not hold in the shipped binary.
+/// jwc-shortener declares `pattern(r"^https?://")` on its shortener input
+/// and its native build accepted `javascript:` URLs and 302'd to them.
+#[test]
+fn emit_rust_source_compiles_validate_pattern_to_a_regex() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        route POST "/links" {
+            validate body {
+                url: required, pattern(r"^https?://");
+            }
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "pat", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    assert!(
+        body.contains("regex::Regex::new("),
+        "pattern rule did not compile to a regex"
+    );
+    assert!(
+        body.contains("is_match(__s)"),
+        "pattern rule does not actually match the field"
+    );
+    // Interpreter parity: an absent/null field passes — that is `required`'s
+    // job, not `pattern`'s. The old codegen rejected null here.
+    assert!(
+        body.contains("V::Null => {}"),
+        "a null field must pass the pattern rule, matching runner::validation"
+    );
+}
+
+/// The `/metrics` route must be registered BEFORE the user's routes.
+///
+/// `match_route` returns the first entry whose segments match, so a
+/// catch-all like `route GET "/{code}"` swallows `/metrics` when the
+/// built-in is appended last — which is how it first shipped, answering
+/// `{"error":"no such link"}`.
+#[test]
+fn emit_rust_source_registers_metrics_before_user_routes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Link of AppDb { code varchar(8) pk; url varchar(2048); }
+        route GET "/{code}" {
+            return json({ code: path_param("code") });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "met", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    let metrics = body
+        .find(r#"router.add("GET", "/metrics", jwc_metrics_route)"#)
+        .expect("built-in /metrics route not registered");
+    let catchall = body
+        .find(r#"router.add("GET", "/{code}""#)
+        .expect("user catch-all route not registered");
+    assert!(
+        metrics < catchall,
+        "/metrics must be registered before a catch-all or the catch-all wins"
+    );
+}
+
+/// ...and yields entirely when the program declares its own `/metrics`,
+/// matching `server.rs::route_owned_by_user`.
+#[test]
+fn emit_rust_source_lets_a_user_metrics_route_win() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Link of AppDb { code varchar(8) pk; }
+        route GET "/metrics" {
+            return json({ mine: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "usermet", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    // The handler's *definition* still ships — it lives in the DB prelude,
+    // which this program pulls in for its entity. What must not happen is
+    // the built-in claiming the route.
+    assert!(
+        !body.contains(r#"router.add("GET", "/metrics", jwc_metrics_route)"#),
+        "a user-declared /metrics must suppress the built-in registration"
+    );
+    assert!(
+        body.contains(r#"router.add("GET", "/metrics", route_0)"#),
+        "the user's own /metrics route must be the one registered"
+    );
+}
