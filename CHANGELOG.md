@@ -3,7 +3,7 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — Redis
+## [0.8.9] — Redis, as a core-tier driver
 
 ### Added
 

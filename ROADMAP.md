@@ -4,7 +4,7 @@
 > "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
 > "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
 >
-> Joriy holat: **v0.8.8** — Phase 0–11 yopildi, native query-layer parity bor.
+> Joriy holat: **v0.8.9** — Phase 0–11 yopildi, native query-layer parity bor.
 > v0.7.0 real ilovalardan (MyWallet, jwc-shortener) kelgan feedback bo'yicha
 > DSL/editor/HTTP-kontrakt tuzatishlari; v0.8.0 query layer (where'dan
 > `and`/`or` jimgina yo'qolishi, having'da agregatlar, `select distinct`);
@@ -650,7 +650,7 @@ Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
 
 ## 1.0 gacha yo'l xaritasi
 
-Hozirgi holat: Phase 0–11 yopildi (v0.8.8). Query Layer tugadi, native
+Hozirgi holat: Phase 0–11 yopildi (v0.8.9). Query Layer tugadi, native
 parity bor. Qolgani — quyidagi olti reliz.
 
 Tartib bitta prinsipga bo'ysunadi: **buzuvchi o'zgarishlar erta, ergonomika
@@ -670,6 +670,9 @@ breaking o'zgarish 0.9–0.12 ichida tugashi shart.
              aritetini `jwc check` da rad etish) + brending
 ✅ v0.8.7 →  console/fayl builtinlari: `console.*`, `file.*`, `directory.*`
              + `IoError` xato turi (qo'shimcha, breaking emas)
+✅ v0.8.9 →  Redis core-tier driver: `redis_*` builtinlari (interpreter +
+             `--native`), `rediss://` TLS, `/readyz` probe va
+             `jwc_redis_pool_*` metrikalari. `--features redis` ortida.
 ✅ v0.8.8 →  `console.writeln` + `int()` endi trim qiladi va parse bo'lmasa
              xato beradi (0 qaytarmaydi) — BREAKING
    v0.9.0 →  Entity DSL: default / private / server / enum / composite pk
