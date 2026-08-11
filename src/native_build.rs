@@ -710,7 +710,9 @@ impl CallScan<'_> {
             Stmt::Try {
                 body, catch_body, ..
             } => body.iter().any(|s| self.stmt(s)) || catch_body.iter().any(|s| self.stmt(s)),
-            Stmt::Transaction { body } => body.iter().any(|s| self.stmt(s)),
+            Stmt::Transaction { body } | Stmt::Savepoint { body, .. } => {
+                body.iter().any(|s| self.stmt(s))
+            }
             Stmt::DbDeleteWhere { where_clause, .. } => self.where_expr(where_clause),
             Stmt::DbUpdateSet {
                 assignments,
@@ -723,29 +725,76 @@ impl CallScan<'_> {
 }
 
 /// True when `program` calls any built-in in `names`.
-fn program_calls_any(program: &Program, names: &[&str]) -> bool {
-    let scan = CallScan { names };
-    for f in &program.functions {
-        if f.body.iter().any(|s| scan.stmt(s)) {
-            return true;
-        }
-    }
-    for r in &program.routes {
-        if r.body.iter().any(|s| scan.stmt(s)) {
-            return true;
-        }
-    }
+/// Every top-level statement block in the program: function bodies, route
+/// bodies, middleware request **and** response phases, and the error
+/// handler.
+///
+/// `after_body` belongs here and used to be missing. A built-in called only
+/// from a middleware `after { }` block went undetected, so `needs_crypto` /
+/// `needs_redis` / `needs_http_client` all read false for it. That was
+/// harmless while every prelude shipped unconditionally — it became a real
+/// fault the moment they were gated, because codegen then emits a call to a
+/// `jwc_b_*` that was never included and the generated crate fails on an
+/// unresolved name.
+fn program_stmt_blocks(program: &Program) -> Vec<&Vec<Stmt>> {
+    let mut out: Vec<&Vec<Stmt>> = Vec::new();
+    out.extend(program.functions.iter().map(|f| &f.body));
+    out.extend(program.routes.iter().map(|r| &r.body));
     for m in &program.middlewares {
-        if m.body.iter().any(|s| scan.stmt(s)) {
-            return true;
+        out.push(&m.body);
+        if let Some(after) = &m.after_body {
+            out.push(after);
         }
     }
     if let Some(eh) = &program.error_handler {
-        if eh.body.iter().any(|s| scan.stmt(s)) {
-            return true;
+        out.push(&eh.body);
+    }
+    out
+}
+
+fn program_calls_any(program: &Program, names: &[&str]) -> bool {
+    let scan = CallScan { names };
+    program_stmt_blocks(program)
+        .iter()
+        .any(|b| b.iter().any(|s| scan.stmt(s)))
+}
+
+/// Does any `validate body { ... }` in the program carry a `pattern` rule?
+///
+/// Gates the `regex` dependency of the generated crate, so a program that
+/// never writes one does not pay for it.
+fn program_uses_pattern(program: &Program) -> bool {
+    fn has(s: &Stmt) -> bool {
+        match s {
+            Stmt::ValidateBody { fields } => fields.iter().any(|f| {
+                f.rules
+                    .iter()
+                    .any(|r| matches!(r, crate::ast::ValidateRule::Pattern(_)))
+            }),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                then_body.iter().any(has)
+                    || else_body
+                        .as_ref()
+                        .map(|b| b.iter().any(has))
+                        .unwrap_or(false)
+            }
+            Stmt::While { body, .. }
+            | Stmt::ForIn { body, .. }
+            | Stmt::Transaction { body }
+            | Stmt::Savepoint { body, .. } => body.iter().any(has),
+            Stmt::Try {
+                body, catch_body, ..
+            } => body.iter().any(has) || catch_body.iter().any(has),
+            _ => false,
         }
     }
-    false
+    program_stmt_blocks(program)
+        .iter()
+        .any(|b| b.iter().any(|s| has(s)))
 }
 
 /// Outbound-HTTP built-ins: pull `reqwest` into the generated Cargo.toml.
@@ -857,6 +906,7 @@ pub fn compile_with_target(
         needs_http_client,
         needs_crypto,
         needs_redis,
+        program_uses_pattern(program),
     )?;
     let bin = invoke_cargo(&cargo, &workspace, app_name, release, target)?;
     let final_path = copy_to_project_bin(root, &bin, release, target)?;
@@ -1320,7 +1370,7 @@ fn codegen(
         emit_route_handler(&mut out, idx, route, &ctx);
     }
 
-    emit_serve_impl(&mut out, &program.routes);
+    emit_serve_impl(&mut out, &program.routes, needs_db);
 
     // **Phase 1 [1.0-blocker]** — flush all interned object-literal shapes
     // as `__jwc_shape_N()` getters. Rust resolves item references regardless
@@ -1944,9 +1994,24 @@ fn emit_error_handler_fn(out: &mut String, eh: &crate::ast::ErrorHandlerDecl, ct
     out.push_str("}\n");
 }
 
-fn emit_serve_impl(out: &mut String, routes: &[crate::ast::RouteDecl]) {
+fn emit_serve_impl(out: &mut String, routes: &[crate::ast::RouteDecl], needs_db: bool) {
     out.push_str("\nasync fn jwc_serve_impl(port: u16) {\n");
     out.push_str("    let mut router = Router::new();\n");
+    // Built-in `/metrics`, registered BEFORE the user's routes.
+    // `match_route` returns the first entry whose segments match, so a
+    // catch-all like `route GET "/{code}"` swallows `/metrics` if it is
+    // registered first — which is exactly what happened when this was
+    // appended at the end: jwc-shortener's redirect route answered
+    // `{"error":"no such link"}` and the endpoint looked unimplemented.
+    //
+    // Registering first is safe because it is skipped entirely when the
+    // program declares its own `/metrics` — same precedence as the
+    // interpreter's `route_owned_by_user` guard. Gated on `needs_db`: what
+    // it reports (the buffered log writer, the Postgres pool) lives in the
+    // DB prelude, so without one there is nothing to publish.
+    if needs_db && !routes.iter().any(|r| normalise_path(&r.path) == "/metrics") {
+        out.push_str("    router.add(\"GET\", \"/metrics\", jwc_metrics_route);\n");
+    }
     for (idx, route) in routes.iter().enumerate() {
         let path = normalise_path(&route.path);
         if matches!(route.protocol, crate::ast::RouteProtocol::Ws) {
@@ -2416,11 +2481,44 @@ fn emit_validate_body(
                         v = v, f = fname,
                     ));
                 }
-                crate::ast::ValidateRule::Pattern(_) => {
-                    // No regex crate in the native prelude yet — skip with a
-                    // best-effort non-empty string check. Document below.
+                crate::ast::ValidateRule::Pattern(src) => {
+                    // Mirrors `runner::validation`: a string is matched, an
+                    // absent/null field passes (that is `required`'s job),
+                    // and any other type is a type error.
+                    //
+                    // This used to degrade to "is it a string" because the
+                    // generated crate had no regex dependency. The rule
+                    // still *looked* enforced — `jwc check` accepted it, the
+                    // interpreter honoured it — so a program using
+                    // `pattern` as a security boundary had none under
+                    // `--native`, silently. jwc-shortener declares
+                    // `pattern(r"^https?://")` on its shortener input and
+                    // shipped a native binary that accepted
+                    // `javascript:` URLs and 302'd to them.
+                    //
+                    // `regex` is now a conditional dependency, gated on
+                    // `program_uses_pattern` — programs that never write a
+                    // `pattern` rule do not pay for it.
+                    //
+                    // The `OnceLock` is per call site, so the regex compiles
+                    // once rather than per request. `expect` is safe in the
+                    // sense that matters: the pattern is a source literal,
+                    // so a bad one fails on the first request every time
+                    // rather than on unlucky input. `validate_program`
+                    // rejects an uncompilable pattern before codegen.
                     out.push_str(&format!(
-                        "if !matches!(__field, V::Str(_)) {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern\")); }}\n",
+                        "{{ static __RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();\n\
+                         {inner}    match &__field {{\n\
+                         {inner}        V::Null => {{}}\n\
+                         {inner}        V::Str(__s) => {{\n\
+                         {inner}            let __re = __RE.get_or_init(|| regex::Regex::new({pat}).expect(\"INVARIANT: validate pattern is a literal checked at compile time\"));\n\
+                         {inner}            if !__re.is_match(__s) {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern({esc})\")); }}\n\
+                         {inner}        }}\n\
+                         {inner}        _ => {{ __errors.insert(\"{f}\".to_string(), v_str(\"pattern({esc}): not a string\")); }}\n\
+                         {inner}    }} }}\n",
+                        inner = inner,
+                        pat = format!("{:?}", src),
+                        esc = src.replace('\\', "\\\\").replace('"', "\\\""),
                         f = fname,
                     ));
                 }
@@ -4484,6 +4582,7 @@ fn scaffold_workspace(
     needs_http_client: bool,
     needs_crypto: bool,
     needs_redis: bool,
+    needs_regex: bool,
 ) -> Result<PathBuf> {
     let workspace = root.join(BUILD_DIR_NAME);
     let src_dir = workspace.join("src");
@@ -4499,6 +4598,7 @@ fn scaffold_workspace(
             needs_http_client,
             needs_crypto,
             needs_redis,
+            needs_regex,
         ),
     )
     .with_context(|| format!("Failed to write {}", cargo_toml.display()))?;
@@ -4521,6 +4621,7 @@ fn render_cargo_toml(
     needs_http_client: bool,
     needs_crypto: bool,
     needs_redis: bool,
+    needs_regex: bool,
 ) -> String {
     // `http_get` / `fetch_json` and their SSRF guards live in
     // `native_prelude_http.rs.in`, so `reqwest` is a dependency only of
@@ -4581,6 +4682,14 @@ fn render_cargo_toml(
     deps.push_str("serde_json = \"1\"\n");
     if needs_http {
         deps.push_str("url = \"2\"\n");
+    }
+    // Only for programs that write a `pattern` rule in `validate body`.
+    // Before this the rule compiled to an is-it-a-string check and the
+    // regex was discarded, so `pattern(r"^https?://")` accepted
+    // `javascript:` — a security boundary that existed in the source, held
+    // in the interpreter, and silently did not hold in the shipped binary.
+    if needs_regex {
+        deps.push_str("regex = \"1\"\n");
     }
     if needs_db {
         // `with-chrono-0_4` plugs `chrono::DateTime` into tokio-postgres'

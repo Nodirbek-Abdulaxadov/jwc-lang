@@ -717,3 +717,104 @@ fn emit_rust_source_keeps_bodies_inline_without_an_after_chain() {
         "a route with no after-chain must not pay for the lifted body"
     );
 }
+
+/// `pattern(...)` must compile to a real regex match, not a type check.
+///
+/// It used to degrade to "is this a string" because the generated crate had
+/// no regex dependency — so a rule written as a security boundary held in
+/// the interpreter and silently did not hold in the shipped binary.
+/// jwc-shortener declares `pattern(r"^https?://")` on its shortener input
+/// and its native build accepted `javascript:` URLs and 302'd to them.
+#[test]
+fn emit_rust_source_compiles_validate_pattern_to_a_regex() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        route POST "/links" {
+            validate body {
+                url: required, pattern(r"^https?://");
+            }
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "pat", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    assert!(
+        body.contains("regex::Regex::new("),
+        "pattern rule did not compile to a regex"
+    );
+    assert!(
+        body.contains("is_match(__s)"),
+        "pattern rule does not actually match the field"
+    );
+    // Interpreter parity: an absent/null field passes — that is `required`'s
+    // job, not `pattern`'s. The old codegen rejected null here.
+    assert!(
+        body.contains("V::Null => {}"),
+        "a null field must pass the pattern rule, matching runner::validation"
+    );
+}
+
+/// The `/metrics` route must be registered BEFORE the user's routes.
+///
+/// `match_route` returns the first entry whose segments match, so a
+/// catch-all like `route GET "/{code}"` swallows `/metrics` when the
+/// built-in is appended last — which is how it first shipped, answering
+/// `{"error":"no such link"}`.
+#[test]
+fn emit_rust_source_registers_metrics_before_user_routes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Link of AppDb { code varchar(8) pk; url varchar(2048); }
+        route GET "/{code}" {
+            return json({ code: path_param("code") });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "met", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    let metrics = body
+        .find(r#"router.add("GET", "/metrics", jwc_metrics_route)"#)
+        .expect("built-in /metrics route not registered");
+    let catchall = body
+        .find(r#"router.add("GET", "/{code}""#)
+        .expect("user catch-all route not registered");
+    assert!(
+        metrics < catchall,
+        "/metrics must be registered before a catch-all or the catch-all wins"
+    );
+}
+
+/// ...and yields entirely when the program declares its own `/metrics`,
+/// matching `server.rs::route_owned_by_user`.
+#[test]
+fn emit_rust_source_lets_a_user_metrics_route_win() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Link of AppDb { code varchar(8) pk; }
+        route GET "/metrics" {
+            return json({ mine: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "usermet", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    // The handler's *definition* still ships — it lives in the DB prelude,
+    // which this program pulls in for its entity. What must not happen is
+    // the built-in claiming the route.
+    assert!(
+        !body.contains(r#"router.add("GET", "/metrics", jwc_metrics_route)"#),
+        "a user-declared /metrics must suppress the built-in registration"
+    );
+    assert!(
+        body.contains(r#"router.add("GET", "/metrics", route_0)"#),
+        "the user's own /metrics route must be the one registered"
+    );
+}

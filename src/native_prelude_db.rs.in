@@ -595,3 +595,57 @@ async fn jwc_log_flush(pending: &mut Vec<JwcLogRow>) {
         let _ = jwc_db_exec(&sql, flat).await;
     }
 }
+
+// --- /metrics ----------------------------------------------------------------
+//
+// Native builds used to serve nothing here: `jwc_log_stats` existed but had
+// no caller, and codegen registered no route, so `curl /metrics` fell through
+// to the catch-all. That made `jwc_log_dropped_total` — the documented way to
+// tell that the buffered writer is falling behind — visible only under the
+// interpreter, which is not the path anyone deploys.
+//
+// Narrower than the interpreter's endpoint on purpose: this serves what the
+// generated crate can actually observe, which is the log writer and the
+// Postgres pool. Request counters live in `server.rs`'s `ServerMetrics` and
+// have no native counterpart yet.
+//
+// Registered only when the program has no `/metrics` route of its own —
+// mirrors `server.rs::route_owned_by_user`, so a user endpoint always wins.
+
+fn jwc_metrics_body() -> String {
+    let mut out = String::new();
+
+    if let Some((depth, cap, dropped)) = jwc_log_stats() {
+        out.push_str("# HELP jwc_log_queue_depth Rows queued for the buffered log writer.\n");
+        out.push_str("# TYPE jwc_log_queue_depth gauge\n");
+        out.push_str(&format!("jwc_log_queue_depth {}\n", depth));
+        out.push_str("# HELP jwc_log_queue_capacity Channel ceiling (JWC_LOG_QUEUE).\n");
+        out.push_str("# TYPE jwc_log_queue_capacity gauge\n");
+        out.push_str(&format!("jwc_log_queue_capacity {}\n", cap));
+        out.push_str("# HELP jwc_log_dropped_total Rows discarded because the channel was full.\n");
+        out.push_str("# TYPE jwc_log_dropped_total counter\n");
+        out.push_str(&format!("jwc_log_dropped_total {}\n", dropped));
+    }
+
+    if let Some(pool) = DB_POOL.get() {
+        let st = pool.status();
+        out.push_str("# HELP jwc_db_pool_size Connections held by the deadpool-postgres pool.\n");
+        out.push_str("# TYPE jwc_db_pool_size gauge\n");
+        out.push_str(&format!("jwc_db_pool_size {}\n", st.size));
+        out.push_str("# HELP jwc_db_pool_available Idle connections immediately checkout-able.\n");
+        out.push_str("# TYPE jwc_db_pool_available gauge\n");
+        out.push_str(&format!("jwc_db_pool_available {}\n", st.available));
+    }
+
+    out
+}
+
+fn jwc_metrics_route() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> + Send>> {
+    Box::pin(async move {
+        make_response(
+            200,
+            jwc_metrics_body(),
+            "text/plain; version=0.0.4; charset=utf-8",
+        )
+    })
+}
