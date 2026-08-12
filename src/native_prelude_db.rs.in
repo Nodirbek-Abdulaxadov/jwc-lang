@@ -133,17 +133,23 @@ async fn jwc_db_query_rows(sql: &str, params: DbParams) -> Vec<tokio_postgres::R
 }
 
 async fn jwc_db_exec(sql: &str, params: DbParams) -> u64 {
+    jwc_db_try_exec(sql, params)
+        .await
+        .unwrap_or_else(|e| panic!("{}\nSQL: {}", e, sql))
+}
+
+/// Non-panicking `execute`. A failing statement on a request path should
+/// unwind into the route's panic guard and become a 500, which is what
+/// `jwc_db_exec` above preserves — but the log writer's drain loop is a
+/// spawned task with no guard above it, so a panic there kills the writer
+/// for the rest of the process's life and every later `log_insert` silently
+/// drops. Telemetry failures have to be catchable.
+async fn jwc_db_try_exec(sql: &str, params: DbParams) -> Result<u64, tokio_postgres::Error> {
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
     let client = jwc_db_get().await;
-    let stmt = client
-        .prepare_cached(sql)
-        .await
-        .unwrap_or_else(|e| panic!("prepare failed: {}\nSQL: {}", e, sql));
-    client
-        .execute(&stmt, &refs)
-        .await
-        .unwrap_or_else(|e| panic!("execute failed: {}\nSQL: {}", e, sql))
+    let stmt = client.prepare_cached(sql).await?;
+    client.execute(&stmt, &refs).await
 }
 
 fn jwc_row_to_v(row: &tokio_postgres::Row) -> V {
@@ -464,8 +470,16 @@ struct JwcLogRow {
 struct JwcLogWriter {
     tx: tokio::sync::mpsc::Sender<JwcLogRow>,
     dropped: std::sync::atomic::AtomicU64,
+    written: std::sync::atomic::AtomicU64,
+    batches: std::sync::atomic::AtomicU64,
+    failed: std::sync::atomic::AtomicU64,
     capacity: usize,
 }
+
+/// Postgres refuses a statement with more than 65535 bound parameters, so a
+/// batch is chunked to fit rather than trusting `JWC_LOG_BATCH` to be small
+/// enough for the entity's width. Mirrors `log_writer::MAX_BIND_PARAMS`.
+const JWC_LOG_MAX_BIND_PARAMS: usize = 65_535;
 
 static JWC_LOG: OnceLock<JwcLogWriter> = OnceLock::new();
 
@@ -487,17 +501,22 @@ fn jwc_log_env_usize(key: &str, default: usize) -> usize {
 fn jwc_log_push(prefix: &'static str, ncols: usize, params: DbParams) -> V {
     let w = JWC_LOG.get_or_init(|| {
         let queue = jwc_log_env_usize("JWC_LOG_QUEUE", 10_000);
-        let batch = jwc_log_env_usize("JWC_LOG_BATCH", 500);
+        let batch = jwc_log_env_usize("JWC_LOG_BATCH", 2_000);
         let flush_ms = jwc_log_env_usize("JWC_LOG_FLUSH_MS", 200) as u64;
+        let conc = jwc_log_env_usize("JWC_LOG_CONCURRENCY", 4);
         let (tx, rx) = tokio::sync::mpsc::channel::<JwcLogRow>(queue);
         tokio::spawn(jwc_log_drain(
             rx,
             batch,
             std::time::Duration::from_millis(flush_ms),
+            conc,
         ));
         JwcLogWriter {
             tx,
             dropped: std::sync::atomic::AtomicU64::new(0),
+            written: std::sync::atomic::AtomicU64::new(0),
+            batches: std::sync::atomic::AtomicU64::new(0),
+            failed: std::sync::atomic::AtomicU64::new(0),
             capacity: queue,
         }
     });
@@ -515,41 +534,106 @@ fn jwc_log_push(prefix: &'static str, ncols: usize, params: DbParams) -> V {
     }
 }
 
-/// Queue depth / dropped count for `/metrics`. `None` before the first push.
-fn jwc_log_stats() -> Option<(usize, usize, u64)> {
+/// Writer counters for `/metrics`. `None` before the first push.
+///
+/// Only depth/capacity/dropped used to be published here, against the
+/// interpreter's six. That gap is not cosmetic: `written` and `batches` are
+/// what turn a drop rate into a diagnosis — rows-per-batch says whether the
+/// limit is statement overhead or the database — so tuning a native build
+/// meant re-running the whole thing on the interpreter to see the numbers.
+struct JwcLogStats {
+    depth: usize,
+    capacity: usize,
+    dropped: u64,
+    written: u64,
+    batches: u64,
+    failed: u64,
+}
+
+fn jwc_log_stats() -> Option<JwcLogStats> {
+    use std::sync::atomic::Ordering;
     let w = JWC_LOG.get()?;
-    Some((
-        w.capacity.saturating_sub(w.tx.capacity()),
-        w.capacity,
-        w.dropped.load(std::sync::atomic::Ordering::Relaxed),
-    ))
+    Some(JwcLogStats {
+        depth: w.capacity.saturating_sub(w.tx.capacity()),
+        capacity: w.capacity,
+        dropped: w.dropped.load(Ordering::Relaxed),
+        written: w.written.load(Ordering::Relaxed),
+        batches: w.batches.load(Ordering::Relaxed),
+        failed: w.failed.load(Ordering::Relaxed),
+    })
+}
+
+fn jwc_log_note_written(n: u64) {
+    if let Some(w) = JWC_LOG.get() {
+        w.written.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        w.batches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn jwc_log_note_failed(n: u64) {
+    if let Some(w) = JWC_LOG.get() {
+        w.failed.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 async fn jwc_log_drain(
     mut rx: tokio::sync::mpsc::Receiver<JwcLogRow>,
     batch: usize,
     flush: std::time::Duration,
+    concurrency: usize,
 ) {
     let mut pending: Vec<JwcLogRow> = Vec::with_capacity(batch);
     let mut ticker = tokio::time::interval(flush);
     // Without this a slow write is followed by a burst of catch-up ticks,
     // each flushing an empty buffer.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Up to `concurrency` INSERTs in flight. The loop used to `await` each
+    // one before looking at the channel again, so for the whole round-trip
+    // nothing drained and arrivals had only the channel to sit in: the
+    // writer's ceiling was one batch per round-trip, no matter how much
+    // capacity the database had left. Telemetry rows carry no ordering
+    // requirement between batches, so overlapping them is free.
+    //
+    // Bounded, not unbounded: these take connections from the same
+    // `deadpool-postgres` pool the application's own queries need, and the
+    // point of a single consumer was never to be slow — it was to keep
+    // telemetry from crowding out real work.
+    let mut inflight: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let concurrency = concurrency.max(1);
     loop {
         tokio::select! {
-            got = rx.recv() => match got {
-                Some(row) => {
-                    pending.push(row);
-                    if pending.len() >= batch {
-                        jwc_log_flush(&mut pending).await;
+            // `recv_many`, not `recv` — see `log_writer::drain_loop`. Taking
+            // one row per poll made the batch size vary with arrival timing,
+            // so every INSERT carried a different number of VALUES tuples,
+            // missed `prepare_cached` and left an entry nothing would reuse.
+            got = rx.recv_many(&mut pending, batch) => {
+                if got == 0 {
+                    if !pending.is_empty() {
+                        jwc_log_flush(std::mem::take(&mut pending)).await;
                     }
-                }
-                None => {
-                    jwc_log_flush(&mut pending).await;
+                    while inflight.join_next().await.is_some() {}
                     return;
                 }
-            },
-            _ = ticker.tick() => jwc_log_flush(&mut pending).await,
+                if pending.len() >= batch {
+                    while inflight.len() >= concurrency {
+                        let _ = inflight.join_next().await;
+                    }
+                    let rows = std::mem::replace(&mut pending, Vec::with_capacity(batch));
+                    inflight.spawn(jwc_log_flush(rows));
+                }
+            }
+            _ = ticker.tick() => {
+                if !pending.is_empty() {
+                    while inflight.len() >= concurrency {
+                        let _ = inflight.join_next().await;
+                    }
+                    let rows = std::mem::replace(&mut pending, Vec::with_capacity(batch));
+                    inflight.spawn(jwc_log_flush(rows));
+                }
+            }
+            // Reap finished writes so `inflight.len()` reflects reality
+            // rather than growing until the next flush forces a join.
+            Some(_) = inflight.join_next(), if !inflight.is_empty() => {}
         }
     }
 }
@@ -557,42 +641,57 @@ async fn jwc_log_drain(
 /// Group by statement prefix, then write one multi-row INSERT per group.
 /// Rows from two different entities cannot share a `VALUES` list, and the
 /// prefix is what distinguishes them.
-async fn jwc_log_flush(pending: &mut Vec<JwcLogRow>) {
+async fn jwc_log_flush(pending: Vec<JwcLogRow>) {
     if pending.is_empty() {
         return;
     }
     let mut groups: std::collections::HashMap<(&'static str, usize), Vec<DbParams>> =
         std::collections::HashMap::new();
-    for row in pending.drain(..) {
+    for row in pending {
         groups
             .entry((row.prefix, row.ncols))
             .or_default()
             .push(row.params);
     }
     for ((prefix, ncols), rows) in groups {
-        let mut sql = String::from(prefix);
-        let mut flat: DbParams = Vec::with_capacity(rows.len() * ncols);
-        let mut next = 1usize;
-        for (i, params) in rows.into_iter().enumerate() {
-            if i > 0 {
-                sql.push_str(", ");
-            }
-            sql.push('(');
-            for c in 0..ncols {
-                if c > 0 {
+        // Chunk to Postgres's bound-parameter ceiling. Without this,
+        // `JWC_LOG_BATCH=5000` against a 20-column entity builds a 100k
+        // parameter statement the server refuses, and the whole batch is
+        // lost at execute time rather than at configuration time.
+        let per_chunk = (JWC_LOG_MAX_BIND_PARAMS / ncols.max(1)).max(1);
+        let mut rows = rows;
+        while !rows.is_empty() {
+            let n = per_chunk.min(rows.len());
+            let mut sql = String::from(prefix);
+            let mut flat: DbParams = Vec::with_capacity(n * ncols);
+            let mut next = 1usize;
+            for (i, params) in rows.drain(..n).enumerate() {
+                if i > 0 {
                     sql.push_str(", ");
                 }
-                sql.push_str(&format!("${}", next));
-                next += 1;
+                sql.push('(');
+                for c in 0..ncols {
+                    if c > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push_str(&format!("${}", next));
+                    next += 1;
+                }
+                sql.push(')');
+                flat.extend(params);
             }
-            sql.push(')');
-            flat.extend(params);
+            sql.push(';');
+            // `jwc_db_exec` already reports its own failures; a telemetry
+            // write has no caller to propagate to and must never take the
+            // process down.
+            match jwc_db_try_exec(&sql, flat).await {
+                Ok(_) => jwc_log_note_written(n as u64),
+                Err(e) => {
+                    eprintln!("[JWC] log writer: {} row(s) failed: {}", n, e);
+                    jwc_log_note_failed(n as u64);
+                }
+            }
         }
-        sql.push(';');
-        // `jwc_db_exec` already reports its own failures; a telemetry write
-        // has no caller to propagate to and must never take the process
-        // down.
-        let _ = jwc_db_exec(&sql, flat).await;
     }
 }
 
@@ -615,16 +714,25 @@ async fn jwc_log_flush(pending: &mut Vec<JwcLogRow>) {
 fn jwc_metrics_body() -> String {
     let mut out = String::new();
 
-    if let Some((depth, cap, dropped)) = jwc_log_stats() {
+    if let Some(s) = jwc_log_stats() {
         out.push_str("# HELP jwc_log_queue_depth Rows queued for the buffered log writer.\n");
         out.push_str("# TYPE jwc_log_queue_depth gauge\n");
-        out.push_str(&format!("jwc_log_queue_depth {}\n", depth));
+        out.push_str(&format!("jwc_log_queue_depth {}\n", s.depth));
         out.push_str("# HELP jwc_log_queue_capacity Channel ceiling (JWC_LOG_QUEUE).\n");
         out.push_str("# TYPE jwc_log_queue_capacity gauge\n");
-        out.push_str(&format!("jwc_log_queue_capacity {}\n", cap));
+        out.push_str(&format!("jwc_log_queue_capacity {}\n", s.capacity));
         out.push_str("# HELP jwc_log_dropped_total Rows discarded because the channel was full.\n");
         out.push_str("# TYPE jwc_log_dropped_total counter\n");
-        out.push_str(&format!("jwc_log_dropped_total {}\n", dropped));
+        out.push_str(&format!("jwc_log_dropped_total {}\n", s.dropped));
+        out.push_str("# HELP jwc_log_written_total Rows successfully written by the log writer.\n");
+        out.push_str("# TYPE jwc_log_written_total counter\n");
+        out.push_str(&format!("jwc_log_written_total {}\n", s.written));
+        out.push_str("# HELP jwc_log_failed_total Rows the log writer could not persist.\n");
+        out.push_str("# TYPE jwc_log_failed_total counter\n");
+        out.push_str(&format!("jwc_log_failed_total {}\n", s.failed));
+        out.push_str("# HELP jwc_log_batches_total Batch INSERTs issued by the log writer.\n");
+        out.push_str("# TYPE jwc_log_batches_total counter\n");
+        out.push_str(&format!("jwc_log_batches_total {}\n", s.batches));
     }
 
     // Redis lives in its own prelude, which is only concatenated for

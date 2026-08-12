@@ -1617,6 +1617,13 @@ fn jwc_b_response_duration_ms() -> V {
     with_current_request(|req| V::Int(req.started_at.elapsed().as_millis() as i64))
 }
 
+// Microseconds, for handlers that finish inside one millisecond — where
+// `response_duration_ms` reports 0 and every percentile derived from it is
+// also 0.
+fn jwc_b_response_duration_us() -> V {
+    with_current_request(|req| V::Int(req.started_at.elapsed().as_micros() as i64))
+}
+
 // `response_status()` — HTTP status the handler emitted. The
 // dispatcher populates this *after* the handler returns and *before*
 // any `after { ... }` block runs (see `jwc_set_response_status`

@@ -3,6 +3,72 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.4] — The log writer's ceiling
+
+A saturation benchmark reported the buffered writer persisting **46%** of
+offered rows at 106k req/s. Chasing that turned up five separate faults,
+four of them silent.
+
+### Fixed
+
+**`log_insert` wrote nothing at all outside `jwc serve`.** The writer was
+started only by `server::serve`, so a program that does not serve — a batch
+job under `jwc run` — got `false` from every call and wrote zero rows, with
+no writer around to even count them as dropped. It now starts on first push,
+matching the AOT prelude, which always did.
+
+**The writer's ceiling was one batch per database round-trip.** The drain
+loop awaited each `INSERT` before looking at the channel again, so for the
+whole round-trip nothing drained and arrivals had only the channel to sit
+in. Up to `JWC_LOG_CONCURRENCY` (default 4) batches now overlap. Measured on
+a saturation harness, 20 rows per request against local Postgres:
+
+| | rows/s | of offered |
+|---|---|---|
+| batch 500, serial (0.9.3) | 50,413 | 11% |
+| batch 2000, serial | 85,997 | 19% |
+| **batch 2000, 4 in flight** | **178,820** | **74%** |
+
+**A varying batch size defeated the prepared-statement cache.** The loop took
+one row per `select!` poll, so the number of `VALUES` tuples tracked arrival
+timing — a different SQL string every time, a miss in deadpool's
+`prepare_cached` map every time, and an entry added that nothing would reuse.
+`recv_many` drains up to a full batch at once, so a saturated writer emits
+the same statement repeatedly.
+
+**`JWC_LOG_BATCH` could build a statement Postgres refuses.** Rows × columns
+has to stay under 65535 bound parameters and the row count alone cannot
+guarantee it: 5000 rows of a 20-column entity is 100k parameters and the
+whole batch failed at execute time. Batches are now chunked to fit, so the
+row limit and the entity's width are independent again. The default rises
+500 → 2000.
+
+**A failed batch killed the native writer permanently.** `jwc_db_exec`
+panics on error, and the AOT drain loop is a spawned task with no guard above
+it, so one bad statement ended the writer for the life of the process and
+every later `log_insert` silently dropped. Telemetry writes now use a
+non-panicking exec and count failures.
+
+**Native `/metrics` published three log-writer series to the interpreter's
+six.** `jwc_log_written_total`, `jwc_log_batches_total` and
+`jwc_log_failed_total` were interpreter-only — and `written ÷ batches` is
+exactly the number that says whether the limit is statement overhead or the
+database, so diagnosing a native build meant re-running it on the
+interpreter.
+
+### Added
+
+**`response_duration_us()`.** `response_duration_ms()` cannot resolve a
+handler that answers in under a millisecond: a shortener logging 1.48M
+requests recorded min 0, max 1, mean 0.00, and every percentile built on that
+column was zero. The value was measured all along — the unit was too coarse.
+
+**A path-length pre-check on Windows native builds.** cargo nests build
+artefacts ~140 characters below the workspace, which crosses `MAX_PATH` for a
+project in a deep directory. The build reached the link step and died with
+`LNK1104` naming a file rather than the path length. It now fails up front
+with the budget, the measured length, and both fixes.
+
 ## [0.9.3] — The rest of the native-parity gaps
 
 Everything here is `--native` catching up to the interpreter. Each one

@@ -414,12 +414,24 @@ raw_sql("WITH b AS (UPDATE \"link\" SET hits = hits + 1 WHERE code = $1 RETURNIN
 log_insert("ApiCall", row);
 ```
 
-Hands the row to a background writer that batches a few hundred into one
-multi-row `INSERT`, so the request does not wait for a database round-trip.
-Use it for logs and metrics; use `insert` when the caller must see the write.
-The first argument must be a **string literal** naming the entity (E023).
-Rows are dropped rather than queued without bound if the writer falls behind
-— `jwc_log_dropped_total` on `/metrics` counts them.
+Hands the row to a background writer that batches a couple of thousand into
+one multi-row `INSERT`, so the request does not wait for a database
+round-trip. Use it for logs and metrics; use `insert` when the caller must
+see the write. The first argument must be a **string literal** naming the
+entity (E023).
+
+Rows are dropped rather than queued without bound if the writer falls
+behind. `/metrics` publishes `jwc_log_dropped_total`,
+`jwc_log_written_total`, `jwc_log_batches_total`, `jwc_log_failed_total`,
+`jwc_log_queue_depth` and `jwc_log_queue_capacity` — identically on both
+backends. If you see drops, `written ÷ batches` is the number to look at
+first: a low rows-per-batch means the writer is paying statement overhead
+too often, and `JWC_LOG_BATCH` / `JWC_LOG_CONCURRENCY` are the knobs.
+
+One caveat that is not a bug: under `jwc run` the runtime is
+single-threaded, so a tight `main()` loop that never awaits starves the
+drain task and fills the channel. Rows logged from route handlers are
+unaffected — `serve` runs a multi-threaded runtime.
 
 ---
 
@@ -447,6 +459,12 @@ must be declared *after* every literal route it would otherwise swallow.
 
 `path_param(name)`, `query_param(name[, default])`, `body()`, `header(name)`,
 `client_ip()`, `request_id()`, `request_path()`, `request_method()`.
+
+Inside an `after { }` block you also get `response_status()`,
+`response_duration_ms()` and `response_duration_us()`. Prefer the
+microsecond one for latency telemetry: a route that answers in under a
+millisecond records `0` through `response_duration_ms`, and every
+percentile computed from a column of zeros is also zero.
 
 `body()` returns the parsed JSON body; read fields with `.`:
 
@@ -570,7 +588,8 @@ Complete surface as of 0.9.x. `name/N` is the accepted argument count;
 
 **HTTP request** — `path_param/1`, `query_param/1..2`, `body/0`, `header/1`,
 `client_ip/0`, `request_id/0`, `response_status/0`, `response_duration_ms/0`,
-`request_path/0`, `request_method/0`, `request_body/0` [interp-only]
+`response_duration_us/0`, `request_path/0`, `request_method/0`,
+`request_body/0` [interp-only]
 
 **HTTP response** — `json/1`, `json_unchecked/1`, `text/1`, `html/1`,
 `response/2` (alias `raw`), `ok/0..1`, `created/1`, `not_found/0..1`,
@@ -786,7 +805,7 @@ Frequently needed vars:
 |---|---|---|
 | `JWC_DATABASE_URL` | — | full Postgres URL |
 | `JWC_REDIS_URL` | unset | Redis; unset means the `redis_*` builtins are disabled, not broken |
-| `JWC_LOG_QUEUE` / `JWC_LOG_BATCH` / `JWC_LOG_FLUSH_MS` | 10000 / 500 / 200 | `log_insert` writer |
+| `JWC_LOG_QUEUE` / `JWC_LOG_BATCH` / `JWC_LOG_FLUSH_MS` / `JWC_LOG_CONCURRENCY` | 10000 / 2000 / 200 / 4 | `log_insert` writer |
 | `JWC_HTTP_ALLOWLIST` | unset | CSV host allowlist for outbound HTTP (SSRF guard) |
 | `JWC_DEBUG_ERRORS` | false | put error detail in the response body |
 | `JWC_PRINT_CONFIG` | false | print the resolved config table at boot |

@@ -4710,6 +4710,78 @@ fn dirs_home() -> Option<PathBuf> {
 
 // --- Workspace scaffolding ----------------------------------------------------
 
+/// Longest path cargo appends under the workspace root while building.
+///
+/// The deepest thing the generated build produces is a build-script binary:
+///
+/// ```text
+/// .jwc-build/target/release/build/<crate>-<16 hex>/build_script_build-<16 hex>.exe
+/// ```
+///
+/// which is ~120 characters for a typical dependency name, so 140 is a
+/// realistic worst case rather than a guess.
+#[cfg(windows)]
+const MAX_GENERATED_SUFFIX: usize = 140;
+
+/// Windows' default `MAX_PATH`. Long-path support exists but is opt-in per
+/// machine *and* per binary manifest, and `link.exe` is one of the tools
+/// that still trips over it.
+#[cfg(windows)]
+const WINDOWS_MAX_PATH: usize = 260;
+
+/// Fail early, and in terms of the actual problem, when the project sits too
+/// deep for the generated cargo workspace to build on Windows.
+///
+/// Without this the build gets all the way to linking and dies with
+///
+/// ```text
+/// error: linking with `link.exe` failed: exit code: 1104
+/// LINK : fatal error LNK1104: cannot open file '...'
+/// ```
+///
+/// which names a file, not a path length, and sends you looking for a
+/// missing dependency or a corrupt toolchain. Someone benchmarking JWC lost
+/// a build to exactly this and worked around it by moving the project to
+/// `C:\Users\<name>\jb\`.
+///
+/// Non-Windows targets have no equivalent limit worth pre-checking (Linux
+/// allows 4096), so this compiles to nothing there.
+fn check_path_length(workspace: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let len = workspace.as_os_str().len();
+        if len + MAX_GENERATED_SUFFIX > WINDOWS_MAX_PATH {
+            let budget = WINDOWS_MAX_PATH.saturating_sub(MAX_GENERATED_SUFFIX);
+            bail!(
+                "project path is too long for a native build on Windows.\n\
+                 \n  build workspace: {} ({len} chars)\n  \
+                 budget:          {budget} chars\n\
+                 \n\
+                 cargo nests build artefacts about {MAX_GENERATED_SUFFIX} characters below \
+                 this directory, which crosses Windows' {WINDOWS_MAX_PATH}-character MAX_PATH. \
+                 The build would reach the link step and fail with LNK1104 naming a file \
+                 rather than the path length.\n\
+                 \n\
+                 Move the project somewhere shorter (for example C:\\src\\{}), or enable \
+                 long paths system-wide:\n  \
+                 reg add HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem \
+                 /v LongPathsEnabled /t REG_DWORD /d 1 /f",
+                workspace.display(),
+                workspace
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("myapp"),
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = workspace;
+    }
+    Ok(())
+}
+
 fn scaffold_workspace(
     root: &Path,
     app_name: &str,
@@ -4721,6 +4793,7 @@ fn scaffold_workspace(
     needs_regex: bool,
 ) -> Result<PathBuf> {
     let workspace = root.join(BUILD_DIR_NAME);
+    check_path_length(&workspace)?;
     let src_dir = workspace.join("src");
     std::fs::create_dir_all(&src_dir)
         .with_context(|| format!("Failed to create {}", src_dir.display()))?;
