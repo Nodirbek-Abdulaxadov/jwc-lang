@@ -14,23 +14,23 @@ JWC ships two official multi-arch (`linux/amd64`, `linux/arm64`) images on GHCR,
 
 Both publish SBOM + provenance attestations.
 
-`:latest` exists too, but **pin to an exact `:0.4.8`-style tag in production** — these images are part of your supply chain.
+`:latest` exists too, but **pin to an exact `:0.9.2`-style tag in production** — these images are part of your supply chain.
 
 ---
 
 ## Recipe 1 — Verify the install
 
 ```bash
-docker pull ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8
-docker run --rm ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8 --version
-# jwc 0.4.8
+docker pull ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2
+docker run --rm ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2 --version
+# jwc 0.9.2
 ```
 
 The default `ENTRYPOINT` is `/usr/local/bin/jwc`, so anything you pass becomes a subcommand:
 
 ```bash
-docker run --rm -v "$PWD:/work" ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8 check examples/testapp/main.jwc
-docker run --rm -v "$PWD:/work" ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8 lint
+docker run --rm -v "$PWD:/work" ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2 check examples/testapp/main.jwc
+docker run --rm -v "$PWD:/work" ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2 lint
 ```
 
 ---
@@ -43,7 +43,7 @@ Compile your app to a static-ish native binary, then ship it inside the minimal 
 # syntax=docker/dockerfile:1.7
 
 # Stage 1: pull a known-good jwc CLI.
-FROM ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8 AS jwc-bin
+FROM ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2 AS jwc-bin
 
 # Stage 2: build the native app binary.
 FROM debian:bookworm-slim AS app-builder
@@ -63,7 +63,7 @@ COPY . .
 RUN jwc build --native --release
 
 # Stage 3: minimal runtime — just the binary on distroless.
-FROM ghcr.io/nodirbek-abdulaxadov/jwc-runtime:0.4.8
+FROM ghcr.io/nodirbek-abdulaxadov/jwc-runtime:0.9.2
 COPY --from=app-builder /app/bin/release/my-api /app/my-api
 EXPOSE 8080
 ENV RUST_LOG=info
@@ -95,7 +95,7 @@ spec:
     spec:
       initContainers:
         - name: migrate
-          image: ghcr.io/nodirbek-abdulaxadov/jwc:0.4.8
+          image: ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2
           args: ["migrate", "up"]
           workingDir: /work
           env:
@@ -108,7 +108,7 @@ spec:
               readOnly: true
       containers:
         - name: app
-          image: registry.example.com/my-jwc-app:0.4.8   # your Recipe-2 image
+          image: registry.example.com/my-jwc-app:0.9.2   # your Recipe-2 image
           ports:
             - containerPort: 8080
           env:

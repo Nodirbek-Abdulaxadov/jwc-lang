@@ -93,10 +93,18 @@ working CRUD set you can edit.
 - Anything that needs a mature ecosystem (1000s of packages). JWC's
   package count is small and curated.
 
+## Building with an AI agent?
+
+Hand it [**AI agent guide**](./reference/ai-agent-guide) — the whole language
+in one self-contained file: every declaration, statement and built-in, the
+native-build rules, and the mistakes agents actually make. Nothing else needs
+to be in its context.
+
 ## What's here
 
 | Section | What it covers |
 |---|---|
+| [AI agent guide](./reference/ai-agent-guide) | The whole language in one file, written to be pasted into an agent's context |
 | [Getting started](./getting-started/install) | Install, first project, templates, editor setup |
 | [Tutorial — zero to deployed CRUD](./tutorial/zero-to-crud) | 15-minute end-to-end walkthrough |
 | [Language](./language/syntax) | Types, variables, functions, control flow, async |
