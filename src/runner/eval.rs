@@ -379,6 +379,21 @@ impl<'a> Vm<'a> {
                         .unwrap_or(Value::Null));
                 }
 
+                // Microseconds, for handlers faster than the millisecond
+                // `response_duration_ms` can resolve. A shortener logging
+                // `latency_ms` over 1.48M requests recorded min 0, max 1,
+                // mean 0.00 — the value was measured, and every percentile
+                // built on it was still zero.
+                if name.eq_ignore_ascii_case("response_duration_us") {
+                    if !args.is_empty() {
+                        bail!("response_duration_us() expects no args");
+                    }
+                    return Ok(self
+                        .current_request_started
+                        .map(|t| Value::Int(t.elapsed().as_micros() as i64))
+                        .unwrap_or(Value::Null));
+                }
+
                 if name.eq_ignore_ascii_case("context") {
                     return self.eval_context_get_call(args, vars).await;
                 }

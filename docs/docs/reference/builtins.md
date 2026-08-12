@@ -60,6 +60,7 @@ Columns:
 | `request_id` | — | 0 | ✅ |
 | `response_status` | — | 0 | ✅ |
 | `response_duration_ms` | — | 0 | ✅ |
+| `response_duration_us` | — | 0 | ✅ |
 | `request_path` | — | 0 | ✅ |
 | `request_method` | — | 0 | ✅ |
 | `request_body` | — | 0 | — |

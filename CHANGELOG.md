@@ -3,6 +3,155 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.4] — The log writer's ceiling
+
+A saturation benchmark reported the buffered writer persisting **46%** of
+offered rows at 106k req/s. Chasing that turned up five separate faults,
+four of them silent.
+
+### Fixed
+
+**`log_insert` wrote nothing at all outside `jwc serve`.** The writer was
+started only by `server::serve`, so a program that does not serve — a batch
+job under `jwc run` — got `false` from every call and wrote zero rows, with
+no writer around to even count them as dropped. It now starts on first push,
+matching the AOT prelude, which always did.
+
+**The writer's ceiling was one batch per database round-trip.** The drain
+loop awaited each `INSERT` before looking at the channel again, so for the
+whole round-trip nothing drained and arrivals had only the channel to sit
+in. Up to `JWC_LOG_CONCURRENCY` (default 4) batches now overlap. Measured on
+a saturation harness, 20 rows per request against local Postgres:
+
+| | rows/s | of offered |
+|---|---|---|
+| batch 500, serial (0.9.3) | 50,413 | 11% |
+| batch 2000, serial | 85,997 | 19% |
+| **batch 2000, 4 in flight** | **178,820** | **74%** |
+
+**A varying batch size defeated the prepared-statement cache.** The loop took
+one row per `select!` poll, so the number of `VALUES` tuples tracked arrival
+timing — a different SQL string every time, a miss in deadpool's
+`prepare_cached` map every time, and an entry added that nothing would reuse.
+`recv_many` drains up to a full batch at once, so a saturated writer emits
+the same statement repeatedly.
+
+**`JWC_LOG_BATCH` could build a statement Postgres refuses.** Rows × columns
+has to stay under 65535 bound parameters and the row count alone cannot
+guarantee it: 5000 rows of a 20-column entity is 100k parameters and the
+whole batch failed at execute time. Batches are now chunked to fit, so the
+row limit and the entity's width are independent again. The default rises
+500 → 2000.
+
+**A failed batch killed the native writer permanently.** `jwc_db_exec`
+panics on error, and the AOT drain loop is a spawned task with no guard above
+it, so one bad statement ended the writer for the life of the process and
+every later `log_insert` silently dropped. Telemetry writes now use a
+non-panicking exec and count failures.
+
+**Native `/metrics` published three log-writer series to the interpreter's
+six.** `jwc_log_written_total`, `jwc_log_batches_total` and
+`jwc_log_failed_total` were interpreter-only — and `written ÷ batches` is
+exactly the number that says whether the limit is statement overhead or the
+database, so diagnosing a native build meant re-running it on the
+interpreter.
+
+### Added
+
+**`response_duration_us()`.** `response_duration_ms()` cannot resolve a
+handler that answers in under a millisecond: a shortener logging 1.48M
+requests recorded min 0, max 1, mean 0.00, and every percentile built on that
+column was zero. The value was measured all along — the unit was too coarse.
+
+**`migrate new` generated an unapplicable `ADD COLUMN`.** A NOT NULL column
+added to a table that already has rows needs a backfill default, or Postgres
+refuses with `column "x" of relation "t" contains null values`. The migration
+generated cleanly and only failed on the machine with production data — the
+one place you least want to be hand-editing SQL. It now carries the type's
+zero and drops the default on the next statement, so the migrated schema
+still matches what `gen-sql` emits for a fresh database. Verified against a
+900k-row table.
+
+**A path-length pre-check on Windows native builds.** cargo nests build
+artefacts ~140 characters below the workspace, which crosses `MAX_PATH` for a
+project in a deep directory. The build reached the link step and died with
+`LNK1104` naming a file rather than the path length. It now fails up front
+with the budget, the measured length, and both fixes.
+
+## [0.9.3] — The rest of the native-parity gaps
+
+Everything here is `--native` catching up to the interpreter. Each one
+returned a well-formed response with the wrong contents, status, or header,
+which is why they read as application bugs rather than compiler faults.
+
+### Fixed
+
+**`validate body` failures were served as HTTP 200.** Codegen returned a
+bare `{error, fields, status: 400}` object; `jwc_to_response` has no reason
+to treat that as anything but a plain JSON value, so the status line said
+`200 OK` while the body claimed 400. Any client branching on `res.ok` read
+a rejected signup as a successful one. Native now answers with the shared
+envelope through `make_response(400, …)` — `{code, details, error, status}`,
+byte for byte what `http_error::validation_failed` produces.
+
+The per-rule messages moved with it. Native emitted `minLength 3` where the
+interpreter writes `minLength(3)`, reported *every* failing rule per field
+where `run_validation_rules` breaks on the first, and silently skipped type
+errors: `{"name": 5}` passed `minLength(3)` and `{"age": "abc"}` passed
+`min(18)`, both because the emitted check only looked at the arm it wanted.
+
+**A short-circuiting middleware skipped the after-chain.** `dispatch.rs`
+breaks out of the request-phase loop on the first middleware that answers,
+then runs the after-chain over every declared middleware anyway. Native's
+`return __mw` jumped straight out of `route_N_inner` — the same class of bug
+as the route-body `return` fixed in 0.9.2, one layer up. jwc-shortener
+served 92,675 rate-limited requests and wrote zero `api_call` rows, so
+throttling was invisible in the analytics. The short-circuit response is now
+parked and stands in for the route body, which also means `response_status()`
+inside `after { }` reads the 429 rather than a handler status that never
+happened. Routes with no after-block anywhere in the chain keep the flat
+early `return` and pay nothing.
+
+**Bare string and null responses got the wrong content-type.** `server.rs`
+defaults every response without an explicit type to `application/json`;
+native guessed `text/plain; charset=utf-8` for a `V::Str`. A handler that
+hand-builds a JSON document and returns the string — jwc-shortener's
+`/openapi.json` — served the right bytes under the wrong header, and Swagger
+UI refused the spec from the native binary only. A handler that returns
+nothing now sends the JSON document `null` rather than an empty body, also
+matching the interpreter. Handlers wanting another type say so with
+`text(v)`, `html(v)`, or `response(v, "image/svg+xml")`.
+
+**`select … first` results read back as null.** `jwc_get_field` handled
+`V::Object` and `V::Record` and sent everything else to `_ => V::Null`, but a
+row from the database arrives as `V::RawJson` and a dynamic object as
+`V::Str`. Every field read off a query result was empty under `--native`;
+jwc-shortener's `/api/links/{code}` served nulls in production. `datetime`
+columns were read as `String` in the same path — `TIMESTAMPTZ` has no
+`FromSql for String`, so the read could only fail, and `unwrap_or_default`
+turned the failure into `""`.
+
+**`redis_eval` re-uploaded the script on every call.** It issued a plain
+`EVAL`, so a rate limiter running one script per request put the script's
+bytes on the wire forever. Both backends now use `redis::Script`, which
+sends `EVALSHA` and falls back once on `NOSCRIPT`.
+
+**`cargo run -- serve` aborted on a stack overflow.** tokio's default
+worker stack is 2 MiB, and the `#[async_recursion]` evaluator nests one
+boxed future per expression node — which fits in an optimised build and
+does not fit in a debug one. jwc-shortener's redirect route overflowed and
+killed the process on the *first* request under a debug build while serving
+normally from a release build, which reads as a broken application rather
+than a profile artefact. Server workers now get 8 MiB, which on Linux is
+address space rather than committed memory.
+
+### Added
+
+**Redis pool gauges on native `/metrics`.** `jwc_redis_pool_size` /
+`_available` / `_max_size` / `_waiting`, alongside the Postgres pool series
+the endpoint already published. Absent rather than zeroed when Redis is not
+configured, matching the interpreter.
+
 ## [0.9.2] — Request logging off the critical path, and three native-parity fixes
 
 ### Fixed

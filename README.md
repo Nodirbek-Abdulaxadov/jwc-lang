@@ -49,8 +49,13 @@ entities against the last migration and writes the DDL; `jwc build
 Routes are written, not generated — `jwc new --template api` scaffolds a
 working CRUD set you can edit.
 
-Latest release: **v0.5.1**. Status: production-ready for the maintainer's
+Latest release: **v0.9.2**. Status: production-ready for the maintainer's
 own workload; external pilots TBD.
+
+**Building an app with an AI agent?** Hand it
+[`docs/docs/reference/ai-agent-guide.md`](docs/docs/reference/ai-agent-guide.md)
+— one self-contained file covering the whole language, every built-in, the
+native-build rules, and the mistakes agents actually make.
 
 ## Why JWC
 
@@ -103,75 +108,48 @@ Standalone HTTP bench against `rust-axum`, `go-fiber`, `dotnet-minimal`,
 Full numbers, methodology, and reproduction recipe:
 <https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark>
 
-## What's new in v0.4.8 (Phase 8 dev-experience close-out)
+## What's new
 
-- **Docker images** — multi-arch (`linux/amd64` + `linux/arm64`) builder
-  + slim runtime image, published on tag via `.github/workflows/docker.yml`
-  with SBOM + provenance attestations.
-- **musl static binary** — `jwc-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz`
-  ships alongside the standard release; runs on any Linux without libc
-  ABI compatibility worries.
-- **`jwc new --template api|auth|jobs`** — three embedded starters
-  (REST CRUD / argon2 + JWT auth / background-job worker) scaffold with
-  `{{name}}` substitution into a fresh project.
-- **LSP go-to-definition, rename, completion** — `jwc-lsp` now indexes
-  symbols across the whole project, rewrites references for renames, and
-  surfaces context-aware completions (catch types, `use ?`, builtins,
-  user functions, default keywords).
-- **VS Code Marketplace + OpenVSX publish** — tag-triggered
-  `.github/workflows/vscode-marketplace.yml` packages the extension and
-  publishes to both registries via `vsce` / `ovsx`.
-- **`jwc fmt`** — hybrid AST-driven formatter with a comment-preserving
-  line-based fallback when the source contains `//` or `/* */`. Idempotency
-  enforced by `tests/fmt_idempotency.rs`. CLI: `jwc fmt [paths] [--check]
-  [--stdout]`.
-- **`jwc upgrade`** — codemod scaffold (empty rule registry at v0.4.8)
-  with stable `UpgradeRule` trait; first rule (`no-typecheck-removed`)
-  scheduled for v0.6.0 in [`DEPRECATION.md`](DEPRECATION.md).
-- **Autogen builtin reference** — `cargo run --bin gen_builtins_doc`
-  emits `docs/docs/reference/builtins.md` from `jwc::builtins::BUILTIN_DEFS`;
-  CI gate (`tests/builtins_doc_sync.rs`) fails if the checked-in doc drifts
-  from the source-of-truth defs.
-- **Zero-to-deployed-CRUD tutorial** — new
-  [`docs/docs/tutorial/zero-to-crud.md`](docs/docs/tutorial/zero-to-crud.md)
-  walks `jwc new --template api` → Postgres → `jwc run` → `jwc build
-  --native` → Docker → k8s in 8 steps.
+### 0.9.x — Redis, buffered telemetry, and native parity
 
-## What landed in v0.4.8 (Sprint 1–5 + Phase 6/7)
+- **Redis as a core driver** — `redis_get/set/del/exists/incr/expire/eval/
+  ping/enabled` behind the `redis` Cargo feature, backed by a
+  `deadpool-redis` pool. Configured with `JWC_REDIS_URL`; unset means
+  disabled, not broken. `redis_eval` sends `EVALSHA`, so a Lua rate-limiter
+  does not re-upload its script every request. Guide:
+  [`deployment/redis`](docs/docs/deployment/redis.md).
+- **The `redis` package** — a pure-JWC layer over those builtins with
+  `get/set/del/incr/expire/exists`, `get_json`/`set_json`, and an atomic
+  `rate_limit(key, limit, window)`. Falls back to the in-process cache when
+  no Redis is configured, so single-replica and local runs need nothing.
+- **`log_insert(Entity, record)`** — telemetry writes off the request's
+  critical path. Rows go to a bounded channel and one background task
+  batches a few hundred into a single multi-row `INSERT`. Tuned with
+  `JWC_LOG_QUEUE` / `JWC_LOG_BATCH` / `JWC_LOG_FLUSH_MS`; rows are dropped
+  rather than queued without bound, counted by `jwc_log_dropped_total`.
+  Replacing a per-request inline `insert` with this cut mean latency 4.24 ms
+  → 1.01 ms on a real service.
+- **`after { }` on middleware** — a response-phase block that can read
+  `response_status()` and `response_duration_ms()`. Runs in reverse
+  middleware order, and runs even when an earlier middleware short-circuits,
+  so a throttled request still reaches your metrics block.
+- **`GET /metrics` on native builds** — Prometheus text exposition for the
+  Postgres pool, the Redis pool and the buffered writer.
+- **Native AOT caught up with the interpreter** — `pattern(...)` is a real
+  regex under `--native` (it used to degrade to an is-it-a-string check,
+  which silently removed a security boundary); `validate body` failures are
+  a real HTTP 400 with the shared error envelope; field reads off
+  `select … first` return the row instead of nulls; `datetime` columns come
+  back as RFC 3339 instead of empty strings; content-type defaults match.
 
-- **Typed catch with dotted subtypes** — `catch (e: DbError.UniqueViolation) { ... }`
-  matches PG SQLSTATE-classified errors; bare `catch (e: DbError)` still
-  catches the parent kind.
-- **Gradual static type checker** — return-type, arity, and arg-type checks
-  on user functions (E018/E019/E020). Opt out with `--no-typecheck` on
-  `jwc check / run / build` while migrating older code.
-- **AOT visibility re-check** — E021 fires when one namespace calls another
-  namespace's `private` function. Same rule, enforced at compile time.
-- **Migration safety** — SHA-256 checksum recorded for every applied
-  migration, surfaced by `jwc migrate status`; `jwc migrate up --dry-run`
-  / `down --dry-run` print the SQL without touching the DB.
-- **`savepoint <name> { ... }`** — nested rollback boundary inside
-  `transaction { ... }`. Literal nested `transaction { transaction { ... } }`
-  is rejected with E016; `savepoint` outside a transaction is E017.
-- **`json()` validation + escape hatch** — `json(s)` now validates string
-  bodies before sending; `json_unchecked(s)` keeps the v0.4.4 passthrough
-  behaviour for known-good JSON.
-- **DB pool resilience** — transient errors retry with exponential backoff
-  (`JWC_DB_RETRY_MAX_ATTEMPTS`, `JWC_DB_RETRY_BACKOFF_MS`), `engine::ping()`
-  drives an end-to-end `/readyz`, and four `jwc_db_pool_*` Prometheus
-  gauges expose pool health.
-- **Boot-time config validation** — every `JWC_*` env var is registered;
-  `JWC_PRINT_CONFIG=1` prints the resolved table at startup.
-- **Postgres-backed persistent job queue** — `JWC_QUEUE_DRIVER=postgres`
-  uses a durable `_jwc_jobs` table with a dead-letter queue for terminal
-  failures.
-- **Optional OTLP tracing** — behind the `otlp` Cargo feature, enabled at
-  runtime with `JWC_OTLP_ENDPOINT` + `JWC_SERVICE_NAME`.
-- **SSRF allowlist + JWT `exp`** — `JWC_HTTP_ALLOWLIST` gates outbound
-  `http_get` / `http_post` / `fetch_json`; `jwt_verify` rejects expired
-  tokens up front.
-- **cargo-fuzz scaffold** — lexer + parser fuzz targets, exercised by a
-  nightly CI job.
+### 0.5.x–0.8.x
+
+Packages + registry (`jwc add` / `jwc publish`, `jwcproj.lock`),
+`namespace`/`import`/`public`/`private`, `mount` + `group`, the query layer
+(joins, `group by`, `having`, `distinct`, aggregates, projections, optional
+predicates), `file.*` / `directory.*` / `console.*`, and `jwc fmt`.
+
+Full history: [`CHANGELOG.md`](CHANGELOG.md).
 
 Full env-var reference: [`docs/docs/deployment/env-vars.md`](docs/docs/deployment/env-vars.md).
 
@@ -1010,18 +988,24 @@ try {
 
 Typed catch with dotted subtypes is real now: `catch (e: DbError)` matches
 every DB error and `catch (e: DbError.UniqueViolation)` narrows to PG
-SQLSTATE `23505` only. Known kinds today: `Error`, `DbError`,
-`DbError.UniqueViolation`, `DbError.ForeignKeyViolation`,
-`DbError.NotNullViolation`, `HttpError`, `ValidationError`,
-`TimeoutError`. Unknown kinds bail at compile time with a "did you mean"
-hint.
+SQLSTATE `23505` only. Known kinds today: `Error`; `DbError` +
+`.UniqueViolation` / `.ForeignKeyViolation` / `.NotNullViolation` /
+`.CheckViolation` / `.SerializationFailure` / `.DeadlockDetected` /
+`.ConnectionFailure`; `HttpError` + `.NotFound` / `.Unauthorized` /
+`.Forbidden` / `.BadGateway`; `JwtError` + `.InvalidSignature` /
+`.Expired`; `IoError` + `.NotFound` / `.PermissionDenied` /
+`.AlreadyExists`; `RedisError` + `.ConnectionFailure` / `.TimedOut` /
+`.NoScript` / `.LoadingError`; plus `ValidationError` and `TimeoutError`.
+Unknown kinds bail at compile time with a "did you mean" hint.
 
-The diagnostic catalog (W001–W006, E001–E021) is in
-[`src/error_codes.rs`](src/error_codes.rs). Highlights from v0.4.8:
-**E016** (literal nested transaction → use `savepoint`), **E017**
+The diagnostic catalog (W001–W006, E001–E023) is in
+[`src/error_codes.rs`](src/error_codes.rs). The ones you're most likely to
+hit: **E016** (literal nested transaction → use `savepoint`), **E017**
 (savepoint outside a transaction), **E018**/**E019**/**E020** (type
 checker — return type / arg count / arg type), **E021** (visibility —
-cross-namespace private call).
+cross-namespace private call), **E022** (unknown builtin), **E023**
+(package resolution). Full list with fixes:
+[`reference/error-codes`](docs/docs/reference/error-codes.md).
 
 ## Foreign Keys
 
@@ -1191,19 +1175,19 @@ curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/
 ### Linux x86_64 (musl, static — works on Alpine, distroless, glibc-old)
 
 ```bash
-curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.4.8/jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz | tar xz
+curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m 755 jwc /usr/local/bin/
 sudo install -m 755 jwc-lsp /usr/local/bin/
 jwc --version
 ```
 
-A matching `jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
+A matching `jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
 
 ### Docker (official multi-arch images)
 
 ```bash
-docker pull ghcr.io/nodirbek-abdulaxadov/jwc:0.4.7
-docker run --rm ghcr.io/nodirbek-abdulaxadov/jwc:0.4.7 --version
+docker pull ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2
+docker run --rm ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2 --version
 ```
 
 `ghcr.io/nodirbek-abdulaxadov/jwc:<version>` ships the `jwc` CLI on `debian:bookworm-slim` (use as a build stage or a `migrate up` k8s init-container). `ghcr.io/nodirbek-abdulaxadov/jwc-runtime:<version>` is a ~25 MB distroless base for your compiled native app. Full guide + k8s YAML in [`docs/docs/deployment/docker.md`](docs/docs/deployment/docker.md).
@@ -1229,7 +1213,7 @@ if `jwc` isn't immediately on the path.
 
 | Env var | What it does |
 |---|---|
-| `JWC_VERSION=v0.2.0` | install a specific release tag instead of latest |
+| `JWC_VERSION=v0.9.2` | install a specific release tag instead of latest |
 | `JWC_INSTALL_DIR=/opt/jwc/bin` | install to a custom directory |
 | `JWC_DOWNLOAD_BASE=https://...` | fetch from a mirror (e.g. the project's MinIO) instead of GitHub Releases |
 

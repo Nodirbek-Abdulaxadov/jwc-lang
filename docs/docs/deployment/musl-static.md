@@ -11,11 +11,11 @@ library dependencies** — it runs unchanged on Alpine, distroless,
 `scratch`-based images, and on long-lived hosts whose glibc is too old to
 ABI-match the standard release binary.
 
-Asset name (release v0.4.8 as the working example):
+Asset name (release v0.9.2 as the working example):
 
 ```
-jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz
-jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz.sha256
+jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz
+jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256
 ```
 
 ## When to use musl
@@ -56,9 +56,9 @@ asset, not the `*-x86_64-linux.tar.gz` one.
 Every release publishes a sibling `.sha256` next to the tarball:
 
 ```bash
-curl -fLO https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.4.8/jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz
-curl -fLO https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.4.8/jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz.sha256
-sha256sum -c jwc-v0.4.8-x86_64-unknown-linux-musl.tar.gz.sha256
+curl -fLO https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz
+curl -fLO https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256
+sha256sum -c jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256
 ```
 
 `install.sh` does this automatically when a `.sha256` asset is published.

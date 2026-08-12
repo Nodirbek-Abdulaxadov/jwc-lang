@@ -49,7 +49,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
-ARG JWC_VERSION=0.3.4
+ARG JWC_VERSION=0.9.2
 RUN curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v${JWC_VERSION}/jwc-x86_64-unknown-linux-gnu.tar.gz \
         | tar -xz -C /usr/local/bin
 

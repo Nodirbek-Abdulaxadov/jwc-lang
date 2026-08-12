@@ -186,7 +186,7 @@ pub const REGISTRY: &[EnvVar] = &[
     EnvVar {
         name: "JWC_LOG_BATCH",
         parse_kind: ParseKind::Usize,
-        default: "500",
+        default: "2000",
         doc: "Rows per batched INSERT from the log writer.",
     },
     EnvVar {
@@ -194,6 +194,12 @@ pub const REGISTRY: &[EnvVar] = &[
         parse_kind: ParseKind::DurationMs,
         default: "200",
         doc: "Longest a log_insert row waits before being written (ms).",
+    },
+    EnvVar {
+        name: "JWC_LOG_CONCURRENCY",
+        parse_kind: ParseKind::Usize,
+        default: "4",
+        doc: "Batch INSERTs the log writer keeps in flight at once.",
     },
     // --- Server ------------------------------------------------------------
     EnvVar {

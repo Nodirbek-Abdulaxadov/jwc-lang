@@ -818,3 +818,284 @@ fn emit_rust_source_lets_a_user_metrics_route_win() {
         "the user's own /metrics route must be the one registered"
     );
 }
+
+/// `/metrics` lives in the DB prelude; the Redis gauges live in the Redis
+/// one, which is only emitted for programs that call a `redis_*` built-in.
+/// A shim bridges them, so `jwc_metrics_body` can call it unconditionally.
+///
+/// Without it the endpoint reported the log writer and the Postgres pool and
+/// silently nothing for Redis — worse than omitting the endpoint, because
+/// the absence reads as "Redis is not configured" when it is really "not
+/// implemented". That misreading cost a production debugging session: the
+/// service was talking to Redis the whole time.
+#[test]
+fn emit_rust_source_bridges_redis_metrics_when_redis_is_used() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Hit of AppDb { id int pk; }
+        route GET "/" {
+            let ok = redis_ping();
+            return json({ ok: ok });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "redismet", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_redis_metrics_hook() -> String { jwc_redis_metrics() }"),
+        "the hook must forward to the real gauges when Redis is compiled in"
+    );
+}
+
+/// ...and returns empty when it is not, so the DB prelude's unconditional
+/// call still resolves.
+#[test]
+fn emit_rust_source_stubs_redis_metrics_without_redis() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Hit of AppDb { id int pk; }
+        route GET "/" { return json({ ok: true }); }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "noredismet", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("fn jwc_redis_metrics_hook() -> String { String::new() }"),
+        "the hook must stub out when the Redis prelude is absent"
+    );
+    assert!(
+        !body.contains("fn jwc_redis_metrics()"),
+        "the Redis prelude must not be emitted for a program that never touches Redis"
+    );
+}
+
+/// A `datetime` column must not be read as `String`.
+///
+/// `TIMESTAMPTZ` has no `FromSql for String`, so the read always failed and
+/// `unwrap_or_default` turned the failure into `""` — every timestamp came
+/// back empty, silently, with the response shape still correct.
+#[test]
+fn emit_rust_source_reads_timestamps_as_datetime_not_string() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        dbcontext AppDb : Postgres;
+        entity Link of AppDb {
+            code varchar(8) pk;
+            created_at datetime;
+        }
+        function one() { return select Link from AppDb.Link first; }
+        function main() { one(); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "ts", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("chrono::DateTime<chrono::Utc>>(1).map(|d| d.to_rfc3339())"),
+        "timestamp column must be read as DateTime and rendered RFC 3339"
+    );
+    assert!(
+        !body.contains("try_get::<_, String>(1)"),
+        "timestamp column must not be read as String — that read can only fail"
+    );
+}
+
+/// A `validate body` failure must be a real HTTP 400 carrying the shared
+/// error envelope, not a bare object served as 200.
+///
+/// Codegen used to return `{error, fields, status: 400}` straight out of
+/// the route fn. `jwc_to_response` has no reason to treat that as anything
+/// but a plain JSON value, so the status line said `200 OK` while the body
+/// claimed 400 — every client branching on `res.ok` read a rejected signup
+/// as a successful one.
+#[test]
+fn emit_rust_source_returns_a_real_400_for_validation_failures() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        route POST "/signup" {
+            validate body {
+                email: required;
+            }
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "vstatus", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    assert!(
+        body.contains("make_response(400, jwc_to_json(&v_obj(__payload)), \"application/json\")"),
+        "validation failure must travel as a real 400 response"
+    );
+    // The interpreter's envelope, key for key — `http_error::envelope`
+    // writes error/status/code and attaches the per-field map under
+    // `details`. `fields` was native-only and no client ever knew about it.
+    for key in [
+        "\"code\".to_string(), v_str(\"validation_failed\")",
+        "\"details\".to_string(), v_obj(__errors)",
+        "\"error\".to_string(), v_str(\"Request body failed validation\")",
+    ] {
+        assert!(body.contains(key), "envelope is missing `{key}`");
+    }
+    assert!(
+        !body.contains("v_str(\"Validation failed\")"),
+        "the old native-only envelope message is still being emitted"
+    );
+}
+
+/// Rule messages are part of the response body, so they have to read the
+/// same on both backends: `minLength(3)`, not `minLength 3`.
+///
+/// And only the FIRST failing rule per field is reported —
+/// `run_validation_rules` breaks out of the rule list — where codegen used
+/// to insert unconditionally and let a later rule overwrite an earlier one.
+#[test]
+fn emit_rust_source_reports_one_interpreter_shaped_message_per_field() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        route POST "/signup" {
+            validate body {
+                name: required, minLength(3), maxLength(8);
+                age: min(18), max(120);
+            }
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "vmsg", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    for msg in ["minLength(3)", "maxLength(8)", "min(18)", "max(120)"] {
+        assert!(
+            body.contains(&format!("Some(\"{msg}\".to_string())")),
+            "rule message `{msg}` is not emitted in the interpreter's shape"
+        );
+    }
+    for stale in ["minLength 3", "maxLength 8", "min 18", "max 120"] {
+        assert!(
+            !body.contains(stale),
+            "space-separated `{stale}` diverges from the interpreter"
+        );
+    }
+    // First failure wins, so every rule is guarded on the slot still
+    // being empty and the insert happens once, after the whole list.
+    assert!(
+        body.contains("let mut __err: Option<String> = None;"),
+        "no per-field first-failure slot"
+    );
+    assert!(
+        body.contains("if __err.is_none()"),
+        "rules are not guarded on the field having no error yet"
+    );
+    // Type errors: the interpreter reports them, codegen used to fall
+    // through and pass a number off as a valid string.
+    assert!(
+        body.contains("minLength(3): not a string"),
+        "a non-string value must fail minLength, not skip it"
+    );
+    assert!(
+        body.contains("min(18): not a number"),
+        "a non-number value must fail min, not skip it"
+    );
+}
+
+/// A middleware that answers early must not skip the after-chain.
+///
+/// `dispatch.rs` breaks out of the request-phase loop on the first
+/// middleware that returns, then runs the after-chain over every declared
+/// middleware anyway. Native's `return __mw` jumped straight out of
+/// `route_N_inner`: jwc-shortener answered 92,675 rate-limited requests
+/// and wrote zero `api_call` rows, so throttling was invisible in both the
+/// status codes and the analytics.
+#[test]
+fn emit_rust_source_runs_the_after_chain_when_middleware_short_circuits() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        middleware Gate {
+            if (query_param("block") == "1") {
+                return statusCode(429, "slow down");
+            }
+        }
+        middleware Tracker {
+        }
+        after {
+            let s = response_status();
+        }
+        route GET "/" use Gate, Tracker {
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "mwshort", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+
+    let inner = body
+        .split("async fn route_0_inner()")
+        .nth(1)
+        .expect("route_0_inner missing");
+    assert!(
+        !inner.contains("if !matches!(__mw, V::Null) { return __mw; }"),
+        "a short-circuiting middleware still returns past the after-chain:\n{inner}"
+    );
+    assert!(
+        inner.contains("__short = Some(__mw);"),
+        "the short-circuit response is not parked for the after-chain"
+    );
+    assert!(
+        inner.contains("if let Some(__s) = __short { __s } else { route_0_body().await }"),
+        "the parked response must stand in for the route body"
+    );
+    // `response_status()` inside the after-block has to see the 429, so
+    // the status capture reads the parked value like any other response.
+    let short = inner.find("__short = Some(__mw);").expect("park missing");
+    let set_status = inner
+        .find("jwc_set_response_status(")
+        .expect("status capture missing");
+    let after_call = inner
+        .find("let _ = mw_tracker_after().await;")
+        .expect("after-chain call missing");
+    assert!(
+        short < set_status && set_status < after_call,
+        "order must be park → capture status → after-chain"
+    );
+}
+
+/// A route with no after-chain keeps the flat early `return` — the Option
+/// dance exists only to keep the after-chain reachable, so nothing that
+/// cannot observe it should pay for it.
+#[test]
+fn emit_rust_source_keeps_the_flat_middleware_return_without_an_after_chain() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        middleware Gate {
+            if (query_param("block") == "1") {
+                return statusCode(429, "slow down");
+            }
+        }
+        route GET "/" use Gate {
+            return json({ ok: true });
+        }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "mwflat", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    let inner = body
+        .split("async fn route_0_inner()")
+        .nth(1)
+        .expect("route_0_inner missing");
+    assert!(
+        inner.contains("if !matches!(__mw, V::Null) { return __mw; }"),
+        "no after-chain to protect — the early return should have stayed"
+    );
+    assert!(
+        !inner.contains("__short"),
+        "a route with no after-chain must not pay for the parked-response slot"
+    );
+}

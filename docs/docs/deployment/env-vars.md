@@ -44,11 +44,26 @@ feature warns at boot if `JWC_REDIS_URL` is set, then carries on with the
 | `JWC_REDIS_POOL_SIZE` | `64` | Max connections in the deadpool-redis pool. `0` is ignored (a zero-size pool never hands out a connection). | v0.9.0 |
 | `JWC_REDIS_RETRY_MAX_ATTEMPTS` | `3` | Transient-error retry ceiling (dropped connection, timeout, `LOADING`, cluster `MOVED`/`ASK`). `1` disables retries. | v0.9.0 |
 | `JWC_REDIS_RETRY_BACKOFF_MS` | `100` | Base Redis retry backoff in milliseconds; doubles per attempt. | v0.9.0 |
-| `JWC_LOG_QUEUE` | `10000` | Channel capacity for `log_insert`. Once full, rows are **dropped** rather than queued without bound — watch `jwc_log_dropped_total`. | v0.9.2 |
-| `JWC_LOG_BATCH` | `500` | Rows merged into one multi-row `INSERT`. Postgres caps a statement at 65535 bound parameters, so this × column count must stay under that. | v0.9.2 |
-| `JWC_LOG_FLUSH_MS` | `200` | Longest a `log_insert` row waits before being written. Also the bound on how much telemetry a crash can lose. | v0.9.2 |
 
 Cross-link: [deployment/redis](./redis.md).
+
+## Buffered log writer
+
+`log_insert` hands rows to a bounded channel that one background task
+drains in batched multi-row `INSERT`s, so a request-logging middleware
+costs a `try_send` instead of a database round-trip. Watch
+`jwc_log_dropped_total`, `jwc_log_written_total` and
+`jwc_log_batches_total` on `/metrics` — written ÷ batches is the number to
+tune against.
+
+| Var | Default | Description | Since |
+|---|---|---|---|
+| `JWC_LOG_QUEUE` | `10000` | Channel capacity for `log_insert`. Once full, rows are **dropped** rather than queued without bound — watch `jwc_log_dropped_total`. | v0.9.2 |
+| `JWC_LOG_BATCH` | `2000` | Rows merged into one multi-row `INSERT`. Batches are chunked to Postgres's 65535 bound-parameter ceiling, so a wide entity can no longer make this produce a statement the server refuses. Was `500`, which measured as the writer's binding constraint rather than the database. | v0.9.3 |
+| `JWC_LOG_FLUSH_MS` | `200` | Longest a `log_insert` row waits before being written. Also the bound on how much telemetry a crash can lose. | v0.9.2 |
+| `JWC_LOG_CONCURRENCY` | `4` | Batch `INSERT`s in flight at once. `1` restores the old strictly-serial writer, whose ceiling was one batch per database round-trip. Raising it past the measured optimum trades application throughput for write throughput — both draw on the same pool. | v0.9.3 |
+
+Cross-link: [deployment/observability](./observability.md).
 
 ## HTTP server hardening
 

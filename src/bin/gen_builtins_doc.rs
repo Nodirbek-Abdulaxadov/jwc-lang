@@ -185,6 +185,7 @@ const GROUPS: &[Group] = &[
                     | "request_method"
                     | "response_status"
                     | "response_duration_ms"
+                    | "response_duration_us"
             )
         },
     },
