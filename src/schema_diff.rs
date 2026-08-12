@@ -890,6 +890,41 @@ fn sql_types_equal(a: &str, b: &str) -> bool {
 ///
 /// Returns `String::new()` for an empty diff so callers can detect "no
 /// schema changes" without inspecting the string contents.
+/// A backfill value for every column type `map_type_postgres` can emit.
+///
+/// Used only to make `ADD COLUMN ... NOT NULL` applicable to a table that
+/// already has rows; the default is dropped on the next line, so this value
+/// is what existing rows get and nothing else.
+///
+/// Every entry is the type's conventional zero rather than a guess at what
+/// the column means — an empty string, 0, false, the epoch, the nil UUID.
+/// A column whose zero is wrong for the domain wants a data migration, which
+/// is a thing to write by hand; this only exists so the schema change itself
+/// applies.
+fn zero_value_for(sql_type: &str) -> &'static str {
+    let base = sql_type
+        .split_once('(')
+        .map(|(head, _)| head)
+        .unwrap_or(sql_type)
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "smallint" | "integer" | "int" | "bigint" | "numeric" | "decimal" | "real"
+        | "double precision" => "0",
+        "boolean" | "bool" => "false",
+        "text" | "varchar" | "character varying" | "char" | "character" => "''",
+        "timestamptz" | "timestamp with time zone" | "timestamp" | "date" => "now()",
+        "uuid" => "'00000000-0000-0000-0000-000000000000'::uuid",
+        "jsonb" => "'{}'::jsonb",
+        "json" => "'{}'::json",
+        "bytea" => "'\\x'::bytea",
+        // An unrecognised type is better served by a statement that fails
+        // loudly at migrate time than by a wrong default that silently
+        // backfills every existing row.
+        _ => "NULL",
+    }
+}
+
 pub fn diff_to_sql(diff: &[DiffOp]) -> String {
     if diff.is_empty() {
         return String::new();
@@ -907,11 +942,41 @@ pub fn diff_to_sql(diff: &[DiffOp]) -> String {
                 out.push_str(&render_create_table(snapshot));
             }
             DiffOp::AddColumn { table, column } => {
-                let nn = if column.is_nullable { "" } else { " NOT NULL" };
-                out.push_str(&format!(
-                    "ALTER TABLE \"{}\" ADD COLUMN \"{}\" {}{};\n",
-                    table, column.name, column.sql_type, nn
-                ));
+                if column.is_nullable {
+                    out.push_str(&format!(
+                        "ALTER TABLE \"{}\" ADD COLUMN \"{}\" {};\n",
+                        table, column.name, column.sql_type
+                    ));
+                } else {
+                    // A NOT NULL column added to a table that already has
+                    // rows needs a default, or Postgres refuses:
+                    //
+                    //   ERROR: column "x" of relation "t" contains null values
+                    //
+                    // The migration was generated, committed, and only failed
+                    // on the machine that had production data — the one place
+                    // you least want to be hand-editing SQL. Adding a
+                    // shortener's `latency_us` column to a 900k-row table hit
+                    // exactly this.
+                    //
+                    // Postgres 11+ stores the default in the catalogue instead
+                    // of rewriting the table, so the backfill is O(1).
+                    //
+                    // `DROP DEFAULT` immediately after is what keeps the
+                    // migrated schema identical to what `gen-sql` emits for a
+                    // fresh database: the column ends up NOT NULL with no
+                    // default either way, so an INSERT that omits it still
+                    // fails, in both.
+                    let zero = zero_value_for(&column.sql_type);
+                    out.push_str(&format!(
+                        "ALTER TABLE \"{}\" ADD COLUMN \"{}\" {} NOT NULL DEFAULT {};\n",
+                        table, column.name, column.sql_type, zero
+                    ));
+                    out.push_str(&format!(
+                        "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" DROP DEFAULT;\n",
+                        table, column.name
+                    ));
+                }
             }
             DiffOp::DropColumn { table, column_name } => {
                 out.push_str(&format!(
@@ -1156,7 +1221,14 @@ mod tests {
             other => panic!("expected AddColumn, got {:?}", other),
         }
         let sql = diff_to_sql(&diff);
-        assert!(sql.contains("ALTER TABLE \"user\" ADD COLUMN \"email\" varchar(120) NOT NULL;"));
+        // Carries a backfill default so the statement applies to a table
+        // that already has rows, then drops it so the resulting schema
+        // matches a freshly generated one. See
+        // `added_not_null_column_backfills_then_drops_the_default`.
+        assert!(sql.contains(
+            "ALTER TABLE \"user\" ADD COLUMN \"email\" varchar(120) NOT NULL DEFAULT '';"
+        ));
+        assert!(sql.contains("ALTER TABLE \"user\" ALTER COLUMN \"email\" DROP DEFAULT;"));
     }
 
     #[test]
@@ -1178,6 +1250,79 @@ mod tests {
         ));
         let sql = diff_to_sql(&diff);
         assert!(sql.contains("ALTER TABLE \"user\" DROP COLUMN \"legacy\";"));
+    }
+
+    /// A NOT NULL column added to a table that already has rows must carry
+    /// a default, or Postgres rejects the statement outright:
+    ///
+    ///   ERROR: column "x" of relation "t" contains null values
+    ///
+    /// The migration generated fine and was only unapplicable on the machine
+    /// that had data. Verified against a 900k-row table.
+    #[test]
+    fn added_not_null_column_backfills_then_drops_the_default() {
+        let old = vec![table("api_call", vec![col("id", "bigint", false, true)])];
+        let new = vec![table(
+            "api_call",
+            vec![
+                col("id", "bigint", false, true),
+                col("latency_us", "integer", false, false),
+            ],
+        )];
+        let sql = diff_to_sql(&compute_diff(&old, &new));
+        assert!(
+            sql.contains("ADD COLUMN \"latency_us\" integer NOT NULL DEFAULT 0;"),
+            "no backfill default — this cannot apply to a populated table:\n{sql}"
+        );
+        // The migrated schema has to match what `gen-sql` emits for a fresh
+        // database, which has no default on the column.
+        assert!(
+            sql.contains("ALTER COLUMN \"latency_us\" DROP DEFAULT;"),
+            "default left in place, so the migrated schema diverges from a \
+             freshly created one:\n{sql}"
+        );
+    }
+
+    /// A nullable column needs no backfill, so it must not acquire a default
+    /// it would then have to drop.
+    #[test]
+    fn added_nullable_column_gets_no_default() {
+        let old = vec![table("t", vec![col("id", "bigint", false, true)])];
+        let new = vec![table(
+            "t",
+            vec![
+                col("id", "bigint", false, true),
+                col("note", "text", true, false),
+            ],
+        )];
+        let sql = diff_to_sql(&compute_diff(&old, &new));
+        assert!(sql.contains("ADD COLUMN \"note\" text;"), "{sql}");
+        assert!(!sql.contains("DEFAULT"), "{sql}");
+    }
+
+    /// Every type `map_type_postgres` can emit needs a backfill value, or the
+    /// generated migration is unapplicable for that column type.
+    #[test]
+    fn every_emitted_column_type_has_a_zero() {
+        for ty in [
+            "integer",
+            "bigint",
+            "smallint",
+            "numeric(10,2)",
+            "text",
+            "varchar(200)",
+            "boolean",
+            "uuid",
+            "timestamptz",
+            "jsonb",
+            "bytea",
+        ] {
+            assert_ne!(
+                zero_value_for(ty),
+                "NULL",
+                "`{ty}` has no backfill value, so ADD COLUMN NOT NULL cannot apply"
+            );
+        }
     }
 
     #[test]

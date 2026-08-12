@@ -63,6 +63,15 @@ handler that answers in under a millisecond: a shortener logging 1.48M
 requests recorded min 0, max 1, mean 0.00, and every percentile built on that
 column was zero. The value was measured all along — the unit was too coarse.
 
+**`migrate new` generated an unapplicable `ADD COLUMN`.** A NOT NULL column
+added to a table that already has rows needs a backfill default, or Postgres
+refuses with `column "x" of relation "t" contains null values`. The migration
+generated cleanly and only failed on the machine with production data — the
+one place you least want to be hand-editing SQL. It now carries the type's
+zero and drops the default on the next statement, so the migrated schema
+still matches what `gen-sql` emits for a fresh database. Verified against a
+900k-row table.
+
 **A path-length pre-check on Windows native builds.** cargo nests build
 artefacts ~140 characters below the workspace, which crosses `MAX_PATH` for a
 project in a deep directory. The build reached the link step and died with
