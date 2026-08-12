@@ -1131,8 +1131,18 @@ impl<'a> Vm<'a> {
                         None
                     };
                     if is_redirect {
-                        if let Some(Value::Str(s)) = &body_val {
-                            if let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(s)
+                        // Object literals evaluate to `Value::Record` since the
+                        // typed-record fast path, no longer to a `Value::Str` of
+                        // JSON — so matching only `Value::Str` here silently
+                        // downgraded `statusCode(302, { Location: url })` to the
+                        // JSON-body arm below: status 302, `{"Location":...}` as
+                        // the body, and no Location header for the browser to
+                        // follow. Accept anything whose JSON form is an object,
+                        // mirroring the native prelude's Record/Object handling.
+                        if let Some(v) = &body_val {
+                            let s = v.as_string();
+                            if let Ok(JsonValue::Object(map)) =
+                                serde_json::from_str::<JsonValue>(&s)
                             {
                                 let envelope = json!({
                                     "__jwc_status__": status,
