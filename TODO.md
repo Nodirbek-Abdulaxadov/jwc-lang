@@ -2,6 +2,94 @@
 
 Open defects found in the field, not yet scheduled into `ROADMAP.md`.
 
+## Native: field access on a `select` result — panic on write, `null` on read (2026-08-06)
+
+Found on 0.8.7 building a CRUD demo (Postgres 17, Windows). The update path
+every REST handler is written with — read a row, assign a field, write it
+back — kills the worker thread under the native backend:
+
+```jwc
+route PUT "api/todos/{id}" {
+    let existing = select Todo from AppDb.Todo where Todo.id == @id first;
+    existing.title = req.title;          // ← panics natively, fine under `jwc run`
+    update existing in AppDb.Todo;
+    return ok(existing);
+}
+```
+
+```
+thread 'tokio-rt-worker' panicked at src\main.rs:894:
+field assignment on non-object value:
+RawJson("{\"id\":7,\"title\":\"sss\",\"done\":false,\"created_at\":\"\"}")
+```
+
+`select … first` yields `V::RawJson` — that's the whole point of the variant
+(`native_prelude.rs.in:149`, skip the `V::Object` FxHashMap roundtrip). But
+neither accessor knows about it:
+
+- `jwc_set_field` (`native_prelude.rs.in:881`) matches `Object` / `Record` and
+  `panic!`s on everything else — so a write is a hard crash, one per request,
+  and the client just loses the connection.
+- `jwc_get_field` (`native_prelude.rs.in:866`) has the same two arms with
+  `_ => V::Null`, so a *read* off a select result is silently null rather than
+  a crash. That one is worse: no diagnostic anywhere.
+
+The interpreter handles both (it falls back to the JSON-string path), so
+`jwc test` / `jwc lint` / `jwc run` are all clean and the failure only shows up
+after `--native`.
+
+Fix: give both helpers a `V::RawJson` arm that parses to `V::Object` (in
+`set_field`, materialise then write back through `*v`). A parity test should
+cover read-modify-write on a `select … first` result — `native_parity.rs`
+currently never assigns to a field of a query result.
+
+## Native `validate body` — two bugs, one of them a live security hole (2026-08-06)
+
+Found while benchmarking jwc-shortener on 0.8.7. Same source file, same
+request, two backends:
+
+```
+POST /api/links  {"url":"javascript:alert(1)"}
+
+jwc run          400  {"code":"validation_failed",
+                       "details":{"url":"pattern(^https?://)"},
+                       "error":"Request body failed validation","status":400}
+
+--native         201  {"code":"9e73bef", ...}       ← link created and stored
+```
+
+### A. `pattern(...)` is not enforced against a present, non-matching value
+
+The route declares `url: required, minLength(8), maxLength(2048),
+pattern(r"^https?://")` precisely so the service can't be turned into a
+phishing relay. `minLength` works natively (`{"url":"ab"}` is rejected) and
+`pattern` fires when the field is *absent* — but a value that is present and
+does not match sails through. `javascript:` and `data:` URLs are shortened and
+stored, and the redirect then emits them as a `Location:` header. This is live
+on the deployed app, because production is the `--native` build.
+
+### B. A validation failure answers HTTP 200
+
+Native rejections come back with the right JSON but the wrong status line:
+
+```
+HTTP/1.1 200 OK
+{"error":"Validation failed","fields":{"url":"minLength 8"},"status":400}
+```
+
+Two problems in one response. The status is 200, not 400 — so `res.ok` is true
+in a browser and jwc-shortener's landing page renders `undefined` instead of
+the error. And the envelope is the pre-0.7.0 shape (`fields`, no `code`), so
+native never got the "one error envelope" work that 0.7.0 shipped for the
+interpreter — a client cannot branch on `code` the way the changelog promises.
+
+Worth a differential test: `tests/native_parity.rs` should assert status line
+*and* body shape for each `validate` failure mode, not just the body.
+
+**This also silently corrupts load tests.** Every `POST` bombardier sent to
+that route counted as a 2xx while inserting nothing, which is how a "118,000
+rps" write-path measurement happened — it was measuring rejections.
+
 ## Found while moving jwc-shortener from 0.6.3 → 0.8.8 (2026-08-06)
 
 All four were reproduced against jwc 0.8.7 on Windows, with the
