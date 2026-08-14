@@ -1,0 +1,41 @@
+{
+  "requests": [
+    {
+      "name": "pattern rejects a present, non-matching value (the phishing relay)",
+      "method": "POST",
+      "path": "/links",
+      "body": "{\"url\":\"javascript:alert(1)\"}",
+      "expect": {
+        "status": 400,
+        "json_subset": { "code": "validation_failed", "status": 400 }
+      }
+    },
+    {
+      "name": "minLength rejects a short value",
+      "method": "POST",
+      "path": "/links",
+      "body": "{\"url\":\"ab\"}",
+      "expect": {
+        "status": 400,
+        "json_subset": { "code": "validation_failed", "status": 400 }
+      }
+    },
+    {
+      "name": "required rejects an absent field",
+      "method": "POST",
+      "path": "/links",
+      "body": "{}",
+      "expect": {
+        "status": 400,
+        "json_subset": { "code": "validation_failed", "status": 400 }
+      }
+    },
+    {
+      "name": "a value satisfying every rule is accepted",
+      "method": "POST",
+      "path": "/links",
+      "body": "{\"url\":\"https://example.com/a/b\"}",
+      "expect": { "status": 200, "json": { "created": true } }
+    }
+  ]
+}

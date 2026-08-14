@@ -950,6 +950,47 @@ fn jwc_set_field(v: &mut V, k: &str, value: V) {
                 *v = v_obj(m);
             }
         }
+        // The write half of the same lazy representation `jwc_get_field`
+        // handles above. A row from `select ... first` is `RawJson`; a
+        // `json_parse` result or a computed-key object literal is `Str`.
+        // Reads were taught to parse these; writes were not, so
+        //
+        //     let existing = select Todo from AppDb.Todo where ... first;
+        //     existing.title = req.title;
+        //     update existing in AppDb.Todo;
+        //
+        // — the shape every REST update handler is written in — panicked the
+        // tokio worker on a native build, one panic per request, and the
+        // client just lost the connection. Under `jwc run` it worked, so
+        // `jwc test` / `jwc lint` / `jwc run` were all clean and the crash
+        // only appeared after `--native`.
+        //
+        // Materialise, write through `*v`, and let the next access take the
+        // Object path — the parse cost lands once per mutated value rather
+        // than once per field access.
+        V::RawJson(s) | V::Str(s) => {
+            let parsed = jwc_from_json(s.as_ref());
+            match parsed {
+                Ok(V::Object(m)) => {
+                    let mut m = (*m).clone();
+                    m.insert(k.to_string(), value);
+                    *v = v_obj(m);
+                }
+                Ok(V::Record { field_names, values }) => {
+                    let mut m: JwcObj = FxHashMap::default();
+                    for (name, val) in field_names.iter().zip(values.iter()) {
+                        m.insert(name.as_ref().to_string(), val.clone());
+                    }
+                    m.insert(k.to_string(), value);
+                    *v = v_obj(m);
+                }
+                // A string that is not a JSON object is not assignable. The
+                // interpreter raises rather than crashing the worker, so the
+                // message matters more than the arm: keep it describing the
+                // value, not the internal variant.
+                _ => panic!("field assignment on non-object value: {:?}", s),
+            }
+        }
         other => panic!("field assignment on non-object value: {:?}", other),
     }
 }

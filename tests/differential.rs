@@ -153,6 +153,10 @@ struct Expectation {
     status: u16,
     /// Compared with `serde_json` equality so key order never decides a test.
     json: Option<Json>,
+    /// Recursive subset match: every key named here must match, keys not named
+    /// are ignored. For envelopes where one field is worth pinning (`code`,
+    /// `status`) and another is formatting detail (`details`).
+    json_subset: Option<Json>,
     /// Exact string equality, for responses that are not JSON.
     text: Option<String>,
     /// Header name (lowercased) -> exact expected value.
@@ -201,6 +205,7 @@ fn load_expectations(case: &str) -> Vec<Expectation> {
                 body: r["body"].as_str().map(|s| s.to_string()),
                 status: expect["status"].as_u64().expect("`status` is required") as u16,
                 json: expect.get("json").filter(|v| !v.is_null()).cloned(),
+                json_subset: expect.get("json_subset").filter(|v| !v.is_null()).cloned(),
                 text: expect["text"].as_str().map(|s| s.to_string()),
                 headers,
             }
@@ -257,6 +262,29 @@ fn issue(port: u16, exp: &Expectation) -> Result<Observed, String> {
     })
 }
 
+/// Walks `want` against `actual`, recording a message per key that is absent
+/// or unequal. Keys present in `actual` but not in `want` are ignored — that
+/// is what makes this a subset match.
+fn subset_diff(want: &Json, actual: &Json, path: String, out: &mut Vec<String>) {
+    match (want, actual) {
+        (Json::Object(w), Json::Object(a)) => {
+            for (k, wv) in w {
+                let child = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                match a.get(k) {
+                    Some(av) => subset_diff(wv, av, child, out),
+                    None => out.push(format!("`{child}` missing, expected {wv}")),
+                }
+            }
+        }
+        (w, a) if w != a => out.push(format!("`{path}` = {a}, expected {w}")),
+        _ => {}
+    }
+}
+
 /// Checks one response against the fixture. Returns one line per violation so
 /// a single run reports every mismatch instead of stopping at the first.
 fn compare(backend: &str, exp: &Expectation, got: &Observed) -> Vec<String> {
@@ -277,6 +305,22 @@ fn compare(backend: &str, exp: &Expectation, got: &Observed) -> Vec<String> {
                     fails.push(format!(
                         "{where_}: json mismatch\n      expected: {want}\n      actual:   {actual}"
                     ));
+                }
+            }
+            Err(e) => fails.push(format!(
+                "{where_}: expected JSON but body did not parse ({e})\n      body: {}",
+                got.body
+            )),
+        }
+    }
+
+    if let Some(want) = &exp.json_subset {
+        match serde_json::from_str::<Json>(&got.body) {
+            Ok(actual) => {
+                let mut missing = Vec::new();
+                subset_diff(want, &actual, String::new(), &mut missing);
+                for m in missing {
+                    fails.push(format!("{where_}: {m}\n      body: {}", got.body));
                 }
             }
             Err(e) => fails.push(format!(
@@ -501,4 +545,14 @@ fn case_len_shapes() {
 #[test]
 fn case_request_body() {
     run_case("request_body");
+}
+
+#[test]
+fn case_validate_body() {
+    run_case("validate_body");
+}
+
+#[test]
+fn case_field_write() {
+    run_case("field_write");
 }

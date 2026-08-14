@@ -30,9 +30,29 @@ declared in the fixture — neither backend votes, so a case where both agree
 and both are wrong still fails. It is opt-in (`JWC_DIFFERENTIAL=1`) because
 each case shells out to cargo.
 
-It found a new divergence on its first run. See below.
+It found a new divergence on its first run, and gave the two defects TODO.md
+had been carrying a place to live. Six cases ship: `error_helpers`, `redirect`,
+`len_shapes`, `request_body`, `validate_body`, `field_write`.
 
 ### Fixed
+
+**Native field assignment crashed on a row read back from the database.**
+Read-modify-write — the shape every REST update handler is written in — blew up
+under `--native` and worked under `jwc run`:
+
+```jwc
+let existing = select Todo from AppDb.Todo where Todo.id == @id first;
+existing.title = req.title;   // HTTP 500 natively, fine under `jwc run`
+update existing in AppDb.Todo;
+```
+
+`select ... first` yields `V::RawJson`. `jwc_get_field` was taught to parse
+that on access, but `jwc_set_field` kept its two `Object` / `Record` arms and
+`panic!`d on everything else — so reads started working while writes kept
+failing, which is a worse state than both being broken. TODO.md reports it on
+0.8.7 as a worker panic that dropped the connection; on 0.9.x it is caught and
+answers 500. `tests/differential/cases/field_write.*` covers it and was
+verified to fail without the fix.
 
 **Native error helpers did not wrap a string argument.** `notFound("gone")`
 returned the bare bytes `gone` as `text/plain` under `--native` and
@@ -75,7 +95,21 @@ which sets it to share one target dir across cases.
 anything like `env`; it was a documented built-in with no native
 implementation. Registry-known names that carry `native: false` now say so.
 
+### Verified, not changed
+
+TODO.md's `validate body` entry — `pattern(...)` not enforced against a
+present, non-matching value, and a validation failure answering HTTP 200 in the
+pre-0.7.0 envelope — was fixed in 0.9.5 but had never been regression-tested.
+`tests/differential/cases/validate_body.*` now asserts the status line *and*
+the envelope shape on both backends across `pattern`, `minLength`, `required`
+and the accepted case. That entry asked for exactly this test; it exists now.
+
 ### Known
+
+Four issues from the 0.6.3 → 0.8.8 migration remain open in TODO.md, three of
+them interpreter-side: `raw_sql` reading only a text first column, unqualified
+calls into a dependency namespace, Windows binding `[::]` without clearing
+`IPV6_V6ONLY`, and `return { status: N, ... }` answering 200.
 
 Thirteen built-ins remain interpreter-only, so `--native` is still not a
 superset of `jwc run`: `dispatch`, `http_post`, `send_email`, `db_query`,
