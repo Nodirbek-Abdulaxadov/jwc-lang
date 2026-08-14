@@ -3,6 +3,89 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.6] — A harness that can fail both backends at once
+
+0.9.5 fixed five interpreter/native divergences that an outside user found by
+running into them. This release is about why *we* did not find them, and the
+answer is that the parity tests could not have.
+
+### Added
+
+**`tests/differential.rs` — both backends, compiled and run.** Every existing
+parity test string-matches the *emitted Rust source* and deliberately never
+invokes cargo on it. That leaves two blind spots, and all five of the 0.9.5
+bugs lived in both:
+
+* **The call shape was right and the behaviour was wrong.**
+  `badRequest({...})` emitted a well-formed `jwc_b_bad_request(...)` on both
+  backends. No substring assertion can see the difference.
+* **The golden value was one of the backends.** `native_parity.rs` says it
+  outright: "we treat the interpreter's stdout as the source of truth". In
+  all five bugs the interpreter was the wrong side, so a harness anchored to
+  it would have certified the bug and moved on.
+
+The new suite cargo-builds the generated crate, runs the binary, and drives
+real HTTP at it and at `jwc run`. Both are compared against expectations
+declared in the fixture — neither backend votes, so a case where both agree
+and both are wrong still fails. It is opt-in (`JWC_DIFFERENTIAL=1`) because
+each case shells out to cargo.
+
+It found a new divergence on its first run. See below.
+
+### Fixed
+
+**Native error helpers did not wrap a string argument.** `notFound("gone")`
+returned the bare bytes `gone` as `text/plain` under `--native` and
+`{"error":"gone"}` as `application/json` under `jwc run` — same helper, same
+argument, a body no client can parse the same way twice. The same held for
+`badRequest`, `internalError`, `unauthorized` and `forbidden`. Object
+arguments already agreed, which is exactly why it survived 0.9.5's review:
+the divergence only appears with a string, and a string is the spelling most
+of the docs use. Native now goes through a shared `error_envelope` that
+mirrors the interpreter's `error_response`, including the no-argument
+defaults.
+
+**`len()` was rejected by the native backend.** It carried its own registry
+row with `native: false` while `length` — the identical interpreter body —
+was `native: true`. The third instance of one built-in split across two
+`BuiltinDef` rows, after `setConnectionString` in 0.9.5. `len` is now an
+alias, and CLAUDE.md documents the pattern so the next one does not happen.
+
+**`length()` counted characters natively, elements in the interpreter.** A
+string that parses as a JSON array or object counts its elements under
+`jwc run` and its characters under `--native`. This one was live in shipped
+code, not merely unimplemented: `length(request_body())` returned the field
+count on one backend and the byte-ish length on the other.
+
+**`request_body()` had no native implementation.** Programs using it ran
+under `jwc run` and failed to compile under `--native`. Implemented, keeping
+it distinct from `body()` — this is the raw string, `body()` is the parsed
+value — including the contract that an absent body yields the literal string
+`"null"`.
+
+**`jwc build --native` ignored `CARGO_TARGET_DIR`.** The binary path was
+hardcoded to `<workspace>/target`, so anyone exporting the variable globally
+— a single shared target dir across projects is a common setup — got a full
+successful compile followed by `cargo reported success but binary not found`,
+naming a path that legitimately did not exist. Found by the new harness,
+which sets it to share one target dir across cases.
+
+**A non-native built-in was reported as a typo.** `len(xs)` failed with
+`unknown function — did you mean \`env\`?`. It was neither unknown nor
+anything like `env`; it was a documented built-in with no native
+implementation. Registry-known names that carry `native: false` now say so.
+
+### Known
+
+Thirteen built-ins remain interpreter-only, so `--native` is still not a
+superset of `jwc run`: `dispatch`, `http_post`, `send_email`, `db_query`,
+`set_json_field`, and the job queue (`register_job_handler`, `enqueue`,
+`enqueue_urgent`, `job_count`, `dlq_count`, `dlq_drain`). They now fail with
+an accurate message instead of a misleading one.
+
+The 0.9.5 "Known" items still stand: `jwc check` accepts calls to functions
+that do not exist, and `first(rows).value` is a parse error.
+
 ## [0.9.5] — What the interpreter got wrong
 
 From an outside user's first real project. Every fix here is a case where

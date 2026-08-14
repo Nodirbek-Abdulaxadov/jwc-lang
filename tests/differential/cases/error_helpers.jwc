@@ -1,0 +1,59 @@
+// Regression cover for the v0.9.5 double-encoding bug.
+//
+// `badRequest` and `internalError` stringified their argument unconditionally,
+// so an object body came back JSON-encoded inside the `error` string field
+// while `notFound` / `unauthorized` / `forbidden` — which already went through
+// `error_response` — were correct. Native was correct for all of them. Every
+// helper is exercised here with both an object and a string argument so the
+// pair can never drift apart again.
+
+route GET "/bad-obj" {
+    return badRequest({ got: "x" });
+}
+
+route GET "/bad-str" {
+    return badRequest("plain text");
+}
+
+route GET "/ise-obj" {
+    return internalError({ got: "x" });
+}
+
+route GET "/ise-str" {
+    return internalError("boom");
+}
+
+route GET "/notfound" {
+    return notFound("gone");
+}
+
+route GET "/unauth" {
+    return unauthorized("nope");
+}
+
+route GET "/forbidden" {
+    return forbidden("no");
+}
+
+// No-arg forms fall back to a default message. Native reached these through a
+// different branch than the string forms, so they get their own coverage.
+route GET "/bad-none" {
+    return badRequest();
+}
+
+route GET "/notfound-none" {
+    return notFound();
+}
+
+route GET "/ise-none" {
+    return internalError();
+}
+
+function main() {
+    let port_env = env("PORT");
+    let port = 8080;
+    if (port_env != "") {
+        port = int(port_env);
+    }
+    serve(port);
+}

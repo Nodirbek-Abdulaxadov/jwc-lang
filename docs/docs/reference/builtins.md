@@ -25,7 +25,7 @@ Columns:
 
 | Name | Aliases | Args | Native |
 |---|---|---|---|
-| `length` | — | 1 | ✅ |
+| `length` | `len` | 1 | ✅ |
 | `lower` | — | 1 | ✅ |
 | `upper` | — | 1 | ✅ |
 | `trim` | — | 1 | ✅ |
@@ -38,7 +38,6 @@ Columns:
 | `take` | — | 2 | ✅ |
 | `first` | — | 1 | ✅ |
 | `last` | — | 1 | ✅ |
-| `len` | — | 1 | — |
 
 ## JSON
 
@@ -63,7 +62,7 @@ Columns:
 | `response_duration_us` | — | 0 | ✅ |
 | `request_path` | — | 0 | ✅ |
 | `request_method` | — | 0 | ✅ |
-| `request_body` | — | 0 | — |
+| `request_body` | — | 0 | ✅ |
 
 ## HTTP response
 

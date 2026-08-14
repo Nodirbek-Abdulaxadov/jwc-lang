@@ -1152,6 +1152,22 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             // Dotted names (`Dome.fn`) are flattened by the parser into a
             // single string; codegen sanitizes the `.` to `_` in user_fn_name.
             if name != "print" && !funcs.contains(name) && !builtins.contains(name.as_str()) {
+                // A name the registry knows but that carries `native: false`
+                // is not a typo — it is a real, documented built-in the
+                // interpreter runs and this backend has not implemented.
+                // Saying "unknown function" and offering the nearest
+                // Levenshtein neighbour sent authors chasing a rename:
+                // `len(xs)` reported `did you mean \`env\`?`, which is not
+                // remotely the same function. Name the actual gap instead.
+                if let Some(def) = crate::builtins::lookup(name) {
+                    if !def.native {
+                        bail!(unsupported(&format!(
+                            "call to `{name}(...)` — `{name}` is an \
+                             interpreter-only built-in, not a typo. It has no \
+                             native implementation yet"
+                        )));
+                    }
+                }
                 // Use a did-you-mean hint rather than dumping the full
                 // builtin list — the old shape produced a paragraph-long
                 // error for a typo. Walk both user functions and the
@@ -5070,9 +5086,20 @@ fn invoke_cargo(
     } else {
         app_name.to_string()
     };
-    // With --target, cargo emits to target/<triple>/<profile>/ instead of
-    // target/<profile>/.
-    let mut bin = workspace.join("target");
+    // `CARGO_TARGET_DIR` (and its per-project `build.target-dir` twin) moves
+    // cargo's output tree somewhere else entirely. Assuming `<ws>/target`
+    // meant that anyone who exports it globally — a common setup, one shared
+    // target dir across every Rust project — got a full successful compile
+    // followed by "cargo reported success but binary not found", naming a
+    // path that legitimately does not exist. Read the same variable cargo
+    // read. Relative values resolve against the workspace, matching cargo.
+    let target_root = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) if !dir.is_empty() => workspace.join(dir),
+        _ => workspace.join("target"),
+    };
+    // With --target, cargo emits to <target-dir>/<triple>/<profile>/ instead
+    // of <target-dir>/<profile>/.
+    let mut bin = target_root;
     if let Some(t) = target {
         bin = bin.join(t);
     }

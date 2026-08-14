@@ -70,9 +70,15 @@ pub struct BuiltinDef {
 /// rows with `native: false` are interpreter-only.
 pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     // ── String helpers (native) ─────────────────────────────────────────
+    // `len` is the same function, not a second one. It used to carry its own
+    // row with `native: false`, so `length(xs)` compiled under `--native` and
+    // `len(xs)` — which the interpreter dispatches to this exact body — was
+    // rejected as an unknown function. Same shape as the
+    // `setConnectionString` / `set_connection_string` split: one function,
+    // two rows, two different answers.
     BuiltinDef {
         name: "length",
-        aliases: &[],
+        aliases: &["len"],
         min_args: 1,
         max_args: Some(1),
         native: true,
@@ -949,14 +955,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         aliases: &[],
         min_args: 0,
         max_args: Some(0),
-        native: false,
-    },
-    BuiltinDef {
-        name: "len",
-        aliases: &[],
-        min_args: 1,
-        max_args: Some(1),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "unix_timestamp",

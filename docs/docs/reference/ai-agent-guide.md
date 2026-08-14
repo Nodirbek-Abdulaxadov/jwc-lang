@@ -586,14 +586,14 @@ Complete surface as of 0.9.x. `name/N` is the accepted argument count;
 
 **Strings** — `length/1`, `lower/1`, `upper/1`, `trim/1`, `contains/2`,
 `starts_with/2`, `ends_with/2`, `replace/3`, `split/2`, `substring/3`,
-`take/2`, `first/1`, `last/1`, `len/1` [interp-only]
+`take/2`, `first/1`, `last/1`, `len/1` (alias of `length`)
 
 **JSON** — `json_parse/1`, `json_stringify/1`, `set_json_field/3` [interp-only]
 
 **HTTP request** — `path_param/1`, `query_param/1..2`, `body/0`, `header/1`,
 `client_ip/0`, `request_id/0`, `response_status/0`, `response_duration_ms/0`,
 `response_duration_us/0`, `request_path/0`, `request_method/0`,
-`request_body/0` [interp-only]
+`request_body/0`
 
 **HTTP response** — `json/1`, `json_unchecked/1`, `text/1`, `html/1`,
 `response/2` (alias `raw`), `ok/0..1`, `created/1`, `not_found/0..1`,
@@ -831,8 +831,8 @@ configured, Redis), `/metrics` (Prometheus).
 These are real failures observed from agents writing JWC, not hypotheticals.
 
 **1. Inventing a built-in, and `jwc check` saying OK.** `toInt` (it's `int`),
-`query` (it's `query_param`), `parseInt`, `console.log`, `len` on a native
-build. The type checker only validates *arity* for names it recognises; an
+`query` (it's `query_param`), `parseInt`, `console.log`. The type checker
+only validates *arity* for names it recognises; an
 unrecognised name is assumed to be a user function and passes. It then fails
 with `Unknown function: toInt` at runtime, or `E022` at native build time.
 **Check §11 before writing any call you have not already used.**

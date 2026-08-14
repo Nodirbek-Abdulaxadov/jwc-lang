@@ -1,0 +1,25 @@
+// Regression cover for the v0.9.5 redirect bug.
+//
+// The interpreter's redirect branch matched on `Value::Str` holding JSON —
+// what object literals used to evaluate to. Once they started building
+// `Value::Record` nothing matched, so the call fell through to the body path:
+// a 302 status line, no `Location` header, and the header map served as the
+// response body. Native was unaffected, so only a both-backends check that
+// looks at the actual header would have caught it.
+
+route GET "/go" {
+    return statusCode(302, { Location: "/target" });
+}
+
+route GET "/target" {
+    return json({ arrived: true });
+}
+
+function main() {
+    let port_env = env("PORT");
+    let port = 8080;
+    if (port_env != "") {
+        port = int(port_env);
+    }
+    serve(port);
+}
