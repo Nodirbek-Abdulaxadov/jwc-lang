@@ -1099,3 +1099,80 @@ fn emit_rust_source_keeps_the_flat_middleware_return_without_an_after_chain() {
         "a route with no after-chain must not pay for the parked-response slot"
     );
 }
+
+/// `setConnectionString` and `set_connection_string` are one built-in, so a
+/// program must build the same way whichever spelling it uses.
+///
+/// They used to be two registry rows that disagreed: camelCase `native:
+/// true`, snake_case `native: false`. So the snake_case spelling was
+/// rejected as "unknown function — did you mean `setConnectionString`?",
+/// which reads as a typo report for a name that is in the reference table.
+#[test]
+fn emit_rust_source_accepts_both_spellings_of_set_connection_string() {
+    for (name, call) in [
+        ("scscamel", "setConnectionString();"),
+        ("scssnake", "set_connection_string();"),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src = format!(
+            r#"
+            dbcontext AppDb : Postgres;
+            entity E of AppDb {{ id int pk; }}
+            function main() {{ {call} serve(8080); }}
+        "#
+        );
+        let program = parse(&src);
+        let out = emit_rust_source(&program, tmp.path(), name, false).expect("emit");
+        let body = fs::read_to_string(&out).expect("read generated");
+        // Both must be awaited — the built-in suspends, and a call emitted
+        // without `.await` compiles to a dropped future that never connects.
+        assert!(
+            body.contains("jwc_b_setConnectionString(V::Null).await")
+                || body.contains("jwc_b_set_connection_string(V::Null).await"),
+            "`{call}` was not emitted as an awaited call"
+        );
+    }
+}
+
+/// The Postgres prelude is gated on *use*, not only on declarations.
+///
+/// It used to key off `dbcontexts`/`models` alone, so a program that called
+/// `setConnectionString()` or `raw_sql(...)` without declaring an entity
+/// emitted a crate referencing `jwc_b_setConnectionString` without defining
+/// it. The build then failed inside generated Rust with
+/// `error[E0425]: cannot find function` — an internal symbol the author
+/// never wrote, and no hint that the fix is to declare a dbcontext.
+#[test]
+fn emit_rust_source_includes_db_prelude_for_a_bare_connection_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        function main() {
+            setConnectionString();
+            serve(8080);
+        }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "dbcall", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        body.contains("async fn jwc_b_setConnectionString"),
+        "called the built-in but did not emit its definition"
+    );
+}
+
+/// …and a program that touches no database at all still must not pay for it.
+#[test]
+fn emit_rust_source_omits_db_prelude_when_nothing_uses_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = r#"
+        route GET "/" { return ok({ a: 1 }); }
+        function main() { serve(8080); }
+    "#;
+    let program = parse(src);
+    let out = emit_rust_source(&program, tmp.path(), "nodb", false).expect("emit");
+    let body = fs::read_to_string(&out).expect("read generated");
+    assert!(
+        !body.contains("deadpool_postgres"),
+        "DB prelude emitted for a program with no database use"
+    );
+}

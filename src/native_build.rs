@@ -759,6 +759,33 @@ fn program_calls_any(program: &Program, names: &[&str]) -> bool {
         .any(|b| b.iter().any(|s| scan.stmt(s)))
 }
 
+/// Does the program need the Postgres prelude?
+///
+/// Declaring a dbcontext or entity is the usual reason, but not the only
+/// one: a program can call `setConnectionString()` or `raw_sql(...)` with no
+/// entities at all. Gating on declarations alone emitted a crate that
+/// referenced `jwc_b_setConnectionString` without defining it, so the build
+/// died in *generated* Rust —
+///
+///   error[E0425]: cannot find function `jwc_b_setConnectionString`
+///
+/// which names an internal symbol the author never wrote and gives no hint
+/// that the fix is "declare a dbcontext". Same class of failure the async
+/// builtin list produces when a name is missed.
+fn program_needs_db(program: &Program) -> bool {
+    !program.dbcontexts.is_empty()
+        || !program.models.is_empty()
+        || program_calls_any(
+            program,
+            &[
+                "setConnectionString",
+                "set_connection_string",
+                "raw_sql",
+                "log_insert",
+            ],
+        )
+}
+
 /// Does any `validate body { ... }` in the program carry a `pattern` rule?
 ///
 /// Gates the `regex` dependency of the generated crate, so a program that
@@ -887,7 +914,7 @@ pub fn compile_with_target(
          or run `jwc build` (without --native) for the interpreter-bundled launcher.",
     )?;
 
-    let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
+    let needs_db = program_needs_db(program);
     let needs_http_client = program_uses_http_client(program);
     let needs_crypto = program_uses_crypto(program);
     let needs_redis = program_uses_redis(program);
@@ -931,7 +958,7 @@ pub fn emit_rust_source(
 
     reject_unsupported(program)?;
 
-    let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
+    let needs_db = program_needs_db(program);
     let needs_http_client = program_uses_http_client(program);
     let needs_crypto = program_uses_crypto(program);
     let needs_redis = program_uses_redis(program);
@@ -1125,6 +1152,22 @@ fn check_expr(expr: &Expr, funcs: &HashSet<String>, builtins: &HashSet<&str>) ->
             // Dotted names (`Dome.fn`) are flattened by the parser into a
             // single string; codegen sanitizes the `.` to `_` in user_fn_name.
             if name != "print" && !funcs.contains(name) && !builtins.contains(name.as_str()) {
+                // A name the registry knows but that carries `native: false`
+                // is not a typo — it is a real, documented built-in the
+                // interpreter runs and this backend has not implemented.
+                // Saying "unknown function" and offering the nearest
+                // Levenshtein neighbour sent authors chasing a rename:
+                // `len(xs)` reported `did you mean \`env\`?`, which is not
+                // remotely the same function. Name the actual gap instead.
+                if let Some(def) = crate::builtins::lookup(name) {
+                    if !def.native {
+                        bail!(unsupported(&format!(
+                            "call to `{name}(...)` — `{name}` is an \
+                             interpreter-only built-in, not a typo. It has no \
+                             native implementation yet"
+                        )));
+                    }
+                }
                 // Use a did-you-mean hint rather than dumping the full
                 // builtin list — the old shape produced a paragraph-long
                 // error for a typo. Walk both user functions and the
@@ -3710,6 +3753,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                     // suspends like any other outbound call.
                     | "jwt_verify_jwks"
                     | "setConnectionString"
+                    | "set_connection_string"
                     | "ws_send"
                     | "ws_recv"
                     | "ws_close"
@@ -5042,9 +5086,20 @@ fn invoke_cargo(
     } else {
         app_name.to_string()
     };
-    // With --target, cargo emits to target/<triple>/<profile>/ instead of
-    // target/<profile>/.
-    let mut bin = workspace.join("target");
+    // `CARGO_TARGET_DIR` (and its per-project `build.target-dir` twin) moves
+    // cargo's output tree somewhere else entirely. Assuming `<ws>/target`
+    // meant that anyone who exports it globally — a common setup, one shared
+    // target dir across every Rust project — got a full successful compile
+    // followed by "cargo reported success but binary not found", naming a
+    // path that legitimately does not exist. Read the same variable cargo
+    // read. Relative values resolve against the workspace, matching cargo.
+    let target_root = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) if !dir.is_empty() => workspace.join(dir),
+        _ => workspace.join("target"),
+    };
+    // With --target, cargo emits to <target-dir>/<triple>/<profile>/ instead
+    // of <target-dir>/<profile>/.
+    let mut bin = target_root;
     if let Some(t) = target {
         bin = bin.join(t);
     }

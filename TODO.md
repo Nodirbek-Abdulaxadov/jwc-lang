@@ -1,8 +1,24 @@
 # TODO
 
-Open defects found in the field, not yet scheduled into `ROADMAP.md`.
+Defects found in the field, not scheduled into `ROADMAP.md`. Entries marked
+**RESOLVED** are kept for the field report — the reproduction and the reasoning
+are worth more than the strikethrough — with a pointer to the regression cover
+that now holds them down.
 
-## Native: field access on a `select` result — panic on write, `null` on read (2026-08-06)
+## RESOLVED (0.9.6) — Native: field access on a `select` result — panic on write, `null` on read (2026-08-06)
+
+**Both halves fixed.** The read half landed earlier: `jwc_get_field` grew a
+`V::RawJson(s) | V::Str(s)` arm that parses on access. The write half landed in
+0.9.6 — `jwc_set_field` had the same two arms and still `panic!`d on everything
+else, so read-modify-write kept failing after reads started working. On 0.9.x
+the panic is caught and answers HTTP 500 rather than dropping the connection as
+reported below, but the handler never ran either way.
+
+Regression cover: `tests/differential/cases/field_write.*` — read-modify-write
+over a JSON-bearing `V::Str`, the same match arm, no Postgres needed. Verified
+to fail without the fix (native 500, interpreter 200).
+
+Original report follows.
 
 Found on 0.8.7 building a CRUD demo (Postgres 17, Windows). The update path
 every REST handler is written with — read a row, assign a field, write it
@@ -43,7 +59,16 @@ Fix: give both helpers a `V::RawJson` arm that parses to `V::Object` (in
 cover read-modify-write on a `select … first` result — `native_parity.rs`
 currently never assigns to a field of a query result.
 
-## Native `validate body` — two bugs, one of them a live security hole (2026-08-06)
+## RESOLVED (0.9.5) — Native `validate body` — two bugs, one of them a live security hole (2026-08-06)
+
+**Both fixed**, and both now covered by `tests/differential/cases/validate_body.*`,
+which asserts the status line *and* the envelope shape on both backends for
+`pattern`, `minLength` and `required` failures plus the accepted case — the
+differential test this entry asked for. A present, non-matching value is
+rejected natively (400, `code: validation_failed`), so the `javascript:` relay
+is closed.
+
+Original report follows.
 
 Found while benchmarking jwc-shortener on 0.8.7. Same source file, same
 request, two backends:

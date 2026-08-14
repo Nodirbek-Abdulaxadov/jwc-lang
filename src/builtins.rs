@@ -70,9 +70,15 @@ pub struct BuiltinDef {
 /// rows with `native: false` are interpreter-only.
 pub static BUILTIN_DEFS: &[BuiltinDef] = &[
     // ── String helpers (native) ─────────────────────────────────────────
+    // `len` is the same function, not a second one. It used to carry its own
+    // row with `native: false`, so `length(xs)` compiled under `--native` and
+    // `len(xs)` — which the interpreter dispatches to this exact body — was
+    // rejected as an unknown function. Same shape as the
+    // `setConnectionString` / `set_connection_string` split: one function,
+    // two rows, two different answers.
     BuiltinDef {
         name: "length",
-        aliases: &[],
+        aliases: &["len"],
         min_args: 1,
         max_args: Some(1),
         native: true,
@@ -395,9 +401,15 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         native: true,
     },
     // ── DB connection (native) ───────────────────────────────────────────
+    // `set_connection_string` is an ALIAS, not a second def. It used to be
+    // its own row with `native: false`, so the two spellings of one function
+    // disagreed about AOT support: `setConnectionString()` compiled and
+    // `set_connection_string()` was rejected as an unknown function. Every
+    // other camel/snake pair in this table (`setContext`/`set_context`,
+    // `notFound`/`not_found`) is one def with an alias — this is that.
     BuiltinDef {
         name: "setConnectionString",
-        aliases: &[],
+        aliases: &["set_connection_string"],
         min_args: 0,
         max_args: Some(1),
         native: true,
@@ -943,14 +955,7 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         aliases: &[],
         min_args: 0,
         max_args: Some(0),
-        native: false,
-    },
-    BuiltinDef {
-        name: "len",
-        aliases: &[],
-        min_args: 1,
-        max_args: Some(1),
-        native: false,
+        native: true,
     },
     BuiltinDef {
         name: "unix_timestamp",
@@ -972,13 +977,6 @@ pub static BUILTIN_DEFS: &[BuiltinDef] = &[
         aliases: &[],
         min_args: 3,
         max_args: Some(3),
-        native: false,
-    },
-    BuiltinDef {
-        name: "set_connection_string",
-        aliases: &[],
-        min_args: 0,
-        max_args: Some(1),
         native: false,
     },
     // ── Server entry point ───────────────────────────────────────────────

@@ -2180,3 +2180,93 @@ async fn keyword_and_symbol_boolean_operators_agree() {
     let out = run_main(&program).await.unwrap().output;
     assert_eq!(out.trim(), "kw\nsym");
 }
+
+/// `badRequest` / `internalError` used to stringify their argument
+/// unconditionally, so an object body came back JSON-encoded *inside* the
+/// `error` string:
+///
+///   {"error":"{\"got\":\"x\"}"}
+///
+/// `notFound`, `unauthorized`, `forbidden` and `ok` all went through
+/// `error_response` and were correct, and every one of them was correct
+/// under `--native` — so this was visible only to whoever ran `jwc run`,
+/// which is anyone without a Rust toolchain installed.
+#[tokio::test]
+async fn error_helpers_keep_an_object_body_intact() {
+    for (call, status) in [
+        ("badRequest", 400),
+        ("internalError", 500),
+        ("notFound", 404),
+        ("unauthorized", 401),
+        ("forbidden", 403),
+    ] {
+        let src = format!(
+            r#"
+            function main() {{
+                print({call}({{ got: "x", n: 1 }}));
+            }}
+        "#
+        );
+        let program = parse_program(&src).unwrap();
+        validate_program(&program).unwrap();
+        let out = run_main(&program).await.unwrap().output;
+        let doc: serde_json::Value = serde_json::from_str(out.trim())
+            .unwrap_or_else(|e| panic!("{call} produced invalid JSON: {e}\n{out}"));
+        assert_eq!(doc["got"], "x", "{call} lost or re-encoded the body: {out}");
+        assert_eq!(doc["n"], 1, "{call} lost or re-encoded the body: {out}");
+        assert_eq!(doc["__jwc_status__"], status, "{call} status: {out}");
+        assert!(
+            doc.get("error").is_none(),
+            "{call} wrapped the object in an `error` string: {out}"
+        );
+    }
+}
+
+/// `statusCode(302, { Location: url })` has to produce a header envelope,
+/// not a JSON body.
+///
+/// The redirect branch matched on `Value::Str` holding JSON, which is what
+/// object literals used to evaluate to. Once they became `Value::Record`
+/// nothing matched, so the call fell through to the body path: a 302 status
+/// line, no `Location` header, and the header map served as the response
+/// body — a redirect that does not redirect, wearing a 3xx to hide it.
+#[tokio::test]
+async fn redirect_status_code_emits_headers_from_an_object_literal() {
+    let src = r#"
+        function main() {
+            print(statusCode(302, { Location: "https://example.com/t" }));
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    let doc: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+    assert_eq!(doc["__jwc_status__"], 302, "{out}");
+    assert_eq!(
+        doc["__jwc_headers__"]["Location"], "https://example.com/t",
+        "Location did not become a header: {out}"
+    );
+    assert_eq!(doc["__jwc_body__"], "", "{out}");
+}
+
+/// `take(xs, n)` accepts arrays, not just strings.
+///
+/// `first` and `last` have always taken either, and the reference groups all
+/// three together — so `take(rows, 5)`, the obvious pagination shape, raising
+/// "s must be string" read as a bug in the caller's code. A string still
+/// slices by character; that behaviour predates this and programs depend on it.
+#[tokio::test]
+async fn take_slices_arrays_and_strings() {
+    let src = r#"
+        function main() {
+            print(join(take([1, 2, 3, 4], 2), ","));
+            print(take("abcdef", 2));
+            print(join(take([1, 2], 99), ","));
+            print(join(take([1, 2], 0), ","));
+        }
+    "#;
+    let program = parse_program(src).unwrap();
+    validate_program(&program).unwrap();
+    let out = run_main(&program).await.unwrap().output;
+    assert_eq!(out, "1,2\nab\n1,2\n\n");
+}

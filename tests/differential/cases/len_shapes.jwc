@@ -1,0 +1,29 @@
+// Cover for `len` / `length` across every shape they accept.
+//
+// Two separate defects met here. `len` carried its own registry row with
+// `native: false`, so `length(xs)` compiled under `--native` and `len(xs)` —
+// which the interpreter dispatches to the identical body — was rejected as an
+// unknown function. And `jwc_b_length` counted the characters of a string that
+// parses as JSON where the interpreter counted its elements, so
+// `length(request_body())` meant two different things per backend.
+
+route GET "/len" {
+    let xs = [1, 2, 3];
+    return json({
+        arr: len(xs),
+        arr_alias: length(xs),
+        str: len("hello"),
+        json_arr: len("[1,2,3]"),
+        json_obj: len("{\"a\":1,\"b\":2}"),
+        nul: len(null)
+    });
+}
+
+function main() {
+    let port_env = env("PORT");
+    let port = 8080;
+    if (port_env != "") {
+        port = int(port_env);
+    }
+    serve(port);
+}

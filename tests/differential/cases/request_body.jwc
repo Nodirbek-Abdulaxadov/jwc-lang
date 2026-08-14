@@ -1,0 +1,25 @@
+// Cover for `request_body()`, which had no native implementation at all —
+// `jwc run` served the route and `jwc build --native` refused to compile the
+// program. Note this is the *raw* body as a string, deliberately not the same
+// built-in as `body()`, which hands back the parsed value; the two must not
+// collapse into each other.
+//
+// The empty case pins the odd part of the contract: no body yields the
+// literal string "null", not a null value, because callers compare against it.
+
+route POST "/size" {
+    return json({ size: len(request_body()) });
+}
+
+route GET "/empty" {
+    return json({ missing: request_body() == "null" });
+}
+
+function main() {
+    let port_env = env("PORT");
+    let port = 8080;
+    if (port_env != "") {
+        port = int(port_env);
+    }
+    serve(port);
+}

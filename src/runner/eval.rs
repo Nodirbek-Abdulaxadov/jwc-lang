@@ -1079,32 +1079,41 @@ impl<'a> Vm<'a> {
                     return Ok(Value::Str(r#"{"__jwc_status__":204}"#.to_string()));
                 }
 
+                // Through `error_response`, like `notFound` / `unauthorized`
+                // / `forbidden` — this and `badRequest` below were the two
+                // that never got converted, and they stringified their
+                // argument unconditionally. `internalError({ got: "x" })`
+                // came back as
+                //
+                //     {"error":"{\"got\":\"x\"}"}
+                //
+                // an object JSON-encoded and then stuffed into a string
+                // field, so a client had to parse the body twice. Native was
+                // right all along (`jwc_b_internal_error` takes a `V`), so
+                // this was visible only to whoever ran `jwc run` — which is
+                // everyone who has not installed a Rust toolchain.
                 if name.eq_ignore_ascii_case("internalError")
                     || name.eq_ignore_ascii_case("internal_error")
                 {
-                    let msg = if let Some(arg) = args.first() {
-                        self.eval_expr(arg, vars).await?.as_string()
-                    } else {
-                        "Internal Server Error".to_string()
+                    let body = match args.first() {
+                        Some(arg) => Some(self.eval_expr(arg, vars).await?),
+                        None => None,
                     };
-                    let escaped = msg.replace('"', "\\\"");
-                    return Ok(Value::Str(format!(
-                        r#"{{"__jwc_status__":500,"error":"{escaped}"}}"#
+                    return Ok(Value::Str(error_response(
+                        500,
+                        "Internal Server Error",
+                        body,
                     )));
                 }
 
                 if name.eq_ignore_ascii_case("badRequest")
                     || name.eq_ignore_ascii_case("bad_request")
                 {
-                    let msg = if let Some(arg) = args.first() {
-                        self.eval_expr(arg, vars).await?.as_string()
-                    } else {
-                        "Bad Request".to_string()
+                    let body = match args.first() {
+                        Some(arg) => Some(self.eval_expr(arg, vars).await?),
+                        None => None,
                     };
-                    let escaped = msg.replace('"', "\\\"");
-                    return Ok(Value::Str(format!(
-                        r#"{{"__jwc_status__":400,"error":"{escaped}"}}"#
-                    )));
+                    return Ok(Value::Str(error_response(400, "Bad Request", body)));
                 }
 
                 // `statusCode(code, body_or_headers?)` — set the HTTP status
@@ -1131,8 +1140,22 @@ impl<'a> Vm<'a> {
                         None
                     };
                     if is_redirect {
-                        if let Some(Value::Str(s)) = &body_val {
-                            if let Ok(JsonValue::Object(map)) = serde_json::from_str::<JsonValue>(s)
+                        // Matched on the *stringified* value, not on
+                        // `Value::Str`. Object literals used to evaluate to
+                        // `Value::Str` holding JSON; they now build a
+                        // `Value::Record` (the Phase 1 typed-shape change),
+                        // which this arm never matched. So
+                        //
+                        //     return statusCode(302, { Location: url });
+                        //
+                        // fell through to the body path: status 302, no
+                        // `Location` header, the header map served as the
+                        // response body — a redirect that does not redirect,
+                        // with a 3xx status line to hide it. Native builds
+                        // were unaffected, so this only ever broke `jwc run`.
+                        if let Some(v) = &body_val {
+                            if let Ok(JsonValue::Object(map)) =
+                                serde_json::from_str::<JsonValue>(&v.as_string())
                             {
                                 let envelope = json!({
                                     "__jwc_status__": status,

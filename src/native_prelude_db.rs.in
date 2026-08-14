@@ -75,6 +75,13 @@ async fn jwc_b_setConnectionString(v: V) -> V {
     V::Null
 }
 
+/// snake_case spelling of the same built-in. Codegen maps a call to
+/// `jwc_b_<name>` verbatim, so the alias needs a function of its own —
+/// mirrors `jwc_b_set_context` beside `jwc_b_setContext`.
+async fn jwc_b_set_connection_string(v: V) -> V {
+    jwc_b_setConnectionString(v).await
+}
+
 async fn jwc_db_get() -> deadpool_postgres::Object {
     let pool = DB_POOL
         .get()

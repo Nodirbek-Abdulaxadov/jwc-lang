@@ -72,7 +72,10 @@ than inventing syntax; **JWC has no syntax you cannot find on this page.**
 7. **`after { }` goes after the middleware's closing brace**, not inside it.
 8. **Entity name → table name is snake_case:** `entity ApiCall` is table
    `api_call`. Write `raw_sql` against the snake_case name.
-9. Before claiming done, run `jwc check`, `jwc lint`, **and actually exercise
+9. **Field access works on variables, not on call results.**
+   `first(rows).value` is a parse error — bind it first:
+   `let r = first(rows); return r.value;`
+10. Before claiming done, run `jwc check`, `jwc lint`, **and actually exercise
    the routes** — see the checklist in [§19](#19-before-you-say-its-done).
 
 ---
@@ -275,7 +278,8 @@ the number to text.
 Arrays are references, and `push(arr, v)` **mutates in place** as well as
 returning the array — `push(a, 2);` and `let b = push(a, 2);` do the same
 thing to `a`, and `b` is not a copy. There is no index syntax: reach elements
-with `first(arr)`, `last(arr)`, `take(arr, n)`, or `for x in arr`.
+with `first(arr)`, `last(arr)`, `take(arr, n)`, or `for x in arr`. `take` on
+a string slices characters instead.
 
 ```jwc
 let label = count > 0 ? "some" : "none";
@@ -582,14 +586,14 @@ Complete surface as of 0.9.x. `name/N` is the accepted argument count;
 
 **Strings** — `length/1`, `lower/1`, `upper/1`, `trim/1`, `contains/2`,
 `starts_with/2`, `ends_with/2`, `replace/3`, `split/2`, `substring/3`,
-`take/2`, `first/1`, `last/1`, `len/1` [interp-only]
+`take/2`, `first/1`, `last/1`, `len/1` (alias of `length`)
 
 **JSON** — `json_parse/1`, `json_stringify/1`, `set_json_field/3` [interp-only]
 
 **HTTP request** — `path_param/1`, `query_param/1..2`, `body/0`, `header/1`,
 `client_ip/0`, `request_id/0`, `response_status/0`, `response_duration_ms/0`,
 `response_duration_us/0`, `request_path/0`, `request_method/0`,
-`request_body/0` [interp-only]
+`request_body/0`
 
 **HTTP response** — `json/1`, `json_unchecked/1`, `text/1`, `html/1`,
 `response/2` (alias `raw`), `ok/0..1`, `created/1`, `not_found/0..1`,
@@ -760,8 +764,13 @@ jwc build --native --release      # → bin/release/<app>, one static binary
 ```
 
 Linux x86_64 (and musl) only — a cross-target matrix is an explicit non-goal.
-Codegen emits Rust and shells out to `cargo`, so the first build takes ~1
-minute.
+
+**A Rust toolchain must be on `PATH`.** Codegen emits Rust source and shells
+out to a real `cargo build`; nothing is embedded in the `jwc` binary, and
+without cargo the build stops at ``` `cargo` not found ```. The first build
+takes ~1 minute. This is the *only* subcommand that needs it — `run`,
+`serve`, `check`, `lint`, `fmt` and `migrate` are self-contained, and so is
+`jwc build` without `--native`.
 
 Rules that only apply here:
 
@@ -822,8 +831,8 @@ configured, Redis), `/metrics` (Prometheus).
 These are real failures observed from agents writing JWC, not hypotheticals.
 
 **1. Inventing a built-in, and `jwc check` saying OK.** `toInt` (it's `int`),
-`query` (it's `query_param`), `parseInt`, `console.log`, `len` on a native
-build. The type checker only validates *arity* for names it recognises; an
+`query` (it's `query_param`), `parseInt`, `console.log`. The type checker
+only validates *arity* for names it recognises; an
 unrecognised name is assumed to be a user function and passes. It then fails
 with `Unknown function: toInt` at runtime, or `E022` at native build time.
 **Check §11 before writing any call you have not already used.**
@@ -881,7 +890,15 @@ parameters with `raw_sql`.
 
 **17. `/* block comments */`.** Not a thing. `//` only, anywhere.
 
-**18. Declaring a catch-all before the routes it shadows.** Matching is
+**18. Reading a field off a call result.** `first(rows).value` does not
+parse — field access binds to a variable name, not to an arbitrary
+expression. `let r = first(rows); return r.value;`
+
+**19. Assuming a helper takes only what its examples show.** `take` accepts
+both a string (slices characters) and an array (slices elements), same as
+`first` and `last`. Before 0.9.5 the array form raised.
+
+**20. Declaring a catch-all before the routes it shadows.** Matching is
 first-match in declaration order and there is no specificity ranking, so a
 `route GET "{code}"` written above `route GET "/late"` answers `/late`
 itself — with no warning, and a perfectly valid-looking wrong response.

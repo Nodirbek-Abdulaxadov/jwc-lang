@@ -49,6 +49,20 @@ cargo test --test integration_db -- some_test_name   # single test
 cargo test -- --nocapture            # show eprintln! output (skips, etc.)
 ```
 
+```bash
+JWC_DIFFERENTIAL=1 cargo test --test differential   # both backends, compiled + run
+```
+
+`tests/differential.rs` is the only suite that actually **cargo-builds the
+emitted crate, runs the binary, and drives HTTP at both backends**. Every
+other parity test string-matches generated source, and `native_parity.rs`
+treats interpreter stdout as the golden value — so neither can see a bug
+where the call shape is right and the behaviour is wrong, or where the
+interpreter is the side that's wrong. Cases compare against expectations
+declared in `tests/differential/cases/*.expect.json`; neither backend votes.
+It is opt-in because each case shells out to cargo. **A SKIPPED line is not
+a pass** — set the variable before claiming parity work is done.
+
 `tests/integration_db.rs` boots a Postgres container via `testcontainers` and
 serialises tests behind a global `Mutex` because `jwc::engine::ENGINE` is a
 process-wide `OnceLock`. Tests print `SKIPPED` via `eprintln!` and return
@@ -138,10 +152,19 @@ This is the single most important architectural fact:
 - **The one that bites:** an async builtin must ALSO be named in the
   `is_async_builtin` `matches!` in `src/native_build.rs`. That list is not
   derived from anything. Miss it and codegen emits the call without
-  `.await`, so the *generated* crate fails to compile — and no test in this
-  repo catches it, because neither `conformance.rs` nor `native_parity.rs`
-  builds emitted source. Verify with a real `jwc build --native`, or extend
-  the await-guard in `tests/native_emit.rs`.
+  `.await`, so the *generated* crate fails to compile. `conformance.rs` and
+  `native_parity.rs` will not tell you — they string-match emitted source
+  and never invoke cargo on it. `tests/differential.rs` does compile it, so
+  add a case there covering the new builtin (or run a real
+  `jwc build --native`); the await-guard in `tests/native_emit.rs` is the
+  cheap backstop.
+- One built-in must never be split across two `BuiltinDef` rows. Two rows
+  means two `native` flags, and the pair drifts: `setConnectionString`
+  compiled while `set_connection_string` did not, and `length` compiled
+  while `len` — dispatched to the identical interpreter body — was rejected
+  as an unknown function. Use `aliases: &[...]` on one row and add a shim in
+  `native_prelude.rs.in` (`fn jwc_b_len(v: V) -> V { jwc_b_length(v) }`),
+  since codegen mangles each spelling to its own symbol.
 
 ### Migrations
 
