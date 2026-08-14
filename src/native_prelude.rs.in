@@ -1317,21 +1317,28 @@ fn jwc_b_substring(s: V, start: V, len: V) -> V {
     v_str(out)
 }
 
-fn jwc_b_take(s: V, n: V) -> V {
-    let s = match s {
-        V::Str(s) => s,
-        V::Null => return V::Null,
-        other => panic!("take() expects a string, got {:?}", other),
-    };
+fn jwc_b_take(xs: V, n: V) -> V {
     let n = match n {
         V::Int(n) => n,
         other => panic!("take() expects int n, got {:?}", other),
     };
-    if n <= 0 {
-        return v_str(String::new());
+    match xs {
+        // `take(rows, 5)` — the obvious pagination shape — used to panic on
+        // both backends, while `first` and `last` accepted arrays. See
+        // `eval_take_call`; a string still slices by character.
+        V::Array(items) => {
+            let k = if n <= 0 { 0 } else { n as usize };
+            v_arr(items.iter().take(k).cloned().collect())
+        }
+        V::Str(s) => {
+            if n <= 0 {
+                return v_str(String::new());
+            }
+            v_str(s.chars().take(n as usize).collect::<String>())
+        }
+        V::Null => V::Null,
+        other => panic!("take() expects a string or an array, got {:?}", other),
     }
-    let out: String = s.chars().take(n as usize).collect();
-    v_str(out)
 }
 
 fn jwc_b_first(v: V) -> V {

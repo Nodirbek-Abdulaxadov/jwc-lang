@@ -759,6 +759,33 @@ fn program_calls_any(program: &Program, names: &[&str]) -> bool {
         .any(|b| b.iter().any(|s| scan.stmt(s)))
 }
 
+/// Does the program need the Postgres prelude?
+///
+/// Declaring a dbcontext or entity is the usual reason, but not the only
+/// one: a program can call `setConnectionString()` or `raw_sql(...)` with no
+/// entities at all. Gating on declarations alone emitted a crate that
+/// referenced `jwc_b_setConnectionString` without defining it, so the build
+/// died in *generated* Rust —
+///
+///   error[E0425]: cannot find function `jwc_b_setConnectionString`
+///
+/// which names an internal symbol the author never wrote and gives no hint
+/// that the fix is "declare a dbcontext". Same class of failure the async
+/// builtin list produces when a name is missed.
+fn program_needs_db(program: &Program) -> bool {
+    !program.dbcontexts.is_empty()
+        || !program.models.is_empty()
+        || program_calls_any(
+            program,
+            &[
+                "setConnectionString",
+                "set_connection_string",
+                "raw_sql",
+                "log_insert",
+            ],
+        )
+}
+
 /// Does any `validate body { ... }` in the program carry a `pattern` rule?
 ///
 /// Gates the `regex` dependency of the generated crate, so a program that
@@ -887,7 +914,7 @@ pub fn compile_with_target(
          or run `jwc build` (without --native) for the interpreter-bundled launcher.",
     )?;
 
-    let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
+    let needs_db = program_needs_db(program);
     let needs_http_client = program_uses_http_client(program);
     let needs_crypto = program_uses_crypto(program);
     let needs_redis = program_uses_redis(program);
@@ -931,7 +958,7 @@ pub fn emit_rust_source(
 
     reject_unsupported(program)?;
 
-    let needs_db = !program.dbcontexts.is_empty() || !program.models.is_empty();
+    let needs_db = program_needs_db(program);
     let needs_http_client = program_uses_http_client(program);
     let needs_crypto = program_uses_crypto(program);
     let needs_redis = program_uses_redis(program);
@@ -3710,6 +3737,7 @@ fn emit_expr(out: &mut String, expr: &Expr, ctx: &CodegenCtx) {
                     // suspends like any other outbound call.
                     | "jwt_verify_jwks"
                     | "setConnectionString"
+                    | "set_connection_string"
                     | "ws_send"
                     | "ws_recv"
                     | "ws_close"

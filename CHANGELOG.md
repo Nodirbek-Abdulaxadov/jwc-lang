@@ -3,6 +3,58 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.5] — What the interpreter got wrong
+
+From an outside user's first real project. Every fix here is a case where
+`jwc run` behaved differently from `jwc build --native`, and the interpreter
+was the one that was wrong — which matters more than the direction suggests,
+because the interpreter is what runs on a machine with no Rust toolchain.
+
+### Fixed
+
+**`badRequest(obj)` and `internalError(obj)` double-encoded an object body.**
+Both stringified their argument unconditionally, so `badRequest({ got: "x" })`
+came back as `{"error":"{\"got\":\"x\"}"}` — an object JSON-encoded and
+then stuffed into a string field, forcing the client to parse the body twice.
+`notFound`, `unauthorized`, `forbidden` and `ok` all went through
+`error_response` and were correct, and native was correct for every one of
+them.
+
+**`statusCode(302, { Location: url })` did not redirect.** The redirect branch
+matched on `Value::Str` holding JSON, which is what object literals used to
+evaluate to; they now build a `Value::Record`, so nothing matched and the call
+fell through to the body path — a 302 status line, no `Location` header, and
+the header map served as the response body. Native was unaffected.
+
+**`take(xs, n)` rejected arrays on both backends.** `first` and `last` have
+always accepted either, and the reference groups all three together, so
+`take(rows, 5)` — the obvious pagination shape — read as a mistake in the
+caller's code. A string still slices by character.
+
+**`set_connection_string` and `setConnectionString` disagreed about native
+support.** They were two registry rows, the snake_case one marked
+`native: false`, so one spelling of one built-in compiled and the other was
+rejected as an unknown function with a "did you mean" pointing at the name
+the author had effectively already written. It is now an alias, like
+`setContext` / `set_context`.
+
+**A bare `setConnectionString()` broke the native build.** The Postgres
+prelude was gated on declaring a dbcontext or entity, so a program that
+called the built-in without declaring one emitted a crate referencing
+`jwc_b_setConnectionString` without defining it. The build then failed inside
+*generated* Rust with `error[E0425]: cannot find function` — an internal
+symbol the author never wrote. The prelude is now gated on use as well as on
+declarations.
+
+### Known
+
+`jwc check` still accepts a call to a function that does not exist; it fails
+at runtime with `Unknown function`. `typecheck::check_call` returns `Ok(())`
+for any name that is neither a built-in nor a known user function, and it
+cannot simply reject them: the same `None` means "ambiguous across
+namespaces", and `jwc check <file>` sees one file of a multi-file project.
+The fix belongs in `lint.rs` as a warning, where the whole project is loaded.
+
 ## [0.9.4] — The log writer's ceiling
 
 A saturation benchmark reported the buffered writer persisting **46%** of

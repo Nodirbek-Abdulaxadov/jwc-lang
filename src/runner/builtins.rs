@@ -1391,18 +1391,34 @@ impl<'a> Vm<'a> {
         vars: &mut HashMap<String, Value>,
     ) -> Result<Value> {
         if args.len() != 2 {
-            bail!("take(s, n) expects exactly 2 args");
+            bail!("take(xs, n) expects exactly 2 args");
         }
-        let s = match self.eval_expr(&args[0], vars).await? {
-            Value::Str(s) => s,
-            Value::Null => return Ok(Value::Null),
-            other => bail!("take: s must be string, got {}", other.type_name()),
-        };
+        let target = self.eval_expr(&args[0], vars).await?;
         let n = match self.eval_expr(&args[1], vars).await? {
             Value::Int(n) => n,
             other => bail!("take: n must be int, got {}", other.type_name()),
         };
-        Ok(Value::Str(slice_chars(&s, 0, Some(n))))
+        match target {
+            // Arrays used to hit the catch-all and raise, so `take(rows, 5)`
+            // — pagination, the obvious use — was an error on both backends
+            // while `first` and `last` accepted arrays happily. The
+            // documentation groups all three together, which made the gap
+            // read as a bug in the caller's code.
+            Value::Array(items) => {
+                let k = n.max(0) as usize;
+                Ok(Value::Array(items.into_iter().take(k).collect()))
+            }
+            // A string still slices by character. That is what `take`
+            // already meant and changing it would silently rewrite existing
+            // programs — including a JSON-array-shaped string, which stays a
+            // string here even though `first`/`last` would parse it.
+            Value::Str(s) => Ok(Value::Str(slice_chars(&s, 0, Some(n)))),
+            Value::Null => Ok(Value::Null),
+            other => bail!(
+                "take: xs must be a string or an array, got {}",
+                other.type_name()
+            ),
+        }
     }
 
     pub(super) async fn eval_first_or_last_call(
