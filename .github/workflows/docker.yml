@@ -24,10 +24,20 @@ env:
   # its own owner, so ghcr answered `permission_denied: The requested
   # installation does not exist`.
 
+# arm64 is built on GitHub's native ARM runners rather than under QEMU. The
+# emulated leg compiled the Rust release for 30+ minutes and effectively hung,
+# which is why arm64 was dropped to amd64-only; native runners are the fix
+# that note called for, and they are free for public repos.
+#
+# Multi-runner builds cannot push tags directly — two runners pushing the same
+# tag would each overwrite the other's single-arch manifest. So each arch
+# pushes *by digest* only, and a merge job stitches the digests into one
+# multi-arch manifest list under the real tags. This is Docker's documented
+# pattern for distributing a build across runners.
 jobs:
   build-push:
-    name: Build & push ${{ matrix.image.name }}
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.image.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -38,6 +48,11 @@ jobs:
           - name: jwc-runtime
             dockerfile: Dockerfile.slim
             description: 'Minimal distroless runtime base for JWC native apps'
+        platform:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +65,106 @@ jobs:
         run: |
           owner="${{ github.repository_owner }}"
           echo "IMAGE_NAMESPACE=${owner,,}" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Labels only — tags are applied once, by the merge job.
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}
+          labels: |
+            org.opencontainers.image.description=${{ matrix.image.description }}
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      # `push-by-digest` publishes the layers and returns a digest without
+      # claiming any tag. Nothing is user-visible until the merge job runs.
+      #
+      # If the merge step ever fails with an unexpected-media-type error, the
+      # attestations below are the cause — `imagetools create` is stitching
+      # index manifests rather than image manifests. The remedy is to set
+      # `provenance: false` and `sbom: false` here, at the cost of dropping
+      # supply-chain metadata. Keeping them on preserves what this workflow
+      # already published for amd64.
+      - name: Build & push by digest
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/${{ matrix.platform.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
+          provenance: true
+          sbom: true
+          # Scope carries the arch: a shared scope would have the two runners
+          # overwriting each other's cache on every build.
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }},mode=max
+
+      # The digest is passed to the merge job as an empty file named after it —
+      # the filename is the payload, which keeps the artifact tiny.
+      - name: Export digest
+        shell: bash
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge manifest ${{ matrix.image.name }}
+    needs: build-push
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: jwc
+            description: 'JWC compiler + runtime CLI'
+          - name: jwc-runtime
+            description: 'Minimal distroless runtime base for JWC native apps'
+
+    steps:
+      - name: Resolve image namespace
+        shell: bash
+        run: |
+          owner="${{ github.repository_owner }}"
+          echo "IMAGE_NAMESPACE=${owner,,}" >> "$GITHUB_ENV"
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.image.name }}-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Compute version label
         id: ver
@@ -64,16 +179,6 @@ jobs:
           fi
           echo "label=${label}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -82,24 +187,30 @@ jobs:
           tags: |
             type=raw,value=${{ steps.ver.outputs.label }}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
-          labels: |
-            org.opencontainers.image.description=${{ matrix.image.description }}
-            org.opencontainers.image.licenses=MIT
-            org.opencontainers.image.source=https://github.com/Nodirbek-Abdulaxadov/jwc-lang
 
-      - name: Build & push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          # amd64-only: the arm64 leg compiled the Rust release under QEMU
-          # emulation and effectively hung (30+ min). Re-add arm64 via a native
-          # ARM runner (ubuntu-*-arm) + manifest merge if/when it's needed.
-          file: ${{ matrix.image.dockerfile }}
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
-          cache-from: type=gha,scope=${{ matrix.image.name }}
-          cache-to: type=gha,scope=${{ matrix.image.name }},mode=max
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}@sha256:%s ' *)
+
+      # Fails the job if the manifest list did not come out multi-arch, so a
+      # silently amd64-only image can't ship again.
+      - name: Verify both architectures are present
+        run: |
+          ref="${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}:${{ steps.ver.outputs.label }}"
+          docker buildx imagetools inspect "$ref"
+          # Parse the index rather than grepping it — `--raw` formatting is not
+          # a stable contract, and a whitespace change would turn this into a
+          # false failure. Attestation manifests carry unknown/unknown here and
+          # are simply absent from the match.
+          archs="$(docker buildx imagetools inspect --raw "$ref" \
+            | jq -r '[.manifests[]?.platform.architecture] | unique | join(" ")')"
+          echo "architectures: ${archs}"
+          for arch in amd64 arm64; do
+            case " ${archs} " in
+              *" ${arch} "*) ;;
+              *) echo "::error::${ref} is missing linux/${arch}"; exit 1 ;;
+            esac
+          done

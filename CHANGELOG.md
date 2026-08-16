@@ -95,6 +95,38 @@ which sets it to share one target dir across cases.
 anything like `env`; it was a documented built-in with no native
 implementation. Registry-known names that carry `native: false` now say so.
 
+### Added — arm64 Linux
+
+`jwc` now ships prebuilt for **aarch64 Linux**, glibc and musl, alongside the
+existing x86_64 Linux and Windows builds. Raspberry Pi, Ampere, Graviton and
+Android shells stop dead-ending on:
+
+```
+Unsupported platform: linux-aarch64.
+```
+
+The Docker images are multi-arch again (`linux/amd64` + `linux/arm64`).
+
+This is a deliberate change to a **Non-goal**. `ROADMAP.md` refused a
+cross-target matrix on the grounds that *"Linux x86_64 (glibc + musl) +
+Docker amd64/arm64 is enough"* — but the Docker arm64 leg had been dropped
+because building it under QEMU emulation hung for 30+ minutes. The policy
+pointed at an escape hatch that did not exist, so arm64 users had no path at
+all: no binary, no image. Both now exist, built on native ARM runners rather
+than emulated. Windows-ARM, macOS-ARM and FreeBSD remain non-goals.
+
+Two details that were wrong independently of architecture:
+
+* `install.sh` told you to run `./install-from-source.sh` after failing.
+  You reach that message by piping the script from `curl`, so there is no
+  such file on disk — the advice could not be followed. It now gives the
+  clone first, and a `docker run` line that needs no toolchain.
+* The Docker images labelled `org.opencontainers.image.source` with the
+  repository's pre-move URL. It is derived from the running repo now.
+
+The manifest merge verifies both architectures are present and fails the job
+otherwise, so a silently amd64-only image cannot ship again.
+
 ### Verified, not changed
 
 TODO.md's `validate body` entry — `pattern(...)` not enforced against a
