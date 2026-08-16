@@ -33,7 +33,7 @@ yoki PR yuborsa ham — siyosat darajasidagi rad etish.
 | Item | Sabab | Status |
 |---|---|---|
 | **LLVM IR backend** | Native AOT Rust-codegen orqali yetadi. LLVM yakka muhandis sig'imidan tashqarida | Non-goal |
-| **Cross-target native build matrisi** (Windows-ARM, macOS-ARM, FreeBSD, …) | Linux x86_64 (glibc + musl) + Docker amd64/arm64 yetadi. Boshqa target'lar shovqin | Non-goal |
+| **Cross-target native build matrisi** (Windows-ARM, macOS-ARM, FreeBSD, …) | Linux x86_64 + aarch64 (glibc + musl), Windows x86_64, Docker amd64/arm64 yetadi. Boshqa target'lar shovqin | Non-goal — **lekin aarch64 Linux 0.9.6'da qo'shildi**: bu qator ARM uchun javob sifatida Docker arm64'ga ishora qilardi, holbuki u QEMU osilib qolgani uchun o'chirilgan edi — ya'ni hech qanday arm64 yo'li yo'q edi. Endi ikkalasi ham bor |
 | **Self-hosting compiler** | JWC kompilyatori JWC'da yozilishi maqsad emas. Rust qoladi | Non-goal |
 | **WASM target** | Backend tili — brauzer/edge runtimega chiqish niche'ga to'g'ri kelmaydi | Non-goal |
 | **Multi-database driver** (MySQL/SQLite/MSSQL/Oracle) | Postgres-first va'dasi. SQL'ning Postgres dialect'iga sodiq qolamiz | Non-goal |

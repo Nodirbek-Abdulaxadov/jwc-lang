@@ -48,8 +48,11 @@ ldd jwc
 ```
 
 If `file` says "dynamically linked" or `ldd` lists shared objects, you
-grabbed the wrong artifact — re-download the `*-x86_64-unknown-linux-musl.tar.gz`
-asset, not the `*-x86_64-linux.tar.gz` one.
+grabbed the wrong artifact — re-download the `*-unknown-linux-musl.tar.gz`
+asset, not the plain `*-linux.tar.gz` one. Both architectures publish the
+pair: `x86_64-unknown-linux-musl` / `x86_64-linux`, and
+`aarch64-unknown-linux-musl` / `aarch64-linux`. `install.sh` picks the musl
+one for the host architecture when `JWC_MUSL=1` is set.
 
 ## Verify the checksum
 

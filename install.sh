@@ -31,10 +31,31 @@ case "${os}-${arch}" in
         fi
         ext="tar.gz"
         ;;
+    # `uname -m` says aarch64 on Linux; arm64 is what macOS and some
+    # minimal userlands (Android shells, Alpine images) report for the
+    # same hardware. Accept both or half the arm64 hosts still dead-end.
+    linux-aarch64 | linux-arm64)
+        if [[ "${JWC_MUSL:-0}" == "1" ]]; then
+            short="aarch64-unknown-linux-musl"
+        else
+            short="aarch64-linux"
+        fi
+        ext="tar.gz"
+        ;;
     *)
         echo "Unsupported platform: ${os}-${arch}." >&2
-        echo "Prebuilt JWC binaries currently ship for x86_64 Linux + Windows." >&2
-        echo "Build from source: ./install-from-source.sh" >&2
+        echo "Prebuilt JWC binaries ship for x86_64 and aarch64 Linux, and x86_64 Windows." >&2
+        echo >&2
+        # The old text said "Build from source: ./install-from-source.sh",
+        # which is unactionable in the documented install path: you get here
+        # by piping this script from curl, so there is no ./ anything on disk
+        # and nothing to run. Give the clone first.
+        echo "To build from source (needs a Rust toolchain):" >&2
+        echo "  git clone https://github.com/${REPO}.git" >&2
+        echo "  cd jwc-lang && ./install-from-source.sh" >&2
+        echo >&2
+        echo "Or run the published image, which needs no toolchain:" >&2
+        echo "  docker run --rm -it ghcr.io/just-web-code/jwc:latest --help" >&2
         exit 1
         ;;
 esac
