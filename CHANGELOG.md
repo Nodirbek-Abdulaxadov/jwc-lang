@@ -127,6 +127,28 @@ Two details that were wrong independently of architecture:
 The manifest merge verifies both architectures are present and fails the job
 otherwise, so a silently amd64-only image cannot ship again.
 
+### Fixed — the installer 403'd on mobile networks
+
+Resolving "latest" called `api.github.com`, which allows unauthenticated
+clients **60 requests per hour per IP**. Carriers put thousands of subscribers
+behind one NAT address, so the budget is routinely already spent and the
+install dies with:
+
+```
+Resolving latest release tag for just-web-code/jwc-lang...
+curl: (22) The requested URL returned error: 403
+```
+
+The same command works from a home network minutes later, which makes it look
+like a broken release rather than a shared quota. Reported from an Android
+shell on 4G while Windows and WSL on the same account succeeded.
+
+Both installers now follow the `/releases/latest` redirect on github.com,
+which resolves the same tag and is not part of that budget. The API remains a
+fallback and picks up `GITHUB_TOKEN` when set (5000/hour). If resolution still
+fails, the error names the rate limit and shows how to pin `JWC_VERSION`
+instead of just saying "failed".
+
 ### Fixed — the multi-arch Docker merge (0.9.6 tag)
 
 The `v0.9.6` tag built both architectures for both images and then failed to
