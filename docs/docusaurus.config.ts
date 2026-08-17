@@ -10,7 +10,7 @@ const config: Config = {
   url: 'https://jwc.1kb.uz',
   baseUrl: '/',
 
-  organizationName: 'Nodirbek-Abdulaxadov',
+  organizationName: 'just-web-code',
   projectName: 'jwc-lang',
 
   // Every canonical tag and every sitemap entry is emitted without a
@@ -39,7 +39,7 @@ const config: Config = {
           sidebarPath: './sidebars.ts',
           routeBasePath: '/',          // serve docs at site root, no /docs/ prefix
           editUrl:
-            'https://github.com/Nodirbek-Abdulaxadov/jwc-lang/edit/main/docs/',
+            'https://github.com/just-web-code/jwc-lang/edit/main/docs/',
         },
         blog: false,
         theme: {
@@ -74,7 +74,7 @@ const config: Config = {
           'entities that compile to SQL, and Postgres execution.',
         url: 'https://jwc.1kb.uz',
         image: 'https://jwc.1kb.uz/img/jwc-social-card.png',
-        codeRepository: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang',
+        codeRepository: 'https://github.com/just-web-code/jwc-lang',
         programmingLanguage: 'Rust',
         // No `license` / `offers` here on purpose: the repo carries no
         // LICENSE file yet (Cargo.toml: "workspace-private until a license
@@ -113,7 +113,7 @@ const config: Config = {
           position: 'right',
         },
         {
-          href: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang',
+          href: 'https://github.com/just-web-code/jwc-lang',
           label: 'GitHub',
           position: 'right',
         },
@@ -136,8 +136,8 @@ const config: Config = {
           title: 'Tools',
           items: [
             {label: 'Registry', href: 'https://registry-jwc.1kb.uz/'},
-            {label: 'GitHub', href: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang'},
-            {label: 'Roadmap', href: 'https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md'},
+            {label: 'GitHub', href: 'https://github.com/just-web-code/jwc-lang'},
+            {label: 'Roadmap', href: 'https://github.com/just-web-code/jwc-lang/blob/main/ROADMAP.md'},
           ],
         },
       ],

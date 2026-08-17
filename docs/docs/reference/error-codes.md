@@ -8,7 +8,7 @@ description: "The numbered JWC diagnostic catalog: Exxx compile errors and Wxxx 
 JWC ships a numbered diagnostic catalog. **`Wxxx`** codes are lint
 warnings (non-fatal); **`Exxx`** codes are validator / parser errors
 (fatal). The single source of truth is
-[`src/error_codes.rs`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/src/error_codes.rs)
+[`src/error_codes.rs`](https://github.com/just-web-code/jwc-lang/blob/main/src/error_codes.rs)
 — this page mirrors it and keeps the "why this exists" prose.
 
 ## Lint warnings (`W001`–)

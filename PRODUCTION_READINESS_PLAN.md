@@ -54,7 +54,7 @@ A team can:
 ## Production dogfooding — findings from `jwc-shortener` (June 2026)
 
 The first production JWC app —
-[`jwc-shortener`](https://github.com/Nodirbek-Abdulaxadov/jwc-shortener),
+[`jwc-shortener`](https://github.com/just-web-code/jwc-shortener),
 live at 1kb.uz (native AOT image, k8s + ArgoCD, migrations via init
 container) — validates the deploy story end-to-end and surfaced concrete
 gaps. Each is folded into its phase below; the map:
@@ -309,7 +309,7 @@ surface; all findings ≥ medium fixed.
 
 ## Phase 7 — Performance with receipts
 
-Largely underway: [`http-framework-benchmark`](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
+Largely underway: [`http-framework-benchmark`](https://github.com/just-web-code/http-framework-benchmark)
 already exists with equal-workload methodology (bombardier, sequential
 isolation, raw JSON archived, reproduce scripts) and strong results — 2nd on
 `/async-delay` ahead of rust-axum, 0 errors across 4.48M requests. Remaining

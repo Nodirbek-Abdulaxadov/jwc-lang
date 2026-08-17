@@ -1,6 +1,6 @@
 # PERF_PLAN — closing the gap to rust-axum
 
-> Source of truth: [`http-framework-benchmark`](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
+> Source of truth: [`http-framework-benchmark`](https://github.com/just-web-code/http-framework-benchmark)
 > measured on `Intel i5-10400 / 32GB / Win11`, bombardier v1.2.6, 15s @ warmup 3s.
 
 ## Baseline (jwc v0.4.0 native AOT vs rust-axum 0.8)

@@ -17,7 +17,7 @@ supported — older 0.x releases do not receive backported fixes.
 
 **Preferred channel — GitHub private security advisory.** Open a
 private report at
-[Security → Report a vulnerability](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/security/advisories/new)
+[Security → Report a vulnerability](https://github.com/just-web-code/jwc-lang/security/advisories/new)
 on this repository. GitHub routes the advisory directly to the
 maintainers; no third-party form or email address is involved, and the
 advisory stays private until coordinated disclosure.

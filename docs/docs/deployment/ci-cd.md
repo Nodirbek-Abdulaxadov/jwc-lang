@@ -5,7 +5,7 @@ description: "An end-to-end deploy pipeline for a real JWC app, from build and m
 
 # CI/CD walkthrough
 
-End-to-end deploy pipeline using a real JWC app — [`jwc-shortener`](https://github.com/Nodirbek-Abdulaxadov/jwc-shortener), live at [1kb.uz](https://1kb.uz/).
+End-to-end deploy pipeline using a real JWC app — [`jwc-shortener`](https://github.com/just-web-code/jwc-shortener), live at [1kb.uz](https://1kb.uz/).
 
 ```
 git push App-repo:main
@@ -50,7 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
 ARG JWC_VERSION=0.9.2
-RUN curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v${JWC_VERSION}/jwc-x86_64-unknown-linux-gnu.tar.gz \
+RUN curl -fsSL https://github.com/just-web-code/jwc-lang/releases/download/v${JWC_VERSION}/jwc-x86_64-unknown-linux-gnu.tar.gz \
         | tar -xz -C /usr/local/bin
 
 COPY . .

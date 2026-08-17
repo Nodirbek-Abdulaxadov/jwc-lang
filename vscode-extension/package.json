@@ -37,13 +37,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang.git"
+    "url": "https://github.com/just-web-code/jwc-lang.git"
   },
   "bugs": {
-    "url": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang/issues"
+    "url": "https://github.com/just-web-code/jwc-lang/issues"
   },
   "homepage": "https://jwc.1kb.uz",
-  "qna": "https://github.com/Nodirbek-Abdulaxadov/jwc-lang/discussions",
+  "qna": "https://github.com/just-web-code/jwc-lang/discussions",
   "main": "./out/extension.js",
   "contributes": {
     "languages": [

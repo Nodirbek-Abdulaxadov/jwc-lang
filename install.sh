@@ -6,7 +6,7 @@
 # which meant the documented one-liner promised a platform that has never
 # had a build. Build from source or use the Docker image instead.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
 #
 # Override targets via env:
 #   JWC_VERSION=v0.2.0            install a specific release tag
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-REPO="Nodirbek-Abdulaxadov/jwc-lang"
+REPO="just-web-code/jwc-lang"
 INSTALL_DIR="${JWC_INSTALL_DIR:-${HOME}/.jwc/bin}"
 DOWNLOAD_BASE="${JWC_DOWNLOAD_BASE:-}"
 

@@ -59,8 +59,8 @@ one for the host architecture when `JWC_MUSL=1` is set.
 Every release publishes a sibling `.sha256` next to the tarball:
 
 ```bash
-curl -fLO https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz
-curl -fLO https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256
+curl -fLO https://github.com/just-web-code/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz
+curl -fLO https://github.com/just-web-code/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256
 sha256sum -c jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256
 ```
 

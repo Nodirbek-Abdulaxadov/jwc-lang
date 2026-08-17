@@ -33,13 +33,13 @@ for now, not an oversight.
 PowerShell (Windows x86_64):
 
 ```powershell
-iex "& { $(irm https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.ps1) }"
+iex "& { $(irm https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.ps1) }"
 ```
 
 Bash (Linux x86_64 / arm64):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
 ```
 
 Drops `jwc` and `jwc-lsp` into `%LOCALAPPDATA%\jwc\bin` (Windows) or
@@ -65,7 +65,7 @@ Works anywhere Rust does, including macOS and Windows ARM. Requires the
 [Rust toolchain](https://rustup.rs/) (1.83+).
 
 ```bash
-git clone https://github.com/Nodirbek-Abdulaxadov/jwc-lang
+git clone https://github.com/just-web-code/jwc-lang
 cd jwc-lang
 cargo install --path .         # → ~/.cargo/bin/jwc
 ```

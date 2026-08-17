@@ -125,7 +125,7 @@ pub fn render_builtins_doc(defs: &[BuiltinDef]) -> String {
         "  rejected at `jwc build --native` time — preferred over silent miscompilation.\n",
     );
     out.push_str("- For per-builtin contract (semantics, error modes, examples), see\n");
-    out.push_str("  [`docs/spec/builtins.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/builtins.md).\n");
+    out.push_str("  [`docs/spec/builtins.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/builtins.md).\n");
     out.push_str("- New builtin? Edit `src/builtins.rs::BUILTIN_DEFS`, regenerate this file via\n");
     out.push_str(
         "  the command at the top, then add the runtime + AOT impls per the module docs.\n",

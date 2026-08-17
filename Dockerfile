@@ -58,9 +58,9 @@ WORKDIR /work
 
 LABEL org.opencontainers.image.title="jwc" \
       org.opencontainers.image.description="JWC language compiler + runtime CLI" \
-      org.opencontainers.image.source="https://github.com/Nodirbek-Abdulaxadov/jwc-lang" \
-      org.opencontainers.image.url="https://github.com/Nodirbek-Abdulaxadov/jwc-lang" \
-      org.opencontainers.image.documentation="https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/docs/deployment/docker.md" \
+      org.opencontainers.image.source="https://github.com/just-web-code/jwc-lang" \
+      org.opencontainers.image.url="https://github.com/just-web-code/jwc-lang" \
+      org.opencontainers.image.documentation="https://github.com/just-web-code/jwc-lang/blob/main/docs/docs/deployment/docker.md" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Nodirbek Abdulaxadov"
 

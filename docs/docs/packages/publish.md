@@ -9,7 +9,7 @@ description: "Publish a JWC package to registry-jwc.1kb.uz: signing in, preparin
 > Mass-ecosystem ambition is not part of the north star — JWC competes on
 > CRUD ergonomics, not on the breadth of npm-style availability. If you
 > need 1000s of packages, JWC isn't the right tool. See
-> [`docs/spec/ecosystem.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/ecosystem.md) for what belongs
+> [`docs/spec/ecosystem.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/ecosystem.md) for what belongs
 > in core vs. what belongs in a package.
 
 ## One-time setup
@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+      - run: curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
       - run: jwc publish
 ```
 
