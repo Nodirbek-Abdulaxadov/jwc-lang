@@ -127,6 +127,39 @@ Two details that were wrong independently of architecture:
 The manifest merge verifies both architectures are present and fails the job
 otherwise, so a silently amd64-only image cannot ship again.
 
+### Fixed — the Linux binaries required a very new glibc
+
+v0.9.6's glibc builds require **GLIBC_2.39**, so they install cleanly and then
+refuse to start:
+
+```
+jwc: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+```
+
+Found on an arm64 Android shell, but it was never an arm64 problem — the
+shipped `x86_64-linux` binary needs 2.39 too. That is Ubuntu 24.04's glibc, so
+the release did not run on Ubuntu 22.04 (2.35), Debian 12 (2.36), RHEL 9 or
+Amazon Linux 2023 (2.34) on either architecture. The cause was `ubuntu-latest`
+moving to 24.04: a glibc binary runs on its build glibc or newer, never older.
+
+Two changes:
+
+* **Releases build glibc targets on the oldest supported runner** —
+  `ubuntu-22.04` and `ubuntu-22.04-arm`, glibc 2.35, covering all of the above.
+  The musl targets stay on the current image; they link libc statically, so
+  the runner's version is irrelevant. The matrix carries a comment saying not
+  to "upgrade" the pins, because doing so silently drops distributions.
+
+* **The installer no longer leaves a binary that cannot run.** It executes
+  `jwc --version` after installing and, on failure, re-installs the static
+  musl build automatically. This is a smoke test rather than an
+  `ldd --version` comparison on purpose: a minimum-glibc constant would have
+  to be kept in sync with the release runner and would drift silently, while
+  asking the binary whether it runs cannot.
+
+The fallback works against the existing v0.9.6 assets, so affected hosts are
+fixed by re-running the installer — no new release required.
+
 ### Fixed — the installer 403'd on mobile networks
 
 Resolving "latest" called `api.github.com`, which allows unauthenticated

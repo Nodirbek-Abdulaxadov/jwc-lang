@@ -29,22 +29,16 @@ arch="$(uname -m)"
 # and glibc-old hosts. See docs/docs/deployment/musl-static.md.
 case "${os}-${arch}" in
     linux-x86_64)
-        if [[ "${JWC_MUSL:-0}" == "1" ]]; then
-            short="x86_64-unknown-linux-musl"
-        else
-            short="x86_64-linux"
-        fi
+        GLIBC_FLAVOUR="x86_64-linux"
+        MUSL_FLAVOUR="x86_64-unknown-linux-musl"
         ext="tar.gz"
         ;;
     # `uname -m` says aarch64 on Linux; arm64 is what macOS and some
     # minimal userlands (Android shells, Alpine images) report for the
     # same hardware. Accept both or half the arm64 hosts still dead-end.
     linux-aarch64 | linux-arm64)
-        if [[ "${JWC_MUSL:-0}" == "1" ]]; then
-            short="aarch64-unknown-linux-musl"
-        else
-            short="aarch64-linux"
-        fi
+        GLIBC_FLAVOUR="aarch64-linux"
+        MUSL_FLAVOUR="aarch64-unknown-linux-musl"
         ext="tar.gz"
         ;;
     *)
@@ -68,6 +62,14 @@ case "${os}-${arch}" in
         exit 1
         ;;
 esac
+
+# JWC_MUSL=1 asks for the static build up front. Otherwise start on glibc and
+# let the smoke test below fall back if the host libc is too old.
+if [[ "${JWC_MUSL:-0}" == "1" ]]; then
+    short="${MUSL_FLAVOUR}"
+else
+    short="${GLIBC_FLAVOUR}"
+fi
 
 # Resolve the newest release tag *without* touching api.github.com.
 #
@@ -131,39 +133,85 @@ if [[ -z "${version}" ]]; then
     fi
 fi
 
-asset="jwc-${version}-${short}.${ext}"
-if [[ -n "${DOWNLOAD_BASE}" ]]; then
-    url="${DOWNLOAD_BASE%/}/${asset}"
-else
-    url="https://github.com/${REPO}/releases/download/${version}/${asset}"
-fi
-
-echo "Downloading ${url}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "${tmp}"' EXIT
 
-curl -fL "${url}" -o "${tmp}/${asset}"
-
-# Verify the sha256 checksum when the release publishes one (releases after
-# v0.4.1 do). Older releases lack the .sha256 asset — warn and continue.
-if curl -fsSL "${url}.sha256" -o "${tmp}/${asset}.sha256" 2>/dev/null; then
-    echo "Verifying sha256 checksum..."
-    if command -v sha256sum >/dev/null 2>&1; then
-        (cd "${tmp}" && sha256sum -c "${asset}.sha256")
-    elif command -v shasum >/dev/null 2>&1; then
-        (cd "${tmp}" && shasum -a 256 -c "${asset}.sha256")
+# Download + verify + install one flavour. Factored out so the glibc build can
+# be retried as musl without re-running the whole script — `curl | bash` has no
+# script file on disk, so re-exec is not an option.
+fetch_and_install() {
+    local flavour="$1"
+    local asset="jwc-${version}-${flavour}.${ext}"
+    local url
+    if [[ -n "${DOWNLOAD_BASE}" ]]; then
+        url="${DOWNLOAD_BASE%/}/${asset}"
     else
-        echo "WARNING: no sha256sum/shasum on PATH — skipping verification." >&2
+        url="https://github.com/${REPO}/releases/download/${version}/${asset}"
     fi
-else
-    echo "WARNING: ${asset}.sha256 not published for ${version} — skipping verification." >&2
+
+    echo "Downloading ${url}"
+    curl -fL "${url}" -o "${tmp}/${asset}"
+
+    # Verify the sha256 checksum when the release publishes one (releases after
+    # v0.4.1 do). Older releases lack the .sha256 asset — warn and continue.
+    if curl -fsSL "${url}.sha256" -o "${tmp}/${asset}.sha256" 2>/dev/null; then
+        echo "Verifying sha256 checksum..."
+        if command -v sha256sum >/dev/null 2>&1; then
+            (cd "${tmp}" && sha256sum -c "${asset}.sha256")
+        elif command -v shasum >/dev/null 2>&1; then
+            (cd "${tmp}" && shasum -a 256 -c "${asset}.sha256")
+        else
+            echo "WARNING: no sha256sum/shasum on PATH — skipping verification." >&2
+        fi
+    else
+        echo "WARNING: ${asset}.sha256 not published for ${version} — skipping verification." >&2
+    fi
+
+    tar -xzf "${tmp}/${asset}" -C "${tmp}"
+
+    mkdir -p "${INSTALL_DIR}"
+    install -m 0755 "${tmp}/jwc"     "${INSTALL_DIR}/jwc"
+    install -m 0755 "${tmp}/jwc-lsp" "${INSTALL_DIR}/jwc-lsp"
+}
+
+fetch_and_install "${short}"
+
+# A glibc binary built against a newer libc than the host installs perfectly
+# and then fails at first run:
+#
+#   jwc: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+#
+# Running it once here turns that into something the installer can fix. The
+# release ships a fully-static musl build of every Linux target for exactly
+# this case, so retry with it rather than leaving a broken binary on PATH.
+#
+# Deliberately a smoke test rather than an `ldd --version` comparison: that
+# would need a minimum-glibc constant kept in sync with whatever runner the
+# release workflow uses, and it would drift silently. Asking the binary
+# whether it runs cannot drift.
+if ! "${INSTALL_DIR}/jwc" --version >/dev/null 2>&1; then
+    if [[ "${short}" == *-musl ]]; then
+        echo >&2
+        echo "ERROR: the installed jwc does not run on this host:" >&2
+        "${INSTALL_DIR}/jwc" --version >&2 || true
+        echo >&2
+        echo "This is the static musl build, so a libc mismatch is not the cause." >&2
+        echo "Please report it: https://github.com/${REPO}/issues" >&2
+        exit 1
+    fi
+    echo
+    echo "The glibc build does not run here — usually a host libc older than the"
+    echo "one it was built against. Retrying with the fully-static musl build."
+    echo
+    fetch_and_install "${MUSL_FLAVOUR}"
+    if ! "${INSTALL_DIR}/jwc" --version >/dev/null 2>&1; then
+        echo >&2
+        echo "ERROR: the musl build does not run here either:" >&2
+        "${INSTALL_DIR}/jwc" --version >&2 || true
+        echo "Please report it: https://github.com/${REPO}/issues" >&2
+        exit 1
+    fi
 fi
-
-tar -xzf "${tmp}/${asset}" -C "${tmp}"
-
-mkdir -p "${INSTALL_DIR}"
-install -m 0755 "${tmp}/jwc"     "${INSTALL_DIR}/jwc"
-install -m 0755 "${tmp}/jwc-lsp" "${INSTALL_DIR}/jwc-lsp"
 
 echo "Installed: ${INSTALL_DIR}/jwc"
 echo "Installed: ${INSTALL_DIR}/jwc-lsp"
