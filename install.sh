@@ -69,16 +69,64 @@ case "${os}-${arch}" in
         ;;
 esac
 
+# Resolve the newest release tag *without* touching api.github.com.
+#
+# The API caps unauthenticated clients at 60 requests/hour per IP. Mobile
+# carriers put thousands of subscribers behind one NAT address, so that budget
+# is usually already spent by somebody else and the install dies with
+#
+#     curl: (22) The requested URL returned error: 403
+#
+# on a phone while the identical command works from a home network minutes
+# earlier. `/releases/latest` on github.com is a plain redirect to the tag
+# page and is not part of that budget, so it goes first. The API stays as a
+# fallback in case the redirect shape ever changes, and uses GITHUB_TOKEN when
+# one is set (5000/hour, authenticated).
+resolve_latest_tag() {
+    local final
+    final="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+        "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+    case "${final}" in
+        */releases/tag/*)
+            printf '%s\n' "${final##*/releases/tag/}"
+            return 0
+            ;;
+    esac
+
+    local api="https://api.github.com/repos/${REPO}/releases/latest"
+    local body
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+        body="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "${api}" 2>/dev/null || true)"
+    else
+        body="$(curl -fsSL "${api}" 2>/dev/null || true)"
+    fi
+    # Dep-free parse — no `jq` required.
+    printf '%s' "${body}" | grep -oE '"tag_name":\s*"[^"]+"' | head -1 | cut -d'"' -f4 || true
+}
+
 version="${JWC_VERSION:-}"
 if [[ -z "${version}" ]]; then
     echo "Resolving latest release tag for ${REPO}..."
-    # Cheap, dep-free version lookup. No `jq` required.
-    version=$(
-        curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-            | grep -oE '"tag_name":\s*"[^"]+"' | head -1 | cut -d'"' -f4
-    )
+    version="$(resolve_latest_tag)"
     if [[ -z "${version}" ]]; then
-        echo "Failed to resolve latest version. Set JWC_VERSION to pin one." >&2
+        echo "Failed to resolve the latest release tag for ${REPO}." >&2
+        echo >&2
+        echo "If this is a phone, a hotspot or a shared/corporate network, the" >&2
+        echo "likely cause is GitHub's unauthenticated API limit — 60 requests" >&2
+        echo "per hour per IP address, shared with everyone behind the same NAT." >&2
+        echo >&2
+        # No concrete tag here on purpose — hardcoding one means another
+        # version reference to keep in sync, and it only ever appears in an
+        # error message. The releases page is always current.
+        echo "Skip the lookup by pinning a version. Current tags:" >&2
+        echo "  https://github.com/${REPO}/releases" >&2
+        echo >&2
+        echo "  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | JWC_VERSION=vX.Y.Z bash" >&2
+        echo >&2
+        echo "(the variable goes before \`bash\`, not before \`curl\` — it is bash that needs it)" >&2
+        echo >&2
+        echo "Or authenticate, which raises the limit to 5000/hour:" >&2
+        echo "  export GITHUB_TOKEN=<a personal access token>" >&2
         exit 1
     fi
 fi

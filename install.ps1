@@ -34,10 +34,54 @@ if ($env:JWC_VERSION) {
     $Version = $env:JWC_VERSION
 } else {
     Write-Host "Resolving latest release tag for $Repo..."
-    $Version = (Invoke-RestMethod -UseBasicParsing `
-        -Uri "https://api.github.com/repos/$Repo/releases/latest").tag_name
+
+    # Resolve without touching api.github.com. The API caps unauthenticated
+    # clients at 60 requests/hour per IP, and a shared NAT — mobile tethering,
+    # an office, a VPN exit — burns that on everyone's behalf, so the install
+    # dies with a 403 that has nothing to do with this machine.
+    # `/releases/latest` is a plain redirect to the tag page and is not part
+    # of that budget.
+    $Version = $null
+    try {
+        $resp = Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$Repo/releases/latest"
+        # Windows PowerShell 5.1 exposes ResponseUri; PowerShell 7+ moved it
+        # to RequestMessage.RequestUri. Try both rather than pinning a host.
+        $final = $null
+        if ($resp.BaseResponse.PSObject.Properties.Name -contains 'ResponseUri') {
+            $final = $resp.BaseResponse.ResponseUri.AbsoluteUri
+        } elseif ($resp.BaseResponse.RequestMessage) {
+            $final = $resp.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+        }
+        if ($final -match '/releases/tag/(.+)$') { $Version = $Matches[1] }
+    } catch { }
+
     if (-not $Version) {
-        Write-Error "Failed to resolve latest version. Set `$env:JWC_VERSION to pin one."
+        try {
+            $headers = @{}
+            if ($env:GITHUB_TOKEN) { $headers['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
+            $Version = (Invoke-RestMethod -UseBasicParsing -Headers $headers `
+                -Uri "https://api.github.com/repos/$Repo/releases/latest").tag_name
+        } catch { }
+    }
+
+    if (-not $Version) {
+        Write-Error @"
+Failed to resolve the latest release tag for $Repo.
+
+On a tethered, shared or corporate network the usual cause is GitHub's
+unauthenticated API limit - 60 requests per hour per IP address, shared with
+everyone behind the same NAT.
+
+Skip the lookup by pinning a version (current tags:
+https://github.com/$Repo/releases):
+
+  `$env:JWC_VERSION = 'vX.Y.Z'
+  iex "& { `$(irm https://raw.githubusercontent.com/$Repo/main/install.ps1) }"
+
+Or authenticate, which raises the limit to 5000/hour:
+
+  `$env:GITHUB_TOKEN = '<a personal access token>'
+"@
     }
 }
 

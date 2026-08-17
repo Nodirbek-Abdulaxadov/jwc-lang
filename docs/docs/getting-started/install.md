@@ -46,8 +46,35 @@ curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install
 
 Drops `jwc` and `jwc-lsp` into `%LOCALAPPDATA%\jwc\bin` (Windows) or
 `~/.jwc/bin` (Linux) and prints how to add it to `PATH`. The architecture is
-detected from `uname -m`; pass `JWC_VERSION=v0.9.6` to pin a specific release
-or `JWC_INSTALL_DIR=/opt/jwc/bin` to install elsewhere.
+detected from `uname -m`.
+
+| Env var | Effect |
+|---|---|
+| `JWC_VERSION=v0.9.6` | install that tag instead of resolving the latest |
+| `JWC_INSTALL_DIR=/opt/jwc/bin` | install somewhere other than the default |
+| `JWC_MUSL=1` | fetch the static musl build for your architecture |
+| `GITHUB_TOKEN=<pat>` | authenticate the release lookup (see below) |
+
+:::tip Installing from a phone, hotspot or office network
+Resolving "latest" used to call `api.github.com`, which allows **60 requests
+per hour per IP address** to unauthenticated clients. Everyone behind the same
+NAT shares that budget, so a mobile connection often answers:
+
+```
+curl: (22) The requested URL returned error: 403
+```
+
+The installer no longer uses the API for this — it follows the
+`/releases/latest` redirect, which is not rate-limited that way. If you are on
+an older copy of the script, or hit the limit through the fallback, pin the
+version instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | JWC_VERSION=v0.9.6 bash
+```
+
+The variable goes before `bash`, not before `curl` — `bash` is what reads it.
+:::
 
 ## Docker
 
