@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# jwc — one-liner installer (Linux / macOS).
+# jwc — one-liner installer (Linux x86_64 / aarch64).
+#
+# Not macOS: no darwin binary is published, so this script stops with
+# "Unsupported platform: darwin-*" there. The header used to claim macOS,
+# which meant the documented one-liner promised a platform that has never
+# had a build. Build from source or use the Docker image instead.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
 #

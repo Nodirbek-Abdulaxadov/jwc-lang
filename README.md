@@ -1201,10 +1201,14 @@ iwr -useb https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/i
 Both scripts pull the latest tagged release from GitHub Releases, drop the
 binaries into:
 
-| OS | Path |
-|----|------|
-| Linux / macOS | `~/.jwc/bin/` |
-| Windows | `%LOCALAPPDATA%\jwc\bin\` |
+| OS | Architecture | Path |
+|----|----|------|
+| Linux | x86_64, arm64 | `~/.jwc/bin/` |
+| Windows | x86_64 | `%LOCALAPPDATA%\jwc\bin\` |
+
+There is **no prebuilt macOS binary** on either architecture — the installer
+stops with `Unsupported platform: darwin-*`. Build from source (below) or use
+the Docker image; both work on macOS.
 
 and add that directory to your user `PATH`. Open a new terminal afterwards
 if `jwc` isn't immediately on the path.
