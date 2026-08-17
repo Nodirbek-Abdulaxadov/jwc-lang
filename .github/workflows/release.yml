@@ -20,10 +20,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # glibc builds pin the OLDEST supported runner on purpose. A glibc
+          # binary runs on its build glibc or newer, never older, and
+          # `ubuntu-latest` moved to 24.04 — so v0.9.6 shipped binaries
+          # requiring GLIBC_2.39 and they refused to start on Ubuntu 22.04
+          # (2.35), Debian 12 (2.36), RHEL 9 / Amazon Linux 2023 (2.34):
+          #
+          #   jwc: /lib/.../libc.so.6: version `GLIBC_2.39' not found
+          #
+          # 22.04 gives glibc 2.35 and covers all of those. Do not "upgrade"
+          # these to ubuntu-latest — that silently drops distros. Anything
+          # older than 2.35 is served by the musl builds below, which carry
+          # no libc dependency at all.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             short: x86_64-linux
             ext: tar.gz
+          # musl links libc statically, so the runner's glibc is irrelevant
+          # here; these stay on the current image.
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             short: x86_64-unknown-linux-musl
@@ -34,7 +48,7 @@ jobs:
           # Covers Raspberry Pi / Ampere / Graviton hosts and Android shells,
           # where the installer used to dead-end on "Unsupported platform".
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             short: aarch64-linux
             ext: tar.gz
           - target: aarch64-unknown-linux-musl

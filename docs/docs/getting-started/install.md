@@ -52,8 +52,25 @@ detected from `uname -m`.
 |---|---|
 | `JWC_VERSION=v0.9.6` | install that tag instead of resolving the latest |
 | `JWC_INSTALL_DIR=/opt/jwc/bin` | install somewhere other than the default |
-| `JWC_MUSL=1` | fetch the static musl build for your architecture |
+| `JWC_MUSL=1` | fetch the static musl build up front (see below) |
 | `GITHUB_TOKEN=<pat>` | authenticate the release lookup (see below) |
+
+:::note glibc too old? The installer handles it
+A glibc binary runs on the glibc it was built against **or newer**, never
+older. If yours is older you get a clean install followed by:
+
+```
+jwc: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found
+```
+
+The installer runs `jwc --version` after installing and, if that fails,
+re-installs the fully-static **musl** build automatically — it carries no libc
+dependency at all. You do not need to do anything; `JWC_MUSL=1` just skips
+straight to it.
+
+Releases build the glibc binaries on the oldest supported runner (glibc 2.35),
+so Ubuntu 22.04+, Debian 12+, RHEL 9+ and Amazon Linux 2023 use them directly.
+:::
 
 :::tip Installing from a phone, hotspot or office network
 Resolving "latest" used to call `api.github.com`, which allows **60 requests
