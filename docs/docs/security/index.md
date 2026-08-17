@@ -10,8 +10,8 @@ JWC is built for production — the goal is "secure by default" on the
 HTTP / DB / secrets axes that bite hardest in real deployments. This
 page is the index; the per-topic sources of truth live in the repo:
 
-- [`SECURITY.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/SECURITY.md) — vulnerability disclosure policy + supported versions.
-- [`docs/spec/threat-model.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/threat-model.md) — the formal threat model.
+- [`SECURITY.md`](https://github.com/just-web-code/jwc-lang/blob/main/SECURITY.md) — vulnerability disclosure policy + supported versions.
+- [`docs/spec/threat-model.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/threat-model.md) — the formal threat model.
 
 ## SSRF allowlist (`JWC_HTTP_ALLOWLIST`)
 
@@ -124,10 +124,10 @@ What to do instead:
   single-call tree removal even if a path does leak through.
 
 Recorded as an accepted risk in
-[`docs/spec/threat-model.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/threat-model.md)
+[`docs/spec/threat-model.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/threat-model.md)
 row 6. Per-builtin detail: [Console + files](../stdlib/io.md).
 
 ## Reporting a vulnerability
 
 Don't open a public issue. Follow the disclosure flow in
-[`SECURITY.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/SECURITY.md).
+[`SECURITY.md`](https://github.com/just-web-code/jwc-lang/blob/main/SECURITY.md).

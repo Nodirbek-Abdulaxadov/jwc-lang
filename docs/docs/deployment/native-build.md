@@ -47,15 +47,29 @@ Skips cargo entirely. Useful for debugging codegen / opening an issue.
 jwc build --native --target x86_64-unknown-linux-musl --release
 ```
 
-Output goes to `bin/<target>/<profile>/<app>`. Supported triples (v1 allowlist):
+Output goes to `bin/<target>/<profile>/<app>`. Accepted triples (v1 allowlist —
+anything else is rejected before cargo runs):
 
-- `x86_64-unknown-linux-gnu`
-- `x86_64-unknown-linux-musl`
-- `aarch64-unknown-linux-gnu`
-- `aarch64-apple-darwin`
-- `x86_64-pc-windows-msvc`
+| Triple | Exercised |
+|---|---|
+| `x86_64-unknown-linux-gnu` | ✅ CI |
+| `x86_64-unknown-linux-musl` | ✅ CI |
+| `aarch64-unknown-linux-gnu` | ✅ CI |
+| `aarch64-unknown-linux-musl` | ✅ CI |
+| `x86_64-pc-windows-msvc` | ✅ CI |
+| `aarch64-apple-darwin` | ⚠️ accepted, not exercised |
 
-The host toolchain must have the target installed (`rustup target add <triple>`).
+Being on this list means the CLI forwards the triple to cargo — **not** that
+the build will succeed. The host toolchain still needs the target installed
+(`rustup target add <triple>`) and a linker that can produce it.
+
+:::warning `aarch64-apple-darwin` is accepted but untested
+No darwin binary is published, so there is no macOS `jwc` to invoke it from
+without [building the compiler from source](../getting-started/install.md#build-from-source)
+on that Mac first. Cross-linking to darwin from Linux additionally needs a
+macOS SDK (osxcross); cargo alone will not do it. The triple is accepted for
+people who have that set up — treat it as unsupported otherwise.
+:::
 
 ## What doesn't compile yet (native AOT)
 
@@ -75,7 +89,7 @@ The native pipeline is partial. These constructs are interpreter-only today (cle
 
 As of v0.4.0, `hash_password` / `verify_password` are accepted by `jwc build --native`; `env` is native too. Graceful shutdown — `serve(port)` draining in-flight requests on Ctrl+C — also works in native builds.
 
-Roadmap [Phase 4 + Sprint 13](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md) tracks the closing list.
+Roadmap [Phase 4 + Sprint 13](https://github.com/just-web-code/jwc-lang/blob/main/ROADMAP.md) tracks the closing list.
 
 ## Why the AOT binary is fast: monomorphization
 

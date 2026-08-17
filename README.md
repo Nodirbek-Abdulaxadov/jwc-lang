@@ -49,7 +49,7 @@ entities against the last migration and writes the DDL; `jwc build
 Routes are written, not generated — `jwc new --template api` scaffolds a
 working CRUD set you can edit.
 
-Latest release: **v0.9.2**. Status: production-ready for the maintainer's
+Latest release: **v0.9.6**. Status: production-ready for the maintainer's
 own workload; external pilots TBD.
 
 **Building an app with an AI agent?** Hand it
@@ -106,7 +106,7 @@ Standalone HTTP bench against `rust-axum`, `go-fiber`, `dotnet-minimal`,
 - `/cpu` 127 RPS (3rd, ahead of go-fiber)
 
 Full numbers, methodology, and reproduction recipe:
-<https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark>
+<https://github.com/just-web-code/http-framework-benchmark>
 
 ## What's new
 
@@ -1144,7 +1144,7 @@ table) lives in [`docs/docs/deployment/env-vars.md`](docs/docs/deployment/env-va
 JWC's native AOT output is benchmarked against rust-axum, ASP.NET Minimal
 API, go-fiber, node-fastify, python-fastapi, and the LiteAPI Rust/managed
 listeners under equal per-request workloads in
-[http-framework-benchmark](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
+[http-framework-benchmark](https://github.com/just-web-code/http-framework-benchmark)
 (bombardier, sequential isolation, raw results archived, fully
 reproducible). Headlines from the 2026-06-13 clean-environment rerun
 (8 stacks × 3 runs, Run 1 cold numbers):
@@ -1169,13 +1169,13 @@ The roadmap for closing the remaining gap to the statically-compiled stacks
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
 ```
 
 ### Linux x86_64 (musl, static — works on Alpine, distroless, glibc-old)
 
 ```bash
-curl -fsSL https://github.com/Nodirbek-Abdulaxadov/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz | tar xz
+curl -fsSL https://github.com/just-web-code/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m 755 jwc /usr/local/bin/
 sudo install -m 755 jwc-lsp /usr/local/bin/
 jwc --version
@@ -1186,16 +1186,16 @@ A matching `jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside 
 ### Docker (official multi-arch images)
 
 ```bash
-docker pull ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2
-docker run --rm ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2 --version
+docker pull ghcr.io/just-web-code/jwc:0.9.2
+docker run --rm ghcr.io/just-web-code/jwc:0.9.2 --version
 ```
 
-`ghcr.io/nodirbek-abdulaxadov/jwc:<version>` ships the `jwc` CLI on `debian:bookworm-slim` (use as a build stage or a `migrate up` k8s init-container). `ghcr.io/nodirbek-abdulaxadov/jwc-runtime:<version>` is a ~25 MB distroless base for your compiled native app. Full guide + k8s YAML in [`docs/docs/deployment/docker.md`](docs/docs/deployment/docker.md).
+`ghcr.io/just-web-code/jwc:<version>` ships the `jwc` CLI on `debian:bookworm-slim` (use as a build stage or a `migrate up` k8s init-container). `ghcr.io/just-web-code/jwc-runtime:<version>` is a ~25 MB distroless base for your compiled native app. Full guide + k8s YAML in [`docs/docs/deployment/docker.md`](docs/docs/deployment/docker.md).
 
 ### Windows (PowerShell)
 
 ```powershell
-iwr -useb https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.ps1 | iex
 ```
 
 Both scripts pull the latest tagged release from GitHub Releases, drop the
@@ -1227,7 +1227,7 @@ When you want the bleeding-edge `main` rather than a tagged release, or
 to hack on the compiler itself:
 
 ```bash
-git clone https://github.com/Nodirbek-Abdulaxadov/jwc-lang
+git clone https://github.com/just-web-code/jwc-lang
 cd jwc-lang
 ./install-from-source.sh         # Linux / macOS
 ./install-from-source.ps1        # Windows PowerShell

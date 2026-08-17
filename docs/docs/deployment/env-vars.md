@@ -7,7 +7,7 @@ description: "Every JWC_* environment variable the runtime reads, with its defau
 
 Every `JWC_*` env var the runtime reads, with its default, owning
 subsystem, and the release it landed in. The canonical source is
-[`src/config.rs::REGISTRY`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/src/config.rs)
+[`src/config.rs::REGISTRY`](https://github.com/just-web-code/jwc-lang/blob/main/src/config.rs)
 — the boot path walks the same table, prints the rendered values at
 startup, and fails fast if a numeric var was set to a non-numeric
 string. Group order matches the order a production checklist usually

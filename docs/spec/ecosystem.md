@@ -430,7 +430,7 @@ Har birini 2-3 kun ish, single contributor qila oladi.
 
 ### Faza 7 — Ecosystem quality bar
 
-- [ ] Registry'da "Official" badge — `Nodirbek-Abdulaxadov/jwc-*` org'i
+- [ ] Registry'da "Official" badge — `just-web-code/jwc-*` org'i
 - [ ] CI workflow templates: paket repo'siga drop qilinadigan
       `.github/workflows/jwc-package.yml` (lint + test + publish on tag)
 - [ ] Paket security scanning: registry'da `cargo audit`-like

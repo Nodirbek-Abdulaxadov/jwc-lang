@@ -127,6 +127,35 @@ Two details that were wrong independently of architecture:
 The manifest merge verifies both architectures are present and fails the job
 otherwise, so a silently amd64-only image cannot ship again.
 
+### Changed — canonical repository
+
+Every repository URL, clone command, `raw.githubusercontent.com` install
+one-liner and `ghcr.io` image reference now points at **`just-web-code`**.
+`install.sh` and `install.ps1` resolved releases from the pre-move
+`Nodirbek-Abdulaxadov` owner while the workflows published to the new one, so
+the installer and the release pipeline were aimed at different repositories —
+the aarch64 assets added above would have landed somewhere the installer never
+looked.
+
+Historical mentions are deliberately left alone: the workflow comments
+explaining *why* the namespace is resolved at run time, and the changelog
+entries recording the old VS Code publisher ID, are the reason those
+workarounds exist.
+
+### Fixed — `--target` allowlist had drifted
+
+`aarch64-unknown-linux-musl` was missing from `KNOWN_TARGETS`, so an arm64 host
+could install `jwc` and still be refused the static app build its x86_64
+counterpart gets. Added, with a note in the source that the two lists must not
+drift again.
+
+The docs claimed the allowlist as a flat "supported triples" list.
+`aarch64-apple-darwin` is on it and exercised by nothing — no darwin binary is
+published, so there is no macOS `jwc` to invoke it from without building the
+compiler from source first, and cross-linking to darwin from Linux needs a
+macOS SDK. It stays accepted; the docs now say plainly which triples CI
+actually covers and which one does not.
+
 ### Verified, not changed
 
 TODO.md's `validate body` entry — `pattern(...)` not enforced against a
@@ -1887,7 +1916,7 @@ remaining Phase 6 quick-wins from `PRODUCTION_READINESS_PLAN.md`.
   Actions, and both npm trees (`docs/`, `vscode-extension/`), with
   minor/patch grouped.
 - **README — Performance section** linking the
-  [http-framework-benchmark](https://github.com/Nodirbek-Abdulaxadov/http-framework-benchmark)
+  [http-framework-benchmark](https://github.com/just-web-code/http-framework-benchmark)
   repo with the v0.4.x headline numbers.
 
 ### Changed

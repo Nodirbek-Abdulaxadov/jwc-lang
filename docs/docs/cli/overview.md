@@ -32,7 +32,7 @@ Every subcommand in one place. `jwc --help` and `jwc <sub> --help` print the up-
 | `jwc build` | Bundle interpreter + launcher into `bin/{debug,release}/`. |
 | `jwc build --native` | Real AOT — generates Rust source, runs cargo. |
 | `jwc build --native --emit-rust-source` | Dump the generated Rust to `bin/<profile>/<app>.generated.rs` and skip cargo. |
-| `jwc build --native --target <triple>` | Cross-compile. Triple must be in the supported list (`linux-gnu/musl`, `darwin`, `windows-msvc`, …). |
+| `jwc build --native --target <triple>` | Cross-compile. The triple must be one of the six [known targets](../deployment/native-build.md#cross-compile) — anything else is rejected up front. |
 
 ## Database
 

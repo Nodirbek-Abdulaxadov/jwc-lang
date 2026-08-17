@@ -9,7 +9,7 @@ description: "Optional distributed tracing. JWC exports spans over OTLP HTTP to 
 > and the `JWC_OTLP_ENDPOINT` env var — default builds don't include it
 > and default runs don't emit spans. OTLP is an ops tool, not a JWC
 > ergonomics surface; it stays opt-in by policy (see
-> [`ROADMAP.md` Non-goals](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md)).
+> [`ROADMAP.md` Non-goals](https://github.com/just-web-code/jwc-lang/blob/main/ROADMAP.md)).
 > Skip this page unless you already run Jaeger / Tempo / Honeycomb.
 
 JWC exports spans via OTLP HTTP — point it at any

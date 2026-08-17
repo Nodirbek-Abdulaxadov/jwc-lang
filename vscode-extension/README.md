@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/vscode-extension/icon.png" alt="JWC" width="128">
+  <img src="https://raw.githubusercontent.com/just-web-code/jwc-lang/main/vscode-extension/icon.png" alt="JWC" width="128">
 </p>
 
 # JWC Language for VS Code
@@ -48,7 +48,7 @@ Completion is context-aware:
 Install the `jwc` toolchain (which ships `jwc-lsp`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
 ```
 
 The extension auto-discovers `jwc-lsp` on `PATH` or under `~/.jwc/bin`. Override via the `jwc.lspPath` setting.

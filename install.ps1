@@ -2,7 +2,7 @@
 <#
     jwc — one-liner installer (Windows PowerShell).
 
-    iwr -useb https://raw.githubusercontent.com/Nodirbek-Abdulaxadov/jwc-lang/main/install.ps1 | iex
+    iwr -useb https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.ps1 | iex
 
     Override targets via env:
       $env:JWC_VERSION          install a specific release tag (e.g. v0.2.0)
@@ -14,7 +14,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'Nodirbek-Abdulaxadov/jwc-lang'
+$Repo = 'just-web-code/jwc-lang'
 $InstallDir = if ($env:JWC_INSTALL_DIR) {
     $env:JWC_INSTALL_DIR
 } else {

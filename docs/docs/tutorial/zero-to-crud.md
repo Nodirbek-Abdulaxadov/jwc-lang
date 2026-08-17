@@ -175,7 +175,7 @@ JWC ships an official Docker base image:
 # Dockerfile
 cat > Dockerfile <<'EOF'
 # Stage 1: build the native binary inside the JWC base.
-FROM ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2 AS build
+FROM ghcr.io/just-web-code/jwc:0.9.2 AS build
 WORKDIR /src
 COPY . .
 RUN jwc build --native --release
@@ -229,7 +229,7 @@ spec:
       initContainers:
         - name: migrate
           # The official JWC image. Carries `jwc migrate`.
-          image: ghcr.io/nodirbek-abdulaxadov/jwc:0.9.2
+          image: ghcr.io/just-web-code/jwc:0.9.2
           args: ["migrate", "up"]
           env:
             - name: DATABASE_URL
@@ -280,7 +280,7 @@ for a multi-row CRUD path on a 3-field entity.
 | JWT login + middleware-guarded routes | [`jwc new myapp --template auth`](../getting-started/templates.md) |
 | Background email / image / webhook handlers | [`jwc new myapp --template jobs`](../getting-started/templates.md) |
 | OTLP traces to Jaeger / Tempo | [Observability + OTLP](../deployment/otlp.md) |
-| Pull packages from the registry | [`jwc add jwc-...`](../getting-started/install.md), full ecosystem map in [`docs/spec/ecosystem.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/ecosystem.md) |
+| Pull packages from the registry | [`jwc add jwc-...`](../getting-started/install.md), full ecosystem map in [`docs/spec/ecosystem.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/ecosystem.md) |
 | Editor support (LSP) | [Editor setup](../getting-started/editor-setup.md) |
 | Static binary for Alpine / distroless | [musl static](../deployment/musl-static.md) |
 
@@ -304,7 +304,7 @@ if you've already validated the string yourself.
 
 **`error[E021]: cannot reference private function 'foo' across namespaces`**
 Mark the function `public` in its declaration. The visibility rule is
-documented in [`docs/spec/visibility.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/docs/spec/visibility.md).
+documented in [`docs/spec/visibility.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/visibility.md).
 
 ---
 

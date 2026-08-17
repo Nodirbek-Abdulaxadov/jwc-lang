@@ -66,4 +66,4 @@ try {
 
 ## Timeouts
 
-No per-call timeout flag yet — wrap in `sleep_ms` + custom logic, or set a global tokio timeout via the runtime. Issue tracking it on the [roadmap](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md).
+No per-call timeout flag yet — wrap in `sleep_ms` + custom logic, or set a global tokio timeout via the runtime. Issue tracking it on the [roadmap](https://github.com/just-web-code/jwc-lang/blob/main/ROADMAP.md).

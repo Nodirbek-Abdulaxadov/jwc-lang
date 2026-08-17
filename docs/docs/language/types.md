@@ -5,7 +5,7 @@ description: "The JWC type set and how each type maps to a Postgres column, wher
 
 # Types
 
-JWC has a small fixed type set. Types appear on function parameters, return types, and entity columns. Local variables are untyped today (inferred at the runtime); compile-time inference is on the [roadmap](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/ROADMAP.md).
+JWC has a small fixed type set. Types appear on function parameters, return types, and entity columns. Local variables are untyped today (inferred at the runtime); compile-time inference is on the [roadmap](https://github.com/just-web-code/jwc-lang/blob/main/ROADMAP.md).
 
 ## Primitives
 

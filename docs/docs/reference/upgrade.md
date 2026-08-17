@@ -18,7 +18,7 @@ ships now so the CLI shape is stable and rules can land in v0.5 / v0.6
 without breaking your `jwc upgrade && jwc test && jwc publish` workflow.
 
 The first scheduled rule will retire `--no-typecheck` (see
-[`DEPRECATION.md`](https://github.com/Nodirbek-Abdulaxadov/jwc-lang/blob/main/DEPRECATION.md))
+[`DEPRECATION.md`](https://github.com/just-web-code/jwc-lang/blob/main/DEPRECATION.md))
 in v0.6.0. When that lands, `jwc upgrade` will scan for build / CI scripts
 that pass `--no-typecheck` and rewrite them (or leave a clear failure when
 the flag is in a non-recognised template).

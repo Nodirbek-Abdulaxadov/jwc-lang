@@ -19,14 +19,14 @@ runtime). Build context is the **repo root** (so the `COPY docs/...`
 paths resolve correctly):
 
 ```bash
-docker build -f docs/Dockerfile -t ghcr.io/nodirbek-abdulaxadov/jwc-docs:latest .
+docker build -f docs/Dockerfile -t ghcr.io/just-web-code/jwc-docs:latest .
 ```
 
 ## CI / CD
 
 `.github/workflows/docs.yml` runs on every push to `main` touching `docs/`:
 
-1. Builds the image and pushes to `ghcr.io/nodirbek-abdulaxadov/jwc-docs`
+1. Builds the image and pushes to `ghcr.io/just-web-code/jwc-docs`
    with two tags: `main-<short-sha>` and `latest`.
 2. Checks out **musanna-soft/k8s-gitops** and rewrites
    `apps/jwc-docs/deployment.yaml` to pin the new SHA tag.
@@ -49,7 +49,7 @@ the namespace):
 kubectl create secret docker-registry ghcr-secret \
   --namespace=jwc \
   --docker-server=ghcr.io \
-  --docker-username=nodirbek-abdulaxadov \
+  --docker-username=<your-github-username> \
   --docker-password=<PAT-with-read:packages> \
   --docker-email=you@example.com
 ```

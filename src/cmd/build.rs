@@ -25,12 +25,26 @@ use crate::{cmd, native_build, project};
 /// than letting cargo fail later with a less actionable error. Passing
 /// through arbitrary triples is deferred behind a future
 /// `--target-passthrough` flag.
+///
+/// Being on this list means the CLI forwards the triple to cargo — not
+/// that a build will succeed. The host still needs
+/// `rustup target add <triple>` and a working linker for it.
+///
+/// `aarch64-apple-darwin` is the odd one out: nothing exercises it. The
+/// release matrix publishes no darwin binary, so there is no macOS `jwc`
+/// to run it from without building the compiler from source first, and
+/// cross-linking to darwin from Linux needs a macOS SDK. It stays
+/// accepted, but "we actually exercise this" does not hold for it.
 pub const KNOWN_TARGETS: &[&str] = &[
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
     "aarch64-unknown-linux-gnu",
+    // Shipped as a jwc binary since 0.9.6, but missing here — so an arm64
+    // host could install jwc and still not ask for the static app build
+    // its x86_64 counterpart gets. The two lists should not drift.
+    "aarch64-unknown-linux-musl",
 ];
 
 /// Pre-flight validation for `--target` flag. Pulled out so the unit
