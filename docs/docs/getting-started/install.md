@@ -22,8 +22,10 @@ running the installer. See [musl static builds](../deployment/musl-static.md).
 
 :::note macOS has no prebuilt binary
 There is no `jwc` download for macOS on either architecture — the installer
-will stop with `Unsupported platform: darwin-arm64`. Build from source or use
-the Docker image; both work on macOS. Prebuilt macOS binaries are a
+will stop with `Unsupported platform: darwin-arm64`.
+[Build from source](#build-from-source); that needs only a Rust toolchain. The
+Docker image also runs on macOS, but see the authentication note below.
+Prebuilt macOS binaries are a
 [declared non-goal](https://github.com/just-web-code/jwc-lang/blob/main/ROADMAP.md)
 for now, not an oversight.
 :::
@@ -49,8 +51,18 @@ or `JWC_INSTALL_DIR=/opt/jwc/bin` to install elsewhere.
 
 ## Docker
 
-Needs no toolchain, and covers macOS and every other platform. The images are
-multi-arch (`linux/amd64` and `linux/arm64`):
+Needs no Rust toolchain, and covers macOS and every other platform. The images
+are multi-arch (`linux/amd64` and `linux/arm64`).
+
+:::warning Requires authentication today
+The GHCR packages are **private**, so an anonymous `docker pull` fails with
+`denied`. Log in first with a GitHub personal access token carrying
+`read:packages`:
+
+```bash
+echo "$GITHUB_PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
+```
+:::
 
 ```bash
 docker run --rm -it ghcr.io/just-web-code/jwc:latest --help

@@ -59,8 +59,12 @@ case "${os}-${arch}" in
         echo "  git clone https://github.com/${REPO}.git" >&2
         echo "  cd jwc-lang && ./install-from-source.sh" >&2
         echo >&2
-        echo "Or run the published image, which needs no toolchain:" >&2
-        echo "  docker run --rm -it ghcr.io/just-web-code/jwc:latest --help" >&2
+        # Deliberately not advertising `docker run ghcr.io/...` here: the
+        # published packages are private, so an anonymous pull fails and the
+        # suggestion would be the same kind of unfollowable advice this
+        # message was rewritten to stop giving. The docs page carries the
+        # authenticated variant.
+        echo "Other options: https://jwc.1kb.uz/getting-started/install" >&2
         exit 1
         ;;
 esac

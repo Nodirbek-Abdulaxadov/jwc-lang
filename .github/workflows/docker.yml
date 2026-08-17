@@ -149,12 +149,39 @@ jobs:
           owner="${{ github.repository_owner }}"
           echo "IMAGE_NAMESPACE=${owner,,}" >> "$GITHUB_ENV"
 
-      - name: Download digests
+      # Exact artifact names, deliberately not a glob. `pattern:
+      # digests-jwc-*` also matched `digests-jwc-runtime-amd64` — one image's
+      # name is a prefix of the other's — so the `jwc` merge collected four
+      # digests, two of which belong to a different repository, and
+      # imagetools failed with
+      #   ERROR: ghcr.io/just-web-code/jwc@sha256:1ee0569e…: not found
+      # `jwc-runtime` merged fine because its prefix happens to be unique,
+      # which is exactly how a bug like this hides. Exact names cannot
+      # collide; adding an architecture means adding a step, which is
+      # visible rather than silent.
+      - name: Download amd64 digest
         uses: actions/download-artifact@v4
         with:
+          name: digests-${{ matrix.image.name }}-amd64
           path: /tmp/digests
-          pattern: digests-${{ matrix.image.name }}-*
-          merge-multiple: true
+
+      - name: Download arm64 digest
+        uses: actions/download-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-arm64
+          path: /tmp/digests
+
+      # Cheap assertion with a legible message. The failure above surfaced as
+      # a registry 404 about a digest, which says nothing about the real
+      # cause; a count check names it immediately.
+      - name: Check digest count
+        working-directory: /tmp/digests
+        run: |
+          found=$(ls -1 | wc -l)
+          if [ "$found" -ne 2 ]; then
+            echo "::error::expected 2 digests (amd64, arm64) for ${{ matrix.image.name }}, found ${found}: $(ls -1 | tr '\n' ' ')"
+            exit 1
+          fi
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

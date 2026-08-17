@@ -1185,9 +1185,13 @@ A matching `jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside 
 
 ### Docker (official multi-arch images)
 
+`linux/amd64` + `linux/arm64`. The packages are currently **private**, so an
+anonymous pull is denied — log in with a PAT carrying `read:packages` first:
+
 ```bash
-docker pull ghcr.io/just-web-code/jwc:0.9.2
-docker run --rm ghcr.io/just-web-code/jwc:0.9.2 --version
+echo "$GITHUB_PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
+docker pull ghcr.io/just-web-code/jwc:0.9.6
+docker run --rm ghcr.io/just-web-code/jwc:0.9.6 --version
 ```
 
 `ghcr.io/just-web-code/jwc:<version>` ships the `jwc` CLI on `debian:bookworm-slim` (use as a build stage or a `migrate up` k8s init-container). `ghcr.io/just-web-code/jwc-runtime:<version>` is a ~25 MB distroless base for your compiled native app. Full guide + k8s YAML in [`docs/docs/deployment/docker.md`](docs/docs/deployment/docker.md).

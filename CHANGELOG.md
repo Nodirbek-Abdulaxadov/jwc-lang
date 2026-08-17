@@ -127,6 +127,37 @@ Two details that were wrong independently of architecture:
 The manifest merge verifies both architectures are present and fails the job
 otherwise, so a silently amd64-only image cannot ship again.
 
+### Fixed — the multi-arch Docker merge (0.9.6 tag)
+
+The `v0.9.6` tag built both architectures for both images and then failed to
+publish `jwc`:
+
+```
+ERROR: ghcr.io/just-web-code/jwc@sha256:1ee0569e…: not found
+```
+
+The merge job selected its digests with `pattern: digests-<image>-*`. One image
+is named `jwc` and the other `jwc-runtime`, so `digests-jwc-*` matched
+`digests-jwc-runtime-amd64` too: the `jwc` merge collected four digests, two of
+them belonging to a different repository, and the registry rejected them.
+`jwc-runtime` published fine because its prefix happens to be unique — which is
+how the bug hid in a green job next to a red one.
+
+Digests are now downloaded by exact artifact name, and a count check fails with
+a legible message instead of a registry 404 that names nothing.
+
+Binaries were unaffected: `Release jwc binaries` published all five targets,
+aarch64 included.
+
+### Known — the GHCR packages are private
+
+`docker pull ghcr.io/just-web-code/jwc` is denied for anonymous users; a
+GitHub PAT with `read:packages` is required. The docs said Docker was the
+no-toolchain escape hatch for macOS and other unsupported platforms, which was
+wrong as written — they now show the `docker login` step, and `install.sh` no
+longer suggests a `docker run` that would fail. Making the packages public
+would remove the step; that is a repository setting, not a code change.
+
 ### Changed — canonical repository
 
 Every repository URL, clone command, `raw.githubusercontent.com` install
