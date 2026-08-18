@@ -75,19 +75,27 @@ people who have that set up — treat it as unsupported otherwise.
 
 The native pipeline is partial. These constructs are interpreter-only today (clear error at build time):
 
-- **`jwt_sign` / `jwt_verify`** — JWT signing/verification (an app using
-  Bearer auth builds its query layer native but not its auth path; run it
-  under `jwc run` / `jwc serve`).
+- **The background-job queue, all of it** — `register_job_handler`,
+  `enqueue`, `enqueue_urgent`, `job_count`, `dlq_count`, `dlq_drain`. (This
+  entry used to read "some queue primitives"; it is every one of them.)
+- **`dispatch`**, **`http_post`**, **`send_email`**, **`db_query`**,
+  **`set_json_field`**
 - Class methods on user-defined `class` (DTOs work; methods don't)
-- `cache_*` family
-- Some queue primitives
 - A few **query forms** on the native path only: a dynamic in-list
   (`where col in (@arr)` → `= ANY`) and a `where` on a *joined* entity's
   column. The rest of the Query Layer — nav eager-load (all kinds + nested),
   grouped aggregation, explicit `join`, `==?` optional predicate — **does**
   compile native as of v0.6.x.
 
-As of v0.4.0, `hash_password` / `verify_password` are accepted by `jwc build --native`; `env` is native too. Graceful shutdown — `serve(port)` draining in-flight requests on Ctrl+C — also works in native builds.
+That list is the whole of it — eleven built-ins out of 117. Everything else
+compiles native, including several this page used to disclaim: `jwt_sign` /
+`jwt_verify` (so a Bearer-auth app *does* build native now), the entire
+`cache_*` family, `hash_password` / `verify_password`, and `env`. The
+authority is the `native` flag in `src/builtins.rs`, rendered per built-in in
+[the builtins reference](../reference/builtins.md) — prefer that over prose
+anywhere the two disagree.
+
+Graceful shutdown — `serve(port)` draining in-flight requests on Ctrl+C — also works in native builds.
 
 Roadmap [Phase 4 + Sprint 13](https://github.com/just-web-code/jwc-lang/blob/main/ROADMAP.md) tracks the closing list.
 

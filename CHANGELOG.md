@@ -258,7 +258,7 @@ them interpreter-side: `raw_sql` reading only a text first column, unqualified
 calls into a dependency namespace, Windows binding `[::]` without clearing
 `IPV6_V6ONLY`, and `return { status: N, ... }` answering 200.
 
-Thirteen built-ins remain interpreter-only, so `--native` is still not a
+Eleven built-ins remain interpreter-only, so `--native` is still not a
 superset of `jwc run`: `dispatch`, `http_post`, `send_email`, `db_query`,
 `set_json_field`, and the job queue (`register_job_handler`, `enqueue`,
 `enqueue_urgent`, `job_count`, `dlq_count`, `dlq_drain`). They now fail with
