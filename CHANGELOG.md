@@ -3,6 +3,58 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased] — the v1 redesign lands as documentation
+
+No code changes. The language design for 1.0 is now in the repository, and
+`ROADMAP.md` is a different document.
+
+### Added — `docs/spec/v1/`
+
+- **`design.md`** — the redesigned vocabulary and semantics. `entity` becomes
+  `table`, `dbcontext` becomes `database`, navigation properties and `with`
+  are replaced by explicit `join ... as one/many` written in the query, and
+  projections (`as { }`) replace both the mapper and the response DTO. `new X
+  from Y`, `patch`, `validate body`, `group`, `mount` and `dome` are gone.
+- **`gaps.md`** — 44 confirmed holes in that design, from 138 candidates put
+  through adversarial triage (93 rejected). 25 are blockers. Among them: the
+  same table cannot be joined twice; `where col == param` with matching names
+  silently drops tenant scoping; a LEFT JOIN with no match has no defined
+  result shape; there is no way to set a response header; `private` is
+  contradicted by the projection syntax; renames are inferred and therefore
+  become DROP + ADD.
+- **`error-model.md`** — the Go-style-errors-versus-exceptions question,
+  worked through and decided. Automatic propagation stays, but error types get
+  a declaration site and a function's raise set is inferred over the call
+  graph, so `throw NotFund("...")` stops being a valid program that returns
+  500. It also found a live bug in the sample: the webhook's select-then-insert
+  race produces a 400, which Stripe reads as "retry", in the one place where
+  "already happened" is a normal outcome.
+- **`sample/`** — a ~1100-line app in the new syntax: 4 schemas, 11 tables,
+  5 views, 4 services, 25 endpoints. It is the design's only full exercise and
+  it is *not* yet spec-conformant; its known defects are listed in its README
+  because the gap analysis was found through them.
+
+### Changed
+
+- **`ROADMAP.md` is replaced.** The old phase list (Phase 0–11) and release
+  plan (v0.10.0–v0.14.0) described the old language and are archived at
+  `docs/spec/roadmap-0.9.x.md`. The new roadmap runs v0.20.0 → v1.0.0 in
+  twelve releases, starting with a specification release that writes down 56
+  unanswered semantic questions before any code is written.
+- **`--native` is scheduled to be frozen for 1.0** and to return in 1.1,
+  rewritten. While the semantics are still moving, a second backend doubles
+  every query-compiler change; the interpreter becomes the single reference
+  until the syntax freezes.
+- **README states native platform coverage honestly.** CI runs on
+  `ubuntu-latest` only, so "native works on Windows" means the code path
+  exists and the triple is accepted — not that the produced binary was ever
+  verified. The table says which is which per platform.
+- Stale `v0.9.2` download URLs and `JWC_VERSION` examples corrected to
+  `v0.9.6`.
+- `ROADMAP.md Phase 4` references in `src/native_build.rs`, `src/main.rs` and
+  the README repointed at the archived roadmap, since the new one has no
+  phases.
+
 ## [0.9.6] — A harness that can fail both backends at once
 
 0.9.5 fixed five interpreter/native divergences that an outside user found by

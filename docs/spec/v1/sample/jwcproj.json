@@ -1,0 +1,8 @@
+{
+  "name": "saas",
+  "version": "0.1.0",
+  "entry": "src/app.jwc",
+  "dependencies": {
+    "redis": "^1.2.0"
+  }
+}

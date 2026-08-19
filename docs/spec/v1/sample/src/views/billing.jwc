@@ -1,0 +1,53 @@
+namespace views.billing;
+
+import app;
+
+
+view SubscriptionDetail of App.billing {
+    select Subscriptions from App.billing.Subscriptions
+        left join Plans on Plans.id == Subscriptions.plan_id as one plan
+        left join Orgs  on Orgs.id == Subscriptions.org_id   as one org
+        as {
+            id,
+            org_id,
+            status,
+            current_period_start,
+            current_period_end,
+            cancel_at,
+            plan: { id, code, name, price_cents, currency, interval },
+            org:  { id, slug, name }
+        }
+}
+
+view InvoiceDetail of App.billing {
+    select Invoices from App.billing.Invoices
+        left join InvoiceLines on InvoiceLines.invoice_id == Invoices.id as many lines
+        left join Payments     on Payments.invoice_id == Invoices.id     as many payments
+        as {
+            id,
+            org_id,
+            number,
+            amount_cents,
+            currency,
+            status,
+            issued_at,
+            due_at,
+            paid_at,
+            lines:    { id, description, quantity, unit_cents },
+            payments: { id, provider, provider_ref, amount_cents, status, created_at }
+        }
+}
+
+view OrgBillingSummary of App.billing {
+    select Orgs from App.org.Orgs
+        left join Invoices on Invoices.org_id == Orgs.id
+        group by Orgs.id
+        as {
+            org_id:      id,
+            slug,
+            invoice_count: count(Invoices.id),
+            open_count:    count(Invoices.id where Invoices.status == InvoiceStatus.open),
+            paid_cents:    sum(Invoices.amount_cents where Invoices.status == InvoiceStatus.paid),
+            oldest_due:    min(Invoices.due_at where Invoices.status == InvoiceStatus.open)
+        }
+}

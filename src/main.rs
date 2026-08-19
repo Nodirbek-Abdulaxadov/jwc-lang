@@ -108,7 +108,7 @@ enum Command {
     ///
     /// Pass --native to produce a real AOT-compiled binary via the embedded Rust
     /// toolchain. Native compilation is being rolled out incrementally; trivial
-    /// programs work today, full coverage tracks Phase 4 in ROADMAP.md.
+    /// programs work today; coverage is tracked in docs/spec/roadmap-0.9.x.md Phase 4.
     #[command(alias = "bundle")]
     Build {
         #[arg(long)]

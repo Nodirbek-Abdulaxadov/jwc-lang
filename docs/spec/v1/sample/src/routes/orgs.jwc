@@ -1,0 +1,87 @@
+namespace routes.orgs;
+
+import dto.org;
+import services.org;
+import middleware.auth;
+import middleware.audit;
+
+
+routes "/api/v1/orgs" use RequireAuth, Audit {
+
+    route POST "" {
+        let owner_id = context.get("account_id");
+        let req      = request.body() as OrgCreate;
+        let org      = OrgService.create(req, owner_id);
+
+        return created(json(org));
+    }
+}
+
+routes "/api/v1/orgs/{org_id}" use RequireAuth, RequireOrgMember, Audit {
+
+    route GET "" {
+        let org = OrgService.detail(@org_id);
+
+        return json(org);
+    }
+
+    route PATCH "" use RequireOrgAdmin {
+        let req = request.body() as OrgEdit;
+        let org = OrgService.update(@org_id, req);
+
+        return json(org);
+    }
+
+    route DELETE "" use RequireOrgAdmin {
+        let role = context.get("role");
+
+        OrgService.remove(@org_id, role);
+
+        return noContent();
+    }
+}
+
+routes "/api/v1/orgs/{org_id}/members" use RequireAuth, RequireOrgMember, Audit {
+
+    route GET "" {
+        let members = OrgService.members(@org_id);
+
+        return json(members);
+    }
+
+    route PATCH "{account_id}" use RequireOrgAdmin {
+        let req    = request.body() as MemberEdit;
+        let member = OrgService.set_role(@org_id, @account_id, req);
+
+        return json(member);
+    }
+
+    route DELETE "{account_id}" use RequireOrgAdmin {
+        OrgService.remove_member(@org_id, @account_id);
+
+        return noContent();
+    }
+}
+
+routes "/api/v1/orgs/{org_id}/invites" use RequireAuth, RequireOrgMember, RequireOrgAdmin, Audit {
+
+    route GET "" {
+        let invites = OrgService.invites(@org_id);
+
+        return json(invites);
+    }
+
+    route POST "" {
+        let inviter_id = context.get("account_id");
+        let req        = request.body() as InviteCreate;
+        let invite     = OrgService.invite(@org_id, req, inviter_id);
+
+        return created(json(invite));
+    }
+
+    route DELETE "{id}" {
+        OrgService.revoke_invite(@org_id, @id);
+
+        return noContent();
+    }
+}

@@ -1,0 +1,37 @@
+namespace middleware.ratelimit;
+
+import redis;
+
+
+middleware RateLimit {
+    let ip   = request.client_ip();
+    let path = request.path();
+    let key  = "rl:" + path + ":" + ip;
+
+    let allowed = redis.rate_limit(key, 100, 60);
+
+    if (!allowed) {
+        return statusCode(429, { error: "juda ko'p so'rov" });
+    }
+}
+
+middleware StrictRateLimit {
+    let ip  = request.client_ip();
+    let key = "rl:strict:" + ip;
+
+    let allowed = redis.rate_limit(key, 5, 300);
+
+    if (!allowed) {
+        return statusCode(429, { error: "juda ko'p urinish, keyinroq qayting" });
+    }
+}
+
+middleware VerifySignature {
+    let signature = request.header("X-Signature");
+    let payload   = request.raw_body();
+    let secret    = env("STRIPE_WEBHOOK_SECRET");
+
+    let valid = verify_signature(payload, signature, secret);
+
+    if (!valid) { return unauthorized("imzo yaroqsiz"); }
+}

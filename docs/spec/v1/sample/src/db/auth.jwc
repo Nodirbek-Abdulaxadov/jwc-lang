@@ -1,0 +1,45 @@
+namespace db.auth;
+
+import app;
+
+
+table Accounts of App.auth {
+    id             bigint primary key identity;
+    email          varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan",
+                                pattern(r"^[^@]+@[^@]+\.[^@]+$");
+    display_name   varchar(80) minLength(2);
+    password_hash  varchar(255) private;
+    email_verified boolean default false;
+    created_at     timestamptz default now();
+
+    index on (created_at);
+}
+
+table Sessions of App.auth {
+    id         bigint primary key identity;
+    account_id bigint;
+    token_hash varchar(255) private, unique;
+    user_agent varchar(255)?;
+    ip         inet?;
+    expires_at timestamptz;
+    created_at timestamptz default now();
+
+    foreign key (account_id) references App.auth.Accounts (id) on delete cascade;
+
+    index on (account_id, expires_at);
+}
+
+table ApiKeys of App.auth {
+    id           bigint primary key identity;
+    org_id       bigint;
+    name         varchar(80);
+    key_hash     varchar(255) private, unique;
+    scopes       text[];
+    last_used_at timestamptz?;
+    revoked_at   timestamptz?;
+    created_at   timestamptz default now();
+
+    foreign key (org_id) references App.org.Orgs (id) on delete cascade;
+
+    index on (org_id) where revoked_at == null;
+}

@@ -1,0 +1,29 @@
+namespace middleware.audit;
+
+import app;
+
+
+middleware Audit {
+    after {
+        let method = request.method();
+        let status = response.status();
+
+        let is_read   = method == "GET";
+        let is_failed = status >= 400;
+
+        if (is_read or is_failed) { return; }
+
+        let org_id   = context.get("org_id");
+        let actor_id = context.get("account_id");
+        let path     = request.path();
+        let ip       = request.client_ip();
+
+        log_insert(App.audit.Events, {
+            org_id   = org_id,
+            actor_id = actor_id,
+            action   = method,
+            entity   = path,
+            ip       = ip
+        });
+    }
+}

@@ -1,0 +1,64 @@
+namespace services.auth;
+
+import app;
+import dto.auth;
+
+
+service AuthService {
+
+    function register(req: Register) {
+        let password_hash = hash.password(req.password);
+
+        return insert into App.auth.Accounts {
+            ...req,
+            password_hash = password_hash
+        } as { id, email, display_name, created_at };
+    }
+
+    function login(req: Login) {
+        let account = select Accounts from App.auth.Accounts
+            where Accounts.email == req.email
+            as { id, password_hash }
+            first;
+
+        if (account == null) { throw Forbidden("email yoki parol xato"); }
+
+        let ok = hash.verify(req.password, account.password_hash);
+
+        if (!ok) { throw Forbidden("email yoki parol xato"); }
+
+        let secret      = env("JWT_SECRET");
+        let ttl_minutes = int(env("JWT_TTL_MINUTES") ?? "60");
+        let token       = jwt.sign({ sub: account.id }, secret, ttl_minutes);
+
+        return {
+            token:      token,
+            expires_in: ttl_minutes * 60
+        };
+    }
+
+    function profile(account_id) {
+        let account = select Accounts from App.auth.Accounts
+            where Accounts.id == account_id
+            as { id, email, display_name, email_verified, created_at }
+            first;
+
+        if (account == null) { throw NotFound("akkaunt topilmadi"); }
+
+        return account;
+    }
+
+    function update_profile(account_id, req: AccountEdit) {
+        return update App.auth.Accounts
+            set ...req
+            where Accounts.id == account_id
+            as { id, email, display_name }
+            first;
+    }
+
+    function orgs_of(account_id) {
+        return select from App.org.MemberAccess
+            where account_id == account_id
+            orderby org.name asc;
+    }
+}

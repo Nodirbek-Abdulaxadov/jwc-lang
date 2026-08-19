@@ -1,0 +1,29 @@
+namespace app;
+
+database App : Postgres {
+    init() {
+        pool_size         = int(env("DB_POOL") ?? "20");
+        statement_timeout = "10s";
+        tls               = env("DB_TLS") == "1";
+    }
+}
+
+schema auth    of App;
+schema org     of App;
+schema billing of App;
+schema audit   of App;
+
+
+errorHandler (e) {
+    catch NotFound     (err) { return notFound(err.message); }
+    catch Conflict     (err) { return statusCode(409, { error: err.message }); }
+    catch Forbidden    (err) { return forbidden(err.message); }
+    catch BadRequest   (err) { return badRequest({ error: err.message }); }
+    catch ConstraintViolation (err) { return badRequest({ error: err.message }); }
+    catch (err)              { return internalError(); }
+}
+
+
+function main() {
+    serve(int(env("PORT") ?? "8080"));
+}

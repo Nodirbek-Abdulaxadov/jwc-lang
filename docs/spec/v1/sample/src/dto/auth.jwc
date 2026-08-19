@@ -1,0 +1,17 @@
+namespace dto.auth;
+
+
+class Register {
+    email        varchar(255) required, pattern(r"^[^@]+@[^@]+\.[^@]+$");
+    display_name varchar(80)  required, minLength(2);
+    password     varchar(200) required, minLength(10);
+}
+
+class Login {
+    email    varchar(255) required;
+    password varchar(200) required;
+}
+
+class AccountEdit {
+    display_name varchar(80)? minLength(2);
+}
