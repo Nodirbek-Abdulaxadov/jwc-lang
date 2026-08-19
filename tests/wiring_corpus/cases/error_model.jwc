@@ -1,0 +1,76 @@
+namespace error_model;
+
+-- E7 (middleware.md §5.5) — an `after` block's raise set must be empty.
+-- There is no handler left once the response is decided.
+middleware BadAudit {
+    after {
+        insert into App.s.Notes { org_id = 1, body = "x" };  -- expect: E0811
+    }
+}
+
+middleware GoodAudit {
+    after {
+        insert into App.s.Notes { org_id = 1, body = "x" }
+            catch BadRequest (e) { return; };
+    }
+}
+
+service Svc {
+    -- E2 — the raise set is inferred: own throws, `or throw`s, callee sets,
+    -- and the constraints of tables written.
+    function inner(id: bigint) {
+        return select N from App.s.Notes where id == $id as { id } first
+            or throw NotFound("yo'q");
+    }
+
+    function outer(id: bigint) {
+        return Svc.inner($id);
+    }
+
+    -- E10 — a messaged unique promotes to Conflict; `on conflict do
+    -- nothing` is what stops it being raised (writes.md §2.3).
+    function writes_a_unique(slug: text) {
+        return insert into App.s.Orgs { slug = $slug, name = "x" } as { id };
+    }
+
+    function idempotent(slug: text) {
+        return insert into App.s.Orgs { slug = $slug, name = "x" }
+            on conflict (slug) do nothing
+            as { id };
+    }
+
+    -- E13 — a nested transaction is detected over the call graph, not
+    -- discovered at request time.
+    function opens_one(id: bigint) {
+        transaction {
+            return delete from App.s.Notes where id == $id as { id } first;
+        }
+    }
+
+    function nests_it(id: bigint) {
+        transaction {                           -- expect: E0620
+            return Svc.opens_one($id);
+        }
+    }
+}
+
+routes "/api/raise" {
+    route POST "" {
+        let x = Svc.writes_a_unique("a");
+        return json($x);
+    }
+
+    route GET "{id: bigint}" {
+        let x = Svc.outer(@id);
+        return json($x);
+    }
+}
+
+errorHandler (e) {
+    -- E5 — an arm for a type nobody raises.
+    catch Declined (err) { return statusCode(402, { error: $err.message }); }  -- expect: W1001
+    catch Conflict (err) { return conflict($err.message); }
+    -- E6 — every arm must answer.
+    catch NotFound (err) { let x = 1; }         -- expect: E1011
+    catch (err) { return internalError(); }
+}

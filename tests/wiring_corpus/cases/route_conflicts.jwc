@@ -1,0 +1,46 @@
+namespace route_conflicts;
+
+-- routing.md §4.1 — a duplicate (method, resolved path) is a hard error,
+-- naming both sites. Parameter names do not distinguish two routes.
+routes "/api/dup" {
+    route GET "" { return json(1); }
+}
+
+routes "/api/dup" {
+    route GET "" { return json(1); }            -- expect: E0710
+}
+
+routes "/api/params/{a: bigint}" {
+    route GET "" { return json(1); }
+}
+
+routes "/api/params/{b: bigint}" {
+    route GET "" { return json(1); }            -- expect: E0710, E0701
+}
+
+-- Different methods on one path are not a conflict.
+routes "/api/methods" {
+    route GET "" { return json(1); }
+    route POST "" { return json(1); }
+    route DELETE "" { return json(1); }
+}
+
+-- A literal and a parameter in the same slot are different routes; the
+-- literal wins at match time (routing.md §4.2).
+routes "/api/orgs/settings" {
+    route GET "" { return json(1); }
+}
+
+routes "/api/orgs/{org_id: bigint}" {
+    route GET "" { return json(1); }
+}
+
+-- The prefix and the suffix are two pieces of one path, so these two
+-- resolve to the same thing.
+routes "/api/split" {
+    route GET "leaf" { return json(1); }
+}
+
+routes "/api/split/leaf" {
+    route GET "" { return json(1); }            -- expect: E0710
+}

@@ -11,16 +11,24 @@
 
 pub mod ast;
 pub mod check;
+pub mod db;
 pub mod ddl;
+pub mod exec;
+mod exec_call;
 pub mod diag;
 pub mod fmt;
 pub mod lexer;
 pub mod model;
 pub mod naming;
 pub mod parser;
+pub mod serve;
+pub mod sql;
 pub mod symbols;
 pub mod token;
 pub mod types;
+pub mod validate;
+pub mod value;
+pub mod wiring;
 pub mod workspace;
 
 use diag::{Diagnostic, Severity, SourceFile};

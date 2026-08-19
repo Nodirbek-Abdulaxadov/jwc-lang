@@ -27,6 +27,11 @@ pub struct TableSym {
     pub unique_sets: Vec<Vec<String>>,
     /// Partial uniques, as (columns, canonical predicate).
     pub partial_uniques: Vec<(Vec<String>, String)>,
+    /// Constraint promotion inputs (errors.md §6): a constraint carrying a
+    /// message raises a declared error, a message-less one is a fault.
+    pub has_messaged_unique: bool,
+    pub has_messaged_check: bool,
+    pub has_foreign_key: bool,
     pub loc: Loc,
 }
 
@@ -386,6 +391,9 @@ fn table_sym(t: &TableObj) -> TableSym {
             .collect(),
         unique_sets,
         partial_uniques,
+        has_messaged_unique: t.uniques.iter().any(|u| u.message.is_some()),
+        has_messaged_check: t.checks.iter().any(|c| c.message.is_some()),
+        has_foreign_key: !t.foreign_keys.is_empty(),
         loc: t.loc,
     }
 }

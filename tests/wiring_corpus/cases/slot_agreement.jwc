@@ -1,0 +1,16 @@
+namespace slot_agreement;
+
+-- routing.md §3.4 — one URL slot, one name and one type. Otherwise a
+-- middleware reading `@id` means two different things depending on which
+-- block invoked it.
+routes "/api/a/{id: bigint}" {
+    route GET "" { return json(1); }
+}
+
+routes "/api/a/{id: bigint}/children" {
+    route GET "" { return json(1); }
+}
+
+routes "/api/a/{slug: text}/other" {
+    route GET "" { return json(1); }            -- expect: E0701
+}

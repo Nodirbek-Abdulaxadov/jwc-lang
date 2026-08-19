@@ -46,7 +46,7 @@
       "construct": "builtin.enum_coercion",
       "clause": "builtins \u00a72",
       "uses": 1,
-      "first_use": "src/routes/billing.jwc:44"
+      "first_use": "src/routes/billing.jwc:50"
     },
     {
       "construct": "builtin.env",
@@ -346,7 +346,7 @@
       "construct": "insert.on_conflict",
       "clause": "writes \u00a72.3",
       "uses": 1,
-      "first_use": "src/services/billing.jwc:135"
+      "first_use": "src/services/billing.jwc:159"
     },
     {
       "construct": "insert.returning",
@@ -490,7 +490,7 @@
       "construct": "request.query",
       "clause": "routing \u00a75.3",
       "uses": 1,
-      "first_use": "src/routes/billing.jwc:43"
+      "first_use": "src/routes/billing.jwc:49"
     },
     {
       "construct": "request.raw_body",
@@ -604,7 +604,7 @@
       "construct": "select.optional_pred",
       "clause": "queries \u00a73.2",
       "uses": 2,
-      "first_use": "src/routes/billing.jwc:39"
+      "first_use": "src/routes/billing.jwc:45"
     },
     {
       "construct": "select.orderby",
@@ -693,7 +693,7 @@
     {
       "construct": "throw",
       "clause": "errors \u00a72.1",
-      "uses": 4,
+      "uses": 5,
       "first_use": "src/middleware/auth.jwc:43"
     },
     {

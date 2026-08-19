@@ -95,7 +95,7 @@ fn sample_declaration_counts_match_the_spec() {
     assert_eq!(services, 4, "services");
     assert_eq!(middlewares, 7, "middleware");
     assert!(routes_blocks >= 9, "routes blocks: {routes_blocks}");
-    assert_eq!(routes, 24, "routes");
+    assert_eq!(routes, 25, "routes");
     assert_eq!(tests, 4, "tests");
 }
 

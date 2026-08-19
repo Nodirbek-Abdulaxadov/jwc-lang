@@ -417,12 +417,20 @@ mod tests {
     }
 
     /// `try_push` starts the writer itself now, and starting it spawns a
-    /// task — so the no-runtime path has to stay a quiet `false` rather than
-    /// the panic `tokio::spawn` would give. A panic here would surface as a
+    /// task — so the no-runtime path has to stay quiet rather than take the
+    /// panic `tokio::spawn` would give. A panic here would surface as a
     /// panic inside `log_insert`.
+    ///
+    /// The return value is deliberately **not** asserted. `WRITER` is a
+    /// process-wide `OnceLock` and cargo runs the tests of one crate in
+    /// parallel threads of one process, so whether this call finds the
+    /// writer already started depends on whether
+    /// `push_inside_a_runtime_starts_the_writer` got there first. Asserting
+    /// `false` made this test pass or fail by scheduling; not panicking is
+    /// the property it exists for, and that holds either way.
     #[test]
     fn push_outside_a_runtime_drops_without_panicking() {
-        assert!(!try_push("t".into(), "{}".into(), HashMap::new()));
+        let _ = try_push("t".into(), "{}".into(), HashMap::new());
     }
 
     /// The bug this guards: the writer used to be started only by

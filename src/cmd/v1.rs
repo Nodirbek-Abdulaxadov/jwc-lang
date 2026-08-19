@@ -74,11 +74,13 @@ pub fn check(path: PathBuf, quiet: bool, parse_only: bool) -> Result<()> {
         let built = crate::v1::model::build(&ws);
         let symbols = crate::v1::symbols::build(&ws, &built.model);
         let checked = crate::v1::check::check(&ws, &symbols, &built.model);
+        let wired = crate::v1::wiring::wire(&ws, &symbols);
         for (loc, d) in built
             .diags
             .iter()
             .chain(&symbols.diags)
             .chain(&checked.diags)
+            .chain(&wired.diags)
         {
             match d.severity {
                 Severity::Error => errors += 1,
@@ -207,6 +209,60 @@ pub fn gen_sql(path: PathBuf, explain: bool, out: Option<PathBuf>) -> Result<()>
         None => println!("{sql}"),
     }
     Ok(())
+}
+
+/// `jwc v1 routes <path>` — the resolved route table.
+///
+/// This is the artefact E0710 (duplicate route) and E0803 (unsatisfied
+/// `requires`) are read against: method, path, and the middleware chain in
+/// execution order (routing.md §8.2).
+pub fn routes(path: PathBuf) -> Result<()> {
+    let ws = crate::v1::workspace::Workspace::load(&path)?;
+    if ws.has_parse_errors() {
+        for e in ws.parse_errors() {
+            eprint!("{e}");
+        }
+        bail!("source did not parse");
+    }
+    let built = crate::v1::model::build(&ws);
+    let symbols = crate::v1::symbols::build(&ws, &built.model);
+    let wired = crate::v1::wiring::wire(&ws, &symbols);
+
+    let mut rows: Vec<_> = wired.routes.iter().collect();
+    rows.sort_by(|a, b| (&a.pattern, &a.method).cmp(&(&b.pattern, &b.method)));
+
+    let width = rows.iter().map(|r| r.pattern.len()).max().unwrap_or(4);
+    for r in &rows {
+        let chain = if r.chain.is_empty() {
+            "-".to_string()
+        } else {
+            r.chain.join(" → ")
+        };
+        println!(
+            "{:<7} {:<width$}  {chain}",
+            r.method,
+            r.pattern,
+            width = width
+        );
+        if !r.after.is_empty() {
+            println!("{:<7} {:<width$}  after: {}", "", "", r.after.join(" → "), width = width);
+        }
+    }
+    println!("\n{} route{}", rows.len(), plural(rows.len()));
+    Ok(())
+}
+
+/// `jwc v1 serve <path> --port N` — run the program.
+pub fn serve(path: PathBuf, port: u16) -> Result<()> {
+    let ws = crate::v1::workspace::Workspace::load(&path)?;
+    let program = std::sync::Arc::new(crate::v1::serve::load(&ws)?);
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        crate::engine::init_engine_from_env()?;
+        println!("{} routes", program.routes.len());
+        crate::v1::serve::serve(program, port).await
+    })
 }
 
 /// `jwc v1 ast <file>` — the parse tree, for debugging the front-end and

@@ -33,6 +33,12 @@ routes "/api/v1/orgs/{org_id: bigint}/subscription" use RequireAuth, RequireOrgM
 
         return json($sub);
     }
+
+    route POST "retry-payment" use RequireOrgAdmin {
+        let invoice = BillingService.retry_payment(@org_id);
+
+        return json($invoice);
+    }
 }
 
 routes "/api/v1/orgs/{org_id: bigint}/invoices" use RequireAuth, RequireOrgMember, Audit {

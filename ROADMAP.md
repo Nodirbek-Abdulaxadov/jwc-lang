@@ -409,6 +409,50 @@ talab qiladi va v0.24.0 ga qoladi.**
 mos keladi; route-conflict corpus'i (12 holat) mos diagnostika beradi;
 error model conformance corpus'i (E1–E14 uchun kamida 2 test) o'tadi.
 
+**Holat: yopildi (bitta endpoint guruhidan tashqari).**
+`src/v1/{wiring,sql,value,db,validate,exec,exec_call,serve}.rs`.
+
+**Statik yarmi** — `src/v1/wiring.rs`: route jadvali, dublikat
+`(method, path)` (E0710), slot kelishuvi (E0701), middleware zanjiri
+(E0802/E0803/E0804/E0805), tiplangan `context` (E0820/E0821), raise-set
+fixpoint'i, `after` bloki bo'sh raise-set (E0811), nested transaction
+(E0620), yetib bo'lmaydigan arm (W1001), javob bermaydigan arm (E1011).
+`tests/wiring_corpus/` — 5 fayl, `-- expect:` annotatsiyasi bilan.
+
+**Runtime yarmi** — `jwc v1 serve` haqiqiy Postgres 16.13 ga qarshi ishlaydi.
+`tests/v1_http_golden.rs` — **47 ta so'rov-javob juftligi**, `serve::handle`
+ni to'g'ridan-to'g'ri chaqiradi (server chaqiradigan aynan o'sha funksiya),
+ya'ni tartib, middleware, error model va SQL — hech biri stub emas. Soket
+ham alohida tekshirildi: `curl` bilan 200 (`with { }` header'i bilan), 404,
+400 (yaroqsiz path parametri) va 401 (middleware) olindi.
+
+Uchta xato faqat haqiqiy ishga tushirishda chiqdi:
+- **Parametr bog'lash** — `$1::bigint` Postgres'ga `$1` ni `bigint` deb
+  ko'rsatadi va string'ni rad etadi. `($1::text)::bigint` — bitta bog'lash
+  yo'li, hamma tip uchun.
+- **`created(json(x))` kompozitsiya qilmasdi.** Javob endi **qiymat**
+  (`Value::Response`), shuning uchun `json` 200 da quradi va `created` uni
+  201 ga o'zgartiradi — o'rab olmaydi.
+- **`jsonb` kalitlarni saralaydi.** Proyeksiya tartibi = JSON kalit
+  tartibi, shuning uchun `json_build_object`; va `serde_json` ning default
+  map'i ham saralangani uchun record yo'li proyeksiya tartibida qayta
+  yig'iladi.
+
+Bittasi validatsiyada: `min`/`max` o'nlik son ustida jimgina o'tib ketardi
+(`"-1.00".parse::<i64>()` xato beradi). Endi o'nlik sifatida solishtiriladi
+va chegara ham o'nlik bo'lishi mumkin.
+
+**Ochiq qolgani:**
+- **`/api/v1/me/orgs`** — `MemberAccess` view'idan o'qiydi, view esa query
+  compiler'ga bog'liq (v0.25.0). Qolgan uchta guruh ishlaydi. Umuman
+  olganda namunaning **join/view ishlatadigan har bir endpoint'i** shu
+  sababdan v0.25.0 ni kutadi va aniq runtime xatosi beradi, taxminiy
+  natija emas.
+- **`page` / keyset pagination** — xuddi shu sabab.
+- `E1`–`E14` ning `E3` (exhaustiveness) qismi amalda har doim qanoatlanadi,
+  chunki 1.0 grammatikasida har bir e'lon qilingan xatoning default status'i
+  bor (errors §4.3). Bu — dizayn, kamchilik emas.
+
 ---
 
 ### v0.25.0 — **Query compiler** — ENG KATTA BO'LAK (butun ishning ~28%i)

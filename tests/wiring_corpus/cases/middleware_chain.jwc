@@ -1,0 +1,58 @@
+namespace middleware_chain;
+
+middleware Auth provides account_id: bigint {
+    context.account_id = 1;
+}
+
+middleware OrgMember(@org_id: bigint)
+    requires Auth
+    provides org_id: bigint
+{
+    let who = context.account_id;
+    context.org_id = @org_id;
+}
+
+middleware OrgAdmin requires OrgMember {
+    let org = context.org_id;
+}
+
+middleware Plain {
+    let a = 1;
+}
+
+-- The chain is the block list in written order, then the route list.
+routes "/api/ok/{org_id: bigint}" use Auth, OrgMember {
+    route PATCH "" use OrgAdmin { return json(1); }
+}
+
+-- middleware.md §3.1 — a declared dependency must run earlier.
+routes "/api/order/{org_id: bigint}" use OrgMember, Auth {
+    route GET "" { return json(1); }            -- expect: E0803
+}
+
+-- §3.2 — `requires` is checked, not satisfied automatically.
+routes "/api/missing/{org_id: bigint}" use Auth {
+    route GET "" use OrgAdmin { return json(1); }   -- expect: E0803
+}
+
+-- §4.1 — a name in both lists is ambiguous between running twice and
+-- reordering.
+routes "/api/twice" use Plain {
+    route GET "" use Plain { return json(1); }  -- expect: E0804
+}
+
+-- §2.2 — every declared binder must exist at the attachment site.
+routes "/api/nobinder" use Auth, OrgMember {
+    route GET "" { return json(1); }            -- expect: E0802
+}
+
+-- ... with a matching type. `/api/badtype` is a different path shape from
+-- `/api/ok`, so this is a binder mismatch and not a slot disagreement:
+-- slots are keyed by position *and* by the literals that lead to them.
+routes "/api/badtype/{org_id: text}" use Auth, OrgMember {
+    route GET "" { return json(1); }            -- expect: E0802
+}
+
+routes "/api/unknown" use Nope {
+    route GET "" { return json(1); }            -- expect: E0805
+}

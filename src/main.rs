@@ -349,6 +349,18 @@ enum V1Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Print the resolved route table: method, path, middleware chain.
+    Routes {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Run the program.
+    Serve {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
     /// Dump the parse tree of one file.
     Ast { path: PathBuf },
 }
@@ -545,6 +557,8 @@ fn real_main() -> Result<()> {
             } => cmd::v1::check(path, quiet, parse_only)?,
             V1Command::Fmt { path, check } => cmd::v1::fmt(path, check)?,
             V1Command::GenSql { path, explain, out } => cmd::v1::gen_sql(path, explain, out)?,
+            V1Command::Routes { path } => cmd::v1::routes(path)?,
+            V1Command::Serve { path, port } => cmd::v1::serve(path, port)?,
             V1Command::Ast { path } => cmd::v1::ast(path)?,
         },
         Command::Login { token, registry } => cmd::publish::login(&token, registry.as_deref())?,

@@ -114,6 +114,30 @@ service BillingService {
         }
     }
 
+    --- Surfaces the provider's decline reason to the caller. This is the
+    --- one place the app needs a status the predeclared errors do not
+    --- carry, which is why `PaymentDeclined` is declared at all
+    --- (errors.md §1.1).
+    function retry_payment(org_id: bigint) {
+        let invoice = select I from App.billing.Invoices
+            where org_id == $org_id and status == InvoiceStatus.open
+            as { id, number }
+            orderby due_at asc, id asc
+            first or throw NotFound("to'lanmagan hisob yo'q");
+
+        let failed = select P from App.billing.Payments
+            where invoice_id == $invoice.id and status == PaymentStatus.failed
+            as { id, failure_code }
+            orderby created_at desc, id desc
+            first;
+
+        if ($failed != null) {
+            throw PaymentDeclined($failed.failure_code ?? "unknown");
+        }
+
+        return $invoice;
+    }
+
     function summary(org_id: bigint) {
         return select OBS from App.billing.OrgBillingSummary
             where org_id == $org_id

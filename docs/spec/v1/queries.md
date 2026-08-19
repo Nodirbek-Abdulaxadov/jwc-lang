@@ -268,12 +268,16 @@ Raw is a **compiled projection**, not `row_to_json(t)`:
 So the emitted form is
 
 ```sql
-SELECT jsonb_build_object('id', o.id::text, 'slug', o.slug, …) FROM …
+SELECT json_build_object('id', o.id::text, 'slug', o.slug, …) FROM …
 ```
 
 not `row_to_json`. The fast path is "one JSON value comes back from
 Postgres and is never parsed by the application" — it was never "whatever
 `row_to_json` happens to do".
+
+`json`, not `jsonb`: `jsonb` normalises an object by sorting its keys, and
+the projection order **is** the JSON key order (§6.1). A response whose
+fields come back alphabetised is not the shape the author wrote.
 
 ### 7.3 `jwc explain`
 

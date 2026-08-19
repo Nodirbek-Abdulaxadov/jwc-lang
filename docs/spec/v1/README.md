@@ -34,7 +34,7 @@ expected to: v1 replaces that language rather than extending it
 ## The sample
 
 [`sample/`](./sample) is a ~1200-line SaaS billing app: 4 schemas, 13 tables,
-5 views, 4 services, 24 endpoints. It is **ground truth** — ROADMAP §2 rule
+5 views, 4 services, 25 endpoints. It is **ground truth** — ROADMAP §2 rule
 4 says that if the specification cannot express the sample, the specification
 is wrong.
 
