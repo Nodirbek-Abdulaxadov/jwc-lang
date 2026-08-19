@@ -176,6 +176,29 @@ o'qiydi; `tests/parse_corpus/` grammatikaning har bir produksiyasini qamrab
 oladi (qamrov skripti 100% talab qiladi); `jwc fmt` corpus'da idempotent;
 eski grammatikaning 10 ta kalit so'zi uchun 10 ta `E0900` testi bor.
 
+**Holat: yopildi.** `src/v1/` — token, lexer, ast, parser, fmt, diag
+(~4 600 satr). `jwc v1 check` namunaning 21 faylini 0 xato bilan o'qiydi;
+`tests/v1_parse_corpus.rs` 110 ta snippet bilan grammatikaning **har bir**
+produksiyasini qamrab oladi va qamrov testi grammatikani o'qib tekshiradi —
+yangi produksiya qo'shilsa va corpus'da bandi bo'lmasa, test yiqiladi.
+`jwc v1 fmt` — AST'dan qayta chop etadi, ya'ni qat'iy nuqta konstruksiya
+bo'yicha; namuna **formatlangan holda** commit qilingan, shuning uchun
+layout regressiyasi namunada diff sifatida ko'rinadi. 10 ta `E0900` testi
+bor.
+
+Ikki chekinish, ikkalasi ham namunaning o'zi topdi:
+
+- **Zaxiralangan so'z yo'q** (names §2.6). `route`, `server`, `size`,
+  `max`, `check`, `key`, `text`, `date`, `int` — hammasi namunada oddiy
+  ustun nomi, qoida nomi yoki builtin namespace sifatida uchraydi.
+  Zaxiralangan so'zlar ro'yxati tilning **o'z misolini** taqiqlagan bo'lardi.
+- **`except (a, b)`** qavs ichida (types §9.1). Spread vergul bilan
+  ajratilgan obyekt literali ichida turadi, u yerda `except a, b` ni
+  `except a` + keyingi band'dan ajratib bo'lmaydi.
+
+Namunaning uchta so'rovi `orderby` ni `as { }` dan oldin yozgan edi;
+parser E0501 bilan ushladi va ular tuzatildi.
+
 ---
 
 ### v0.22.0 — **Schema** — DDL va DBA testi

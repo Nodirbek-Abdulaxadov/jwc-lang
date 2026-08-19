@@ -4,14 +4,10 @@ import app;
 import db.org;
 import views.org;
 
+middleware RequireAuth provides account_id: bigint {
+    let header = request.header("Authorization") or throw Unauthorized("token kerak");
 
-middleware RequireAuth
-    provides account_id: bigint
-{
-    let header = request.header("Authorization")
-        or throw Unauthorized("token kerak");
-
-    let token  = string.strip_prefix($header, "Bearer ");
+    let token = string.strip_prefix($header, "Bearer ");
     let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
 
     let claims = jwt.verify($token, $secret)
@@ -21,7 +17,6 @@ middleware RequireAuth
     context.account_id = bigint($claims.sub);
 }
 
-
 middleware RequireOrgMember(@org_id: bigint)
     requires RequireAuth
     provides org_id: bigint, role: MemberRole
@@ -30,19 +25,15 @@ middleware RequireOrgMember(@org_id: bigint)
 
     let access = select MA from App.org.MemberAccess
         where org_id == @org_id and account_id == $account_id
-        first
-        or throw Forbidden("siz bu tashkilot a'zosi emassiz");
+        first or throw Forbidden("siz bu tashkilot a'zosi emassiz");
 
     context.org_id = @org_id;
-    context.role   = $access.role;
+    context.role = $access.role;
 }
-
 
 --- Reads `context.role`, which only RequireOrgMember sets — so it says so,
 --- and a route that forgets the pair fails to compile (middleware.md §3.3).
-middleware RequireOrgAdmin
-    requires RequireOrgMember
-{
+middleware RequireOrgAdmin requires RequireOrgMember {
     let role = context.role;
 
     let is_owner = $role == MemberRole.owner;

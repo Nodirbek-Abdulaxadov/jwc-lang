@@ -142,7 +142,7 @@ will not guess otherwise.
 
 6.2 A rename is declared with `was`:
 
-```jwc
+```jwc no-compile
 table Accounts of App.auth {
     display_name varchar(80) was "full_name";
 }

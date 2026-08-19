@@ -264,10 +264,11 @@ param_ref       = "@" ident ;                        (* path parameter — names
 local_ref       = "$" ident ;                        (* local or parameter — names.md §5.3 *)
 object_literal  = "{" [ obj_entry { "," obj_entry } ] "}" ;
 obj_entry       = spread | ident ":" expr | ident "=" expr ;
-spread          = "..." ident [ "except" ident_list ] ;
+spread          = "..." local_ref [ "except" "(" ident_list ")" ] ;
 array_literal   = "[" [ expr_list ] "]" ;
 
-response_expr   = postfix [ "with" object_literal ] ;
+response_expr   = postfix [ "with" object_literal ]
+                  { "cookie" "(" expr_list ")" } ;
 
 (* ---------- lexical ---------- *)
 

@@ -54,7 +54,7 @@ otherwise, since a non-null operand makes it a plain `==`).
 
 3.3 `in (…)` accepts a literal list or a single array-typed operand:
 
-```jwc
+```jwc no-compile
 where status in (InvoiceStatus.open, InvoiceStatus.paid)
 where status in ($statuses)                 -- $statuses : InvoiceStatus[]
 ```
@@ -177,7 +177,7 @@ Postgres's default (`nulls last` for `asc`) applies otherwise.
 
 ### 6.1 `as { }` is the SELECT list
 
-```jwc
+```jwc no-compile
 as {
     id,
     slug,

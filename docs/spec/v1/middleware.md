@@ -200,7 +200,7 @@ route's (errors §3).
 
 For
 
-```jwc
+```jwc no-compile
 routes "/api/v1/orgs/{org_id: bigint}" use RequireAuth, RequireOrgMember, Audit {
     route PATCH "" use RequireOrgAdmin { … }
 }

@@ -1,6 +1,5 @@
 namespace app;
 
-
 database App : Postgres {
     init() {
         pool_size         = int(env("DB_POOL") ?? "20");
@@ -10,11 +9,13 @@ database App : Postgres {
     }
 }
 
-schema auth    of App;
-schema org     of App;
-schema billing of App;
-schema audit   of App;
+schema auth of App;
 
+schema org of App;
+
+schema billing of App;
+
+schema audit of App;
 
 server {
     max_body_bytes  = 262144;
@@ -31,11 +32,9 @@ server {
     }
 }
 
-
 --- Provider declined the charge. Not a client mistake and not our fault,
 --- so it needs its own status and its own arm.
 error PaymentDeclined(code: text) = 402 : "to'lov rad etildi";
-
 
 -- Every other error type this app raises carries a default status, so it
 -- needs no arm here (errors.md §4.3). This handler exists for the one case
@@ -48,7 +47,6 @@ errorHandler (e) {
         return internalError();
     }
 }
-
 
 function main() {
     serve(int(env("PORT") ?? "8080"));

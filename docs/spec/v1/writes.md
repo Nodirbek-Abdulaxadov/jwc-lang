@@ -123,7 +123,7 @@ delete from App.org.Invites
 5.1 `delete` takes a projection. With `first` the result is `Record?`, which
 is what makes "404 if it did not exist" writable:
 
-```jwc
+```jwc no-compile
 let gone = delete from App.org.Invites where … as { id } first
     or throw NotFound("taklifnoma topilmadi");
 ```
@@ -138,7 +138,7 @@ into `if (n == 0)`.
 
 ## 6. `raw` escape hatch
 
-```jwc
+```jwc no-compile
 let rows = raw("select … from … where x = {}", $x) as { id, total };
 ```
 

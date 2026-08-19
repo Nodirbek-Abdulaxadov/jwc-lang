@@ -9,6 +9,15 @@
 //! Only `parse_program` is asserted, never `validate_program`: documentation
 //! deliberately references entities and classes it doesn't define.
 //!
+//! ## Two languages
+//!
+//! `docs/spec/v1/` describes the redesigned 1.0 language, which is a
+//! different grammar (ROADMAP §0). Blocks under that directory are checked
+//! with the **v1** front-end (`jwc::v1`); everything else with the 0.9.x
+//! parser. Routing by path rather than by fence keeps the marker out of the
+//! author's way, and it means the specification's examples are checked
+//! against the parser that has to accept them.
+//!
 //! ## Illustrative blocks
 //!
 //! Some blocks are prose, not programs — operator tables, `{ ... }` elisions,
@@ -74,6 +83,31 @@ fn jwc_blocks(text: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// v1 spec blocks, checked with the v1 front-end. Same excerpt problem:
+/// a clause shown on its own is not a program, so try the positions an
+/// excerpt can legally occupy.
+fn parses_somewhere_v1(body: &str) -> bool {
+    const HEADER: &str = concat!(
+        "database App : Postgres;\n",
+        "schema s of App;\n",
+        "table T of App.s { id bigint primary key identity; }\n",
+    );
+    let contexts = [
+        body.to_string(),
+        format!("{HEADER}{body}\n"),
+        format!("{HEADER}function f() {{\n{body}\n}}\n"),
+        format!("{HEADER}function f() {{\nreturn {body};\n}}\n"),
+        format!("{HEADER}table U of App.s {{\n{body}\n}}\n"),
+        format!("{HEADER}class C {{\n{body}\n}}\n"),
+        format!("{HEADER}middleware M {{\n{body}\n}}\n"),
+        format!("{HEADER}routes \"/x\" {{\nroute GET \"\" {{\n{body}\n}}\n}}\n"),
+        format!("{HEADER}view V of App.s {{\n{body}\n}}\n"),
+    ];
+    contexts
+        .iter()
+        .any(|src| !jwc::v1::parse_str("<doc>", src).has_errors())
+}
+
 /// Blocks are written as excerpts, so try the positions an excerpt can
 /// legally occupy before calling it broken.
 fn parses_somewhere(body: &str) -> bool {
@@ -107,7 +141,13 @@ fn every_documented_jwc_example_parses() {
                 continue;
             }
             checked += 1;
-            if !parses_somewhere(&body) {
+            let is_v1_spec = file.starts_with(root.join("docs/spec/v1"));
+            let ok = if is_v1_spec {
+                parses_somewhere_v1(&body)
+            } else {
+                parses_somewhere(&body)
+            };
+            if !ok {
                 let rel: &Path = file.strip_prefix(&root).unwrap_or(&file);
                 broken.push(format!("{}:{line}", rel.display()));
             }

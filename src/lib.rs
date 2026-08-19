@@ -70,3 +70,4 @@ pub mod sql;
 pub mod swagger;
 pub mod templates;
 pub mod typecheck;
+pub mod v1;

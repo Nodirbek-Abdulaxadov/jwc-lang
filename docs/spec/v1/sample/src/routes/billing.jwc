@@ -6,9 +6,7 @@ import middleware.audit;
 import middleware.auth;
 import services.billing;
 
-
 routes "/api/v1/plans" {
-
     route GET "" {
         let plans = BillingService.plans();
 
@@ -16,9 +14,7 @@ routes "/api/v1/plans" {
     }
 }
 
-routes "/api/v1/orgs/{org_id: bigint}/subscription"
-    use RequireAuth, RequireOrgMember, Audit {
-
+routes "/api/v1/orgs/{org_id: bigint}/subscription" use RequireAuth, RequireOrgMember, Audit {
     route GET "" {
         let sub = BillingService.subscription(@org_id);
 
@@ -39,17 +35,15 @@ routes "/api/v1/orgs/{org_id: bigint}/subscription"
     }
 }
 
-routes "/api/v1/orgs/{org_id: bigint}/invoices"
-    use RequireAuth, RequireOrgMember, Audit {
-
+routes "/api/v1/orgs/{org_id: bigint}/invoices" use RequireAuth, RequireOrgMember, Audit {
     --- `?status=` is optional and drops the predicate when absent (`==?`);
     --- `?size=` is client-derived, so a bad value is 400, not 500
     --- (types.md §7.2).
     route GET "" {
         let raw_status = request.query("status");
-        let status     = enum(InvoiceStatus, $raw_status);
-        let cursor     = request.query("cursor");
-        let size       = int(request.query("size") ?? "50");
+        let status = enum(InvoiceStatus, $raw_status);
+        let cursor = request.query("cursor");
+        let size = int(request.query("size") ?? "50");
 
         let page = BillingService.invoices(@org_id, $status, $cursor, $size);
 
@@ -63,17 +57,14 @@ routes "/api/v1/orgs/{org_id: bigint}/invoices"
     }
 
     route POST "" use RequireOrgAdmin {
-        let req     = request.body() as InvoiceCreate;
+        let req = request.body() as InvoiceCreate;
         let invoice = BillingService.create_invoice(@org_id, $req);
 
-        return created(json($invoice))
-            with { "Location": "/api/v1/orgs/" + string.of(@org_id)
-                             + "/invoices/" + string.of($invoice.id) };
+        return created(json($invoice)) with { Location: "/api/v1/orgs/" + string.of(@org_id) + "/invoices/" + string.of($invoice.id) };
     }
 }
 
 routes "/api/v1/orgs/{org_id: bigint}/billing" use RequireAuth, RequireOrgMember {
-
     route GET "summary" {
         let summary = BillingService.summary(@org_id);
 

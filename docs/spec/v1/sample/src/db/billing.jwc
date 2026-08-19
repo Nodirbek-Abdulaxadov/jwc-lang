@@ -2,12 +2,13 @@ namespace db.billing;
 
 import app;
 
+enum BillingInterval of App.billing { monthly, yearly }
 
-enum BillingInterval     of App.billing { monthly, yearly }
-enum SubscriptionStatus  of App.billing { trialing, active, past_due, canceled }
-enum InvoiceStatus       of App.billing { draft, open, paid, void }
-enum PaymentStatus       of App.billing { pending, succeeded, failed, refunded }
+enum SubscriptionStatus of App.billing { trialing, active, past_due, canceled }
 
+enum InvoiceStatus of App.billing { draft, open, paid, void }
+
+enum PaymentStatus of App.billing { pending, succeeded, failed, refunded }
 
 --- Money is `numeric`, never an integer count of cents (types.md §2.1).
 --- `price` is per `interval`.
@@ -37,18 +38,12 @@ table Subscriptions of App.billing {
     created_at           timestamptz default now();
     updated_at           timestamptz default now() on update now();
 
-    foreign key (org_id)  references App.org.Orgs (id) on delete cascade;
+    foreign key (org_id) references App.org.Orgs (id) on delete cascade;
     foreign key (plan_id) references App.billing.Plans (id);
+    check (current_period_end > current_period_start) : "davr oxiri boshidan keyin bo'lishi kerak";
+    check (status == SubscriptionStatus.canceled or canceled_at == null) : "canceled_at faqat bekor qilingan obunada";
+    unique (org_id) where status != SubscriptionStatus.canceled : "bu tashkilotda faol obuna allaqachon bor";
 
-    check (current_period_end > current_period_start)
-        : "davr oxiri boshidan keyin bo'lishi kerak";
-    check (status == SubscriptionStatus.canceled or canceled_at == null)
-        : "canceled_at faqat bekor qilingan obunada";
-
-    --- One live subscription per org. Partial, so a canceled row does not
-    --- block a new one (schema.md §4.3).
-    unique (org_id) where status != SubscriptionStatus.canceled
-        : "bu tashkilotda faol obuna allaqachon bor";
     index on (status, current_period_end);
 }
 
@@ -73,11 +68,9 @@ table Invoices of App.billing {
     paid_at         timestamptz?;
     created_at      timestamptz default now();
 
-    foreign key (org_id)          references App.org.Orgs (id);
+    foreign key (org_id) references App.org.Orgs (id);
     foreign key (subscription_id) references App.billing.Subscriptions (id) on delete set null;
-
-    check (status == InvoiceStatus.paid or paid_at == null)
-        : "paid_at faqat to'langan hisobda";
+    check (status == InvoiceStatus.paid or paid_at == null) : "paid_at faqat to'langan hisobda";
 
     index on (org_id, status);
     index on (org_id, issued_at desc, id desc);

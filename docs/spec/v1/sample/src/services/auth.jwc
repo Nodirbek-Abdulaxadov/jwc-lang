@@ -6,14 +6,12 @@ import db.org;
 import dto.auth;
 import views.org;
 
-
 service AuthService {
-
     function register(req: Register) {
         let password_hash = hash.password($req.password);
 
         return insert into App.auth.Accounts {
-            ...$req except password,
+            ...$req except (password),
             password_hash = $password_hash
         } as { id, email, display_name, created_at };
     }
@@ -25,17 +23,18 @@ service AuthService {
         let account = select A from App.auth.Accounts
             where email == $req.email
             as { id, password_hash }
-            first
-            or throw Unauthorized("email yoki parol xato");
+            first or throw Unauthorized("email yoki parol xato");
 
         let ok = hash.verify($req.password, $account.password_hash);
 
-        if (!$ok) { throw Unauthorized("email yoki parol xato"); }
+        if (!$ok) {
+            throw Unauthorized("email yoki parol xato");
+        }
 
-        let secret      = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
+        let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
         let ttl_minutes = int(env("JWT_TTL_MINUTES") ?? "60");
-        let subject     = string.of($account.id);
-        let token       = jwt.sign({ sub: $subject }, $secret, $ttl_minutes);
+        let subject = string.of($account.id);
+        let token = jwt.sign({ sub: $subject }, $secret, $ttl_minutes);
 
         return { token: $token, expires_in: $ttl_minutes * 60 };
     }
@@ -44,8 +43,7 @@ service AuthService {
         return select A from App.auth.Accounts
             where id == $account_id
             as { id, email, display_name, email_verified, created_at }
-            first
-            or throw NotFound("akkaunt topilmadi");
+            first or throw NotFound("akkaunt topilmadi");
     }
 
     function update_profile(account_id: bigint, req: AccountEdit) {
@@ -53,8 +51,7 @@ service AuthService {
             set ...$req
             where id == $account_id
             as { id, email, display_name }
-            first
-            or throw NotFound("akkaunt topilmadi");
+            first or throw NotFound("akkaunt topilmadi");
     }
 
     function orgs_of(account_id: bigint) {

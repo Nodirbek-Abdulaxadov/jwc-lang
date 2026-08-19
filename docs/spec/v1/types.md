@@ -23,7 +23,7 @@ Type  ::= Scalar                       -- §2
 
 A `Record` type is written inline where a signature needs one:
 
-```jwc
+```jwc no-compile
 function record_payment(req: WebhookPayment) -> { status: text } { … }
 ```
 
@@ -289,7 +289,7 @@ A field `f T` (no `?`) that is absent or null is a validation failure
 Inside a block, a local of type `T?` narrows to `T` after a guard that
 **diverges** on the null branch:
 
-```jwc
+```jwc no-compile
 let account = select A from App.auth.Accounts … first;   -- Record{…}?
 if ($account == null) { throw NotFound("akkaunt topilmadi"); }
 -- account : Record{…} from here to end of block
@@ -383,8 +383,10 @@ A `Response` may only be the operand of `return` in a route, middleware or
 value, a `Record`, or a class-typed parameter. `...request.body()` without
 `as C` is `E0340: spread source has no declared shape`. `...raw` is `E0311`.
 
-`...x except a, b` removes named fields. Naming a field that does not exist
-is `E0341`.
+`...x except (a, b)` removes named fields. The list is parenthesised because
+a spread sits inside a comma-separated object literal, where a bare
+`except a, b` cannot be told from `except a` followed by the next entry.
+Naming a field that does not exist is `E0341`.
 
 ### 9.2 Absent, null, present
 

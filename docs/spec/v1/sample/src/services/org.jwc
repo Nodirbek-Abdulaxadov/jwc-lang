@@ -7,7 +7,6 @@ import dto.org;
 import mail;
 import views.org;
 
-
 --- The invite email body. A free function needs a declaration site
 --- (names.md §6.4); it is not magic and it is not a builtin.
 function invite_body(token: text) -> text {
@@ -15,13 +14,12 @@ function invite_body(token: text) -> text {
     return "Taklifnomani qabul qilish: " + $base + "/invites/" + $token;
 }
 
-
 service OrgService {
-
     function create(req: OrgCreate, owner_id: bigint) {
         transaction {
-            let org = insert into App.org.Orgs { ...$req }
-                as { id, slug, name, created_at };
+            let org = insert into App.org.Orgs {
+                ...$req
+            } as { id, slug, name, created_at };
 
             insert into App.org.Members {
                 org_id     = $org.id,
@@ -36,8 +34,7 @@ service OrgService {
     function detail(org_id: bigint) {
         return select OWM from App.org.OrgWithMembers
             where id == $org_id
-            first
-            or throw NotFound("tashkilot topilmadi");
+            first or throw NotFound("tashkilot topilmadi");
     }
 
     function update(org_id: bigint, req: OrgEdit) {
@@ -45,8 +42,7 @@ service OrgService {
             set ...$req
             where id == $org_id
             as { id, slug, name }
-            first
-            or throw NotFound("tashkilot topilmadi");
+            first or throw NotFound("tashkilot topilmadi");
     }
 
     function remove(org_id: bigint, role: MemberRole) {
@@ -57,21 +53,20 @@ service OrgService {
         delete from App.org.Orgs
             where id == $org_id
             as { id }
-            first
-            or throw NotFound("tashkilot topilmadi");
+            first or throw NotFound("tashkilot topilmadi");
     }
 
     function members(org_id: bigint) {
         return select M from App.org.Members
             left join App.auth.Accounts A on A.id == M.account_id as one account
             where org_id == $org_id
-            orderby joined_at asc
             as {
                 account_id,
                 role,
                 joined_at,
                 account: { id, email, display_name }
-            };
+            }
+            orderby joined_at asc;
     }
 
     function set_role(org_id: bigint, account_id: bigint, req: MemberEdit) {
@@ -79,29 +74,27 @@ service OrgService {
             set role = $req.role
             where org_id == $org_id and account_id == $account_id
             as { org_id, account_id, role }
-            first
-            or throw NotFound("a'zo topilmadi");
+            first or throw NotFound("a'zo topilmadi");
     }
 
     function remove_member(org_id: bigint, account_id: bigint) {
         delete from App.org.Members
             where org_id == $org_id and account_id == $account_id
             as { account_id }
-            first
-            or throw NotFound("a'zo topilmadi");
+            first or throw NotFound("a'zo topilmadi");
     }
 
     function invites(org_id: bigint) {
         return select I from App.org.Invites
             where org_id == $org_id and accepted_at == null
-            orderby created_at desc
-            as { id, email, role, expires_at, created_at };
+            as { id, email, role, expires_at, created_at }
+            orderby created_at desc;
     }
 
     --- 32 bytes from the CSPRNG, stored as an unsalted SHA-256 so it can be
     --- looked up by equality later (builtins.md §6).
     function invite(org_id: bigint, req: InviteCreate, inviter_id: bigint) {
-        let token      = crypto.token(32);
+        let token = crypto.token(32);
         let token_hash = hash.sha256($token);
         let expires_at = date.now() + date.days(7);
 
@@ -124,7 +117,6 @@ service OrgService {
         delete from App.org.Invites
             where id == $invite_id and org_id == $org_id
             as { id }
-            first
-            or throw NotFound("taklifnoma topilmadi");
+            first or throw NotFound("taklifnoma topilmadi");
     }
 }

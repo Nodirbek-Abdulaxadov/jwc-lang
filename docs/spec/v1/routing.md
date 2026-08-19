@@ -275,11 +275,24 @@ language had no users (ROADMAP §0).
 |---|---|
 | `entity` | `'entity' was removed in 1.0 — write 'table Accounts of App.auth { … }'` |
 | `dbcontext` | `'dbcontext' was removed in 1.0 — write 'database App : Postgres' + 'schema auth of App;'` |
-| `with` (query clause) | `'with' was removed in 1.0 — write an explicit 'left join … as one/many'` |
+| `dbset` | `'dbset' was removed in 1.0 — a table is declared with 'table T of App.s { … }'` |
 | `via` | `'via' was removed in 1.0 — write the join's 'on' clause` |
+| `nav` | `'nav' was removed in 1.0 — joins are written in the query, never declared on the table` |
 | `validate` | `'validate body' was removed in 1.0 — write 'request.body() as ClassName'` |
-| `new` | `'new X from Y' was removed in 1.0 — write 'insert into App.s.X { …y }'` |
+| `new` | `'new X from Y' was removed in 1.0 — write 'insert into App.s.X { ...y }'` |
 | `patch` | `'patch' was removed in 1.0 — write 'update App.s.X set …'` |
-| `group` (routes) | `'group' was removed in 1.0 — write 'routes "/prefix" { … }'` |
 | `mount` | `'mount' was removed in 1.0 — every route declares its full path` |
 | `dome` | `'dome' was removed in 1.0` |
+
+Two words from the old vocabulary are **not** on this list, because they are
+live 1.0 keywords with different meanings and a dedicated diagnostic would
+fire on correct code:
+
+- **`with`** — was a query clause (`select … with Category`); in 1.0 it is
+  the response-header suffix (§6.2).
+- **`group`** — was a route grouping keyword; in 1.0 it is `group by`
+  (queries §1).
+
+Both produce an ordinary parse error at the position where the old syntax
+would have continued. That is the honest trade: `E0900` is for words that
+can only ever be the old language.

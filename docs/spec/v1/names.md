@@ -48,23 +48,36 @@ regular expressions: `pattern(r"^[a-z0-9-]{3,40}$")`.
 2.5 **Sigils** — `@name` (path parameter, §5.2) and `$name` (local reference
 inside a query, §5.3). The sigil is part of the token; `@ name` is an error.
 
-2.6 **Keywords** are reserved and may not be used as identifiers:
+2.6 **There are no reserved words.** Every word the grammar gives meaning to
+is also a legal identifier; the parser decides by position.
+
+This is not laxity. `route`, `server`, `size`, `max`, `check`, `key`, `text`,
+`date` and `int` all appear as ordinary column names, rule names or builtin
+namespaces in this specification's own sample — `route varchar(200)` in the
+audit table, `max(90)` on a class field, `int(…)` and `date.now()` as calls.
+A reserved-word list would forbid the language's own examples.
+
+The words with grammatical meaning are:
 
 ```
-after     and       as        asc       assert    boolean   by        bytea
-cascade   catch     check     class     conflict  cross     database  date
-default   delete    desc      do        else      enum      error     errorHandler
-exists    false     first     for       foreign   from      full      function
-group     having    identity  if        ilike     import    in        index
-inet      inner     insert    int       interval  into      is        jsonb
-key       left      let       like      limit     max       middleware namespace
-no        not       nothing   null      nulls     numeric   of        on
-or        orderby   page      primary   private   provides  raises    references
-restrict  return    right     route     routes    schema    select    server
-service   set       size      smallint  table     test      text      throw
-time      timestamptz to       transaction transient true   unique    update
-use       using     uuid      varchar   view      was       where     with
+after     and       as        asc       by        cascade   catch     check
+class     conflict  cross     database  default   delete    desc      do
+else      enum      error     errorHandler         except   exists    false
+first     for       foreign   from      full      function  group     having
+identity  if        ilike     import    in        index     inner     insert
+into      join      key       left      let       like      limit     max
+middleware          namespace no        not       nothing   null      nulls
+of        on        or        orderby   page      primary   private   provides
+raises    references          requires  restrict  return    right     route
+routes    schema    select    server    service   set       size      table
+test      throw     transaction         transient true      under     unique
+update    use       using     view      was       where     with      assert
 ```
+
+A word in a position where the grammar expects that keyword is that keyword.
+Everywhere else it is an identifier. In practice this bites in exactly one
+place — a *statement-leading* word is effectively reserved at the start of a
+statement — and that is the position where a column name never appears.
 
 2.7 The HTTP method names `GET POST PUT PATCH DELETE HEAD OPTIONS` are
 contextual: they are keywords only immediately after `route`.
@@ -188,7 +201,7 @@ A bare identifier that is neither a column nor a declaration name is
 
 Consequences, all of them intended:
 
-```jwc
+```jwc no-compile
 where org_id == $org_id          -- tenancy filter: column vs. local
 where org_id == org_id           -- W0104: both sides are the same column
 where code == $req.plan_code
@@ -216,7 +229,7 @@ The declaration space (§5.1) is *not* sigiled: `MemberRole.owner`,
 
 Every `select` binds exactly one name for its source, written after `select`:
 
-```jwc
+```jwc no-compile
 select Accounts from App.auth.Accounts     -- binds `Accounts`
 select a from App.auth.Accounts            -- binds `a`
 ```
@@ -227,7 +240,7 @@ parse. This closes #18: a view query has a binder like every other query.
 Each `join` may bind its own name, defaulting to the joined table's declared
 name:
 
-```jwc
+```jwc no-compile
 left join App.auth.Accounts inviter on inviter.id == Invites.invited_by
 left join App.auth.Accounts on Accounts.id == Members.account_id
 ```

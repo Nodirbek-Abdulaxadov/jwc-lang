@@ -12,3 +12,4 @@ pub mod run;
 pub mod serve;
 pub mod swagger;
 pub mod upgrade;
+pub mod v1;

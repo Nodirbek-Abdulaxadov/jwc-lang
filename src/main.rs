@@ -176,6 +176,16 @@ enum Command {
     Remove { pkg: String },
     /// Print the resolved dependency tree.
     Tree,
+    /// Front-end for the redesigned 1.0 language (docs/spec/v1/).
+    ///
+    /// The 1.0 vocabulary (`table` / `database` / `view` / `service`) is a
+    /// different language from the one the other subcommands compile. It
+    /// lives behind `jwc v1 …` until the v0.25.0 cutover, when it becomes
+    /// the default and the old front-end is removed.
+    V1 {
+        #[command(subcommand)]
+        cmd: V1Command,
+    },
     /// Store a registry API key in `~/.jwc/credentials.json`.
     ///
     /// Generate the key at <https://registry-jwc.1kb.uz/#/keys> after
@@ -296,6 +306,33 @@ impl From<TemplateKindArg> for templates::TemplateKind {
             TemplateKindArg::Jobs => templates::TemplateKind::Jobs,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum V1Command {
+    /// Parse the 1.0 sources under a path and report diagnostics.
+    ///
+    /// Parse-only today: name resolution lands in v0.23.0 and the runtime
+    /// in v0.24.0.
+    Check {
+        /// File or directory. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Print diagnostics only; no success line.
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Rewrite 1.0 sources in canonical form.
+    Fmt {
+        /// File or directory. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Report what would change and exit non-zero; write nothing.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Dump the parse tree of one file.
+    Ast { path: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -482,6 +519,11 @@ fn real_main() -> Result<()> {
             let root = project::find_project_root(&cwd)?;
             cmd::pkg::tree(&root)?;
         }
+        Command::V1 { cmd } => match cmd {
+            V1Command::Check { path, quiet } => cmd::v1::check(path, quiet)?,
+            V1Command::Fmt { path, check } => cmd::v1::fmt(path, check)?,
+            V1Command::Ast { path } => cmd::v1::ast(path)?,
+        },
         Command::Login { token, registry } => cmd::publish::login(&token, registry.as_deref())?,
         Command::Publish => rt.block_on(cmd::publish::publish())?,
         Command::Upgrade { paths, dry_run } => cmd::upgrade::upgrade(paths, dry_run)?,

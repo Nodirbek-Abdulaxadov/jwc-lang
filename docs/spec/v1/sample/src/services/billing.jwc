@@ -5,7 +5,6 @@ import db.billing;
 import dto.billing;
 import views.billing;
 
-
 --- `update … first` emits FOR UPDATE (writes.md §4), so two concurrent
 --- callers serialise and neither sees the same number. This is what a
 --- sequence would do; sequences are DEFERRED-17.
@@ -14,22 +13,19 @@ function next_invoice_number() -> text {
         set value = value + 1
         where name == "invoice"
         as { value }
-        first
-        or throw NotFound("hisob raqami hisoblagichi sozlanmagan");
+        first or throw NotFound("hisob raqami hisoblagichi sozlanmagan");
 
     let digits = string.pad_left(string.of($counter.value), 8, "0");
 
     return "INV-" + $digits;
 }
 
-
 service BillingService {
-
     function plans() {
         return select P from App.billing.Plans
             where active == true
-            orderby price asc, id asc
-            as { id, code, name, price, currency, interval, features };
+            as { id, code, name, price, currency, interval, features }
+            orderby price asc, id asc;
     }
 
     --- Covered by the partial unique index `unique (org_id) where
@@ -38,29 +34,26 @@ service BillingService {
     function subscription(org_id: bigint) {
         return select SD from App.billing.SubscriptionDetail
             where org_id == $org_id and status != SubscriptionStatus.canceled
-            first
-            or throw NotFound("faol obuna yo'q");
+            first or throw NotFound("faol obuna yo'q");
     }
 
     function subscribe(org_id: bigint, req: SubscribeRequest) {
         let plan = select P from App.billing.Plans
             where code == $req.plan_code and active == true
             as { id, interval }
-            first
-            or throw BadRequest("tarif topilmadi");
+            first or throw BadRequest("tarif topilmadi");
 
         let trial_days = $req.trial_days ?? 0;
-        let is_trial   = $trial_days > 0;
+        let is_trial = $trial_days > 0;
 
-        let trial     = date.days($trial_days);
+        let trial = date.days($trial_days);
         let is_yearly = $plan.interval == BillingInterval.yearly;
-        let period    = $is_yearly ? date.days(365) : date.days(30);
+        let period = $is_yearly ? date.days(365) : date.days(30);
 
         let starts_at = date.now();
-        let ends_at   = $starts_at + $trial + $period;
+        let ends_at = $starts_at + $trial + $period;
 
-        let status = $is_trial ? SubscriptionStatus.trialing
-                               : SubscriptionStatus.active;
+        let status = $is_trial ? SubscriptionStatus.trialing : SubscriptionStatus.active;
 
         return insert into App.billing.Subscriptions {
             org_id               = $org_id,
@@ -75,12 +68,10 @@ service BillingService {
         let canceled_at = date.now();
 
         return update App.billing.Subscriptions
-            set status      = SubscriptionStatus.canceled,
-                canceled_at = $canceled_at
+            set status = SubscriptionStatus.canceled, canceled_at = $canceled_at
             where org_id == $org_id and status != SubscriptionStatus.canceled
             as { id, org_id, status, canceled_at }
-            first
-            or throw NotFound("faol obuna yo'q");
+            first or throw NotFound("faol obuna yo'q");
     }
 
     --- Keyset pagination. The order is total (`issued_at desc, id desc`),
@@ -96,16 +87,15 @@ service BillingService {
     function invoice(org_id: bigint, invoice_id: bigint) {
         return select ID from App.billing.InvoiceDetail
             where id == $invoice_id and org_id == $org_id
-            first
-            or throw NotFound("hisob topilmadi");
+            first or throw NotFound("hisob topilmadi");
     }
 
     function create_invoice(org_id: bigint, req: InvoiceCreate) {
         transaction {
-            let total     = array.sum_product($req.lines, "quantity", "unit_price");
+            let total = array.sum_product($req.lines, "quantity", "unit_price");
             let issued_at = date.now();
-            let due_at    = $req.due_at ?? $issued_at + date.days(14);
-            let number    = next_invoice_number();
+            let due_at = $req.due_at ?? $issued_at + date.days(14);
+            let number = next_invoice_number();
 
             let invoice = insert into App.billing.Invoices {
                 org_id    = $org_id,
@@ -117,10 +107,7 @@ service BillingService {
             } as { id, number, amount, currency, status, due_at };
 
             for (line in $req.lines) {
-                insert into App.billing.InvoiceLines {
-                    ...$line,
-                    invoice_id = $invoice.id
-                };
+                insert into App.billing.InvoiceLines { ...$line, invoice_id = $invoice.id };
             }
 
             return $invoice;
@@ -130,14 +117,11 @@ service BillingService {
     function summary(org_id: bigint) {
         return select OBS from App.billing.OrgBillingSummary
             where org_id == $org_id
-            first
-            or throw NotFound("tashkilot topilmadi");
+            first or throw NotFound("tashkilot topilmadi");
     }
 }
 
-
 service WebhookService {
-
     --- Idempotent by construction. The old select-then-insert was a race:
     --- two concurrent deliveries of the same event both saw nothing, both
     --- inserted, one violated the unique index and answered 4xx — which
@@ -148,10 +132,12 @@ service WebhookService {
                 ...$req,
                 provider = "stripe"
             }
-            on conflict (provider_ref) do nothing
-            as { id };
+                on conflict (provider_ref) do nothing
+                as { id };
 
-            if ($payment == null) { return { status: "duplicate" }; }
+            if ($payment == null) {
+                return { status: "duplicate" };
+            }
 
             let succeeded = $req.status == PaymentStatus.succeeded;
 
@@ -159,8 +145,7 @@ service WebhookService {
                 let paid_at = date.now();
 
                 update App.billing.Invoices
-                    set status  = InvoiceStatus.paid,
-                        paid_at = $paid_at
+                    set status = InvoiceStatus.paid, paid_at = $paid_at
                     where id == $req.invoice_id;
             }
 

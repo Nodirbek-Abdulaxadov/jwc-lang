@@ -5,18 +5,16 @@ import middleware.auth;
 import middleware.ratelimit;
 import services.auth;
 
-
 routes "/api/v1/auth" use StrictRateLimit {
-
     route POST "register" {
-        let req     = request.body() as Register;
+        let req = request.body() as Register;
         let account = AuthService.register($req);
 
         return created(json($account));
     }
 
     route POST "login" {
-        let req     = request.body() as Login;
+        let req = request.body() as Login;
         let session = AuthService.login($req);
 
         return json($session);
@@ -24,7 +22,6 @@ routes "/api/v1/auth" use StrictRateLimit {
 }
 
 routes "/api/v1/me" use RequireAuth {
-
     route GET "" {
         let account = AuthService.profile(context.account_id);
 
@@ -32,7 +29,7 @@ routes "/api/v1/me" use RequireAuth {
     }
 
     route PATCH "" {
-        let req     = request.body() as AccountEdit;
+        let req = request.body() as AccountEdit;
         let account = AuthService.update_profile(context.account_id, $req);
 
         return json($account);

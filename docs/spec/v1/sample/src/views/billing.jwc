@@ -4,11 +4,10 @@ import app;
 import db.org;
 import db.billing;
 
-
 view SubscriptionDetail of App.billing {
     select S from App.billing.Subscriptions
         left join App.billing.Plans P on P.id == S.plan_id as one plan
-        left join App.org.Orgs      O on O.id == S.org_id  as one org
+        left join App.org.Orgs O on O.id == S.org_id as one org
         as {
             id,
             org_id,
@@ -17,7 +16,7 @@ view SubscriptionDetail of App.billing {
             current_period_end,
             cancel_at,
             plan: { id, code, name, price, currency, interval },
-            org:  { id, slug, name }
+            org: { id, slug, name }
         }
 }
 
@@ -26,10 +25,8 @@ view SubscriptionDetail of App.billing {
 --- (queries.md §8.3).
 view InvoiceDetail of App.billing {
     select I from App.billing.Invoices
-        left join App.billing.InvoiceLines L on L.invoice_id == I.id
-            as many lines orderby id asc
-        left join App.billing.Payments     Y on Y.invoice_id == I.id
-            as many payments orderby created_at desc limit 20
+        left join App.billing.InvoiceLines L on L.invoice_id == I.id as many lines orderby id asc
+        left join App.billing.Payments Y on Y.invoice_id == I.id as many payments orderby created_at desc limit 20
         as {
             id,
             org_id,
@@ -40,7 +37,7 @@ view InvoiceDetail of App.billing {
             issued_at,
             due_at,
             paid_at,
-            lines:    { id, description, quantity, unit_price },
+            lines: { id, description, quantity, unit_price },
             payments: { id, provider, provider_ref, amount, status, created_at }
         }
 }
@@ -52,11 +49,11 @@ view OrgBillingSummary of App.billing {
         left join App.billing.Invoices I on I.org_id == O.id
         group by O.id, O.slug
         as {
-            org_id:        id,
+            org_id: id,
             slug,
             invoice_count: count(I.id),
-            open_count:    count(I.id where I.status == InvoiceStatus.open),
-            paid_total:    sum(I.amount where I.status == InvoiceStatus.paid),
-            oldest_due:    min(I.due_at where I.status == InvoiceStatus.open)
+            open_count: count(I.id where I.status == InvoiceStatus.open),
+            paid_total: sum(I.amount where I.status == InvoiceStatus.paid),
+            oldest_due: min(I.due_at where I.status == InvoiceStatus.open)
         }
 }

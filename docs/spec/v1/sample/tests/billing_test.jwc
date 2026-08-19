@@ -4,14 +4,15 @@ import app;
 import db.billing;
 import db.org;
 
-
 -- Every test builds its own fixtures. `seed.*` is gone: the sample's old
 -- tests shared one org and the second one failed on the partial unique
 -- index the first one had already satisfied (ROADMAP §5 / N9). A shared
 -- fixture model is DEFERRED-11.
-
 function fixture_org(slug: text) -> { id: bigint } {
-    return insert into App.org.Orgs { slug = $slug, name = "Test Org" } as { id };
+    return insert into App.org.Orgs {
+        slug = $slug,
+        name = "Test Org"
+    } as { id };
 }
 
 function fixture_plan(code: text) -> { id: bigint } {
@@ -22,13 +23,12 @@ function fixture_plan(code: text) -> { id: bigint } {
     } as { id };
 }
 
-
 test "obuna yaratilganda davr oxiri boshidan keyin bo'ladi" {
-    let org  = fixture_org("t-period");
+    let org = fixture_org("t-period");
     let plan = fixture_plan("t_period");
 
     let starts = date.now();
-    let ends   = $starts + date.days(30);
+    let ends = $starts + date.days(30);
 
     let sub = insert into App.billing.Subscriptions {
         org_id               = $org.id,
@@ -40,13 +40,12 @@ test "obuna yaratilganda davr oxiri boshidan keyin bo'ladi" {
     assert $sub.current_period_end > $sub.current_period_start;
 }
 
-
 test "bitta tashkilotda ikkita faol obuna bo'lolmaydi" {
-    let org  = fixture_org("t-dup");
+    let org = fixture_org("t-dup");
     let plan = fixture_plan("t_dup");
 
     let starts = date.now();
-    let ends   = $starts + date.days(30);
+    let ends = $starts + date.days(30);
 
     insert into App.billing.Subscriptions {
         org_id               = $org.id,
@@ -69,28 +68,26 @@ test "bitta tashkilotda ikkita faol obuna bo'lolmaydi" {
     };
 }
 
-
 test "to'langan hisobda paid_at bo'lishi shart" {
     let org = fixture_org("t-paid");
 
     assert fails ConstraintViolation {
         insert into App.billing.Invoices {
-            org_id = $org.id,
-            number = "INV-TEST-0001",
-            amount = 10.00,
-            status = InvoiceStatus.paid,
+            org_id  = $org.id,
+            number  = "INV-TEST-0001",
+            amount  = 10.00,
+            status  = InvoiceStatus.paid,
             paid_at = null
         };
     };
 }
 
-
 test "bekor qilingan obunadan keyin yangisini ochish mumkin" {
-    let org  = fixture_org("t-recancel");
+    let org = fixture_org("t-recancel");
     let plan = fixture_plan("t_recancel");
 
     let starts = date.now();
-    let ends   = $starts + date.days(30);
+    let ends = $starts + date.days(30);
 
     let first_sub = insert into App.billing.Subscriptions {
         org_id               = $org.id,
@@ -101,8 +98,7 @@ test "bekor qilingan obunadan keyin yangisini ochish mumkin" {
     } as { id };
 
     update App.billing.Subscriptions
-        set status      = SubscriptionStatus.canceled,
-            canceled_at = date.now()
+        set status = SubscriptionStatus.canceled, canceled_at = date.now()
         where id == $first_sub.id;
 
     let second_sub = insert into App.billing.Subscriptions {

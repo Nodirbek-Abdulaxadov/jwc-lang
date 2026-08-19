@@ -3,7 +3,6 @@ namespace middleware.audit;
 import app;
 import db.audit;
 
-
 --- Runs on every outcome, including a middleware short-circuit and an
 --- errorHandler response, and sees the status actually being sent
 --- (middleware.md §5.1).
@@ -12,14 +11,16 @@ middleware Audit {
         let method = request.method();
         let status = response.status();
 
-        let is_read   = $method == "GET";
+        let is_read = $method == "GET";
         let is_failed = $status >= 400;
 
-        if ($is_read or $is_failed) { return; }
+        if ($is_read or $is_failed) {
+            return;
+        }
 
-        let route    = request.route();
-        let ip       = request.client_ip();
-        let org_id   = context.org_id?;
+        let route = request.route();
+        let ip = request.client_ip();
+        let org_id = context.org_id?;
         let actor_id = context.account_id?;
 
         -- An `after` block has no outer handler, so its raise set must be
@@ -32,6 +33,8 @@ middleware Audit {
             action   = $method,
             route    = $route,
             ip       = $ip
-        } catch BadRequest (err) { return; };
+        } catch BadRequest (err) {
+            return;
+        };
     }
 }

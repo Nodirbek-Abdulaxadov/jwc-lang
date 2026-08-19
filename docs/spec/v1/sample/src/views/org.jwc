@@ -4,21 +4,23 @@ import app;
 import db.auth;
 import db.org;
 
-
 --- One org with its members, each member carrying its account.
 --- `account` attaches to `members` because its `on` clause names only
 --- `Members` besides the joined table (queries.md §4.4).
 view OrgWithMembers of App.org {
     select O from App.org.Orgs
-        left join App.org.Members     M on M.org_id == O.id      as many members
-        left join App.auth.Accounts   A on A.id == M.account_id  as one account
+        left join App.org.Members M on M.org_id == O.id as many members
+        left join App.auth.Accounts A on A.id == M.account_id as one account
         as {
             id,
             slug,
             name,
             created_at,
-            members: { role, joined_at,
-                       account: { id, email, display_name } }
+            members: {
+                role,
+                joined_at,
+                account: { id, email, display_name }
+            }
         }
 }
 
