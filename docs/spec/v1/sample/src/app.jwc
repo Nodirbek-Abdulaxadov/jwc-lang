@@ -1,9 +1,11 @@
 namespace app;
 
+
 database App : Postgres {
     init() {
         pool_size         = int(env("DB_POOL") ?? "20");
         statement_timeout = "10s";
+        connect_timeout   = "5s";
         tls               = env("DB_TLS") == "1";
     }
 }
@@ -14,13 +16,37 @@ schema billing of App;
 schema audit   of App;
 
 
+server {
+    max_body_bytes  = 262144;
+    request_timeout = "30s";
+    max_page_size   = 200;
+    cursor_secret   = env("CURSOR_SECRET");
+    trusted_proxies = ["10.0.0.0/8"];
+
+    cors {
+        origins     = ["https://app.example.com"];
+        methods     = ["GET", "POST", "PATCH", "DELETE"];
+        headers     = ["authorization", "content-type"];
+        credentials = true;
+    }
+}
+
+
+--- Provider declined the charge. Not a client mistake and not our fault,
+--- so it needs its own status and its own arm.
+error PaymentDeclined(code: text) = 402 : "to'lov rad etildi";
+
+
+-- Every other error type this app raises carries a default status, so it
+-- needs no arm here (errors.md §4.3). This handler exists for the one case
+-- that wants a non-default body.
 errorHandler (e) {
-    catch NotFound     (err) { return notFound(err.message); }
-    catch Conflict     (err) { return statusCode(409, { error: err.message }); }
-    catch Forbidden    (err) { return forbidden(err.message); }
-    catch BadRequest   (err) { return badRequest({ error: err.message }); }
-    catch ConstraintViolation (err) { return badRequest({ error: err.message }); }
-    catch (err)              { return internalError(); }
+    catch PaymentDeclined (err) {
+        return statusCode(402, { error: $err.message, code: $err.code });
+    }
+    catch (err) {
+        return internalError();
+    }
 }
 
 

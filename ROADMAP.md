@@ -86,6 +86,24 @@ Reliz tartibi beshta qoidaga bo'ysunadi.
    xatosi bo'ladi, "biz birini tanladik" emas. Feature keyin qo'shiladi;
    jim noto'g'ri javobni keyin tuzatib bo'lmaydi.
 
+### Implementatsiya joylashuvi — rejadan chekinish
+
+§0 "eski sintaksis bir relizda o'ladi" deydi. Amalda uni **o'sha yerda**
+o'ldirish v0.21.0–v0.24.0 ni jo'natib bo'lmaydigan qiladi: yangi front-end
+v0.25.0 gacha namunani ishga tushira olmaydi, ya'ni eski kodni v0.21.0 da
+o'chirish to'rt reliz davomida hech narsa qilmaydigan kompilyator qoldiradi
+va mavjud test to'plamini butunlay qizil qiladi.
+
+Shuning uchun yangi til **`src/v1/`** daraxtida quriladi va `jwc v1 …`
+buyruqlari orqali ochiladi. Eski front-end o'z joyida qoladi, `cargo test`
+yashil qoladi, va **kesish nuqtasi v0.25.0** — yangi daraxt namunani
+haqiqatan bajara oladigan reliz. O'sha relizda eski `parser/`, `runner/`,
+`sql.rs`, `typecheck.rs` va ularning testlari o'chiriladi va `src/v1/`
+yuqoriga ko'chiriladi.
+
+Bu — joylashuv haqidagi qaror, semantika haqida emas: `src/v1/` eski
+grammatikaning bironta konstruksiyasini qabul qilmaydi.
+
 ---
 
 ## 3. Relizlar
@@ -112,6 +130,18 @@ keyingi relizlar ixtiro qilmasin.
 har biri `spec/` da band raqamiga yoki `DEFERRED` jadvaliga havola qiladi;
 qayta yozilgan namuna 3 kishi tomonidan o'qib chiqilgan va spec bandiga
 tayanmagan bironta konstruksiya qolmagan.
+
+**Holat: yopildi.** `docs/spec/v1/` da 13 ta normativ hujjat
+(`grammar.ebnf` + 11 `.md` + `DEFERRED.md`). `check_sample.py` namunaning
+125 konstruksiyasini tasniflaydi, har birini band raqamiga bog'laydi,
+bandning mavjudligini tekshiradi va olib tashlangan lug'atni rad etadi —
+`unspecified: 0`, `dangling_clauses: []`. Namuna 4 ta nuqsonidan
+qutuldi (403→401, e'lon qilinmagan `context` bog'liqligi, webhook TOCTOU,
+6 ta ikki ma'noli `where`).
+
+Uchinchi qabul mezoni — "3 kishi o'qib chiqqan" — **bajarilmadi**: bu
+tashqi ko'rib chiqish, kod emas. Namunani o'qiydigan uchta muhandis
+topilgunga qadar ochiq qoladi.
 
 ---
 

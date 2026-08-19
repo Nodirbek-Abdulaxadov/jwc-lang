@@ -2,39 +2,53 @@ namespace middleware.auth;
 
 import app;
 import db.org;
+import views.org;
 
 
-middleware RequireAuth {
-    let header = request.header("Authorization");
+middleware RequireAuth
+    provides account_id: bigint
+{
+    let header = request.header("Authorization")
+        or throw Unauthorized("token kerak");
 
-    if (header == null) { return unauthorized("token kerak"); }
+    let token  = string.strip_prefix($header, "Bearer ");
+    let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
 
-    let token  = string.replace(header, "Bearer ", "");
-    let secret = env("JWT_SECRET");
-    let claims = jwt.verify(token, secret);
+    let claims = jwt.verify($token, $secret)
+        or throw Unauthorized("token yaroqsiz yoki muddati o'tgan");
 
-    if (claims == null) { return unauthorized("token yaroqsiz yoki muddati o'tgan"); }
-
-    context.set("account_id", claims.sub);
+    -- Not client-derived: the signature proves we minted it (types.md §7.3).
+    context.account_id = bigint($claims.sub);
 }
 
-middleware RequireOrgMember {
-    let account_id = context.get("account_id");
 
-    let access = select from App.org.MemberAccess
-        where org_id == @org_id and account_id == account_id
-        first;
+middleware RequireOrgMember(@org_id: bigint)
+    requires RequireAuth
+    provides org_id: bigint, role: MemberRole
+{
+    let account_id = context.account_id;
 
-    if (access == null) { return forbidden("siz bu tashkilot a'zosi emassiz"); }
+    let access = select MA from App.org.MemberAccess
+        where org_id == @org_id and account_id == $account_id
+        first
+        or throw Forbidden("siz bu tashkilot a'zosi emassiz");
 
-    context.set("org_id", @org_id);
-    context.set("role", access.role);
+    context.org_id = @org_id;
+    context.role   = $access.role;
 }
 
-middleware RequireOrgAdmin {
-    let role     = context.get("role");
-    let is_owner = role == MemberRole.owner;
-    let is_admin = role == MemberRole.admin;
 
-    if (!is_owner and !is_admin) { return forbidden("admin huquqi kerak"); }
+--- Reads `context.role`, which only RequireOrgMember sets — so it says so,
+--- and a route that forgets the pair fails to compile (middleware.md §3.3).
+middleware RequireOrgAdmin
+    requires RequireOrgMember
+{
+    let role = context.role;
+
+    let is_owner = $role == MemberRole.owner;
+    let is_admin = $role == MemberRole.admin;
+
+    if (!$is_owner and !$is_admin) {
+        throw Forbidden("admin huquqi kerak");
+    }
 }

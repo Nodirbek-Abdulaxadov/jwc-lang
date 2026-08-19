@@ -1,0 +1,281 @@
+(* JWC v1 grammar — normative.
+
+   Notation: ISO/IEC 14977 EBNF with these conventions:
+     "literal"      terminal
+     ident          non-terminal
+     [ x ]          optional
+     { x }          zero or more
+     x | y          alternation
+     (* ... *)      comment
+
+   Whitespace and comments are skipped between tokens except inside string
+   literals. A line comment starts with "--" and runs to end of line. A doc
+   comment starts with "---" and attaches to the next declaration, column or
+   class field (schema.md §7).
+
+   This file is the syntax. Where a production is accepted here but rejected
+   by a static rule, the rejecting clause is named in a trailing comment.
+   Grammar and static rules are both normative; neither overrides the other. *)
+
+program         = { declaration } ;
+
+declaration     = namespace_decl
+                | import_decl
+                | database_decl
+                | schema_decl
+                | table_decl
+                | view_decl
+                | enum_decl
+                | class_decl
+                | error_decl
+                | service_decl
+                | middleware_decl
+                | routes_decl
+                | error_handler_decl
+                | server_decl
+                | function_decl
+                | test_decl ;
+
+(* ---------- modules ---------- *)
+
+namespace_decl  = "namespace" dotted_name ";" ;
+import_decl     = "import" dotted_name ";" ;
+dotted_name     = ident { "." ident } ;
+
+(* ---------- database, schema ---------- *)
+
+database_decl   = "database" ident ":" ident [ db_body ] ;
+db_body         = "{" [ init_block ] "}" ;
+init_block      = "init" "(" ")" "{" { assignment ";" } "}" ;
+assignment      = ident "=" expr ;
+
+schema_decl     = "schema" ident "of" ident [ "as" string ] ";" ;
+
+(* ---------- table ---------- *)
+
+table_decl      = { doc_comment } "table" ident "of" qualified_schema
+                  [ "as" string ] [ "was" string ] "{" { table_member } "}" ;
+qualified_schema= ident "." ident ;                  (* App.auth *)
+qualified_table = ident "." ident "." ident ;        (* App.auth.Accounts *)
+
+table_member    = column_def | table_constraint | index_def ;
+
+column_def      = { doc_comment } ident type_ref [ column_modifiers ] ";" ;
+column_modifiers= column_modifier { [ "," ] column_modifier } ;
+column_modifier = "primary" "key"
+                | "identity"
+                | "unique" [ ":" string ]
+                | "private"
+                | "server"
+                | "default" expr
+                | "on" "update" expr
+                | "as" string
+                | "was" string
+                | rule_call ;
+
+table_constraint= pk_constraint | fk_constraint | uq_constraint | check_constraint ;
+
+pk_constraint   = "primary" "key" "(" ident_list ")" ";" ;
+fk_constraint   = "foreign" "key" "(" ident_list ")" "references"
+                  qualified_table "(" ident_list ")"
+                  { fk_action } ";" ;
+fk_action       = "on" ( "delete" | "update" ) ref_action ;
+ref_action      = "cascade" | "restrict" | "no" "action"
+                | "set" "null" | "set" "default" ;
+uq_constraint   = "unique" "(" ident_list ")" [ "where" expr ]
+                  [ ":" string ] ";" ;
+check_constraint= "check" "(" expr ")" [ ":" string ] ";" ;
+
+index_def       = "index" "on" "(" index_col { "," index_col } ")"
+                  [ "where" expr ] [ "using" ident ] ";" ;
+index_col       = ident [ "asc" | "desc" ] [ "nulls" ( "first" | "last" ) ] ;
+
+(* ---------- enum ---------- *)
+
+enum_decl       = { doc_comment } "enum" ident [ "of" qualified_schema ]
+                  [ "as" string ] "{" ident { "," ident } "}" ;
+
+(* ---------- view ---------- *)
+
+view_decl       = { doc_comment } "view" ident "of" qualified_schema
+                  [ "as" string ] "{" select_expr [ ";" ] "}" ;
+
+(* ---------- class (input shapes) ---------- *)
+
+class_decl      = { doc_comment } "class" ident "{" { class_field } "}" ;
+class_field     = { doc_comment } ident type_ref [ field_rules ] ";" ;
+field_rules     = field_rule { [ "," ] field_rule } ;
+field_rule      = rule_call | "transient" ;
+rule_call       = ident [ "(" [ expr_list ] ")" ] ;
+
+(* ---------- error types ---------- *)
+
+error_decl      = { doc_comment } "error" ident [ "(" [ param_list ] ")" ]
+                  "=" number [ ":" string ] ";" ;
+
+(* ---------- service ---------- *)
+
+service_decl    = { doc_comment } "service" ident "{" { function_decl } "}" ;
+
+function_decl   = { doc_comment } "function" ident "(" [ param_list ] ")"
+                  [ "->" type_ref ] [ raises_clause ] block ;
+param_list      = param { "," param } ;
+param           = ident ":" type_ref [ "=" expr ] ;
+raises_clause   = "raises" "(" ident { "," ident } ")" ;
+
+(* ---------- middleware ---------- *)
+
+middleware_decl = { doc_comment } "middleware" ident
+                  [ "(" [ binder_list ] ")" ]
+                  [ "requires" ident { "," ident } ]
+                  [ provides_clause ]
+                  "{" { statement } [ after_block ] "}" ;
+binder_list     = binder { "," binder } ;
+binder          = "@" ident ":" type_ref ;
+provides_clause = "provides" ctx_decl { "," ctx_decl } ;
+ctx_decl        = ident ":" type_ref ;
+after_block     = "after" "{" { statement } "}" ;
+
+(* ---------- routing ---------- *)
+
+routes_decl     = "routes" string [ use_clause ] "{" { route_decl } "}" ;
+route_decl      = "route" http_method string [ use_clause ] block ;
+http_method     = "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+                | "HEAD" | "OPTIONS" ;
+use_clause      = "use" ident { "," ident } ;
+
+error_handler_decl = "errorHandler" "(" ident ")" "{" { catch_arm } "}" ;
+catch_arm       = "catch" [ ident ] "(" ident ")" block ;
+
+server_decl     = "server" "{" { server_entry } "}" ;
+server_entry    = assignment ";" | ident "{" { assignment ";" } "}" ;
+
+(* ---------- tests ---------- *)
+
+test_decl       = "test" string block ;
+assert_stmt     = "assert" ( expr ";" | "fails" [ ident ] block ";" ) ;
+
+(* ---------- types ---------- *)
+
+type_ref        = base_type [ "?" ] { "[" "]" [ "?" ] } ;
+base_type       = scalar_type | record_type | dotted_name ;
+record_type     = "{" [ ident ":" type_ref { "," ident ":" type_ref } ] "}" ;
+scalar_type     = "bigint" | "int" | "smallint"
+                | "numeric" [ "(" number "," number ")" ]
+                | "varchar" "(" number ")" | "text"
+                | "boolean" | "timestamptz" | "date" | "time" | "interval"
+                | "uuid" | "jsonb" | "inet" | "bytea" ;
+
+(* ---------- statements ---------- *)
+
+block           = "{" { statement } "}" ;
+statement       = let_stmt | assign_stmt | if_stmt | for_stmt
+                | return_stmt | throw_stmt | transaction_stmt
+                | assert_stmt | expr_stmt | block ;
+
+let_stmt        = "let" ident [ ":" type_ref ] "=" expr ";" ;
+assign_stmt     = ( local_ref | "context" "." ident ) "=" expr ";" ;
+if_stmt         = "if" "(" expr ")" block [ "else" ( if_stmt | block ) ] ;
+for_stmt        = "for" "(" ident "in" expr ")" block ;   (* binder is bare, refs use $ *)
+return_stmt     = "return" [ expr ] ";" ;
+throw_stmt      = "throw" ident [ "(" [ expr_list ] ")" ] ";" ;
+transaction_stmt= "transaction" block ;
+expr_stmt       = expr ";" ;
+
+(* ---------- queries ---------- *)
+
+select_expr     = "select" ident "from" source
+                  { join_clause }
+                  [ "where" expr ]
+                  [ "group" "by" col_ref { "," col_ref } ]
+                  [ "having" expr ]
+                  [ projection ]
+                  [ order_by ]
+                  [ page_clause | limit_clause ]
+                  [ "first" ] ;
+
+source          = qualified_table ;                  (* a view is a table-like object *)
+
+join_clause     = join_kind "join" qualified_table [ ident ]
+                  "on" expr [ join_result ] ;
+join_kind       = "left" | "inner" ;                 (* queries.md §4.1 *)
+join_result     = "as" ( "one" | "many" ) ident
+                  [ order_by ] [ limit_clause ] ;
+
+projection      = "as" object_shape ;
+object_shape    = "{" [ proj_field { "," proj_field } ] "}" ;
+proj_field      = ident
+                | ident ":" ( expr | object_shape ) ;
+
+order_by        = "orderby" sort_key { "," sort_key } ;
+sort_key        = expr [ "asc" | "desc" ] [ "nulls" ( "first" | "last" ) ] ;
+limit_clause    = "limit" expr ;
+page_clause     = "page" [ "after" expr ] "size" expr [ "max" expr ] ;
+
+insert_expr     = "insert" "into" qualified_table object_literal
+                  [ conflict_clause ] [ projection ] ;
+conflict_clause = "on" "conflict" [ "(" ident_list ")" ]
+                  ( "do" "nothing" | "do" "update" set_clause ) ;
+
+update_expr     = "update" qualified_table set_clause
+                  [ "where" expr ] [ projection ] [ "first" ] ;
+set_clause      = "set" set_item { "," set_item } ;
+set_item        = ident ( "=" | "=?" ) expr
+                | spread ;
+
+delete_expr     = "delete" "from" qualified_table
+                  [ "where" expr ] [ projection ] [ "first" ] ;
+
+(* ---------- expressions ---------- *)
+
+expr_list       = expr { "," expr } ;
+expr            = or_throw_expr ;
+or_throw_expr   = coalesce_expr [ "or" "throw" throw_target ]
+                | coalesce_expr "catch" ident "(" ident ")" block ;
+throw_target    = ident [ "(" [ expr_list ] ")" ] ;
+coalesce_expr   = ternary_expr { "??" ternary_expr } ;
+ternary_expr    = or_expr [ "?" ternary_expr ":" ternary_expr ] ;
+or_expr         = and_expr { "or" and_expr } ;
+and_expr        = not_expr { "and" not_expr } ;
+not_expr        = [ "!" ] compare_expr ;
+compare_expr    = additive [ compare_op additive ]
+                | additive [ "not" ] "in" "(" ( expr | expr_list ) ")"
+                | [ "not" ] "exists" "(" select_expr ")" ;
+compare_op      = "==" | "!=" | "<" | "<=" | ">" | ">="
+                | "==?" | "like" | "ilike" ;
+additive        = multiplicative { ( "+" | "-" ) multiplicative } ;
+multiplicative  = unary { ( "*" | "/" | "%" ) unary } ;
+unary           = [ "-" ] postfix ;
+postfix         = primary { "." ident | call_args | "[" expr "]" } ;
+call_args       = "(" [ expr_list [ "where" expr ] ] ")" ;  (* aggregate filter: queries.md §6.3 *)
+
+primary         = literal
+                | param_ref
+                | local_ref
+                | ident
+                | object_literal
+                | array_literal
+                | select_expr
+                | insert_expr | update_expr | delete_expr
+                | response_expr
+                | "(" expr ")" ;
+
+param_ref       = "@" ident ;                        (* path parameter — names.md §5.2 *)
+local_ref       = "$" ident ;                        (* local or parameter — names.md §5.3 *)
+object_literal  = "{" [ obj_entry { "," obj_entry } ] "}" ;
+obj_entry       = spread | ident ":" expr | ident "=" expr ;
+spread          = "..." ident [ "except" ident_list ] ;
+array_literal   = "[" [ expr_list ] "]" ;
+
+response_expr   = postfix [ "with" object_literal ] ;
+
+(* ---------- lexical ---------- *)
+
+literal         = number | string | raw_string | "true" | "false" | "null" ;
+raw_string      = "r" string ;
+ident_list      = ident { "," ident } ;
+col_ref         = ident { "." ident } ;
+ident           = letter { letter | digit | "_" } ;
+number          = digit { digit } [ "." digit { digit } ] ;
+string          = '"' { character } '"' ;
+doc_comment     = "---" { character } newline ;

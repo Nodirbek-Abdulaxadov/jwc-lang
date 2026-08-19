@@ -1,12 +1,17 @@
 namespace views.org;
 
 import app;
+import db.auth;
+import db.org;
 
 
+--- One org with its members, each member carrying its account.
+--- `account` attaches to `members` because its `on` clause names only
+--- `Members` besides the joined table (queries.md §4.4).
 view OrgWithMembers of App.org {
-    select Orgs from App.org.Orgs
-        left join Members  on Members.org_id == Orgs.id             as many members
-        left join Accounts on Accounts.id == Members.account_id     as one account
+    select O from App.org.Orgs
+        left join App.org.Members     M on M.org_id == O.id      as many members
+        left join App.auth.Accounts   A on A.id == M.account_id  as one account
         as {
             id,
             slug,
@@ -17,9 +22,11 @@ view OrgWithMembers of App.org {
         }
 }
 
+--- The membership gate reads `role` off this view, which is legal because
+--- a view is a projection and therefore a Record (types.md §5.3).
 view MemberAccess of App.org {
-    select Members from App.org.Members
-        left join Orgs on Orgs.id == Members.org_id as one org
+    select M from App.org.Members
+        left join App.org.Orgs O on O.id == M.org_id as one org
         as {
             org_id,
             account_id,

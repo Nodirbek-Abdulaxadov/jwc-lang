@@ -1,16 +1,16 @@
 namespace routes.webhooks;
 
 import dto.billing;
-import services.billing;
 import middleware.ratelimit;
+import services.billing;
 
 
 routes "/api/v1/webhooks" use RateLimit, VerifySignature {
 
     route POST "payments" {
         let req    = request.body() as WebhookPayment;
-        let result = WebhookService.record_payment(req);
+        let result = WebhookService.record_payment($req);
 
-        return json(result);
+        return json($result);
     }
 }

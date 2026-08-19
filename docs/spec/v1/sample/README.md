@@ -1,68 +1,99 @@
-# saas
+# saas — the specification's ground truth
 
-Obuna/billing platformasi — JWC tili uchun ideologiya namunasi.
-**Kompilyatsiya qilinmaydi**: bu til dizayni uchun yozilgan namuna loyiha.
+An obuna/billing platform written in JWC v1. It does not compile with the
+0.9.x toolchain; it is the reference the specification is validated against
+(ROADMAP §2, rule 4).
 
-## Tuzilma
+Checked by `python3 docs/spec/v1/check_sample.py`, which classifies every
+construct here, maps it to the clause that defines it, and fails on anything
+from the removed vocabulary.
+
+## Layout
 
 ```
-jwcproj.json           manifest
-.env.example           muhit o'zgaruvchilari
+jwcproj.json           manifest — deps: redis, mail
 src/
-  app.jwc              database, schema'lar, init(), main()
-  db/                  jadvallar — sxema bo'yicha bir fayl
+  app.jwc              database, schemas, server { }, errorHandler, main()
+  db/                  tables — one file per schema
     auth.jwc           accounts, sessions, api_keys
     org.jwc            orgs, members, invites
-    billing.jwc        plans, subscriptions, invoices, lines, payments
+    billing.jwc        plans, subscriptions, counters, invoices, lines, payments
     audit.jwc          events
-  views/               chiquvchi shakllar
-    org.jwc
-    billing.jwc
-  dto/                 kiruvchi shakllar
-    auth.jwc
-    org.jwc
-    billing.jwc
+  views/               output shapes
+    org.jwc            OrgWithMembers, MemberAccess
+    billing.jwc        SubscriptionDetail, InvoiceDetail, OrgBillingSummary
+  dto/                 input shapes
+    auth.jwc  org.jwc  billing.jwc
   middleware/
     auth.jwc           RequireAuth, RequireOrgMember, RequireOrgAdmin
     ratelimit.jwc      RateLimit, StrictRateLimit, VerifySignature
-    audit.jwc          Audit (after bloki)
-  services/            domen amallari — route'lar shularni chaqiradi
+    audit.jwc          Audit (an `after` block)
+  services/            domain operations — routes call these
     auth.jwc           AuthService
-    org.jwc            OrgService
-    billing.jwc        BillingService, WebhookService
+    org.jwc            OrgService + invite_body()
+    billing.jwc        BillingService, WebhookService + next_invoice_number()
   routes/
-    auth.jwc
-    orgs.jwc
-    billing.jwc
-    webhooks.jwc
-migrations/            `jwc migrate new` chiqaradi
+    auth.jwc  orgs.jwc  billing.jwc  webhooks.jwc
 tests/
+  billing_test.jwc     each test builds its own fixtures
 ```
 
-## To'rt sxema
+## Four schemas
 
-| sxema | nima uchun |
+| schema | what |
 |---|---|
-| `auth` | shaxs — akkaunt, sessiya, API kalit |
-| `org` | tashkilot — a'zolik, taklifnoma |
-| `billing` | pul — tarif, obuna, hisob, to'lov |
-| `audit` | o'zgarishlar jurnali |
+| `auth` | identity — account, session, API key |
+| `org` | tenant — membership, invite |
+| `billing` | money — plan, subscription, invoice, payment |
+| `audit` | change log |
 
-Sxemalar chegara: `billing` `auth` ga faqat FK orqali tegadi, aksincha emas.
+The boundary is one-directional: `billing` reaches `auth` only through a
+foreign key, never the reverse.
 
-## Dizayn qoidalari
+## The rules this app is written to
 
-- **`of <database>`** = bazadagi obyekt. `table`, `view`, `enum` — hammasi.
-  `of` siz enum — CHECK bilan matn; `of` bilan — `CREATE TYPE`.
-- **Yo'l hech qachon yig'ilmaydi.** `routes "..."` prefiksi + `route` qo'shimchasi,
-  ikki bo'lak, uchinchisi yo'q.
-- **Proyeksiya so'rovda.** `as { ... }` — SELECT ro'yxati. Mapper yo'q.
-- **`class` faqat kirish, `view` faqat chiqish.**
-- **`private` / `server`** — mass-assignment til darajasida yopiladi.
-- Raw default; `as` yozilsa record. Maydon o'qish raw'da kompilyatsiya xatosi.
-- **Route ichida mantiq yo'q.** Route = middleware + service chaqiruvi + `json(...)`.
-  Domen mantiqi `service` da, tekshiruvlar cheklovlarda.
-- **Cheklovda xabar bo'lsa** (`unique (...) : "..."`) buzilish 400 ga aylanadi —
-  qo'lda "band emasmi" deb tekshirish kerak emas.
-- **Servislar HTTP bilmaydi.** Ular `throw NotFound(...)` qiladi,
-  `errorHandler` esa statusga o'giradi.
+- **`of <database>` means a real database object** — `table`, `view`, `enum`
+  alike. An enum without `of` is varchar + CHECK; with `of` it is
+  `CREATE TYPE` (schema §5).
+- **A path is never assembled.** `routes "..."` prefix plus a `route`
+  suffix. Two pieces, never three (routing §1.1).
+- **Projection lives in the query.** `as { … }` is the SELECT list. There is
+  no mapper (queries §6.1).
+- **`class` is input only, `view` is output only** (types §4.1).
+- **`private` / `server` close mass assignment in the language**, not by
+  discipline (schema §3, types §9.4).
+- **Raw by default; `as { }` makes a record.** Reading a field of a raw
+  result is a compile error (types §5.2).
+- **`$` on every local.** A bare name inside a query is a column, always
+  (names §5.3).
+- **No logic in a route.** Route = middleware + one service call +
+  `json(...)`. Domain logic lives in a `service`, invariants live in
+  constraints.
+- **A constraint with a message becomes an error type.** `unique … : "…"`
+  raises `Conflict` 409; `check … : "…"` raises `BadRequest` 400. Nobody
+  writes a "is it taken?" pre-check (errors §6.1).
+- **Services do not know HTTP.** They `throw NotFound(...)`; the status comes
+  from the error type's declaration (errors §2.1, §4.3).
+- **Money is `numeric`.** Not an integer count of cents (types §2.1).
+
+## Endpoints
+
+| Method | Path |
+|---|---|
+| POST | `/api/v1/auth/register` |
+| POST | `/api/v1/auth/login` |
+| GET PATCH | `/api/v1/me` |
+| GET | `/api/v1/me/orgs` |
+| POST | `/api/v1/orgs` |
+| GET PATCH DELETE | `/api/v1/orgs/{org_id}` |
+| GET | `/api/v1/orgs/{org_id}/members` |
+| PATCH DELETE | `/api/v1/orgs/{org_id}/members/{account_id}` |
+| GET POST | `/api/v1/orgs/{org_id}/invites` |
+| DELETE | `/api/v1/orgs/{org_id}/invites/{invite_id}` |
+| GET | `/api/v1/plans` |
+| GET POST | `/api/v1/orgs/{org_id}/subscription` |
+| POST | `/api/v1/orgs/{org_id}/subscription/cancel` |
+| GET POST | `/api/v1/orgs/{org_id}/invoices` |
+| GET | `/api/v1/orgs/{org_id}/invoices/{invoice_id}` |
+| GET | `/api/v1/orgs/{org_id}/billing/summary` |
+| POST | `/api/v1/webhooks/payments` |

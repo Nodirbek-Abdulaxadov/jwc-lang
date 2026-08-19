@@ -1,64 +1,65 @@
 namespace services.auth;
 
 import app;
+import db.auth;
+import db.org;
 import dto.auth;
+import views.org;
 
 
 service AuthService {
 
     function register(req: Register) {
-        let password_hash = hash.password(req.password);
+        let password_hash = hash.password($req.password);
 
         return insert into App.auth.Accounts {
-            ...req,
-            password_hash = password_hash
+            ...$req except password,
+            password_hash = $password_hash
         } as { id, email, display_name, created_at };
     }
 
-    function login(req: Login) {
-        let account = select Accounts from App.auth.Accounts
-            where Accounts.email == req.email
+    --- 401, not 403: the caller is not authenticated yet (errors.md §1.2).
+    --- The same message for both failures, so the endpoint does not tell an
+    --- attacker which addresses exist.
+    function login(req: Login) -> { token: text, expires_in: int } {
+        let account = select A from App.auth.Accounts
+            where email == $req.email
             as { id, password_hash }
-            first;
+            first
+            or throw Unauthorized("email yoki parol xato");
 
-        if (account == null) { throw Forbidden("email yoki parol xato"); }
+        let ok = hash.verify($req.password, $account.password_hash);
 
-        let ok = hash.verify(req.password, account.password_hash);
+        if (!$ok) { throw Unauthorized("email yoki parol xato"); }
 
-        if (!ok) { throw Forbidden("email yoki parol xato"); }
-
-        let secret      = env("JWT_SECRET");
+        let secret      = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
         let ttl_minutes = int(env("JWT_TTL_MINUTES") ?? "60");
-        let token       = jwt.sign({ sub: account.id }, secret, ttl_minutes);
+        let subject     = string.of($account.id);
+        let token       = jwt.sign({ sub: $subject }, $secret, $ttl_minutes);
 
-        return {
-            token:      token,
-            expires_in: ttl_minutes * 60
-        };
+        return { token: $token, expires_in: $ttl_minutes * 60 };
     }
 
-    function profile(account_id) {
-        let account = select Accounts from App.auth.Accounts
-            where Accounts.id == account_id
+    function profile(account_id: bigint) {
+        return select A from App.auth.Accounts
+            where id == $account_id
             as { id, email, display_name, email_verified, created_at }
-            first;
-
-        if (account == null) { throw NotFound("akkaunt topilmadi"); }
-
-        return account;
+            first
+            or throw NotFound("akkaunt topilmadi");
     }
 
-    function update_profile(account_id, req: AccountEdit) {
+    function update_profile(account_id: bigint, req: AccountEdit) {
         return update App.auth.Accounts
-            set ...req
-            where Accounts.id == account_id
+            set ...$req
+            where id == $account_id
             as { id, email, display_name }
-            first;
+            first
+            or throw NotFound("akkaunt topilmadi");
     }
 
-    function orgs_of(account_id) {
-        return select from App.org.MemberAccess
-            where account_id == account_id
+    function orgs_of(account_id: bigint) {
+        return select MA from App.org.MemberAccess
+            where account_id == $account_id
             orderby org.name asc;
     }
 }

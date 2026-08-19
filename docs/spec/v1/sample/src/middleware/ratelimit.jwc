@@ -3,35 +3,39 @@ namespace middleware.ratelimit;
 import redis;
 
 
+--- Keyed on the declared route pattern, not the concrete path: one bucket
+--- per endpoint, not one per id (routing.md §5.4).
 middleware RateLimit {
-    let ip   = request.client_ip();
-    let path = request.path();
-    let key  = "rl:" + path + ":" + ip;
+    let ip    = request.client_ip();
+    let route = request.route();
+    let key   = "rl:" + $route + ":" + string.of($ip);
 
-    let allowed = redis.rate_limit(key, 100, 60);
+    let allowed = redis.rate_limit($key, 100, 60);
 
-    if (!allowed) {
-        return statusCode(429, { error: "juda ko'p so'rov" });
-    }
+    if (!$allowed) { throw TooManyRequests("juda ko'p so'rov"); }
 }
 
 middleware StrictRateLimit {
     let ip  = request.client_ip();
-    let key = "rl:strict:" + ip;
+    let key = "rl:strict:" + string.of($ip);
 
-    let allowed = redis.rate_limit(key, 5, 300);
+    let allowed = redis.rate_limit($key, 5, 300);
 
-    if (!allowed) {
-        return statusCode(429, { error: "juda ko'p urinish, keyinroq qayting" });
-    }
+    if (!$allowed) { throw TooManyRequests("juda ko'p urinish, keyinroq qayting"); }
 }
 
+--- Reads the body before the handler does. Same buffer, so the handler's
+--- `request.body() as WebhookPayment` sees exactly these bytes
+--- (routing.md §5.1).
 middleware VerifySignature {
-    let signature = request.header("X-Signature");
-    let payload   = request.raw_body();
-    let secret    = env("STRIPE_WEBHOOK_SECRET");
+    let signature = request.header("X-Signature")
+        or throw Unauthorized("imzo yo'q");
 
-    let valid = verify_signature(payload, signature, secret);
+    let payload = request.raw_body();
+    let secret  = env("STRIPE_WEBHOOK_SECRET")
+        or throw Unauthorized("server sozlanmagan");
 
-    if (!valid) { return unauthorized("imzo yaroqsiz"); }
+    let valid = hash.hmac_verify($payload, $signature, $secret);
+
+    if (!$valid) { throw Unauthorized("imzo yaroqsiz"); }
 }
