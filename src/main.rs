@@ -331,6 +331,21 @@ enum V1Command {
         #[arg(long)]
         check: bool,
     },
+    /// Emit the schema as Postgres DDL.
+    ///
+    /// Offline: never connects to a database. Deterministic: two runs on
+    /// the same source are byte-identical.
+    GenSql {
+        /// File or directory. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Prefix each statement with the `file:line` that produced it.
+        #[arg(long)]
+        explain: bool,
+        /// Write to a file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Dump the parse tree of one file.
     Ast { path: PathBuf },
 }
@@ -522,6 +537,7 @@ fn real_main() -> Result<()> {
         Command::V1 { cmd } => match cmd {
             V1Command::Check { path, quiet } => cmd::v1::check(path, quiet)?,
             V1Command::Fmt { path, check } => cmd::v1::fmt(path, check)?,
+            V1Command::GenSql { path, explain, out } => cmd::v1::gen_sql(path, explain, out)?,
             V1Command::Ast { path } => cmd::v1::ast(path)?,
         },
         Command::Login { token, registry } => cmd::publish::login(&token, registry.as_deref())?,

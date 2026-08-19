@@ -91,10 +91,10 @@ projection reads the current row.
 selection:
 
 ```sql
-UPDATE app_billing.subscriptions t
+UPDATE billing.subscriptions t
    SET status = $1, canceled_at = $2
  WHERE t.ctid = (
-        SELECT s.ctid FROM app_billing.subscriptions s
+        SELECT s.ctid FROM billing.subscriptions s
          WHERE s.org_id = $3 AND s.status <> 'canceled'
          ORDER BY s.id
          FOR UPDATE

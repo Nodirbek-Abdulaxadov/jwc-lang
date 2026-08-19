@@ -10,11 +10,15 @@
 //! keywords produce `E0900` naming their replacement (routing.md §10).
 
 pub mod ast;
+pub mod ddl;
 pub mod diag;
 pub mod fmt;
 pub mod lexer;
+pub mod model;
+pub mod naming;
 pub mod parser;
 pub mod token;
+pub mod workspace;
 
 use diag::{Diagnostic, Severity, SourceFile};
 use std::path::Path;

@@ -1,0 +1,37 @@
+namespace constraints;
+
+database App : Postgres;
+schema s of App;
+
+enum Kind of App.s { a, b }
+
+table Parents of App.s {
+    id   bigint primary key identity;
+    code varchar(20) unique;
+}
+
+--- Composite primary key, composite foreign key as ONE constraint,
+--- partial unique as an index, and a table check.
+table Children of App.s {
+    parent_id bigint;
+    seq       int;
+    label     varchar(50) minLength(1), maxLength(40);
+    email     varchar(255)? pattern(r"^[^@]+@[^@]+$");
+    amount    numeric(12, 2) min(0), max(1000);
+    kind      Kind;
+    retired   timestamptz?;
+    payload   jsonb?;
+
+    primary key (parent_id, seq);
+    foreign key (parent_id) references App.s.Parents (id) on delete cascade on update restrict;
+
+    unique (parent_id, label) : "bu nom band";
+    unique (parent_id) where retired == null : "faol bola bitta";
+    check (seq > 0) : "musbat bo'lishi kerak";
+    check (amount >= 0 and kind == Kind.a) : "ikkinchi tekshiruv";
+
+    index on (label);
+    index on (parent_id, seq desc nulls last);
+    index on (retired) where retired != null;
+    index on (payload) using gin;
+}

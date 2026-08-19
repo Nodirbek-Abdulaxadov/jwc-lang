@@ -237,6 +237,38 @@ parser E0501 bilan ushladi va ular tuzatildi.
 qo'llanadi; `jwc gen-sql --explain` har bir statementga `file:line` beradi;
 DBA protokoli bir marta o'tkazilgan va farqlar 0.
 
+**Holat: yopildi (DBA auditidan tashqari).** `src/v1/{naming,model,ddl,
+workspace}.rs`. `jwc v1 gen-sql` — offline, deterministik, 7 fazali
+tartibda. `tests/ddl_golden/` da 5 ta etalon (4 ta fokusli holat + to'liq
+namuna); `tests/v1_ddl_golden.rs` bayt-ma-bayt solishtiradi, ikki yurishning
+bir xilligini, har bir statementning `file:line` iga egaligini va faza
+tartibini tekshiradi. `tests/v1_schema_diagnostics.rs` — 24 test, har bir
+qoida uchun bittadan.
+
+**Haqiqiy Postgres 16.13 ga qo'llandi** (`JWC_V1_PG` bilan, skip emas):
+beshta etalonning hammasi toza tushdi, keyin tekshirildi — `identity`
+(`bigserial` emas, `nextval` yo'q), qisman unique indekslar ikkinchi faol
+obunani bloklaydi va bekor qilingandan keyin ruxsat beradi, `on update
+now()` triggeri ishlaydi, `check` buzilishi generatsiya qilingan nom bilan
+qaytadi (errors §6.5 shunga tayanadi), pul ustunlari `numeric(14,2)`.
+
+Postgres ikki xatoni topdi, ikkalasi ham tuzatildi:
+- bir xil ustunlar ustidagi ikki indeks (btree + gin) bir xil nom olardi;
+  endi metod nomga kiradi;
+- jadval `check` ining tartib raqami ustun qoidalarini ham sanardi, ya'ni
+  `minLength(...)` qo'shilishi mavjud constraint'ni qayta nomlardi.
+
+Yangi qoida — `E0431`: `using gin` skalyar `varchar`/`text` ustida rad
+etiladi (`gin_trgm_ops` kerak, JWC extension o'rnatmaydi).
+
+**Ochiq qolgani:**
+- **`E0440`** (`NOT NULL ADD COLUMN`) — bu `migrate new` qoidasi, `gen-sql`
+  har doim jadvalni noldan yaratadi. schema §10 normativ, kod v0.26.0 da
+  differ bilan keladi.
+- **DBA protokoli** — tashqi muhandis. v0.20.0 dagi "3 kishi o'qidi" bilan
+  bir xil sababdan ochiq.
+- **`view` DDL** — ataylab bu relizda emas (query compiler'ga bog'liq).
+
 ---
 
 ### v0.23.0 — **Types** — qiymat panjarasi, null va kirish qatlami

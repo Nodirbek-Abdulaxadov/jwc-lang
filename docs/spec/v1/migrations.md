@@ -100,7 +100,7 @@ migration containing one is emitted as its **own file**, marked:
 
 ```sql
 -- jwc:no-transaction
-ALTER TYPE app_billing.invoice_status ADD VALUE IF NOT EXISTS 'refunded';
+ALTER TYPE billing.invoice_status ADD VALUE IF NOT EXISTS 'refunded';
 ```
 
 The applier honours the marker and runs that file outside a transaction. A
@@ -114,15 +114,15 @@ manual recipe printed:
 E1102: enum App.billing.InvoiceStatus removes value 'void'
   Postgres cannot drop an enum value. The safe sequence is:
 
-    1. CREATE TYPE app_billing.invoice_status_v2 AS ENUM ('draft','open','paid');
-    2. SELECT count(*) FROM app_billing.invoices WHERE status = 'void';  -- must be 0
-    3. ALTER TABLE app_billing.invoices
-         ALTER COLUMN status TYPE app_billing.invoice_status_v2
-         USING status::text::app_billing.invoice_status_v2;
-    4. DROP TYPE app_billing.invoice_status;
-    5. ALTER TYPE app_billing.invoice_status_v2 RENAME TO invoice_status;
+    1. CREATE TYPE billing.invoice_status_v2 AS ENUM ('draft','open','paid');
+    2. SELECT count(*) FROM billing.invoices WHERE status = 'void';  -- must be 0
+    3. ALTER TABLE billing.invoices
+         ALTER COLUMN status TYPE billing.invoice_status_v2
+         USING status::text::billing.invoice_status_v2;
+    4. DROP TYPE billing.invoice_status;
+    5. ALTER TYPE billing.invoice_status_v2 RENAME TO invoice_status;
 
-  Columns using this type: app_billing.invoices.status
+  Columns using this type: billing.invoices.status
 ```
 
 Refusal plus a recipe loses no data; automated rebuild across an unknown
@@ -175,7 +175,7 @@ backfill:
 
 ```
 0008_add_region.up.sql        -- ADD COLUMN region varchar(20)   (nullable)
-0008_add_region.data.sql      -- UPDATE app_org.orgs SET region = 'us' WHERE region IS NULL
+0008_add_region.data.sql      -- UPDATE org.orgs SET region = 'us' WHERE region IS NULL
 0009_region_required.up.sql   -- ALTER COLUMN region SET NOT NULL
 ```
 
@@ -208,7 +208,7 @@ Two logically identical predicates written differently (`a and b` vs
 a narrowing `alter_column_type` — emits:
 
 ```sql
--- irreversible: dropping app_org.orgs.region loses data
+-- irreversible: dropping org.orgs.region loses data
 -- (no down migration is generated for this statement)
 ```
 

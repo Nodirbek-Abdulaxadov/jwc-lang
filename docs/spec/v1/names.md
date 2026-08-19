@@ -141,6 +141,11 @@ Enum members are already snake_case by §3.2.
 `database App : Postgres` declares a *connection*, and `App` is the name that
 qualifies schemas in source. See config §2.
 
+4.6 The database name is therefore **not** part of any physical name.
+`schema billing of App;` creates the schema `billing`, not `app_billing`;
+`App.billing.Invoices` is `billing.invoices` in DDL. The `App.` prefix exists
+to make source references unambiguous, and it stops at the source.
+
 ---
 
 ## 5. Scopes and resolution

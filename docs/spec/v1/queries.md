@@ -306,10 +306,10 @@ a two-stage form:
 
 ```sql
 WITH page AS (
-  SELECT i.id FROM app_billing.invoices i
+  SELECT i.id FROM billing.invoices i
    WHERE i.org_id = $1 ORDER BY i.issued_at DESC LIMIT $2
 )
-SELECT … FROM page JOIN app_billing.invoices i USING (id)
+SELECT … FROM page JOIN billing.invoices i USING (id)
      LEFT JOIN LATERAL (…) lines ON true …
 ```
 

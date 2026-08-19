@@ -140,6 +140,50 @@ pub fn fmt(path: PathBuf, check_only: bool) -> Result<()> {
     Ok(())
 }
 
+/// `jwc v1 gen-sql <path>` — the schema as DDL.
+///
+/// Offline and deterministic: two runs on the same source are byte-identical
+/// (schema.md §9). `--explain` prefixes each statement with the declaration
+/// that caused it, which is the artefact the DBA test is read against.
+pub fn gen_sql(path: PathBuf, explain: bool, out: Option<PathBuf>) -> Result<()> {
+    use crate::v1::diag::Severity;
+
+    let ws = crate::v1::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
+        bail!("no .jwc files under {}", path.display());
+    }
+    if ws.has_parse_errors() {
+        for e in ws.parse_errors() {
+            eprint!("{e}");
+        }
+        bail!("source did not parse");
+    }
+
+    let built = crate::v1::model::build(&ws);
+    let mut errors = 0usize;
+    for (loc, d) in &built.diags {
+        if d.severity == Severity::Error {
+            errors += 1;
+        }
+        eprint!("{}", ws.render(*loc, d));
+    }
+    if errors > 0 {
+        bail!("{errors} schema error{}", plural(errors));
+    }
+
+    let statements = crate::v1::ddl::emit(&built.model);
+    let sql = crate::v1::ddl::render(&ws, &statements, explain);
+    match out {
+        Some(p) => {
+            std::fs::write(&p, format!("{sql}
+"))?;
+            println!("wrote {} ({} statements)", p.display(), statements.len());
+        }
+        None => println!("{sql}"),
+    }
+    Ok(())
+}
+
 /// `jwc v1 ast <file>` — the parse tree, for debugging the front-end and
 /// for `tests/parse_corpus` triage.
 pub fn ast(path: PathBuf) -> Result<()> {

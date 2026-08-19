@@ -186,6 +186,23 @@ A rule on a nullable column is emitted as `CHECK (col IS NULL OR …)`, so a
 enum members and the operators of types §12. A function call other than the
 canonical set (`char_length`, `~`, `lower`, `upper`) is `E0424`.
 
+### 4.5 `index ... using <method>`
+
+The access method is passed through to Postgres. It must be one it has —
+`btree` (the default), `hash`, `gin`, `gist`, `brin`, `spgist` — otherwise
+`E0431`.
+
+One compatibility rule is checked, because it is the mistake people actually
+make: **`using gin` on a plain `varchar`/`text` column is `E0431`.** GIN
+indexes an array, `jsonb` or `tsvector` out of the box; on a text column it
+needs `gin_trgm_ops` from the `pg_trgm` extension, and JWC does not create
+extensions. The diagnostic says so and points at writing that index by hand.
+
+No other operator-class compatibility is checked. The full matrix is large
+and changes per Postgres release; an unsupported combination fails at apply
+time with Postgres's own hint, which is a clear message on the migration
+that introduced it.
+
 ---
 
 ## 5. Enums
@@ -204,7 +221,7 @@ named `ck_<table>__<col>__enum`.
 ### 5.2 `enum E of App.s { a, b }`
 
 ```sql
-CREATE TYPE app_s.e AS ENUM ('a', 'b');
+CREATE TYPE s.e AS ENUM ('a', 'b');
 ```
 
 Columns use the type directly. Evolution is constrained: `ADD VALUE` cannot
@@ -226,7 +243,7 @@ Postgres has no `ON UPDATE` clause. `updated_at timestamptz default now() on
 update now();` emits a per-table trigger:
 
 ```sql
-CREATE OR REPLACE FUNCTION app_billing.tg_subscriptions__touch()
+CREATE OR REPLACE FUNCTION billing.tg_subscriptions__touch()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   NEW.updated_at := now();
@@ -234,8 +251,8 @@ BEGIN
 END $$;
 
 CREATE TRIGGER tg_subscriptions__touch
-BEFORE UPDATE ON app_billing.subscriptions
-FOR EACH ROW EXECUTE FUNCTION app_billing.tg_subscriptions__touch();
+BEFORE UPDATE ON billing.subscriptions
+FOR EACH ROW EXECUTE FUNCTION billing.tg_subscriptions__touch();
 ```
 
 Rules:
@@ -261,8 +278,8 @@ table Orgs of App.org {
 ```
 
 ```sql
-COMMENT ON TABLE  app_org.orgs      IS 'Tenant. One row per paying organisation.';
-COMMENT ON COLUMN app_org.orgs.slug IS 'URL-safe handle, immutable after creation.';
+COMMENT ON TABLE  org.orgs      IS 'Tenant. One row per paying organisation.';
+COMMENT ON COLUMN org.orgs.slug IS 'URL-safe handle, immutable after creation.';
 ```
 
 Multi-line doc blocks join with `\n`. Comments are diffed: changing the text
@@ -344,7 +361,7 @@ source:
 ```sql
 -- src/db/billing.jwc:48
 CREATE UNIQUE INDEX uq_subscriptions__org_id__1f4c9ab2
-    ON app_billing.subscriptions (org_id)
+    ON billing.subscriptions (org_id)
     WHERE status <> 'canceled';
 ```
 
@@ -360,7 +377,7 @@ is **refused at generation time** (`E0440`), with the expand/contract recipe
 printed:
 
 ```
-E0440: adding NOT NULL column `app_org.orgs.region` with no default
+E0440: adding NOT NULL column `org.orgs.region` with no default
   A NOT NULL column cannot be added to a table that may hold rows.
   Either:
     1. give it a default:          region varchar(20) default "us";
@@ -389,5 +406,10 @@ same migration".
 | `E0423` | `on delete set null` on a `NOT NULL` column |
 | `E0424` | unsupported function in a `check` |
 | `E0430` | `on update` expression other than `now()` |
+| `E0431` | unknown index access method, or GIN on a scalar |
+| `E0450` | unknown schema |
+| `E0451` | index or constraint names a column the table does not have |
+| `E0452` | `required` used as a column modifier |
+| `E0453` | unknown column rule |
 | `E0440` | `NOT NULL` column added with no default |
 | `W0401` | table has no primary key |
