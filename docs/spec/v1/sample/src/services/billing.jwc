@@ -1,0 +1,155 @@
+namespace services.billing;
+
+import app;
+import db.billing;
+import dto.billing;
+
+
+service BillingService {
+
+    function plans() {
+        return select Plans from App.billing.Plans
+            where Plans.active == true
+            orderby Plans.price_cents asc
+            as { id, code, name, price_cents, currency, interval, features };
+    }
+
+    function subscription(org_id) {
+        let sub = select from App.billing.SubscriptionDetail
+            where org_id == org_id and status != SubscriptionStatus.canceled
+            first;
+
+        if (sub == null) { throw NotFound("faol obuna yo'q"); }
+
+        return sub;
+    }
+
+    function subscribe(org_id, req: SubscribeRequest) {
+        let plan = select Plans from App.billing.Plans
+            where Plans.code == req.plan_code and Plans.active == true
+            as { id, interval }
+            first;
+
+        if (plan == null) { throw BadRequest("tarif topilmadi"); }
+
+        let trial_days = req.trial_days ?? 0;
+        let is_trial   = trial_days > 0;
+
+        let trial  = days(trial_days);
+        let period = (plan.interval == BillingInterval.yearly) ? days(365) : days(30);
+
+        let starts_at = now();
+        let ends_at   = starts_at + trial + period;
+
+        let status = is_trial ? SubscriptionStatus.trialing
+                              : SubscriptionStatus.active;
+
+        return insert into App.billing.Subscriptions {
+            org_id               = org_id,
+            plan_id              = plan.id,
+            status               = status,
+            current_period_start = starts_at,
+            current_period_end   = ends_at
+        };
+    }
+
+    function cancel(org_id) {
+        let canceled_at = now();
+
+        let sub = update App.billing.Subscriptions
+            set status      = SubscriptionStatus.canceled,
+                canceled_at = canceled_at
+            where Subscriptions.org_id == org_id
+              and Subscriptions.status != SubscriptionStatus.canceled
+            first;
+
+        if (sub == null) { throw NotFound("faol obuna yo'q"); }
+
+        return sub;
+    }
+
+    function invoices(org_id, status, limit) {
+        let page_size = limit ?? 50;
+
+        return select from App.billing.InvoiceDetail
+            where org_id == org_id and status ==? status
+            orderby issued_at desc
+            limit page_size;
+    }
+
+    function invoice(org_id, invoice_id) {
+        let invoice = select from App.billing.InvoiceDetail
+            where id == invoice_id and org_id == org_id
+            first;
+
+        if (invoice == null) { throw NotFound("hisob topilmadi"); }
+
+        return invoice;
+    }
+
+    function create_invoice(org_id, req: InvoiceCreate) {
+        transaction {
+            let total     = sum(req.lines, line => line.quantity * line.unit_cents);
+            let issued_at = now();
+            let due_at    = req.due_at ?? issued_at + days(14);
+            let number    = next_invoice_number();
+
+            let invoice = insert into App.billing.Invoices {
+                org_id       = org_id,
+                number       = number,
+                amount_cents = total,
+                status       = InvoiceStatus.open,
+                issued_at    = issued_at,
+                due_at       = due_at
+            } as { id, number, amount_cents, currency, status, due_at };
+
+            for (line in req.lines) {
+                insert into App.billing.InvoiceLines {
+                    ...line,
+                    invoice_id = invoice.id
+                };
+            }
+
+            return invoice;
+        }
+    }
+
+    function summary(org_id) {
+        return select from App.billing.OrgBillingSummary
+            where org_id == org_id
+            first;
+    }
+}
+
+
+service WebhookService {
+
+    function record_payment(req: WebhookPayment) {
+        transaction {
+            let seen = select Payments from App.billing.Payments
+                where Payments.provider_ref == req.provider_ref
+                as { id }
+                first;
+
+            if (seen != null) { return { status: "duplicate" }; }
+
+            insert into App.billing.Payments {
+                ...req,
+                provider = "stripe"
+            };
+
+            let succeeded = req.status == PaymentStatus.succeeded;
+
+            if (succeeded) {
+                let paid_at = now();
+
+                update App.billing.Invoices
+                    set status  = InvoiceStatus.paid,
+                        paid_at = paid_at
+                    where Invoices.id == req.invoice_id;
+            }
+
+            return { status: "ok" };
+        }
+    }
+}

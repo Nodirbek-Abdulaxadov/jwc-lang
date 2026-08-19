@@ -1,0 +1,22 @@
+namespace dto.org;
+
+import db.org;
+
+
+class OrgCreate {
+    slug varchar(40)  required, pattern(r"^[a-z0-9-]{3,40}$");
+    name varchar(120) required, minLength(2);
+}
+
+class OrgEdit {
+    name varchar(120)? minLength(2);
+}
+
+class InviteCreate {
+    email varchar(255) required, pattern(r"^[^@]+@[^@]+\.[^@]+$");
+    role  MemberRole?;
+}
+
+class MemberEdit {
+    role MemberRole required;
+}

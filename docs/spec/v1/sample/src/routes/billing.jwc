@@ -1,0 +1,71 @@
+namespace routes.billing;
+
+import dto.billing;
+import services.billing;
+import middleware.auth;
+import middleware.audit;
+
+
+routes "/api/v1/plans" {
+
+    route GET "" {
+        let plans = BillingService.plans();
+
+        return json(plans);
+    }
+}
+
+routes "/api/v1/orgs/{org_id}/subscription" use RequireAuth, RequireOrgMember, Audit {
+
+    route GET "" {
+        let sub = BillingService.subscription(@org_id);
+
+        return json(sub);
+    }
+
+    route POST "" use RequireOrgAdmin {
+        let req = request.body() as SubscribeRequest;
+        let sub = BillingService.subscribe(@org_id, req);
+
+        return created(json(sub));
+    }
+
+    route POST "cancel" use RequireOrgAdmin {
+        let sub = BillingService.cancel(@org_id);
+
+        return json(sub);
+    }
+}
+
+routes "/api/v1/orgs/{org_id}/invoices" use RequireAuth, RequireOrgMember, Audit {
+
+    route GET "" {
+        let status   = request.query("status");
+        let limit    = int(request.query("limit") ?? "50");
+        let invoices = BillingService.invoices(@org_id, status, limit);
+
+        return json(invoices);
+    }
+
+    route GET "{id}" {
+        let invoice = BillingService.invoice(@org_id, @id);
+
+        return json(invoice);
+    }
+
+    route POST "" use RequireOrgAdmin {
+        let req     = request.body() as InvoiceCreate;
+        let invoice = BillingService.create_invoice(@org_id, req);
+
+        return created(json(invoice));
+    }
+}
+
+routes "/api/v1/orgs/{org_id}/billing" use RequireAuth, RequireOrgMember {
+
+    route GET "summary" {
+        let summary = BillingService.summary(@org_id);
+
+        return json(summary);
+    }
+}

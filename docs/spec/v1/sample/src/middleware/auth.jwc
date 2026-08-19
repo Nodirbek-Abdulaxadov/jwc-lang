@@ -1,0 +1,40 @@
+namespace middleware.auth;
+
+import app;
+import db.org;
+
+
+middleware RequireAuth {
+    let header = request.header("Authorization");
+
+    if (header == null) { return unauthorized("token kerak"); }
+
+    let token  = string.replace(header, "Bearer ", "");
+    let secret = env("JWT_SECRET");
+    let claims = jwt.verify(token, secret);
+
+    if (claims == null) { return unauthorized("token yaroqsiz yoki muddati o'tgan"); }
+
+    context.set("account_id", claims.sub);
+}
+
+middleware RequireOrgMember {
+    let account_id = context.get("account_id");
+
+    let access = select from App.org.MemberAccess
+        where org_id == @org_id and account_id == account_id
+        first;
+
+    if (access == null) { return forbidden("siz bu tashkilot a'zosi emassiz"); }
+
+    context.set("org_id", @org_id);
+    context.set("role", access.role);
+}
+
+middleware RequireOrgAdmin {
+    let role     = context.get("role");
+    let is_owner = role == MemberRole.owner;
+    let is_admin = role == MemberRole.admin;
+
+    if (!is_owner and !is_admin) { return forbidden("admin huquqi kerak"); }
+}

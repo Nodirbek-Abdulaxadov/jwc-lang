@@ -52,6 +52,14 @@ working CRUD set you can edit.
 Latest release: **v0.9.6**. Status: production-ready for the maintainer's
 own workload; external pilots TBD.
 
+> **v1 is a redesign, not an increment.** The vocabulary below (`entity`,
+> `dbcontext`, `with`/`via`, `validate body`) is replaced in 1.0 by `table`,
+> `database`, explicit `join ... as one/many`, and query-level projections.
+> There are no users to migrate, so the break is clean and there is no compat
+> mode. See [`ROADMAP.md`](ROADMAP.md) and
+> [`docs/spec/v1/`](docs/spec/v1/) — design, the 44 confirmed gaps, the error
+> model, and a ~1100-line sample app in the new syntax.
+
 **Building an app with an AI agent?** Hand it
 [`docs/docs/reference/ai-agent-guide.md`](docs/docs/reference/ai-agent-guide.md)
 — one self-contained file covering the whole language, every built-in, the
@@ -1175,13 +1183,13 @@ curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install
 ### Linux x86_64 (musl, static — works on Alpine, distroless, glibc-old)
 
 ```bash
-curl -fsSL https://github.com/just-web-code/jwc-lang/releases/download/v0.9.2/jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz | tar xz
+curl -fsSL https://github.com/just-web-code/jwc-lang/releases/download/v0.9.6/jwc-v0.9.6-x86_64-unknown-linux-musl.tar.gz | tar xz
 sudo install -m 755 jwc /usr/local/bin/
 sudo install -m 755 jwc-lsp /usr/local/bin/
 jwc --version
 ```
 
-A matching `jwc-v0.9.2-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
+A matching `jwc-v0.9.6-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
 
 ### Docker (official multi-arch images)
 
@@ -1221,7 +1229,7 @@ if `jwc` isn't immediately on the path.
 
 | Env var | What it does |
 |---|---|
-| `JWC_VERSION=v0.9.2` | install a specific release tag instead of latest |
+| `JWC_VERSION=v0.9.6` | install a specific release tag instead of latest |
 | `JWC_INSTALL_DIR=/opt/jwc/bin` | install to a custom directory |
 | `JWC_DOWNLOAD_BASE=https://...` | fetch from a mirror (e.g. the project's MinIO) instead of GitHub Releases |
 
@@ -1244,7 +1252,7 @@ After install, open a new terminal if `jwc` is not found immediately.
 `jwc build` (alias: `jwc bundle`) packages your project together with the JWC
 runtime into `bin/{debug,release}`. This is **not** native AOT compilation yet —
 the launcher invokes the embedded runtime to execute your `.jwc` sources.
-A real native compiler is on Phase 4 of `ROADMAP.md`.
+A real native compiler is Phase 4 of the archived [0.9.x roadmap](docs/spec/roadmap-0.9.x.md).
 
 The build uses your current machine OS/architecture automatically.
 
@@ -1294,7 +1302,30 @@ feature flags:
   `cargo build --features otlp`; runtime is still gated on
   `JWC_OTLP_ENDPOINT` being set.
 
-### Native AOT scope at 1.0
+### Native AOT — platform coverage
+
+`jwc build --native` generates Rust and shells out to `cargo`, so it needs a
+Rust toolchain on the host. What that means per platform, honestly:
+
+| | `jwc` binary | `jwc run` (interpreter) | `jwc build --native` |
+|---|---|---|---|
+| Linux x86_64 | prebuilt | ✅ | ✅ exercised in CI |
+| Linux arm64 | prebuilt | ✅ | ✅ same codegen, CI covers x86_64 |
+| Windows x86_64 | prebuilt | ✅ | emits and compiles; **not exercised in CI** |
+| macOS | build from source | ✅ | accepted triple, **nothing tests it** |
+
+CI runs on `ubuntu-latest` only — all three jobs. So "native works on Windows"
+means the code path exists and the triple is accepted, not that anyone
+verified the produced binary behaves. `--target` accepts six triples; see
+[the native build doc](docs/docs/deployment/native-build.md) for which are
+covered and which are merely accepted.
+
+**In 1.0 `--native` is frozen** and returns in 1.1, rewritten. The reason is
+in [`ROADMAP.md`](ROADMAP.md): while the language semantics are still moving,
+a second backend doubles every query-compiler change. The interpreter is the
+single reference until the syntax freezes.
+
+### Native AOT scope in 0.9.x
 
 The `jwc build --native` path targets the **stateless route tier** —
 low-latency request handlers, simple selects, `transaction { ... }` at

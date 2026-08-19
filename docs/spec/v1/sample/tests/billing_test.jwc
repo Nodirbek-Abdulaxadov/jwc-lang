@@ -1,0 +1,48 @@
+namespace tests.billing;
+
+import app;
+import db.billing;
+
+
+test "obuna yaratilganda davr oxiri boshidan keyin bo'ladi" {
+    let sub = insert into App.billing.Subscriptions {
+        org_id               = seed.org.id,
+        plan_id              = seed.plan.id,
+        current_period_start = now(),
+        current_period_end   = now() + days(30)
+    } as { id, current_period_start, current_period_end };
+
+    assert sub.current_period_end > sub.current_period_start;
+}
+
+test "bitta tashkilotda ikkita faol obuna bo'lolmaydi" {
+    insert into App.billing.Subscriptions {
+        org_id               = seed.org.id,
+        plan_id              = seed.plan.id,
+        status               = SubscriptionStatus.active,
+        current_period_start = now(),
+        current_period_end   = now() + days(30)
+    };
+
+    assert fails {
+        insert into App.billing.Subscriptions {
+            org_id               = seed.org.id,
+            plan_id              = seed.plan.id,
+            status               = SubscriptionStatus.active,
+            current_period_start = now(),
+            current_period_end   = now() + days(30)
+        };
+    };
+}
+
+test "to'langan hisobda paid_at bo'lishi shart" {
+    assert fails {
+        insert into App.billing.Invoices {
+            org_id       = seed.org.id,
+            number       = "INV-TEST-1",
+            amount_cents = 1000,
+            status       = InvoiceStatus.paid,
+            paid_at      = null
+        };
+    };
+}

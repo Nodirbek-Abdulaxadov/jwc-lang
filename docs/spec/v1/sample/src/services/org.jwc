@@ -1,0 +1,113 @@
+namespace services.org;
+
+import app;
+import db.org;
+import dto.org;
+
+
+service OrgService {
+
+    function create(req: OrgCreate, owner_id) {
+        transaction {
+            let org = insert into App.org.Orgs { ...req }
+                as { id, slug, name, created_at };
+
+            insert into App.org.Members {
+                org_id     = org.id,
+                account_id = owner_id,
+                role       = MemberRole.owner
+            };
+
+            return org;
+        }
+    }
+
+    function detail(org_id) {
+        let org = select from App.org.OrgWithMembers
+            where id == org_id
+            first;
+
+        if (org == null) { throw NotFound("tashkilot topilmadi"); }
+
+        return org;
+    }
+
+    function update(org_id, req: OrgEdit) {
+        return update App.org.Orgs
+            set ...req
+            where Orgs.id == org_id
+            as { id, slug, name }
+            first;
+    }
+
+    function remove(org_id, role) {
+        let is_owner = role == MemberRole.owner;
+
+        if (!is_owner) { throw Forbidden("faqat egasi o'chira oladi"); }
+
+        delete from App.org.Orgs where Orgs.id == org_id;
+    }
+
+    function members(org_id) {
+        return select Members from App.org.Members
+            left join Accounts on Accounts.id == Members.account_id as one account
+            where Members.org_id == org_id
+            orderby Members.joined_at asc
+            as {
+                account_id,
+                role,
+                joined_at,
+                account: { id, email, display_name }
+            };
+    }
+
+    function set_role(org_id, account_id, req: MemberEdit) {
+        let member = update App.org.Members
+            set role = req.role
+            where Members.org_id == org_id and Members.account_id == account_id
+            as { org_id, account_id, role }
+            first;
+
+        if (member == null) { throw NotFound("a'zo topilmadi"); }
+
+        return member;
+    }
+
+    function remove_member(org_id, account_id) {
+        delete from App.org.Members
+            where Members.org_id == org_id and Members.account_id == account_id;
+    }
+
+    function invites(org_id) {
+        return select Invites from App.org.Invites
+            where Invites.org_id == org_id and Invites.accepted_at == null
+            orderby Invites.created_at desc
+            as { id, email, role, expires_at, created_at };
+    }
+
+    function invite(org_id, req: InviteCreate, inviter_id) {
+        let token      = random_token(32);
+        let token_hash = hash.password(token);
+        let expires_at = now() + days(7);
+
+        let invite = insert into App.org.Invites {
+            ...req,
+            org_id     = org_id,
+            token_hash = token_hash,
+            invited_by = inviter_id,
+            expires_at = expires_at
+        } as { id, email, role, expires_at };
+
+        let subject = "Taklifnoma";
+        let body    = invite_body(token);
+
+        send_email(req.email, subject, body);
+
+        return invite;
+    }
+
+    function revoke_invite(org_id, invite_id) {
+        delete from App.org.Invites
+            where Invites.id == invite_id and Invites.org_id == org_id;
+    }
+}

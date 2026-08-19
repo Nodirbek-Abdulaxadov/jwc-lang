@@ -1,875 +1,737 @@
-# JWC Language — Roadmap
+# JWC — v1.0.0 Roadmap (qayta loyihalangan til)
 
-> Bu hujjat hozirgi kod holatining halol tahlili asosida tuzilgan.
-> "Done" deb belgilangan band — manba kodda to'liq amalga oshirilgan demakdir.
-> "Partial" — qisman ishlaydi, lekin yashirin hack yoki cheklov bor.
->
-> Joriy holat: **v0.9.2** — Phase 0–11 yopildi, native query-layer parity bor.
-> v0.7.0 real ilovalardan (MyWallet, jwc-shortener) kelgan feedback bo'yicha
-> DSL/editor/HTTP-kontrakt tuzatishlari; v0.8.0 query layer (where'dan
-> `and`/`or` jimgina yo'qolishi, having'da agregatlar, `select distinct`);
-> v0.8.5 SQL parametrlarini ustun turiga qarab bog'lash + E022;
-> v0.8.7 console/fayl builtinlari (`console.*`, `file.*`, `directory.*`).
-> Batafsil — `CHANGELOG.md`.
->
-> **1.0 gacha nima qolgani pastdagi "1.0 gacha yo'l xaritasi" bo'limida** —
-> olti reliz: entity DSL, mapper, ergonomika, query yakuni, `jwc test`, rc.
-> Sprint Tracker (pastda) yangi 1.0 yo'l xaritasini ("1.0 Readiness Plan")
-> aks ettiradi.
+Bu hujjat eski `ROADMAP.md` ni **butunlay almashtiradi**. Eski reliz raqamlari
+(v0.10.0–v0.14.0 rejasi), eski faza ro'yxati (Phase 0–11) va eski lug'at
+(`entity` / `dbcontext` / `with` / `via` / nav-property / `validate body` /
+`new X from Y` / `patch` / `group` / `mount` / `dome`) bekor qilindi.
+Normativ manba — `DESIGN.md` va `saas/` namuna loyihasi.
 
 ---
 
-## North Star (v1.0 fokusi)
+## 0. Boshlang'ich holat — halol tavsif
 
-> "Web backend yoz — CRUD'ni qo'lda yozmasdan, ORM bilan kurashmasdan, native-tez."
+`/home/user/jwc-lang` da **eski tilning** ishlaydigan kompilyatori bor:
+~48 500 satr Rust, v0.9.6, Phase 0–11 yopilgan. Bu kod redizayn uchun
+*asos emas* — u boshqa tilni kompilyatsiya qiladi.
 
-Har bir roadmap bandi shu jumlaga xizmat qilishi shart. Qilmasa — **Non-goals** ga ketadi.
+Muhim yengillik: **ko'chiriladigan foydalanuvchi yo'q.** Deprecation davri
+kerak emas, `--compat` bayrog'i kerak emas, ikki grammatikani bir vaqtda
+qo'llab-quvvatlash kerak emas. Eski sintaksis bir relizda o'ladi.
 
-## Non-goals (1.0 ga qadar va undan keyin ham — qat'iy "yo'q")
+### Qayta ishlatiladi (infratuzilma, til emas — ~40%)
 
-Bu band loyihaning soddaligini himoyalash uchun. Foydalanuvchilar so'rasa
-yoki PR yuborsa ham — siyosat darajasidagi rad etish.
+| Modul | Nima uchun qoladi |
+|---|---|
+| `src/engine.rs` | deadpool-postgres pool, prepared-statement cache, TLS, transient-error klassifikatsiyasi, `with_tx` |
+| `src/migrate.rs` (applier) | advisory lock (`MIGRATION_LOCK_KEY`), forward-only qo'llash, fayl runner |
+| `src/server.rs` | axum + tokio skeleti, so'rov hayot sikli, `tokio::spawn` per-request |
+| `src/lexer.rs` | tokenizatorning ~70%i (token to'plami o'zgaradi, mexanizm emas) |
+| `config.rs`, `error_report.rs`, `error_codes.rs`, `jwt.rs`, `jwks.rs`, `redis_engine.rs`, `log_writer.rs`, `cors.rs` | runtime xizmatlari, tilga bog'liq emas |
+| `project.rs` (loader), `resolver/`, `registry/` | manifest + paket yechish |
+| CI, Docker, `install*.sh/ps1`, `templates/`, docs sayti | ops |
 
-| Item | Sabab | Status |
+### Qayta yoziladi (tilga bog'liq — ~60%)
+
+`ast.rs`, butun `parser/`, `typecheck.rs`, `lint.rs`, `sql.rs`,
+`schema_diff.rs` (model qismi), butun `runner/`, `builtins.rs` registri,
+`openapi.rs` + `swagger.rs`.
+
+### O'chiriladi
+
+Eski deklaratsiyalarning barcha kod yo'llari va ularning testlari
+(`nested_with.rs`, `mutation_fields.rs`, `group_by.rs`, `insert_codegen.rs`,
+`typed_catch.rs`, `query_differential.rs` va h.k.).
+
+### Muzlatiladi
+
+`src/native_build.rs` (5 149 satr) — pastdagi **Kechiktirilganlar** ga qarang.
+
+---
+
+## 1. North star va ikki qabul testi
+
+> "Web backend yoz — CRUD'ni qo'lda yozmasdan, ORM bilan kurashmasdan,
+> native-tez."
+
+`DESIGN.md` ikki qabul testini beradi. 1.0 uchun ular **vibe emas, harness**:
+
+**DBA test** — `jwc gen-sql --explain` har bir DDL statementni manba
+fayl:satr ga bog'laydi; `tests/ddl_golden/` da har bir schema fayli uchun
+qo'lda ko'rib chiqilgan `.sql` etaloni bor; chiqish bayt-ma-bayt mos kelishi
+shart. Har bir reliz oxirida bitta tashqi Postgres muhandisi etalon
+fayllarni ko'rmasdan schema faylini o'qiydi va DDL ni yozadi; farq — bug.
+
+**Developer test** — `tests/sql_golden/` da namunadagi har bir query uchun
+generatsiya qilingan SQL saqlanadi va qo'lda tasdiqlanadi; `EXPLAIN
+(ANALYZE, BUFFERS)` seed'langan bazada indeks bor predikatlar uchun
+`Seq Scan` bermasligi assert qilinadi.
+
+---
+
+## 2. Ketma-ketlik prinsiplari
+
+Reliz tartibi beshta qoidaga bo'ysunadi.
+
+1. **Qaror koddan oldin.** 44 tasdiqlangan bo'shliqning ko'pi — *yozilmagan
+   semantika*, kamchilik emas. Spetsifikatsiya arzon va hamma narsani ochadi.
+2. **Lug'at feature'dan oldin.** Yangi sintaksis birinchi relizda tugaydi;
+   undan keyin hech narsa eski grammatikada yozilmaydi.
+3. **Bitta implementatsiya.** `--native` muzlatiladi. Semantika 1.0 gacha
+   harakatda ekan, ikkinchi backend har bir query-compiler o'zgarishini
+   ikki marta yozishga majbur qiladi.
+4. **`saas/` — ground truth.** Spetsifikatsiya namunani ifodalay olmasa,
+   spetsifikatsiya noto'g'ri. Har reliz namunaning o'sib boruvchi qismini
+   ishga tushiradi.
+5. **Jim noto'g'ri javob yo'q.** Ikki ma'noli konstruksiya 1.0 da kompilyatsiya
+   xatosi bo'ladi, "biz birini tanladik" emas. Feature keyin qo'shiladi;
+   jim noto'g'ri javobni keyin tuzatib bo'lmaydi.
+
+---
+
+## 3. Relizlar
+
+### v0.20.0 — **Spec** (kod deyarli yo'q)
+
+**Maqsad:** har bir ochiq semantik savolga normativ javob yozish, toki
+keyingi relizlar ixtiro qilmasin.
+
+**Ichida:**
+- `docs/spec/` ni noldan yozish: `grammar.ebnf`, `names.md` (nom yechish),
+  `types.md` (`Raw | Record` panjarasi, `T?` propagatsiyasi),
+  `queries.md`, `writes.md`, `routing.md`, `middleware.md`, `errors.md`,
+  `schema.md`, `migrations.md`, `builtins.md`, `config.md`.
+- **Error model qarori** ni normativ band sifatida yozish (§4).
+- 44 tasdiqlangan + 12 yangi bo'shliqning (§5) har biri uchun: normativ band
+  **yoki** aniq `DEFERRED` hukmi + sabab.
+- `saas/` namunasini spetsifikatsiyaga moslab qayta yozish — jumladan
+  hozirgi 6 ta ikki ma'noli `where` sayti, `AuthService.login` dagi 403→401,
+  `RequireOrgAdmin` ning e'lon qilinmagan bog'liqligi, webhook TOCTOU.
+- `spec-coverage.json`: namunadagi har bir konstruksiya → spec bandi.
+
+**Tugadi =** `spec-coverage.json` da 0 ta `unspecified`; 56 bo'shliqning
+har biri `spec/` da band raqamiga yoki `DEFERRED` jadvaliga havola qiladi;
+qayta yozilgan namuna 3 kishi tomonidan o'qib chiqilgan va spec bandiga
+tayanmagan bironta konstruksiya qolmagan.
+
+---
+
+### v0.21.0 — **Vocabulary** (buzuvchi o'zgarish shu yerda tugaydi)
+
+**Maqsad:** yangi sintaksisning to'liq front-end'i; eski til o'ladi.
+
+**Ichida:**
+- Lexer token to'plami; `ast.rs` noldan; recursive-descent parser.
+- Deklaratsiyalar: `database`, `schema`, `table`, `view`, `enum`, `class`,
+  `service`, `middleware` + `after`, `routes`/`route`, `errorHandler`,
+  `error`, `namespace`/`import`, top-level `function`, `test`.
+- Grammatik hal qilinadigan bo'shliqlar (semantika keyin):
+  - join alias: `left join App.auth.Accounts inviter on inviter.id == ... as one inviter` (#1)
+  - typed path segment: `routes "/api/v1/orgs/{org_id: bigint}"` (#9, #20)
+  - `as many` suffikslari: `orderby ... limit ...` (#5)
+  - `delete ... as { } first` (#6)
+  - response header: `return created(json(x)) with { "Location": ... }` (#10)
+  - keyset pagination: `... page after @cursor size N max M` (#11, #40)
+  - `was "old_name"` rename markeri (#26, #27)
+  - `middleware RequireOrgMember(@org_id: bigint) requires RequireOrgMember` (#13, #37)
+  - service signaturalari: `function invoices(org_id: bigint, status: InvoiceStatus?) -> InvoiceDetail` (#31)
+  - `raises (...)` faqat paket eksport chegarasida (E12)
+  - `server { }` config bloki (#39)
+  - lambda **yo'q** — `line => ...` grammatikadan olib tashlanadi (#22)
+- `jwc fmt` yangi grammatika uchun; round-trip idempotent.
+- Eski kalit so'zlar uchun maxsus diagnostika: `E0900: 'entity' 1.0 da olib
+  tashlangan — 'table Accounts of App.auth' ni ko'ring`, migratsiya yo'lisiz.
+
+**Tugadi =** `jwc check --parse-only` namunaning 25 faylini 0 xato bilan
+o'qiydi; `tests/parse_corpus/` grammatikaning har bir produksiyasini qamrab
+oladi (qamrov skripti 100% talab qiladi); `jwc fmt` corpus'da idempotent;
+eski grammatikaning 10 ta kalit so'zi uchun 10 ta `E0900` testi bor.
+
+---
+
+### v0.22.0 — **Schema** — DDL va DBA testi
+
+**Maqsad:** schema fayllardan to'liq, tartibli, deterministik DDL.
+
+**Ichida:**
+- Skalyar tip lug'ati (**N2**): `bigint`, `int`, `smallint`, `numeric(p,s)`,
+  `varchar(n)`, `text`, `boolean`, `timestamptz`, `date`, `time`,
+  `interval`, `uuid`, `jsonb`, `inet`, `bytea`, `T[]`. Har biri uchun
+  Postgres tipi + JSON wire ko'rinishi jadvalda. **`numeric` majburiy** —
+  billing tilida pul tipi bo'lmasligi qabul qilinmaydi.
+- `identity` → `GENERATED BY DEFAULT AS IDENTITY` (`bigserial` emas), yozib
+  qo'yiladi (**N10**).
+- Constraint nomlash funksiyasi — versiyalangan, xabardan mustaqil,
+  har doim DDL da ochiq yoziladi (#28, #30):
+  `pk_<table>`, `uq_<table>__<cols>`, `uq_<table>__<cols>__<8hex(predicate)>`,
+  `ck_<table>__<cols>__<n>`, `fk_<table>__<cols>`, `ix_<table>__<cols>[__<8hex>]`.
+- Partial `unique` → `CREATE UNIQUE INDEX ... WHERE`, table CONSTRAINT emas;
+  predikat kompilyatsiya vaqtida kanonlashtiriladi (`== null` → `IS NULL`,
+  enum literal → fizik shakl) (#25).
+- `on update now()` → generatsiya qilingan trigger + trigger funksiyasi
+  (**N1**). Bu — to'rtinchi DDL obyekt sinfi; snapshot modeliga kiritiladi.
+- `--- doc comment` → `COMMENT ON TABLE/COLUMN` (**N10**).
+- Emissiya tartibi (#33): `CREATE SCHEMA` → enum type → table → **barcha FK
+  alohida o'tishda** → index → trigger → comment. Cross-schema FK sikli
+  (`auth → org → auth` namunada bor) shu bilan yechiladi.
+- `private` ustunlar RAW yo'lidan chiqariladi: default query `row_to_json`
+  emas, **ochiq ustun ro'yxati** emit qiladi (#35).
+- `NOT NULL ADD COLUMN` siyosati: `default` yo'q va jadval bo'sh emas —
+  generatsiya rad etiladi, expand/contract shakli taklif qilinadi (#23).
+- `view` DDL **bu relizda emas** — u query compiler'ga bog'liq (0.25.0).
+
+**Tugadi =** `tests/ddl_golden/` da 4 schema fayli uchun etalon `.sql`;
+`jwc gen-sql` bayt-ma-bayt mos; chiqish bo'sh Postgres 16/17 ga xatosiz
+qo'llanadi; `jwc gen-sql --explain` har bir statementga `file:line` beradi;
+DBA protokoli bir marta o'tkazilgan va farqlar 0.
+
+---
+
+### v0.23.0 — **Types** — qiymat panjarasi, null va kirish qatlami
+
+**Maqsad:** har bir qiymatga tip berish, toki `x.field` va `json(x)` ni
+kompilyator hukm qila olsin.
+
+**Ichida:**
+- **`Raw | Record{fields}` panjarasi to'liq** (#17, #41): har bir qiymat
+  ishlab chiqaruvchi uchun qoida — table projection, view select
+  (view = nomlangan `as { }`, demak `Record`), builtin qaytimlari
+  (`jwt.verify -> Record{sub, exp, iat}?`), `jsonb` ustun va `context.get`
+  → `Raw`. Raw'ning maydonini o'qish — kompilyatsiya xatosi, va'da qilinganidek.
+- **Raw kompozitsiyasi** (#11, #41): raw qiymat object literal maydoni
+  bo'lishi mumkin; splice = **matn konkatenatsiyasi**, parse emas. Har bir
+  query uchun diagnostika: `raw preserved` / `raw lost here: <konstruksiya>`.
+- **`T?` birinchi darajali** (#19): `first : T -> T?`;
+  `left join ... as one a` → `a : R?`; `inner join` va `as many` → null emas
+  (bo'sh massiv); `count -> int`, `sum|min|max|avg -> T?`. Flow narrowing:
+  `if (x == null) { return|throw }` davomida `x` toraytiriladi.
+  `T?` maydonini narrowing'siz o'qish — xato; `json(x)` da `x : T?` — ham xato.
+- **Nom yechish** (#2, #18, #34): query ichida qualifikatsiyasiz identifikator
+  **faqat ustun**; local/parametrga murojaat sigil talab qiladi (`$org_id`).
+  View query'lar alias binder oladi. O'tish davri uchun: ikkala tomon bir
+  ustunga yechilsa — `E: 'org_id' is ambiguous` ikkala saytni nomlab.
+- **Spread qoidalari** (#21, #36): `as <Class>` — validatsiya **va**
+  proyeksiya (noma'lum kalitlar tushadi); `...` operandi statik `class`
+  tipli bo'lishi shart (`...request.body()` — xato); yo'q maydon INSERT
+  ustun ro'yxatidan va UPDATE SET dan tushadi (`=?` kabi); mos ustuni yo'q
+  class maydoni — xato, `transient` markeri yoki `...req except password`
+  bilan yechiladi.
+- **Bo'sh spread** (#7): `set ...req` da hamma maydon yo'q bo'lsa —
+  statement o'tkazib yuboriladi, `as { }` proyeksiyasi joriy qatorni
+  qaytaradi (200, SQL syntax error emas).
+- **Class validatsiyasi + 400 shartnomasi** (#32): `minItems` massivlar
+  uchun ajratiladi; barcha xatolar yig'iladi (fail-fast emas); javob shakli
+  qat'iy: `{"error":"validation_failed","fields":[{"path":"lines[2].quantity","rule":"min","limit":1,"message":"..."}]}`;
+  default xabarlar lokalizatsiya qilinadi.
+- **Service chegarasi tiplangan** (#31): parametrlar annotatsiya **majburiy**;
+  return annotatsiyasi ixtiyoriy, lekin shakllar farq qilsa **majburiy**
+  (`WebhookService.record_payment` shu holat).
+- **Expression yadrosi** (**N3**): `+` ning uch xil yuklamasi
+  (string konkat, son, `timestamptz + interval`) tiplar jadvali bilan
+  ta'riflanadi; truthiness; taqqoslash qoidalari; `int` toshib ketishi
+  (`quantity * unit_cents` yig'indisi) — kompilyatsiyada `numeric` ga
+  ko'tarish yoki ochiq xato.
+- **`bigint` wire ko'rinishi** (#42): bitta tanlov, raw va record yo'lida
+  bir xil. Tanlov — **string**, JS iste'molchilari uchun.
+- Lambda yo'q: `sum(req.lines, line => ...)` o'rniga `array.sum(req.lines, "quantity", "unit_cents")` yoki ochiq `for` + akkumulyator (#22).
+
+**Tugadi =** `tests/type_corpus/` — har bir fayl `-- expect: E0xxx@line`
+annotatsiyasi bilan; `jwc check` 100% mos keladi; namunadagi 6 ta ikki
+ma'noli `where` ning hammasi rad etiladi; `9007199254740993` id raw va
+record yo'lida bayt-bir xil chiqadi (test).
+
+---
+
+### v0.24.0 — **Runtime** — routing, middleware, error model, bir jadvalli CRUD
+
+**Maqsad:** namunaning join'siz qismi haqiqatan ishlaydi.
+
+**Ichida:**
+- **Routing** (#12): `(method, resolved_path)` dublikati — qattiq xato,
+  ikkala saytni nomlab (last-wins hech qachon); literal segment parametr
+  segmentidan ustun, to'liq soyalangan route — xato; bir URL slotidagi
+  parametr hamma blokda bir xil nom va tipda bo'lishi shart.
+- **Path parametr tiplari** (#9, #20): router parse qiladi va **middleware'dan
+  oldin** 400 qaytaradi; `@org_id : bigint` haqiqiy tip; prefix ∪ suffix
+  binder to'plami tekshiriladi.
+- **Middleware** (#13, #14, #37): blok-darajadagi ro'yxat yozilish
+  tartibida, keyin route-darajadagi ro'yxat (qo'shiladi, almashtirmaydi;
+  takroriy nom — xato); `after` bloklar teskari tartibda; `after` **har
+  qanday** javob uchun ishlaydi, jumladan short-circuit, va
+  `response.status()` yuboriladigan statusni ko'radi; `middleware X(@org_id: bigint)`
+  — har bir biriktirish saytida tekshiriladi; `requires` bilan e'lon
+  qilingan bog'liqlik statik tekshiriladi.
+- **Javob konstruktsiyasi** (#10): `with { }` header suffiksi barcha
+  builder'larda; `response.set_header(...)` `after` ichida; takrorlanuvchi
+  header'lar (`Set-Cookie`) alohida API.
+- **`server { }` config bloki** (#39): `trusted_proxies`, `max_body_bytes`,
+  `request_timeout`, `header_timeout`, `cors`, `tls`.
+- **`request.client_ip()`** (#15, #39): `peer_ip()` har doim socket manzili;
+  `client_ip()` — `trusted_proxies` e'lon qilinmagan bo'lsa peer manzili,
+  XFF **e'tiborsiz**. `request.route()` — e'lon qilingan pattern
+  (rate-limit kaliti kardinalligi uchun).
+- **Body bufferi** (#16): bir marta chegaralangan buferga o'qiladi;
+  `raw_body()` va `body() as T` — **bir xil buferning ikki ko'rinishi**;
+  chegaradan oshsa middleware'dan oldin 413.
+- **Error model — to'liq E1–E14** (§4). Bu relizning yarmi.
+- Bir jadvalli `select`/`insert`/`update`/`delete`: `where`, `as { }`,
+  `first`, `orderby`, `limit`, `delete ... as { } first` (#6);
+  `update ... first` → `FOR UPDATE` sub-select (#43); `first` bilan
+  `orderby` majburiy, agar WHERE unique/PK ga tushmasa (#43).
+- `transaction { }` semantikasi yozib qo'yiladi: **xato → ROLLBACK,
+  `return` → COMMIT**; `errorHandler` rollback'dan **keyin**, tranzaksiyadan
+  tashqarida ishlaydi (G7).
+
+**Tugadi =** `jwc serve` namunadagi `/api/v1/auth/*`, `/api/v1/me`,
+`/api/v1/plans`, `/api/v1/webhooks/*` ni ishga tushiradi va
+`tests/http_golden/` dagi 40+ so'rov-javob juftligi (status, header, body)
+mos keladi; route-conflict corpus'i (12 holat) mos diagnostika beradi;
+error model conformance corpus'i (E1–E14 uchun kamida 2 test) o'tadi.
+
+---
+
+### v0.25.0 — **Query compiler** — ENG KATTA BO'LAK (butun ishning ~28%i)
+
+**Maqsad:** join'lar, view'lar, agregatlar, raw kuzatuvi, pagination.
+
+Bu reliz yolg'iz o'zi qolgan har bir relizdan katta. Uni kichraytirib
+ko'rsatish foydasiz — ichki bosqichlarga bo'linadi va har biri alohida
+merge qilinadi.
+
+**25.a — Join va nom qatlami**
+- Alias binder (#1): alias — **yagona** binding; `Accounts.` hech qachon
+  binding emas; self-join ishlaydi (`Invites.invited_by` + acceptor,
+  `Events.actor_id` namunada bor).
+- `from` oldidagi slot yakuniy hal qilinadi: root binding aliasi,
+  view'lar uchun ham majburiy (#1, #18).
+- **Join biriktirish daraxti** (**N12**): join qaysi binding'ga osilishi
+  ochiq yoziladi. Hozir `OrgWithMembers` da `as one account`
+  `as many members` ichiga faqat `Members.account_id` ga murojaat qilgani
+  uchun tushadi — pozitsion va e'lon qilinmagan. 1.0 da: `on` ikki
+  binding'ga murojaat qilsa yoki tartib noaniq bo'lsa — xato,
+  `under <alias>` bilan yechiladi.
+- `inner join` mavjudmi — javob: ha, va u `as one` uchun null emaslikni
+  beradi (#3).
+
+**25.b — Proyeksiya va kardinallik**
+- `as one` + `left join`: `CASE WHEN <right pk> IS NULL THEN NULL ELSE
+  json_build_object(...) END` — ya'ni **null obyekt**, null'lardan iborat
+  obyekt emas; JWC tipi `R?` (#3).
+- `as many`: lateral + `json_agg`; **`orderby` majburiy**, `limit`
+  ixtiyoriy — ikkalasi ham lateral ichida, `json_agg(... ORDER BY ...)`
+  emas (#5).
+- Bola kolleksiyasini filtrlash join ustida: `left join Members m on ...
+  where m.role == admin as many admins` (#8).
+
+**25.c — Agregatlar**
+- Bare join — uchinchi rejim sifatida **o'z kalit so'zi bilan** rasmiylashadi;
+  `as many` bilan bir query'da aralashtirish — kompilyatsiya xatosi (#4).
+- `count(distinct x)`, `avg`, `having` (**N6**) qo'shiladi.
+- Agregat null'ligi tip qatlamiga ulanadi (`sum → T?`) (#19).
+
+**25.d — View'lar**
+- `CREATE VIEW` emissiyasi (0.22.0 dan qoldirilgan qism).
+- **View — haqiqiy DB obyekti** deb yozib qo'yiladi (makro emas) (#44).
+- **Ikki bosqichli pushdown** (#44): `many` bola `orderby`/`limit` bilan
+  uchrashganda — CTE 1 haydovchi jadval kalitlarini `WHERE + ORDER BY +
+  LIMIT` bilan tanlaydi, CTE 2 bolalarni faqat shu kalitlar ustidan
+  LATERAL qiladi. Pushdown isbotlanmasa — kompilyatsiya xatosi, qayta
+  yozish varianti ko'rsatilib.
+- `orderby` nested `one` maydoni bo'yicha (`orderby org.name`) — ta'riflanadi:
+  asosidagi join qilingan ustunga tushadi, JSON path emas (**N6**).
+
+**25.e — Pagination va raw**
+- Keyset pagination birinchi darajali (#11, #40):
+  `orderby issued_at desc, id desc page after @cursor size 50 max 200`
+  → `{data, next_cursor, has_more}` bitta raw payload sifatida; `max`
+  kompilyatsiya vaqtida majburlanadi.
+- Raw kuzatuvi query bo'yicha diagnostika beradi (0.23.0 dagi qoidalarning
+  query tomoni) (#41).
+- `where exists (...)` / `not exists (...)` (#8).
+- **`raw` escape hatch**: parametrlangan xom SQL, faqat `Raw` qaytaradi,
+  interpolyatsiya yo'q, **`view` ichida taqiqlanadi**, `jwc lint` da
+  ko'rinadi. Bu — window function / CTE / recursive / full-text uchun
+  yagona klapan.
+- `jwc explain` ilgaklari (0.27.0 da UI oladi) (#29).
+
+**Tugadi =** namunaning **barcha 25 endpoint'i** ishlaydi;
+`tests/sql_golden/` da har bir query uchun qo'lda tasdiqlangan SQL;
+`InvoiceDetail` ustidan `orderby+limit` bo'yicha `EXPLAIN` seed'langan
+100k qatorli bazada `json_agg` ni faqat sahifa kalitlari uchun bajaradi
+(plan assertioni); self-join corpus'i (6 holat) kompilyatsiya bo'ladi;
+raw-tracking diagnostikasi namunadagi har bir query uchun to'g'ri
+`preserved`/`lost` beradi.
+
+---
+
+### v0.26.0 — **Migrations** — snapshot, fazalar, e'lon qilingan rename
+
+**Maqsad:** schema o'zgarishi ma'lumot yo'qotmasdan va rad etilmasdan qo'llanadi.
+
+**Ichida:**
+- Snapshot modeli barcha obyekt sinflari uchun: table, column, enum
+  (`EnumSnapshot { name, schema, ordered_values }`),
+  `UniqueSnapshot { columns, predicate }`, `IndexSnapshot { columns,
+  predicate, unique }`, view (kompilyatsiya qilingan SQL + murojaat
+  qilingan jadvallar to'plami), trigger, comment (#24, #25, #26).
+- **Fazali emissiya** (#24): `DROP VIEW` teskari topologik tartibda →
+  table DDL → `CREATE VIEW` topologik tartibda. Har doim drop-and-recreate;
+  `CREATE OR REPLACE VIEW` xavfsizligini isbotlashga urinilmaydi.
+- **E'lon qilingan rename** (#27): `created_at timestamptz was "createdAt"`
+  yoki `jwc migrate rename <table>.<col> <new>`. Diff mos tipli
+  `DropColumn+AddColumn` juftligini `--allow-destructive` siz **rad etadi**
+  va gumon qilingan rename'ni chop etadi.
+- **NOT NULL backfill** (#23): expand/contract ikki migratsiya shakli;
+  unique/check/FK ko'targan ustun uchun hech qachon nol qiymat taxmin
+  qilinmaydi; noma'lum tip uchun `DEFAULT NULL` o'rniga qattiq xato.
+- **Enum evolyutsiyasi** (#26): append → `-- jwc:no-transaction` sarlavhali
+  alohida faylda `ADD VALUE`; rename → `ALTER TYPE RENAME VALUE`, faqat
+  manba darajasidagi `was` markeri bilan; `run_migration_file` ga
+  `-- jwc:no-transaction` direktivasi o'rgatiladi (hozirgi
+  `file_opens_transaction` teskari ishlaydi).
+- `jwc migrate status` (qo'llangan / kutilayotgan / drift) va
+  `jwc migrate verify` — `pg_constraint` / `pg_indexes` ni binary kutgan
+  nomlar bilan solishtiradi (#28).
+- Dev-rejim: `jwc serve` boot'da `information_schema` ni dasturga
+  solishtiradi va yetishmayotgan ustunni nomlab startup xatosi beradi
+  (PG 42703 ni o'rab 500 qaytarish o'rniga) (#33).
+
+**Tugadi =** **round-trip property testi**: bo'sh bazadan boshlab N ta
+tasodifiy schema tahriri (ustun qo'shish/o'chirish/rename, unique
+predikatini o'zgartirish, enum label qo'shish, view proyeksiyasini
+o'zgartirish) → `migrate up` ketma-ketligi → natijadagi baza tuzilishi
+yangi `gen-sql` ni bo'sh bazaga qo'llash bilan **bir xil** (`pg_dump
+--schema-only` normallashtirilgan solishtiruv). 200 ta tasodifiy ketma-ketlik
+o'tadi; `varchar(20)→varchar(40)` on `Invoices.number` (view ostidagi ustun)
+xatosiz qo'llanadi.
+
+---
+
+### v0.27.0 — **Tooling** — SQL ko'rinadigan bo'ladi
+
+**Maqsad:** ikki qabul testini editor'da tekshirish mumkin bo'lsin.
+
+**Ichida:**
+- LSP: `select`/`insert`/`update` ustida **hover → generatsiya qilingan
+  SQL** (`$n` placeholder'lar + join strategiyasi bilan) (#29);
+  signature help va `.` completion (0.23.0 dagi tiplangan service
+  chegarasidan kelib chiqadi) (#31); go-to-definition; diagnostikalar.
+- `jwc explain <Service.function>` va
+  `jwc explain --route "GET /api/v1/orgs/{org_id}/invoices"` — SQL + dev
+  bazaga qarshi `EXPLAIN` (#29).
+- `JWC_LOG_SQL=1` — `jwc serve` da so'rov bo'yicha SQL, bog'langan
+  parametrlar, davomiylik, qator soni.
+- `debug.dump(x)` — raw qiymatlarda ham ruxsat, faqat `jwc serve --dev` da (#29).
+- `jwc lint --constraints` — route'dan yetib boriladigan har bir constraint
+  va uning natijaviy status kodi; xabarsiz `unique`/FK uchun ogohlantirish (#30).
+- `jwc openapi` — tiplangan service signaturalari + view proyeksiyalaridan (#31).
+
+**Tugadi =** namunadagi 25 endpoint uchun `jwc explain` chiqishi
+`tests/sql_golden/` bilan mos; LSP smoke testi hover-SQL ni tekshiradi;
+`jwc openapi` chiqishi OpenAPI 3.1 validatoridan o'tadi;
+`jwc lint --constraints` namunadagi 5 ta xabarsiz unique'ni ko'rsatadi.
+
+---
+
+### v0.28.0 — **Test framework va paketlar**
+
+**Maqsad:** constraint xabarlari va paket chegarasi tekshiriladigan bo'lsin.
+
+**Ichida:**
+- `test` bloklari, `assert`, `assert fails { } with "<message>"` — **xabarni
+  ham** tekshiradi, faqat "insert failed" emas (#28).
+- **Test izolyatsiyasi modeli** (**N9**): har bir `test` o'z tranzaksiyasida
+  ishlaydi va oxirida rollback qilinadi. Hozir namunadagi 3 ta test bir-birini
+  buzadi: 1-test `Subscriptions` ga qator qo'shadi, 2-test o'sha org uchun
+  faol obuna yaratishga urinadi va partial unique tufayli *birinchi* insert'da
+  yiqiladi.
+- `seed.*` — e'lon qilinadigan seed fixture'lari, sehrli global emas.
+- **Paket kontent modeli** (**N8**): paket nima e'lon qila oladi (`service`,
+  `middleware`, `class`, builtin namespace) va nima **yo'q** (`table`,
+  `schema`, `routes` — ya'ni paketlar migratsiya keltirmaydi). `import redis;`
+  paket importi sifatida rasmiylashadi.
+- `raises (...)` paket eksport chegarasida — inferred to'plamning superset'i
+  ekanligi tekshiriladi (E12).
+- `jwc-registry` bilan integratsiya: `jwc publish` / `jwc add`.
+
+**Tugadi =** `jwc test` namunaning `tests/billing_test.jwc` ni 3/3 yashil
+ishga tushiradi va tartibdan qat'i nazar takrorlanadi (shuffle testi);
+`assert fails ... with` noto'g'ri xabarda yiqiladi (negativ test);
+`raises` narrowing urinishi kompilyatsiya xatosi beradi.
+
+---
+
+### v0.29.0 — **Hardening**
+
+**Maqsad:** xavfsizlik va ops bo'shliqlarini yopish.
+
+**Ichida:**
+- **Hash builtinlari ajratiladi** (#38): `hash.sha256`, `hash.hmac_sha256`
+  (deterministik, indeks seek uchun), `hash.password`/`verify` (KDF, faqat
+  tekshirish uchun), `crypto.constant_time_eq`. Namunaga accept-invite
+  endpoint'i yoziladi — hozir `Sessions.token_hash` / `ApiKeys.key_hash` /
+  `Invites.token_hash` ustidagi `unique` cheklovlari **ma'nosiz**, chunki
+  yagona hash builtin har chaqiruvda boshqa digest beradi.
+- `verify_signature` shu primitivlar ustida qayta yoziladi.
+- Rate-limit kalitlari `request.route()` ga o'tadi (cheksiz Redis kaliti
+  muammosi) va auth endpoint'lari IP + identity bo'yicha kalitlanadi (#39).
+- Body limitlari, request/header timeout, CORS, TLS — `server { }` orqali
+  soak ostida tekshiriladi.
+- Threat model hujjati redizayn uchun yangilanadi; `cargo audit` / `deny`
+  toza.
+- Perf baseline: bombardier + Postgres, `/metrics`, 24h soak.
+
+**Tugadi =** XFF spoof testi (trusted_proxies bo'sh) limiterni chetlab
+o'tolmaydi; 413 body-limit testi middleware'gacha yetmaydi; timing testi
+`login` ning ikki tarmog'i orasida statistik farq bermaydi (yoki farq
+hujjatlashtiriladi); 24h soak'da RSS o'sishi < 5%, 0 ta pool leak.
+
+---
+
+### v1.0.0-rc.1 — **Freeze candidate**
+
+**Maqsad:** sintaksisni muzlatishdan oldin ishonch.
+
+**Ichida:**
+- To'liq conformance corpus (parse + type + sql-golden + http-golden +
+  ddl-golden + migration round-trip) CI'da bloklovchi.
+- Tashqi audit: bir DBA (DBA testi), bir backend muhandisi (Developer testi),
+  bir xavfsizlik ko'rigi.
+- Pilot: `saas/` dan tashqari bitta haqiqiy loyihani ko'chirish va
+  o'lchash — nechta konstruksiya spec'dan tashqarida ekan.
+- `docs/` sayti yangi til uchun to'liq; eski hujjatlar arxivga.
+- `CHANGELOG.md` 1.0 uchun tozalanadi; SEMVER siyosati yangilanadi.
+
+**Tugadi =** pilot loyiha `raw` escape hatch'siz kompilyatsiya bo'ladi
+(yoki har bir `raw` ishlatilishi kechiktirilgan feature'ga havola qiladi);
+0 ta P0/P1 audit topilmasi ochiq; barcha corpus'lar yashil.
+
+---
+
+### v1.0.0 — **Syntax freeze**
+
+Sintaksis muzlaydi. Buzuvchi o'zgarish faqat 2.0 da. Kechiktirilgan
+feature'lar 1.1+ da, qo'shimcha sifatida.
+
+---
+
+## 4. Error model qarori (rejalashtirilgan band)
+
+**Qaror:** avtomatik propagatsiya (`throw` + bitta `errorHandler`) qoladi,
+lekin u endi tiplanmagan runtime mexanizmi emas — **tiplar e'lon qilinadi,
+har bir funksiyaning raise-set'i statik call-graph ustidan inferred bo'ladi,
+exhaustiveness bitta chegarada bir marta tekshiriladi.**
+
+Sabab qisqacha: namunadagi 41 ta xato nuqtasidan **40 tasi so'rovni status
+bilan tugatadi va hech bir chaquruvchi shoxlanmaydi**. Yagona haqiqiy
+shoxlanish — webhook duplicate — va u allaqachon `return` bilan, xato
+kanalisiz yozilgan. Errors-as-values 40 saytga soliq solib 1 taga xizmat
+qiladi (~+140 satr, route'lar 34% o'sadi, `Route ichida mantiq yo'q`
+qoidasi buziladi). Go lagerining eng kuchli e'tirozlari — `throw NotFund(...)`
+jim 500 ga tushishi va catch-all bug yeyishi — **tiplashning yo'qligiga**
+tegadi, propagatsiyaga emas. Shuning uchun tiplash qo'shiladi, mexanizm
+almashtirilmaydi.
+
+**Rejalashtirish:**
+- **Qaror hujjati:** v0.20.0 (`docs/spec/errors.md`).
+- **Grammatika** (`error` deklaratsiyasi, postfix `catch`, `or throw`,
+  `raises`): v0.21.0.
+- **E10 constraint promotion** ning nomlash asosi: v0.22.0.
+- **E1–E9, E11, E13, E14 implementatsiyasi:** v0.24.0.
+- **E2/E3 ning yozuv tomoni** (yozilgan jadvallarning constraint'lari raise
+  to'plamiga qo'shilishi) query compiler yozuv statement'lari to'liq
+  bo'lgach: v0.25.0.
+- **E12 paket chegarasi:** v0.28.0.
+
+**Qoidalar (v0.24.0 uchun qabul mezoni — har biriga kamida 2 test):**
+
+| # | Qoida |
+|---|---|
+| E1 | `throw`/`catch` dagi har bir nom e'lon qilingan yoki built-in `error` ga yechiladi. Noma'lum nom — kompilyatsiya xatosi |
+| E2 | Raise-set inferred: o'z `throw`lari ∪ `or throw`lari ∪ callee raise-set'lari ∪ yozilgan jadval constraint'lari − postfix `catch` yutgan tiplar. Bo'sh to'plamdan fixpoint |
+| E3 | Barcha route/middleware/`after` raise-set'larining birlashmasi `errorHandler` arm'lari **yoki** built-in default status bilan qoplanishi shart |
+| E4 | Tipsiz `catch (err)` faqat **fault**larni tutadi; e'lon qilingan xato uchun E3 ni qanoatlantirmaydi |
+| E5 | Hech kim ko'tarmaydigan tip uchun arm — ogohlantirish "unreachable arm" |
+| E6 | Har bir `errorHandler` arm'i javob bilan tugashi shart |
+| E7 | `after { }` bloklarining raise-set'i **bo'sh** bo'lishi shart |
+| E8 | Postfix `catch` bloki divergent bo'lishi shart (`return`/`throw`/`continue`/`break`) |
+| E9 | `transaction { }` ichida postfix `catch` → `SAVEPOINT`/`RELEASE`/`ROLLBACK TO`. Majburiy: aks holda `25P02` |
+| E10 | Xabarli constraint → e'lon qilingan xato (`unique`→`Conflict` 409, `check`→`BadRequest` 400, FK→`BadRequest` 400). Xabarsiz → **fault** → 500 + log |
+| E11 | Body validatsiyasi `BadRequest` ko'taradi, `details` maydoni bilan; band-tashqi 400 yo'li yo'q |
+| E12 | Paket chegarasidagi service `raises (...)` yozishi mumkin; inferred to'plamning superset'i ekanligi tekshiriladi. Ilova kodi yozolmaydi |
+| E13 | Nested tranzaksiya **kompilyatsiya vaqtida** call-graph ustidan aniqlanadi (hozirgi runtime `bail!` emas) |
+| E14 | Middleware `throw` qila oladi. `return <response>` faqat ataylab **xato bo'lmagan** javob uchun (redirect, 304, 202) |
+
+Oldindan e'lon qilinganlar (default status bilan): `BadRequest` 400,
+`Unauthorized` 401, `Forbidden` 403, `NotFound` 404, `Conflict` 409,
+`TooManyRequests` 429, `ConstraintViolation` 400. Foydalanuvchi e'lon
+qilgan xatoning default statusi **yo'q** — demak E3 arm talab qiladi.
+Natija: namunaning 8 arm'li `errorHandler` i **butunlay o'chirilishi**
+mumkin va ilova bir xil ishlaydi.
+
+**Ochiq tuzatish (yangi topilgan, §5/N4):** `int(request.query("limit") ?? "50")`
+— mijoz `?limit=abc` yuborsa, `int()` fault ko'taradi va E10/fault qoidasi
+bo'yicha bu 500. Bu noto'g'ri: mijoz xatosi 400 bo'lishi kerak. v0.20.0 da
+hal qilinadi: koersiya builtinlarining **kirish manbasiga** qarab
+klassifikatsiyasi (`request.*` dan kelgan qiymat ustida `int()` →
+`BadRequest`, ichki qiymat ustida → fault), yoki `int?()` ko'rinishidagi
+ochiq nullable variant. Ikkisidan biri tanlanadi, uchinchisi yo'q.
+
+---
+
+## 5. Yangi topilgan bo'shliqlar
+
+Bular 44 talik ro'yxatda ham, `DESIGN.md` ning "Known-invented" bandida ham
+yo'q. Har biri namunadan dalil bilan.
+
+| # | Bo'shliq | Dalil | Reliz |
+|---|---|---|---|
+| **N1** | `on update now()` — `DESIGN.md` schema bandida umuman yo'q, lekin namunada bor. Postgres'da `ON UPDATE` yo'q: bu trigger + trigger funksiyasi, ya'ni **to'rtinchi DDL obyekt sinfi** (view/enum/index dan tashqari), snapshot va diff talab qiladi | `src/db/billing.jwc:38` | 0.22.0, 0.26.0 |
+| **N2** | Skalyar tip lug'ati **hech qayerda e'lon qilinmagan**. `inet`, `text[]`, `jsonb` namunada ishlatiladi va `DESIGN.md` da yo'q. `numeric`/`decimal` umuman yo'q — billing tilida pul `int` sentlarda, `uuid`/`date`/`interval` ham yo'q | `auth.jwc:23,37`, `audit.jwc:14`, `billing.jwc:19` | 0.22.0 |
+| **N3** | Ifoda yadrosi ta'riflanmagan: `+` uch xil yuklangan (string konkat, son, `timestamptz + interval`); truthiness yo'q; `int` toshib ketishi yo'q | `ratelimit.jwc:9`, `billing.jwc:42`, `auth.jwc:36` | 0.23.0 |
+| **N4** | Koersiya builtinlari mijoz kirishida — `int()` fault ko'taradi → 500, holbuki 400 kerak. Bu **qabul qilingan error model ichidagi** teshik | `routes/billing.jwc:44` | 0.20.0 qaror, 0.24.0 kod |
+| **N5** | `import` semantikasi yo'q va u ikki xil narsani bir spelling bilan qiladi: namespace importi (`import db.org`) va **paket** importi (`import redis`). Amalda majburlanmaydi ham: `views/billing.jwc` `InvoiceStatus` ni ishlatadi, lekin `db.billing` ni import qilmaydi; `views/org.jwc` `Accounts` ga join qiladi, `db.auth` ni import qilmaydi. Bundan tashqari **erkin funksiyalar deklaratsiya saytiga ega emas**: `invite_body(token)` chaqiriladi, hech qayerda e'lon qilinmaydi | `views/billing.jwc:3,49`, `views/org.jwc:3,9`, `services/org.jwc:102`, `ratelimit.jwc:3` | 0.20.0, 0.21.0 |
+| **N6** | Query lug'atida `having` yo'q (agregatni filtrlash imkonsiz), `in`/`like`/`between` yo'q (`?status=open,paid` yozib bo'lmaydi), va nested `one` maydoni bo'yicha `orderby` ta'riflanmagan | `services/auth.jwc:62` (`orderby org.name asc`) | 0.25.0 |
+| **N7** | `after { }` ichidagi yalang'och `return;` — `return` ning ikkinchi ma'nosi ("bu bloknı to'xtat"), route'dagi "javob qaytar" dan farqli | `middleware/audit.jwc:14` | 0.21.0, 0.24.0 |
+| **N8** | Paket kontent modeli yo'q: paket `table` e'lon qila oladimi? Agar ha — uning migratsiyalari qanday qo'shiladi? `jwcproj.json` `redis` ni deklaratsiya qiladi va u builtin namespace beradi | `jwcproj.json:6`, `ratelimit.jwc:3,11` | 0.28.0 |
+| **N9** | Test izolyatsiya modeli yo'q. Namunaning 3 testi bir-birini buzadi: 1-test `Subscriptions` ga qator qo'shadi; 2-test o'sha `seed.org.id` uchun faol obuna yaratadi va partial unique tufayli **birinchi** insert'da yiqiladi | `tests/billing_test.jwc:8,19` | 0.28.0 |
+| **N10** | `--- doc comment` → `COMMENT ON` — beshinchi drift qiladigan obyekt sinfi; `identity` ning fizik shakli (`GENERATED ... AS IDENTITY` vs `bigserial`) yozilmagan, DBA testi buni talab qiladi | `DESIGN.md:41,59` | 0.22.0 |
+| **N11** | **`now()` vs `date.now()`.** `DESIGN.md` `date.now()` ni app soati, `default now()` ni Postgres soati deb ajratadi va "farq muhim (billing periods)" deb ogohlantiradi — namuna esa ilova kodida **6 marta yalang'och `now()`** chaqiradi va aynan billing davrlarini shundan hisoblaydi. `date.now()` namunada bir marta ham yo'q. Ya'ni ogohlantirilgan xato ground-truth'da sodir bo'lgan | `services/billing.jwc:41,57,93,144`, `services/org.jwc:91` | 0.20.0, 0.23.0 |
+| **N12** | **Join biriktirish daraxti pozitsion va e'lon qilinmagan.** `OrgWithMembers` da `as one account` `as many members` ichiga tushadi — faqat `on` bandi `Members.account_id` ga murojaat qilgani uchun. `on` ikki binding'ga tegsa, biriktirish noaniq va proyeksiya daraxti aniqlanmaydi | `views/org.jwc:8-9` | 0.25.0 (25.a) |
+
+---
+
+## 6. 44 tasdiqlangan bo'shliq → reliz xaritasi
+
+Har bir bo'shliq **v0.20.0 da yozma javob** oladi; jadval **implementatsiya**
+relizini ko'rsatadi.
+
+| # | Bo'shliq (qisqa) | Reliz |
 |---|---|---|
-| **LLVM IR backend** | Native AOT Rust-codegen orqali yetadi. LLVM yakka muhandis sig'imidan tashqarida | Non-goal |
-| **Cross-target native build matrisi** (Windows-ARM, macOS-ARM, FreeBSD, …) | Linux x86_64 + aarch64 (glibc + musl), Windows x86_64, Docker amd64/arm64 yetadi. Boshqa target'lar shovqin | Non-goal — **lekin aarch64 Linux 0.9.6'da qo'shildi**: bu qator ARM uchun javob sifatida Docker arm64'ga ishora qilardi, holbuki u QEMU osilib qolgani uchun o'chirilgan edi — ya'ni hech qanday arm64 yo'li yo'q edi. Endi ikkalasi ham bor |
-| **Self-hosting compiler** | JWC kompilyatori JWC'da yozilishi maqsad emas. Rust qoladi | Non-goal |
-| **WASM target** | Backend tili — brauzer/edge runtimega chiqish niche'ga to'g'ri kelmaydi | Non-goal |
-| **Multi-database driver** (MySQL/SQLite/MSSQL/Oracle) | Postgres-first va'dasi. SQL'ning Postgres dialect'iga sodiq qolamiz | Non-goal |
-| **HTTP route SSE v2 / `stream select`** | CRUD og'rig'ini kamaytirmaydi | Non-goal (basic WebSocket bor) |
-| **Background-job priority queue / DLQ ML retry policy** | Hozirgi durable queue + dead-letter yetarli | Non-goal (over-engineering) |
-| **OTLP'ni "yadro" featuresi qilish** | `otlp` Cargo feature ortida qolishi kifoya, default-off | Non-goal (ops vositasi, ergonomika emas) |
-| **Rich-domain object graph, change-tracking, lazy-loading, EF-style navigation propertylar** | Maqsad — ORM'siz qolish. JWC bu hududga kirmaydi | Non-goal (by design) |
-| **Module / import sistemasi** | Bir-proyekt-bir-flat-namespace yetarli; modullar 1.0-blocker emas | Defer post-1.0 |
-
-Ushbu band'lar uchun PR'lar yopiladi yoki forka tavsiya etiladi.
-
----
-
-## Progress Snapshot
-
-| Phase | Status |
-|-------|--------|
-| Phase 0 — Texnik qarz (legacy hack’larni tozalash) | ✅ Done |
-| Phase 1 — MVP Core | ✅ Done (Sprint 1 closeout) |
-| Phase 2 — Language Completeness | ✅ Done (Sprint 2A/2B/2C code-health audit yopildi) |
-| Phase 3 — Developer Experience | ✅ Done (Sprint 3: typed catch + dotted subtypes + gradual type checker + AOT visibility) |
-| Phase 4 — Real Compiler (Native) | ✅ Done for 1.0 scope (native AOT via Rust codegen + cargo). Query-layer native parity ✅ v0.6.x (nav eager-load/grouped agg/JOIN/op? + camelCase call-resolution fix). JWT builtinlari (`jwt_sign`/`jwt_verify`) ✅ native (v0.9.6 auditi: registry'da `native: true`) — Bearer-auth app endi to'liq native build bo'ladi. Bu qator uzoq vaqt teskarisini yozib turgan edi. LLVM IR + cross-target → **Non-goals** |
-| Phase 5 — Ecosystem | ✅ Done for 1.0 surface (config registry + OTLP + persistent queue + DLQ + soak harness ✅; 72h soak real run = ops) |
-| Phase 6 — DX Polish (real-app feedback) | ✅ Done (literals/now/@var.field/!/raw strings/typed-field/error-handler) |
-| Phase 6 (security) — SECURITY.md + cargo audit + threat model + SSRF allowlist + JWT exp + secrets redaction | ✅ Done (external review = ops) |
-| Phase 7 — Standard helpers (strings/arrays/iteration/json) | ✅ Done |
-| Phase 7 (perf) — bench DB endpoints + AOT scope + README link | ✅ Done (Linux real-run + CI regression gate + 72h soak burn = ops) |
-| Phase 8 — Background jobs + LSP + dev-experience close-out | ✅ Done (queue + jwc-lsp go-to-def/rename/completion + WebSocket + Docker/musl/templates/fmt/upgrade/Marketplace/autogen) |
-| Phase 9 — Async runtime + perf ceiling | ✅ Done (async Vm + tokio-postgres + reqwest; native AOT also async) |
-| Phase 10 — Observability (kichiroq scope) | ✅ Done for 1.0 surface (typed-catch dispatch ✅; OTLP exporter ✅ behind `otlp` feature). Stream `select` / `route SSE v2` / cross-target → **Non-goals** |
-| **Phase 11 — Query Layer (1.0-blocker)** | ✅ Done (v0.5.0→v0.6.1): explicit JOIN + grouped agg over JOIN (0 raw_sql) + nav eager-load (belongs-to/has-many/one/m2m/2-level nested) + projection + `op?` optional filter + dynamic in-list (`= ANY`) + atomic `update set`/reorder + jonli `/openapi.json`. Native query-layer parity ✅. Kamchiliklar: pastdagi Phase 11 bo'limiga qarang |
-
----
-
-## Phase 0 — Texnik qarz ✅ done
-
-**Maqsad:** Real Phase 2 ga o‘tishdan oldin "Done" deb belgilangan, lekin asli pala-partish qolgan joylarni tozalash.
-
-### 0.1 Legacy WebAPI normalizer’ni olib tashlash ✅
-- `parser.rs::normalize_webapi_compat()` butunlay olib tashlandi.
-- `runner.rs` — hardcoded `db_*_todo` built-in funksiyalari va dispatch shoxlari o‘chirildi (≈ 224 qator − ).
-- Native AST nodelari yagona DB API bo‘ldi.
-
-### 0.2 Drivers majmuasini halollashtirish ✅
-- Validator endi aniq xabar beradi: *"Postgres is currently the only supported dbcontext driver. Multi-driver support is planned for Phase 2."*
-- README’da `## Supported Drivers` bo‘limi qo‘shildi.
-
-### 0.3 Migrations’ni to‘ldirish ✅ (rollback qismi)
-- `jwc migrate down --steps N` qo‘shildi (`main.rs`, `migrate.rs::rollback_migrations`).
-- Har migration alohida transaksiyada `<base>.down.sql` ni ishga tushiradi va `_jwc_migrations` jadvalidan o‘chiradi.
-- Boshqa qoldi (Phase 2 da hal qilinadi): schema diff generator.
-
-### 0.4 Build komanda’ning haqiqiy ma’nosi ✅
-- `jwc build` (alias: `jwc bundle`) — output xabari aniq: *"Bundled runtime + launcher"*.
-- README va `--help` matnida AOT kompilator hali yo‘qligi va Phase 4 ga rejalashtirilgani belgilab qo‘yildi.
+| 1 | No join alias / self-join | 0.25.0 (25.a) |
+| 2 | `where col == param` ambiguity | 0.23.0 |
+| 3 | `left join ... as one` null shape | 0.25.0 (25.b) |
+| 4 | Bare-join aggregates, `count(distinct)` | 0.25.0 (25.c) |
+| 5 | No order/limit inside `as many` | 0.25.0 (25.b) |
+| 6 | `delete` returns nothing | 0.21.0 + 0.24.0 |
+| 7 | Empty `set ...req` | 0.23.0 |
+| 8 | Filter parent by children / `exists` | 0.25.0 (25.b, 25.e) |
+| 9 | Path params untyped | 0.21.0 + 0.24.0 |
+| 10 | No response headers | 0.21.0 + 0.24.0 |
+| 11 | Envelope pagination / raw composition | 0.23.0 + 0.25.0 (25.e) |
+| 12 | Route conflicts / precedence | 0.24.0 |
+| 13 | Middleware undeclared path-param dep | 0.24.0 |
+| 14 | Middleware order / `use` composition / after | 0.24.0 |
+| 15 | `client_ip()` proxy trust | 0.24.0 + 0.29.0 |
+| 16 | Double body read / buffering | 0.24.0 |
+| 17 | Raw-vs-record not total | 0.23.0 |
+| 18 | View queries have no alias binder | 0.23.0 + 0.25.0 |
+| 19 | `?` never propagates | 0.23.0 |
+| 20 | Path param coercion → 500 | 0.24.0 |
+| 21 | Spread absent-vs-null | 0.23.0 |
+| 22 | `sum(xs, lambda)` / closures | **Non-goal** (§8) — `array.*` ga almashtiriladi, 0.23.0 |
+| 23 | NOT NULL backfill | 0.22.0 + 0.26.0 |
+| 24 | Views veto ALTERs / phases | 0.25.0 (25.d) + 0.26.0 |
+| 25 | Partial index predicates in diff | 0.22.0 + 0.26.0 |
+| 26 | Enum evolution | 0.26.0 (**qisman deferred** — §7) |
+| 27 | Renames → data loss | 0.21.0 + 0.26.0 |
+| 28 | Constraint name ↔ message coupling | 0.22.0 + 0.26.0 + 0.28.0 |
+| 29 | Generated SQL invisible | 0.25.0 (ilgaklar) + 0.27.0 (UI) |
+| 30 | Message-less constraints & FK → 500 | 0.22.0 + 0.24.0 + 0.27.0 |
+| 31 | Untyped service params / returns | 0.21.0 + 0.23.0 + 0.27.0 |
+| 32 | Validation 400 body / `minLength` overload | 0.23.0 |
+| 33 | Cross-schema FK cycles / gen-sql order | 0.22.0 + 0.26.0 |
+| 34 | Bare identifiers in `where` | 0.23.0 |
+| 35 | `private` contradicted by projection/view | 0.22.0 + 0.23.0 |
+| 36 | Spread whitelist preconditions | 0.23.0 |
+| 37 | Block vs route `use` order | 0.24.0 |
+| 38 | Hashed-token lookup impossible | 0.29.0 |
+| 39 | No server config surface | 0.24.0 |
+| 40 | No pagination primitive | 0.21.0 + 0.25.0 (25.e) |
+| 41 | Raw boundary at composition | 0.23.0 + 0.25.0 |
+| 42 | `bigint` fidelity raw vs record | 0.23.0 |
+| 43 | `update ... first` locking / `first` order | 0.24.0 + 0.25.0 |
+| 44 | `as many` aggregation before limit | 0.25.0 (25.d) |
 
 ---
 
-## Phase 1 — MVP Core ✅ done
+## 7. 1.0 dan keyinga kechiktirilganlar
 
-**Maqsad:** Interpreter rejimida API + Postgres CRUD’ni yakuniy darajaga keltirish.
+1.0 hamma bo'shliqni yopishga urinsa — chiqmaydi. Quyidagilar ataylab
+qoldiriladi. Har birida "1.0 da nima bo'ladi" ustuni bor — chunki
+kechiktirish **jim noto'g'ri javob** demak emas.
 
-> v0.1.x tarixiy holat. 1.1 dagi `tiny_http` va 1.2 dagi `r2d2_postgres` —
-> Phase 9 da axum + tokio + `deadpool-postgres`'ga ko'chirilgan.
-
-### 1.1 HTTP Server ✅ → Phase 9 da yangilangan
-- `server.rs` (v0.1.x) — `tiny_http` + worker pool (`JWC_SERVER_WORKERS`), bounded `sync_channel` queue, optional metrics.
-- `serve()` til ichidan chaqiriladi: `main()` → `serve(8080)` → CLI orqali `server::serve` ishga tushadi.
-- Per-request body 4xx/5xx error chain to‘liq log qilinadi.
-- **Joriy holat:** axum + tokio, har request `tokio::spawn`. Phase 9.3'ga qarang.
-
-### 1.2 DB Runtime Layer ✅ → Phase 9 da yangilangan
-- `engine.rs` (v0.1.x) — `r2d2_postgres` pool, query-shape SQL cache, optional result cache (`JWC_QUERY_CACHE_TTL_SECS`).
-- Native AST nodelari mavjud: `DbSelect / DbInsert / DbUpdate / DbDelete`, `new Entity()`, `var.field`, `var.field = value`.
-- Phase 0.1 legacy hack’lar tozalandi.
-- **Joriy holat:** `deadpool-postgres` + `tokio-postgres`, async checkout. Phase 9.2'ga qarang.
-
-### 1.3 Type System (very basic) ✅ → Phase 2.1 da yakunlangan
-- Hozir tan olinadigan primitive’lar runtime’da: `string`, `int`, `double`, `bool`.
-- Avtomatik koersiya: `int → string`, `string → int` (parse bo‘lsa), `int ↔ double`.
-- Typed param + return + model JSON validatsiyasi mavjud (`runner.rs::check_typed_value`).
-- **Joriy holat:** `uuid`, `datetime`, `decimal`, `json`, `bigint` Phase 2.1 da birinchi-sinf typelar bo'ldi.
-
-### 1.4 Query string + path params ✅
-- `query_param(name)` va `query_param(name, default)` built-inlari `runner.rs` ga qo‘shildi.
-- `server.rs` to‘liq URL’ni runner’ga uzatadi; route matching `?...` ni avtomatik ajratadi.
-- 3 ta yangi test: query value, default fallback, query bilan route matching buzilmaydi.
-
-### 1.5 `validate body` bloki ✅
-- Yangi keyword `validate` (lexer), `Stmt::ValidateBody { fields }` (AST), parser bloki.
-- Qoidalar: `required`, `minLength(n)`, `maxLength(n)`, `min(n)`, `max(n)`, `pattern("regex")`.
-- Xatolik bo‘lsa, route 400 status va `{"errors": {"field": "rule"}}` javob qaytaradi.
-- Regex `regex` crate orqali compile-time va runtime'da ishlatiladi.
-
-### 1.6 Route handler signaturalari ✅
-- `route GET "users/{id}" -> getUser;` endi `getUser` ning typed params’ini path/query orqali avtomatik to‘ldiradi (`Vm::build_handler_args`).
-- Argument string sifatida o‘tadi, mavjud `check_param_type` orqali declared typeg’a coerce qilinadi (`id: int` → `42` int).
+| Kechiktirilgan | 1.0 da nima bo'ladi | Sabab |
+|---|---|---|
+| **`--native` AOT backend** (hozirgi `native_build.rs`, 5 149 satr) | `jwc build` faqat launcher + runtime bundling; `--native` mavjud emas, `E0910` beradi | Semantika 1.0 gacha harakatda. Har bir query-compiler o'zgarishi ikkinchi implementatsiya + differential case talab qilardi. Interpretator — yagona reference. **1.1 da qaytadi**, eski kod ko'chirilmaydi, qayta yoziladi |
+| **Background jobs, durable queue, DLQ, WebSocket, SSE** | Yo'q. Eski runtime kodi saqlanadi, ammo yangi til ularni e'lon qila olmaydi | `DESIGN.md` bu hududlarga umuman tegmaydi. Ularni yangi lug'atda qanday e'lon qilish — hech kim loyihalamagan dizayn ishi. 1.0 lug'atiga taxmin bilan qo'shish — ikki marta yozish |
+| **Enum `reorder` / `DROP VALUE` rebuild** (#26 ning uchdan biri) | Qattiq xato + qo'lda retsept chop etiladi: yangi tip yarat → har bir ustunni `USING` bilan o'zgartir → eski tipni tashla, plus qolgan qatorlarni tekshiruvchi `SELECT count(*)` guard | To'rt statementli rebuild cross-schema ustun xaritasini talab qiladi. Xato + retsept ma'lumot yo'qotmaydi; noto'g'ri avtomatika yo'qotadi |
+| **Har bir FK uchun maxsus xabar** (#30 ning yarmi) | FK buzilishi default status oladi (`BadRequest` 400) va `jwc lint --constraints` uni ko'rsatadi | Grammatikaga yana bir xabar sloti qo'shish arzon, lekin FK xabarining to'g'ri statusi (400 vs 409 vs 404) holatga bog'liq. Ma'lumot yig'ilsin |
+| **Umumiy subquery / CTE / window function / recursive / full-text** | `where exists`/`not exists` bor; qolgani uchun **`raw` escape hatch** (parametrlangan, `view` ichida taqiqlangan, lint'da ko'rinadi) | Query compiler'ning eng katta bo'lagi allaqachon 28%. Escape hatch klapan bo'ladi va qaysi feature haqiqatan kerakligini o'lchaydi |
+| **Bare-join aggregation + `as many` bir query'da** (#4 ning yarmi) | Kompilyatsiya xatosi, aniq diagnostika bilan | Ikkisining birgalikdagi semantikasi (lateral agregatga kiradimi, guruhlashdan omon qoladimi) haqiqiy dizayn savoli. Xato — to'g'ri javob; jim ko'paytirilgan `count` — emas |
+| **Dev-only `/__jwc/queries` endpoint'i** (#29 ning bir qismi) | `JWC_LOG_SQL=1`, `jwc explain`, LSP hover-SQL bor | Uchtasi DBA/Developer testini qoplaydi. To'rtinchisi — qulaylik |
+| **To'liq modul/visibility sistemasi** | `import` semantikasi yozib qo'yiladi (**N5**), namespace nomlash majburlanadi, lekin nom maydoni **flat** qoladi va `import` ko'rinishni cheklamaydi | Flat namespace + majburlanadigan `import` deklaratsiyasi 1.0 uchun yetadi. Haqiqiy visibility — 2.0 masalasi |
+| **Tiplangan klient generatsiyasi (TS/Go/Python SDK)** | `jwc openapi` bor | OpenAPI — chegara. Har bir til uchun SDK — alohida loyiha |
+| **Migration `down` ning to'liq avtomatik teskarisi** | `migrate down` bor, lekin destruktiv operatsiyalar uchun teskari skript **generatsiya qilinmaydi** — `-- irreversible` deb belgilanadi | Ustun tushirilgandan keyin ma'lumot yo'q. Teskarilikni va'da qilish — yolg'on |
 
 ---
 
-## Phase 2 — Language Completeness ✅ done
+## 8. Non-goals — redizayn uchun yangilangan
 
-**Maqsad:** Tilning ifoda kuchini real productionga yetkazish.
+Bular kechiktirilgan emas: **siyosat darajasidagi "yo'q".** PR yopiladi.
 
-### 2.1 Full type system ✅
-- Birinchi-sinf primitive’lar: `string`, `int`, `bigint`, `double`, `decimal`, `bool`, `uuid`, `datetime`, `json`.
-- `T?` va `Optional<T>` — null qabul qilish; `List<T>` — JSON array + element check.
-- Runtime check `runner.rs::check_typed_value` + JSON-level `json_value_matches_type`.
-- **Qoldi (kichik):** Kompayl-vaqt type checking (assignment/call args/return) — hozir runtime. `byte[]` turi, explicit koersiyalar — keyingi iterazda.
-
-### 2.2 SQL syntax kengaytmasi ✅
-- `orderby <field> [asc|desc]`, `limit N`, `offset N` AST + parser + runner.
-- `@param` referensi `limit`/`offset` ichida.
-- Compound `where` — `and`/`or` + qavslar, `and` `or`dan yuqori precedence.
-- Operatorlar: `like @p`, `ilike @p`, `in (@a, @b, ...)`, `between @a and @b`, `is null`, `is not null`.
-- Aggregatsiyalar: `select count(*)`, `select sum|avg|min|max(Entity.col) from ...`.
-- Projection: `select User { name, email } from ...` — entity field subset, kompayl-vaqt column existence check, `with rel` bilan birga ishlaydi.
-- ✅ Sprint 6: `group by Entity.col [, ...]` + `having <cond>` — AST
-  (`group_by`, `having` Expr::DbSelect'da) + parser + runner SQL emission
-  (`SELECT ... FROM ... [WHERE] GROUP BY ... HAVING ...`) + validator
-  (column existence + having-requires-group-by check) + 5 ta smoke test.
-- **Qoldi:** `join` (navigatsiya bilan qoplandi).
-
-### 2.2b DB business-logic primitivlari ✅
-- PK: `update var in ...` va `delete var from ...` entity'da belgilangan `pk` field(lar)ni hisobga oladi (composite PK qo'llab-quvvatlanadi). Ad-hoc table uchun `id` fallback.
-- Dirty-field tracking: `var.field = X; update var in ...` faqat o'zgargan maydonlarni SET qiladi. O'zgarishsiz `update` aniq xato.
-- Bulk delete: `delete from CTX.Table where ...;` — variable kerakmas, `where` majburiy (xavfsizlik).
-- `transaction { ... }` bloki — `TxGuard` RAII (Drop'da `ROLLBACK`), thread-local connection. Worker thread reuse'da leak yo'q.
-- `raw_sql(sql, params_json)` — parameterized escape hatch; SELECT'da text natija, mutationda affected rows count qaytaradi.
-
-### 2.2c DB operatsion sifat ✅
-- Pool to'liq env-sozlanadigan: `JWC_DB_POOL_SIZE`, `JWC_DB_MIN_IDLE`, `JWC_DB_MAX_LIFETIME_SECS` (default 30 min), `JWC_DB_IDLE_TIMEOUT_SECS` (default 10 min), `JWC_DB_CONNECTION_TIMEOUT_SECS` (default 5s). Stale connection muammosi yumshatildi.
-- Migration session advisory lock (`pg_try_advisory_lock`) — bir vaqtning o'zida ikkita `migrate up/down` ishlasa "already in progress" xato, race yo'q.
-- TLS Postgres: `JWC_DB_TLS=1` yoqadi (`postgres-native-tls`), `JWC_DB_TLS_INSECURE_SKIP_VERIFY=1` self-signed sert uchun. Pool va migration ulanishlari bir xil TLS bilan ishlaydi.
-- Schema diff: `jwc migrate new` endi oldingi `.up.sql` faylni parse qilib joriy entity'lar bilan diff hisoblaydi va faqat ALTER (yoki CREATE TABLE yangi entity uchun) chiqaradi. Diff bo'lmasa "-- no schema changes".
-- Integration tests: `tests/integration_db.rs` — testcontainers-rs orqali Docker Postgres'da 6 ta scenario (basic query, tx commit, tx rollback on drop, migrate up/down, advisory lock concurrency, full CRUD). Docker yo'q hostda graceful skip.
-
-### 2.3 `try / catch` ✅
-- Sintaksis: `try { ... } catch (e[: ErrorType]) { ... }`.
-- Catch var bound: `{"message": "...", "causes": [...]}` JSON sifatida.
-- `catch_type` Phase 10.5 da real ishladi — message-pattern classifier orqali type'ga qarab dispatch; noma'lum kinds kompayl vaqtida bail.
-
-### 2.4 Middleware ✅
-- Top-level `middleware Name { ... }` deklaratsiyasi.
-- `route GET "..." use M1, M2 { body }` yoki `... use M -> handler;`.
-- Built-in: `header(name)`, `context(key)`, `setContext(key, value)`, `unauthorized()`, `forbidden()`.
-- Middleware qaytaradigan qiymat butun routeni qisqartiradi (short-circuit).
-- Server'dan inbound headers `runner::run_request_with_headers` orqali keladi.
-
-### 2.5 Entity relationships ✅
-- `field uuid references EntityName.column [on delete cascade|restrict|set null]` — FK CONSTRAINT.
-- Navigation property: `posts: List<Post> via Post.user_id;` (one-to-many) / `profile: Profile via Profile.user_id;` (one-to-one) — entity body ichida.
-- `select User with posts, profile from AppDb.User ...` — correlated `json_agg` subquery, kompayl-vaqt nav nomini tekshirish.
-- Validator: target entity + FK column + nav nomi mavjudligi tekshiriladi.
-
-### 2.6 async/await ✅
-- ✅ Lexer: `async`, `await` keywordlar.
-- ✅ AST: `FunctionDecl.is_async` flag va `Expr::Await(Box<Expr>)`.
-- ✅ HTTP server axum + tokio; har request `tokio::spawn` (Phase 9 da
-  `spawn_blocking` olib tashlandi).
-- ✅ WebSocket: `route WS "..."` + `ws_send`/`ws_recv`/`ws_close`; frame
-  I/O endi `tokio::io::{AsyncReadExt, AsyncWriteExt}` orqali (Phase 9).
-- ✅ Vm o'zini async (recursive `#[async_recursion]`), DB layer
-  `tokio-postgres` + `deadpool-postgres`, `await` real yield qiladi.
-  Tafsilot — Phase 9 (Async runtime).
-
-### 2.7 Code-health audit (Sprint 2A/2B/2C) ✅
-- ✅ Sprint 2A: `parser.rs` modul ajratish (parser/{mod,validate,tests}),
-  `runner.rs` builtins ajratish, `clippy -- -D warnings` toza.
-- ✅ Sprint 2B: unwrap budget — prod kodda **1 → 0** unwrap qoldi
-  (qolgan barcha `.unwrap()` chaqiruvlar test fayllarda; CI `prod_unwraps.rs`
-  audit testi yashil).
-- ✅ Sprint 2C: anyhow chain depth audit + dead code clean-up + docstring
-  pass kritik `src/*.rs` ustida.
+| Band | Sabab |
+|---|---|
+| **LLVM IR backend** | Native AOT Rust-codegen orqali yetadi (1.1 da). LLVM yakka muhandis sig'imidan tashqarida |
+| **Cross-target native matritsa** | Linux x86_64/aarch64 (glibc + musl) + Windows x86_64 yetadi |
+| **Self-hosting compiler** | JWC kompilyatori Rust'da qoladi |
+| **WASM target** | Backend tili |
+| **Multi-database driver** (MySQL/SQLite/MSSQL/Oracle) | Postgres-first va'dasi. Butun query compiler Postgres dialektiga bog'langan (LATERAL, `json_agg`, partial index, `GENERATED AS IDENTITY`) — abstraksiya qatlami DBA testini o'ldiradi |
+| **Rich-domain object graph, change-tracking, lazy loading, nav-property** | Maqsad — ORM'siz qolish |
+| **Load-modify-save** (`select` → maydonni o'zgartir → `update`) | `DESIGN.md` da ataylab ifodalanmaydigan. Bu — raw fast-path va "yozuv to'plami ko'rinadi" qoidasining asosi |
+| **Birinchi darajali funksiyalar, lambda, closure** | Namunadagi yagona ishlatilishi (`sum(xs, line => ...)`) `array.*` bilan almashtiriladi. Funksiya tipi → tip sistemasi + capture qoidalari + element-tip propagatsiyasi; "bitta amal bir satrda" uslubiga ham zid |
+| **Generic / parametrik foydalanuvchi tiplari** | `T[]` tip konstruktori bor; qolgani yo'q |
+| **Nested `routes` bloklari / prefix rewriting** | `DESIGN.md` ataylab rad etadi: to'liq yo'l literal yoziladi |
+| **`as <Table>` natija bog'lash** | Loyihalangan va tashlangan — to'liq namuna ilovada 0 ta ishlatilish |
+| **OTLP'ni yadro featuresi qilish** | `otlp` Cargo feature ortida, default-off |
+| **Job priority queue / DLQ ML retry policy** | Over-engineering |
 
 ---
 
-## Phase 3 — Developer Experience ✅ done (1.0 surface)
+## 9. Hajm — halol baholash
 
-**Maqsad:** JWC bilan yozish — Node yoki Go bilan yozishdek tezroq bo‘lsin.
+Kompilyator ishi teng taqsimlanmagan. Query compiler qolgan har bir
+relizdan katta va uni yashirish rejani yolg'onga aylantiradi.
 
-### 3.0 Sprint 3 closeout (v0.4.7) ✅
-- ✅ Typed catch + dotted subtypes — `catch (e: DbError.UniqueViolation)` PG
-  SQLSTATE `23505` ga aniq mos keladi. Kinds: `Error`, `DbError`,
-  `DbError.UniqueViolation`, `DbError.ForeignKeyViolation`,
-  `DbError.NotNullViolation`, `HttpError`, `ValidationError`, `TimeoutError`.
-- ✅ Gradual static type checker — `validate_program` ichida E018 (return
-  type mismatch), E019 (wrong arg count), E020 (arg type mismatch); CLI
-  `jwc check/run/build --no-typecheck` opt-out.
-- ✅ AOT visibility re-check — E021 (private function cross-namespace call)
-  kompayl-vaqt tekshiruvi.
-- ✅ Integer / float / encoding / `==` semantics → `docs/spec/semantics.md`
-  qarang (lexer/parser tahrirlari Sprint 3 closeout'da).
+| Reliz | Ulush | Izoh |
+|---|---|---|
+| 0.20.0 Spec | 5% | Kod deyarli yo'q, lekin kalendarda qisqa emas — 56 ta qaror |
+| 0.21.0 Vocabulary | 8% | Lexer + parser + AST + fmt; mexanik, hajmli |
+| 0.22.0 Schema | 10% | 5 ta DDL obyekt sinfi + nomlash + tartib |
+| 0.23.0 Types | 12% | `Raw\|Record` panjarasi + `T?` propagatsiyasi + flow narrowing |
+| **0.25.0 Query compiler** | **28%** | Alias/join daraxti, `one`/`many` lateral, agregat rejimlar, view kompilyatsiyasi + ikki bosqichli pushdown, raw kuzatuvi, keyset pagination |
+| 0.24.0 Runtime | 12% | Yarmi — error model |
+| 0.26.0 Migrations | 12% | Snapshot 5 obyekt sinfi + fazalar + rename + enum |
+| 0.27.0 Tooling | 6% | |
+| 0.28.0 Tests + paketlar | 4% | |
+| 0.29.0 Hardening | 3% | |
 
-### 3.1 Real LSP ✅ basic
-- `src/bin/jwc_lsp.rs` — stdio orqali ishlaydigan tower-lsp asoslangan server.
-- Diagnostics: parse xato (regex bilan `at line N, col M` ushlanadi), validate xato (file boshi), lint warning (W001/W002).
-- Hover: cursor pozitsiyadagi identifier'ga qarab `entity / class / function` haqida ma'lumot — fields soni, context, params, return type, `async` prefiksi.
-- Document sync: `TextDocumentSyncKind::FULL` (har edit'da to'liq matn).
-- **Qoldi:** go-to-definition, autocomplete, route hover, semantic tokens.
+Query compiler amalda 28% dan katta: 0.23.0 dagi tip qoidalarining
+ko'pi (`first`/left-join/agregat null'ligi, raw klassifikatsiyasi)
+query semantikasi haqida. Ikkovini birga hisoblasak — **~35%**.
 
-### 3.2 Compiler diagnostics ✅ qisman
-- ✅ "Did you mean?" suggestion — `runner.rs::closest_match` Levenshtein based, unknown function / undefined variable xabariga qo‘shiladi.
-- ✅ Aniq `at line X, col Y` xabari `diag::SourceMap` orqali yozib qo‘yilgan.
-- ✅ Phase 10.5: typed catch noma'lum kind uchun `closest_known_kind` hint.
-- ✅ Sprint 4: W003 lint — empty function body (handler returns null silently).
-  Duplicate routes endi validator-level (E-level) bo'lib qoldi — W-level emas.
-- ✅ Sprint 4: W004 missing-`first` heuristic — `select Entity ... where
-  Entity.pk == @x` (top-level `==` atom, no `and`/`or`) `first` siz array
-  qaytaradi → warn. PK metadata `program.models` orqali olinadi.
-- ✅ Sprint 4: W006 unreachable code after top-level `return` — function /
-  route inline body / middleware. Branchli body (if/while/try) exempt
-  chunki return faqat shu branchda ishlaydi. (W005 builtin-shadow uchun
-  band qilingan.)
-- ⏳ Sprint 4: numbered diagnostic codes — catalog ✅ (`src/error_codes.rs`
-  W001..W006, E001..E010 + lookup + monotonic-order tests). Wiring the
-  E-codes into `parser.rs::validate_program` `bail!` sites is the next
-  step.
-
-### 3.3 CLI ⏳ qisman
-- ✅ `jwc lint` — `lint.rs::lint_program`: unused function (W001) va unused middleware (W002).
-- ✅ `jwc migrate down` (Phase 0.3 dan).
-- ✅ `jwc serve --watch` — `notify` crate file watcher; parent process child `jwc serve` ni kuzatadi va `.jwc` o‘zgarsa qayta ishga tushiradi.
-- ⏳ `jwc fmt` ✅ v1 (line-based) — `src/fmt.rs`: tabs → 4 spaces, strip
-  trailing whitespace, collapse runs of 3+ blank lines, single trailing
-  newline. `--check` rejim CI uchun (non-zero exit'da diff). Idempotent.
-  Qoldi v2: AST → source qayta chiqaruvi + comment preservation
-  (token-stream attach).
-- ⬜ `jwc add <pkg>` — paket qo‘shish (3.4 ga bog‘liq).
-
-### 3.4 Package sistemasi ✅ shipped (path + git source; registry client deferred)
-- ✅ Strukturalashgan `jwcproj.json::dependencies` (`{ "pkg": "^1.2" }` / `{ "pkg": { "path": "../lib" } }` / `{ "pkg": { "git": "...", "rev": "..." } }`).
-- ✅ `type: "app" | "pkg"` manifest field — `pkg`-type loyihalar `jwc run/serve/build` ga rad etiladi (`load.manifest.ensure_runnable()`).
-- ✅ JSONC manifest format — `//` line va `/* */` block izohlar + trailing comma toleratsiyasi (`project::strip_jsonc_comments`).
-- ✅ Reproducible `jwcproj.lock` (semver, sha256, source URI) — [src/lockfile.rs](src/lockfile.rs).
-- ✅ Backtracking resolver, conflict zanjir reporting — [src/resolver/mod.rs](src/resolver/mod.rs).
-- ✅ Source backends: `PathSource` (lokal dir), `GitSource` (shell out to `git clone --depth 1` + `git checkout <rev>`), `RegistrySource` skeleton — [src/resolver/source.rs](src/resolver/source.rs).
-- ✅ User cache layout `~/.jwc/registry/<host>/<pkg>/<version>/` va `~/.jwc/registry/git/<host>-<rev>/` — [src/pkg_cache.rs](src/pkg_cache.rs).
-- ✅ Namespace + import + visibility til xususiyatlari:
-  - `namespace foo.bar;` fayl boshida
-  - `import foo.bar;` — paketning publik a'zolarini ochadi
-  - `public` / `private` — default private, opt-in eksport
-  - `mount greet [at "/prefix"];` — library route'larini yoqadi
-  - `group "/p" use Mw1, Mw2 { ... }` — prefix + middleware bilan o'rab oladi (recursive)
-- ✅ CLI komandalar: `jwc add` (`--path`/`--git`+`--rev`/`--version`), `jwc install`, `jwc update [pkg]`, `jwc remove <pkg>`, `jwc tree`.
-- ✅ Native build (`flatten_namespaces`) mount expansion + FQN resolution-ni codegen oldidan qiladi — interpreter bilan bir xil natija.
-- ✅ HTTP Registry klienti (Cargo-shape JSON index + tar+gzip extract + sha256 verify, configurable URL: env > manifest > built-in default) — [src/registry/client.rs](src/registry/client.rs).
-- ⚠️ **`hub.jwc.dev` registry server hali alohida repoda emas** — built-in default `https://jwc-registry.1kb.uz/` placeholder. Server up bo'lguncha `path =` va `git =` ishlatiladi.
-- ⬜ `jwc publish` — keyingi fazada.
-- ⬜ `jwc login` / `~/.jwc/credentials.json` — Bearer token placeholder bor, lekin yozish CLI yo'q.
-
-### 3.5 Package registry serveri ⬜ deferred (sibling repo)
-- Mustaqil HTTP service: Cargo-mos index API + tarball blob store.
-- Domain: `jwc-registry.1kb.uz`.
+Kod hajmi bo'yicha kutilma: ~30–35k satr yangi Rust (eski 48.5k dan
+~19k infratuzilma qayta ishlatiladi, ~29k tashlanadi).
 
 ---
 
-## Phase 4 — Real native compiler ⏳ partial
+## 10. Risklar
+
+| Risk | Yumshatish |
+|---|---|
+| **Query compiler o'z relizida tiqilib qoladi** | Ichki 5 bosqich (25.a–25.e) alohida merge qilinadi; har biri o'z golden SQL to'plami bilan. 25.a tugamasa 25.b boshlanmaydi |
+| **Spec relizi cheksiz cho'ziladi** | Qat'iy chegara: 56 bo'shliqning har biri **javob yoki `DEFERRED`** oladi. "Keyinroq o'ylaymiz" — javob emas, `DEFERRED` — javob |
+| **`--native` ni muzlatish 1.0 ni sekin qiladi degan e'tiroz** | To'g'ri, va qabul qilinadi. Interpretator 0.9.x da allaqachon tokio + async va o'lchangan; native'ning foydasi 1.0 ning bloklovchisi emas. 1.1 uni muzlatilgan, o'zgarmas semantika ustiga quradi — bu arzonroq |
+| **Namuna ilova spec'ni ushlab turolmaydi** | `spec-coverage.json` CI'da; namunadagi spec bandiga bog'lanmagan konstruksiya build'ni yiqitadi |
+| **Migratsiya round-trip testi juda sekin** | Property testi nightly'da 200 ketma-ketlik, PR'da 20 ta |
+| **Tashqi DBA auditi topilma bermaydi (soxta ishonch)** | Har relizda **boshqa** muhandis; etalon fayllar ko'rsatilmaydi; farqlar CHANGELOG'ga yoziladi |
 
-**Maqsad:** Interpreter’ni siqib chiqarish, real native binary chiqarish.
-
-> `jwc build` (alias `bundle`) hali ham embedded-launcher rejimi. Real
-> native AOT — `jwc build --native`: `src/native_build.rs` (2062 qator)
-> AST'dan Rust source generatsiya qiladi, `cargo --release` orqali tokio
-> + `tokio-postgres` + `reqwest` bilan stripped binary chiqaradi (Phase
-> 9 da to'liq async). LLVM IR yo'li hozircha tushirilmagan — kelajakda
-> faster cold start uchun.
-
-### 4.1 IR ⬜ deferred
-- AST → JWC IR (linear three-address code).
-- Dead code elimination, constant folding.
-
-### 4.2 Native codegen ⏳ partial (Rust path)
-- ✅ Rust codegen yo'li: `native_build.rs` AST'ni Rust source'ga
-  tushiradi, `cargo --release` build qiladi. Route / user-fn /
-  middleware / errorHandler `Pin<Box<dyn Future<Output=V> + Send>>`
-  qaytaradi; `#[tokio::main(flavor = multi_thread)]` runtime.
-- ✅ `hellocompile` misoli — 1.1 MB stripped release binary
-  (`async_demo` reqwest + rustls bilan ~2.9 MB).
-- ⬜ LLVM IR path — JWC IR → LLVM IR → native binary.
-- ⬜ Cross-target: `jwc build --target linux-x64 --release`,
-  `aarch64-darwin`, `x86_64-windows`.
-
-### 4.3 Kompayl-vaqt SQL validation ⏳ partial
-- ✅ Static check: `select Entity from CTX.Table` da `where Entity.col`/`orderby Entity.col` — `col` entitining haqiqiy maydoni ekanligi `parser::validate_program` ichida tekshiriladi.
-- ✅ Misspelled columns serverni ishga tushirmasdan bail qiladi.
-- ⬜ Qoldi: live DB schema snapshot (`information_schema` o‘qish) + migration drift detector.
-- ⬜ Qoldi: `insert`/`update`/`delete` payload field-name moslik tekshiruvi.
-
-### 4.4 Zero-cost abstractions ⬜ deferred
-- Entity field access → struct field offset.
-- Route handler → inlined function, virtual dispatch yo‘q.
-- LLVM IR (4.1) tugamasidan oldin ma’nosi yo‘q.
-
-### 4.5 Sprint 4 closeout (data + runtime safety, v0.4.7) ✅
-- ✅ Migration safety: SHA-256 checksum har applied migration bilan yozib
-  qo'yiladi; `jwc migrate status` applied/pending/sha-mismatch/orphan
-  ko'rsatadi; `jwc migrate up --dry-run` / `down --dry-run` SQLni chiqaradi,
-  DB ga tegmaydi.
-- ✅ `savepoint <name> { ... }` — `transaction { ... }` ichida nested
-  rollback chegarasi. Literal nested transaction E016 bilan rad etiladi;
-  `savepoint` transaction tashqarisida E017.
-- ✅ `json()` string validatsiyasi + `json_unchecked()` escape hatch — eski
-  v0.4.4 passthrough semantikasini saqlaydi (cached JSON fragmentlar
-  uchun).
-- ✅ Pool resilience: transient xatolar `JWC_DB_RETRY_MAX_ATTEMPTS` (default
-  3) + `JWC_DB_RETRY_BACKOFF_MS` (default 100) eksponensial backoff bilan
-  qayta urinadi. `engine::ping()` (`SELECT 1`) — `/readyz` uchun real
-  end-to-end probe.
-- ✅ Prometheus pool gauges: `jwc_db_pool_size`, `jwc_db_pool_available`,
-  `jwc_db_pool_max_size`, `jwc_db_pool_waiting` `/metrics`'da chiqadi.
-- ✅ Chaos test stub — `JWC_CHAOS_DB_FAIL_RATIO` integration testlarda
-  retry yo'lini majburlaydi.
-
----
-
-## Phase 5 — Ecosystem ✅ 1.0 surface done
-
-**Maqsad:** JWC ni global backend tiliga aylantirish.
-
-### 5.0 Sprint 5 closeout (ops + observability + queue durability, v0.4.7) ✅
-- ✅ **Boot-time config registry** (`src/config.rs`) — har `JWC_*` env var
-  schema bilan ro'yxatdan o'tadi; `JWC_PRINT_CONFIG=1` startup'da resolved
-  jadval chiqaradi; valid bo'lmagan qiymatlar (range/type) bail qiladi.
-- ✅ **OTLP tracing** Cargo feature `otlp` orqasida — `JWC_OTLP_ENDPOINT` +
-  `JWC_SERVICE_NAME`. Default build slim, dependencies optsional.
-- ✅ **Persistent job queue** — `JWC_QUEUE_DRIVER=postgres` durable `_jwc_jobs`
-  jadvalga yozadi; terminal failure DLQ'ga ko'chadi. In-memory `memory`
-  driver — backward-compatible default.
-- ✅ **Soak harness** — `examples/soak/` orqali long-running load profil; 72h
-  real soak run = ops javobgarligi (CI gate emas).
-
-- **Standard library ⏳ partial:**
-  - ✅ Http client: `http_get(url)`, `http_post(url[, body[, headers]])`,
-    `fetch_json(url)` — `reqwest` + `rustls` orqali, async, JSON envelope
-    qaytaradi (`fetch_json` to'g'ridan-to'g'ri decoded value).
-  - ✅ Async helpers: `sleep_ms(ms)` — tokio scheduler'ga yield qiladi.
-  - ✅ Auth: `jwt_sign(payload_json, secret)` / `jwt_verify(token, secret)` — HS256 (hmac + sha2 + base64).
-  - ✅ Password hashing: `hash_password(pwd)` / `verify_password(pwd, hash)` — Argon2id (argon2 crate).
-  - ✅ Email (SMTP): `send_email(to, subject, body_html)` — `lettre` + `rustls`.
-  - ✅ Cache (in-memory, TTL): `cache_set/get/del/clear`.
-  - ✅ WebSocket: `route WS "..."`, `ws_send`/`ws_recv`/`ws_close` —
-    Phase 9 da to'liq async frame I/O.
-  - ✅ Background queue: `register_job_handler` / `enqueue` / `job_count`
-    (Phase 8).
-  - ✅ Redis (core tier, `ecosystem.md` Faza 1): `redis_get/set/del/
-    exists/incr/expire/eval/ping/enabled` — `--features redis` ortida,
-    interpreter + `--native` ikkalasida. `rediss://` TLS, deadpool,
-    `/readyz` probe va `jwc_redis_pool_*` metrikalari bilan.
-    ⬜ Qoldi: `redis_lpush` / `redis_brpop` — `brpop` bloklovchi
-    operatsiya bo'lgani uchun (pool slotini timeout davomida ushlab
-    turadi) durable queue'ning Redis backend'i bilan birga ko'riladi,
-    KV cache bilan emas.
-  - ⬜ Qoldi: Storage (S3), SSE.
-- **WebAssembly target:** `jwc build --target wasm` — edge runtime’da ishlatish.
-- **JWC Hub:** `hub.jwc.dev` — paket registry.
-- **Self-hosting:** JWC kompilatori JWC tilida qayta yozilishi.
-
----
-
-## Phase 6 — DX Polish ✅ done (microblog feedback'idan)
-
-**Maqsad:** Real backend yozish jarayonida til "DSL'dan" "kundalik tilga" aylanishi uchun aniqlangan to'siqlarni tozalash.
-
-### 6.1 JSON object literal ✅
-- Hozir: `return "{\"items\":" + items + ",\"total\":" + total + "}";` — manual concat + escape.
-- Maqsad: `return { items: items, total: total };` — birinchi-sinf object literali.
-- AST: `Expr::ObjectLit(Vec<(String, Expr)>)`. Runtime JSON string'ga serializatsiya.
-
-### 6.2 `now()` built-in ✅
-- Hozir: hardcoded `"2026-05-19T..."` string. Schema-side default'lar yo'q.
-- Maqsad: `now()` → ISO 8601 UTC string (chrono dep). Keyingi iteratsiyada `entity` ichida `created_at datetime default now;`.
-
-### 6.3 `@var.field` shortcut ✅
-- Hozir: `where ... == @req.username` → parse xato. Workaround: `let v = req.username; ... == @v;`.
-- Maqsad: `@ident.field` doim FieldGet sifatida parse qilinsin.
-
-### 6.4 `!expr` unary negation ✅
-- Hozir: `if (ok == false)` yozish kerak.
-- Maqsad: `if (!ok)` ham ishlasin. Lexer'da `!` simvol allaqachon bor (`!=` uchun); `parse_unary_expr`da boshqaruv qo'shiladi.
-
-### 6.5 Raw string literal `r"..."` ✅
-- Regex pattern'larida `\\.` ikki marta escape kerak. `r"^[^@]+@[^@]+\.[^@]+$"` toza.
-
-### 6.6 Typed param field check (compile-time) ✅
-- `function takes(req: ReqClass)` ichida `req.field` kompayl-vaqt `ReqClass` schema'ga tekshiriladi (`Type error: field 'X' is not declared on ReqClass`).
-- `T?` va `Optional<T>` ham tekshiriladi; `List<T>` — skip (var'ning o'zi list, field access mantiqsiz).
-- Local variables (Let/Assign bilan binding) hozircha untyped — kelajakda `let x = body()` typed handler argumenti orqali inferansiya qilinishi mumkin.
-
-### 6.7 Global error handler ✅
-- Top-level `errorHandler (e) { ... }` deklaratsiyasi. Bitta handler programma per. Faqat uncaught route errorlari ushlanadi (response oqim yoki middleware short-circuit emas).
-- `e` JSON sifatida bound: `{ "message": "...", "causes": [...] }`.
-- Handler `return` qiymati response body bo'ladi; status JSON ichidagi `"status"`'dan olinadi (default 200, lekin `internalError(...)` 500 beradi).
-
----
-
-## Phase 7 — Standard helpers ✅
-
-- `length(x)` — char count for strings, element count for JSON arrays,
-  key count for JSON objects, 0 for null.
-- String ops: `lower`, `upper`, `trim`, `replace`, `contains`, `starts_with`,
-  `ends_with`, `split` (returns JSON array string).
-- Array ops: `first(xs)`, `last(xs)`, plus `contains` and `length`.
-- `for VAR in EXPR { ... }` — iterate a JSON array. `break` / `continue` /
-  `return` all work. `EXPR` is evaluated once, items round-trip through
-  `json_to_value`.
-- `json_parse(s)` / `json_stringify(v)` — explicit conversion between
-  JSON-string carriers and structured Value shapes.
-- `in` is now a real keyword (reserved by `where ... in (...)` and `for ... in ...`).
-
-### Phase 6 (security) closeout ✅
-- ✅ `SECURITY.md` — coordinated-disclosure policy, supported versions.
-- ✅ `cargo audit` blocking — release CI failonk known RustSec advisory.
-- ✅ Threat model — `docs/spec/threat-model.md`.
-- ✅ SSRF allowlist — `JWC_HTTP_ALLOWLIST` `http_get` / `http_post` /
-  `fetch_json` ga deny-by-default policy yoqadi.
-- ✅ JWT `exp` claim — `jwt_verify` muddati o'tgan tokenni rad etadi.
-- ✅ Secrets redaction — log/error chain'larda `password`, `secret`, `token`
-  pattern'lar maskalanadi.
-- ⏳ External security review = ops javobgarligi.
-
-### Phase 7 (perf) closeout ✅
-- ✅ Bench DB endpoints — `examples/bench/` har stack uchun bir xil
-  endpoint shape: ping, json-small, json-large, cpu, async-delay, db-read,
-  db-write.
-- ✅ Native AOT 1.0 scope hujjati — `docs/spec/aot-scope.md`.
-- ✅ README ↔ bench repo cross-link.
-- ⏳ Linux real-run + CI regression gate + 72h soak burn = ops.
-
----
-
-## Phase 8 — Background jobs + LSP ✅
-
-### 8.1 In-process job queue
-- Yangi modul `src/queue.rs` + 3 built-in: `register_job_handler(name, fn_name)`,
-  `enqueue(name, payload_json)`, `job_count()`.
-- `Mutex<VecDeque<Job>>` + `Condvar` orqali worker thread'lar polls qiladi.
-  Default 2 worker, `JWC_QUEUE_WORKERS` env bilan sozlanadi.
-- Server `serve(port)` chaqiruvi paytida `queue::init_queue(Arc::clone(&program))`
-  yoqiladi; worker'lar process lifetime davomida tirik.
-- Validator: `register_job_handler` ikkinchi argi haqiqiy function nomi ekanligini
-  kompayl-vaqt tekshiradi.
-- ✅ Retry policy (Sprint 14): `Job.attempts` tracking, env `JWC_QUEUE_MAX_ATTEMPTS`
-  (default 3), `JWC_QUEUE_BACKOFF_MS` (default 1000) — exponential backoff
-  60s'da capped, max attempts'dan keyin drop + log. Worker thread sleep qilib
-  re-enqueue qiladi.
-- **Qoldi v2:** persistent backing (Redis/PG `_jwc_jobs` jadval), priority
-  queues, dead-letter queue.
-
-### 8.2 LSP server (basic)
-- `cargo build --bin jwc-lsp` — stdio orqali tower-lsp ishlaydi.
-- Diagnostics + hover ishlaydi (yuqorida 3.1'ga qarang).
-- **Qoldi:** go-to-definition, autocomplete, route/middleware hover, semantic tokens.
-
----
-
-## Phase 9 — Async runtime + perf ceiling ✅ done
-
-**Maqsad:** Hozirgi ~20k RPS shiftini Rust async stack darajasida (~50–100k RPS) ko'tarish.
-
-### Joriy baseline (v0.1.2, localhost + Postgres, bombardier)
-
-| Test | Conn | RPS | p50 | p95 | p99 |
-|---|---|---|---|---|---|
-| GET /notes | 100 | **21,512** | 3.0ms | 7.4ms | 14.1ms |
-| GET /notes | 200 | 20,146 | 7.0ms | 17.6ms | 39.2ms |
-| POST /notes | 100 | 16,930 | 4.7ms | 8.6ms | 25.2ms |
-
-Bottleneck — sync tree-walking `Vm` + `r2d2_postgres` (blocking driver).
-Har request `spawn_blocking` orqali tokio'dan blocking pool'ga ko'chiriladi
-→ async I/O bekor bo'ladi, har handler bitta thread band qiladi.
-
-### 9.1 Async Vm ✅
-- `runner.rs` Vm to'liq async — `eval_expr` / `exec_block` / `call_function`
-  `#[async_recursion]` orqali, har joyda `.await`.
-- `Flow::{Continue, Return, Break, ContinueLoop}` o'zgarmadi.
-- Tree-walking saqlandi; har step await-able.
-
-### 9.2 `tokio-postgres` ✅
-- `engine.rs` `r2d2_postgres` → `deadpool-postgres` + `tokio-postgres`'ga
-  ko'chdi. `engine::checkout()` async; `TxGuard` async-aware.
-- TLS pathlar `tokio-postgres-rustls` bilan ishlaydi.
-- Bind layer `Box<dyn ToSql + Sync + Send>` orqali — uuid / datetime real
-  Postgres typelariga bind qilinadi.
-
-### 9.3 `spawn_blocking` ni olib tashlash ✅
-- `server.rs` har request uchun `tokio::spawn` ishlatadi — `spawn_blocking`
-  butunlay yo'q.
-- WebSocket bridge'ga ehtiyoj qolmadi — frame I/O `tokio::io::{AsyncReadExt,
-  AsyncWriteExt}` orqali, `WS_STREAM` `tokio::task_local!` Arc<Mutex<TcpStream>>.
-
-### 9.4 Native AOT ham async ✅
-- `native_build.rs` route/user-fn/middleware/errorHandler uchun
-  `Pin<Box<dyn Future<Output=V> + Send>>` chiqaradi; `#[tokio::main(flavor =
-  multi_thread)]` runtime; `jwc_serve_impl` async; try/catch +
-  transaction async block ustida `futures::FutureExt::catch_unwind` orqali.
-- `native_prelude*.rs.in` — `tokio::net::TcpListener`, `tokio::spawn`,
-  task-local request context, async WS prelude, deadpool-postgres prelude,
-  `sleep_ms` / `http_get` / `fetch_json` async helperlar.
-- Workspace Cargo.toml: sync `r2d2*`/`postgres`/`ureq` o'chirildi; `tokio
-  (full)`, `tokio-postgres`, `deadpool-postgres`, `async-recursion`,
-  `reqwest (rustls)` qo'shildi.
-
-### 9.5 Maqsadli raqamlar (verify pending) — Phase 10 da yopiladi
-- GET (oddiy SELECT) c=100: **40–60k RPS**, p99 < 10ms.
-- POST: **30–50k RPS**.
-- c=500+ Linux'da real ravishda yelka tortishi mumkin (Windows loopback alohida holat).
-- Benchmark setup: `examples/bench.sh` (bombardier), `examples/bench.py`
-  (Python harness), `examples/jmeter/` (JMeter plan), `examples/bench-cs/`
-  (.NET baseline solishtirma uchun). Real natijalar — keyingi iteratsiyada
-  qo'shiladi.
-
----
-
-## Phase 10 — Observability ✅ done for 1.0 surface
-
-**Maqsad:** Production-ready obzor. North star fokusiga moslab qisqartirildi —
-streaming/SSE va cross-target **Non-goals** ga ko'chdi.
-
-### 10.5 Typed-catch dispatch ✅ v1
-- ✅ Built-in error kinds (`runner::JWC_ERROR_KINDS`): `Error`,
-  `DbError`, `HttpError`, `ValidationError`, `TimeoutError`.
-- ✅ `catch (e: DbError)` filter — runtime message-pattern classifier
-  (`runner::classify_jwc_error`); type mos kelmasa xato qayta ko'tariladi.
-- ✅ Catch'da bound bo'lgan err JSON: `{ "type": kind, "message", "causes" }`.
-- ✅ Validator: noma'lum catch type "Did you mean?" hint bilan kompayl
-  vaqtida bail (`closest_known_kind`).
-- ✅ Native AOT codegen mirror'i: `jwc_classify_error` + `jwc_catch_type_matches`.
-- 📦 Defer post-1.0: multi-catch (`catch (e: DbError) {} catch (e) {}`) +
-  `JwcError` enum + `.downcast_ref` classifier.
-
-### 10.2 OTLP tracing ✅ optional, gated
-- ✅ `otlp` Cargo feature ortida; runtime'da `JWC_OTLP_ENDPOINT` env bilan yoqiladi.
-- ✅ Postgres pool, HTTP request, queue worker span'lari.
-- Non-goal: OTLP'ni "yadro" qilish. Ergonomika emas, ops vositasi. Default-off.
-
-### 10.7 Schema diff `migrate new` ga to'liq ulash ✅
-- ✅ `schema_diff.rs` joriy entity'lar va oldingi `.up.sql` o'rtasidagi farqdan
-  faqat `ALTER TABLE` / yangi `CREATE TABLE` chiqaradi.
-- ✅ Diff bo'lmasa "no schema changes" — bo'sh migration yaratilmaydi.
-
-### Cut: Streaming + SSE v2 + cross-target
-- ❌ Stream `select` / `route SSE v2` / native cross-target matrix —
-  hammasi **Non-goals** ga ko'chdi. CRUD og'rig'ini kamaytirmaydi.
-
----
-
-## Phase 11 — Query Layer ✅ Done (v0.5.0 → v0.6.1)
-
-**Maqsad (bajarildi):** Joinsiz "ORM og'rig'ini o'ldirdik" da'vosi yarim edi.
-Bu Phase qolgan ~80% holatda raw_sql fallback'iga muhtojlikni o'ldirdi.
-Dogfood: `task-tracker` — read-path N+1 = 0, stats/reorder uchun raw_sql = 0
-(PAIN_LOG2/3/4). Reja: `jwc-query-layer-plan-v2.md` + `jwc-plan-v3.md`.
-
-### 11.1 Join (FK orqali) ✅
-- `select Task { columnId, columnName: Column.name, total: count(*) } from
-  AppDb.Task join Column on Column.id == Task.columnId group by …` — explicit
-  multi-entity equi-join, `j{i}` alias bilan kvalifikatsiya. SQL gen +
-  prepared statement + native AOT codegen mirror ✅.
-- (Cheklov) faqat Inner equi-join (`a == b`); LEFT/outer join — post-1.0.
-
-### 11.2 Projection / shape ✅
-- `select Entity { col, alias: Other.col, total: count(*) }` — aliased plain
-  ustun (joined entity'dan) + aliased aggregate. Nav projection
-  (`author: User { id, name }`) parolni yashiradi. HTTP response avto-JSON.
-
-### 11.3 Composable filter ✅
-- `and`/`or` + qavslar; joined entity field'lariga `where`'da murojaat.
-- **`op?` optional predicate** (`status ==? @s`): qiymat bo'sh/null bo'lsa shart
-  tushadi — bitta statik query barcha filter kombinatsiyasiga xizmat qiladi
-  (in-code shoxlanish o'ldi).
-- **Dynamic in-list** (`where id in (@arr)` → `= ANY($1)`): runtime massiv param.
-
-### 11.4 Aggregation ✅
-- `count`/`sum`/`avg`/`min`/`max` scalar **va** `group by` + `having` bilan
-  grouped aggregation (1.0 scope'dan oshib bajarildi). JOIN ustidan grouped
-  agg ham.
-
-### 11.5 Eager-load + nav + boshqa (v3) ✅
-- **`with`** eager-load: belongs-to, has-many/one, m2m (join-jadval orqali),
-  **ikki-bosqichli nested** (`with boards.columns`) — barchasi korrelyatsiyali
-  `json_agg` subquery, bitta query. Nav ordering (`orderby` nav-decl'da).
-- **Atomik `update CTX.T set col = expr where …`** (D3) — read'siz partial
-  update + reorder (`position = position ± 1`); lost-update oynasi yo'q.
-- **Jonli `/openapi.json` + `/docs`** — runtime'da route'lardan generatsiya,
-  drift mumkin emas.
-- **`schema_diff`** mavjud ustunga qo'shilgan `unique`ni `ALTER` qiladi (D1).
-- **Native AOT query-layer parity**: yuqoridagi nav/agg/JOIN/op? formalari
-  native codegen'da (interpreter SQL'ini qayta ishlatadi) + camelCase
-  funksiya-chaqiruv rezolyutsiya bug fix.
-
-### 11.6 Conformance + docs ✅ qisman
-- `tests/group_by.rs`, `tests/nested_with.rs`, `tests/native_emit.rs` +
-  runner `nav_sql_tests` unit testlari ✅. `docs/.../queries.md` to'liq surface
-  — qoldi.
-
-### Phase 11 — qolgan kamchiliklar (halol)
-1. **✅ YOPILGAN — Native: JWT builtinlari.** `jwt_sign`/`jwt_verify`
-   registry'da `native: true`, ya'ni Bearer auth ishlatadigan app to'liq
-   native build bo'ladi. Bu band yopilganidan keyin ham ochiq turgan edi;
-   v0.9.6 auditida registry bilan solishtirilib aniqlandi.
-2. **🟡 Native: dinamik in-list (`= ANY`) interpreter-only.** Massiv-param
-   binding native'da yo'q (runtime coverage Linux/CI). Statik `in (a,b,c)` ✅.
-3. **🟡 Native: JOIN where faqat asosiy entity ustuni.** WHERE/HAVING bind
-   tipi asosiy entity'dan resolve bo'ladi; joined-entity ustuni bo'yicha WHERE
-   native'da interpreter-only (struktura/SELECT/ON to'liq qo'llanadi).
-4. **🟢 Faqat Inner equi-join.** LEFT/outer + non-equi ON — post-1.0.
-5. **🟢 `group by`/`having` interpreter'da to'liq; arbitrary projection-agg
-   aralashmasi** ba'zi holatda raw_sql talab qiladi (kam uchraydi).
-6. **🟢 Native binar Windows'da runtime-test bo'lmaydi** — AOT Linux
-   x86_64(+musl) only; bu env'da emit-source + SQL-probe darajasi (CI compile).
-
----
-
-## 1.0 gacha yo'l xaritasi
-
-Hozirgi holat: Phase 0–11 yopildi (v0.9.2). Query Layer tugadi, native
-parity bor. Qolgani — quyidagi olti reliz.
-
-Tartib bitta prinsipga bo'ysunadi: **buzuvchi o'zgarishlar erta, ergonomika
-keyin, ishonch doimiy.** 1.0 sintaksisni muzlatadi, demak har qanday
-breaking o'zgarish 0.10–0.13 ichida tugashi shart.
-
-```
-✅ v0.5.0 →  Query Layer yadrosi (eager-load + grouped agg)
-✅ v0.6.0 →  explicit JOIN (0 raw_sql) + op? + dynamic in-list + nested with
-             + atomic update-set + live OpenAPI + native query-layer parity
-✅ v0.7.0 →  field feedback: index + unique(a,b) + &&/||/+=/?:/?? + CORS/405/
-             dual-stack + bitta error envelope + project-wide diagnostics +
-             fmt round-trip + native jwt_sign/jwt_verify va decimal
-✅ v0.8.0 →  where'dan `and`/`or` yo'qolishi tuzatildi + having'da agregatlar
-             (+ alias) + select distinct
-✅ v0.8.5 →  SQL parametrlari ustun turiga qarab bog'lanadi + E022 (builtin
-             aritetini `jwc check` da rad etish) + brending
-✅ v0.8.7 →  console/fayl builtinlari: `console.*`, `file.*`, `directory.*`
-             + `IoError` xato turi (qo'shimcha, breaking emas)
-✅ v0.8.8 →  `console.writeln` + `int()` endi trim qiladi va parse bo'lmasa
-             xato beradi (0 qaytarmaydi) — BREAKING
-✅ v0.9.0 →  Redis core-tier driver: `redis_*` builtinlari (interpreter +
-             `--native`), `rediss://` TLS, `/readyz` probe va
-             `jwc_redis_pool_*` metrikalari. `--features redis` ortida.
-✅ v0.9.2 →  `log_insert` — buferlangan, batchli telemetriya yozuvi
-             (so'rov yo'lidan tashqarida) + native'da `/metrics`.
-             Uchta native-parity tuzatmasi: `pattern(...)` endi haqiqatan
-             bajariladi (xavfsizlik), `after { }` bloklari ishlaydi,
-             vendored paket ikki marta yuklanmaydi.
-   v0.10.0→  Entity DSL: default / private / server / enum / composite pk
-   v0.11.0→  Mapper: new X from Y / patch / class validatsiyasi / check
-   v0.12.0→  Til ergonomikasi: body().x / xs[0] / throw / default param
-   v0.13.0→  Query layer yakuni: ko'p ustunli orderby / LEFT JOIN / subquery
-   v0.14.0→  `jwc test` — haqiqiy test framework
-   v1.0.0-rc.1 → ishonch: differensial qamrov, audit, soak, pilot ko'chirish
-   v1.0.0 →  sintaksis muzlaydi. Breaking faqat 2.0 da
-```
-
----
-
-### v0.10.0 — Entity DSL: default'lar va chegaralar
-
-Birinchi, chunki mapper'ning butun ma'nosi "qaysi ustun avtomatik to'ladi,
-qaysi biri taqiqlangan" degan savolga bog'liq. Buni oldin belgilamasak,
-mapper semantikasini ikki marta ta'riflashga to'g'ri keladi.
-
-- `default <expr>` — `default uuid()`, `default now()`, `default "posted"`
-- `on update now()` — `updatedAt` uchun
-- **`private`** — na javobda, na body'dan (`passwordHash`, `importHash`)
-- **`server`** — javobda bor, body'dan yo'q (`createdBy`, `status`)
-- `enum Direction { in, out }` — DB'da `CHECK`, validatsiyada avtomatik,
-  qoida ikki joyda takrorlanmaydi
-- composite `pk on (a, b)`
-- `on update cascade`
-
-> **BREAKING:** `private` bugungi `select E from ...` javobini o'zgartiradi.
-> Bu ataylab: default xavfsiz tomonga buriladi, proyeksiya esa xavfsizlik
-> uchun emas, trafik uchun yoziladigan bo'ladi.
-
-### v0.11.0 — Mapper
-
-80 ustunli entity uchun router ichida 80 qator o'zlashtirish yozilmasin.
-Chiqish tomonini `select` proyeksiyasi allaqachon hal qiladi — bu reliz
-faqat **kirish** tomoni haqida.
-
-- **`new Entity from <record>`** — manba `body()` ham, DTO instance ham
-  bo'lishi mumkin. Nom bo'yicha moslash; `pk` / `default` / `server` /
-  `private` avtomatik chetlab o'tiladi
-- **`patch e from body()`** — faqat body'da **mavjud** kalitlar. `insert`
-  dan boshqa semantika, shuning uchun alohida so'z
-- **class maydonlarida validatsiya qoidalari** —
-  `amount decimal(14,2) required, min(1);`
-- **`check <expr> : "xabar"`** — maydonlararo qoida. Deklarativ va
-  avtomatik; `validate()` metodi emas, chunki metodni chaqirishni unutish
-  mumkin va bu aynan biz `private` bilan yopayotgan xato turi
-- **`error[E011]`** — `NOT NULL`, default'siz, body'dan kelolmaydigan va
-  hech qayerda o'zlashtirilmagan ustun → kompilyatsiya xatosi
-
-`validate body { ... }` qoladi va DTO majburiy emas: u shakl takrorlanganda,
-maydonlararo qoida kerak bo'lganda yoki OpenAPI'da nomlangan sxema kerak
-bo'lganda o'zini oqlaydi.
-
-Mass-assignment himoyasi til darajasida: `{"id":1,"role":"admin"}` yuborilsa
-o'sha maydonlar jimgina tashlanadi. Bugun bunga to'siq — dasturchining har
-maydonni qo'lda yozgani, ya'ni himoya diqqatga bog'liq.
-
-### v0.12.0 — Til ergonomikasi
-
-Har bir handler'da seziladigan, additive (breaking emas):
-
-- `body().x` — chaqiruv natijasidan maydon olish
-- `xs[0]` — indeksatsiya
-- `throw`
-- default parametr qiymatlari
-- `for i, x in xs`
-
-### v0.13.0 — Query layer yakuni
-
-- **Ko'p ustunli `orderby`** — bugun parser bitta ustun oladi; jadval UI'si
-  uchun majburiy
-- **`LEFT JOIN`** — "har bir kategoriya va undagi tranzaksiyalar soni, nol
-  bo'lsa ham". Avval post-1.0 ga qo'yilgandi; CRUD hisobotlarining yarmi shu
-  shaklda, shuning uchun 1.0 ichiga ko'chirildi
-- `count(distinct col)`
-- `where` ichida subquery (`exists` / `in (select ...)`)
-
-Window funksiya, CTE, `union` — `raw_sql` da qoladi (Non-goal).
-
-### v0.14.0 — `jwc test`
-
-Eng katta strukturaviy bo'shliq: bugun `jwc test` faqat validatsiya qiladi,
-ya'ni **JWC'da yozilgan kodni JWC'da test qilib bo'lmaydi**. 1.0 tili uchun
-bu qabul qilib bo'lmaydigan kamchilik.
-
-Minimum: test bloki, assert'lar, DB fixture, har test uchun transaction
-rollback, runner.
-
-### v1.0.0-rc.1 — Ishonch
-
-Yangi funksiya yo'q, faqat dalil.
-
-- Differensial query suite'ni har yangi shaklga kengaytirish
-  (`tests/query_differential.rs`, CI'da Postgres service bilan)
-- `integration_db` ni service container'ga ko'chirish — hozir
-  testcontainers'da va CI'da skip bo'ladi; **skip pass sifatida
-  o'qilmasligi** kerak
-- **"Hujjatda bor, kodda yo'q" auditi** — `where col is null` shunday chiqdi:
-  hujjatda qo'llab-quvvatlanadigan operator sifatida sanalgan, amalda hech
-  qachon parse bo'lmagan. Yana borligini tekshirish kerak
-- Parser fuzz, 72 soatlik soak
-- MyWallet va task-tracker'ni to'liq yangi sintaksisga ko'chirish
-
-### v1.0.0
-
-Sintaksis muzlaydi. Buzuvchi o'zgarish faqat 2.0 da. Xavfsizlik tuzatmalari
-qo'llab-quvvatlanadi.
-
----
-
-### Doimiy shart — ishonch
-
-Bu reliz emas, **har bir relizning qabul shartlari**.
-
-v0.6.3–v0.8.0 oralig'ida topilgan bug'larning aksariyati bitta turda edi:
-**jimgina noto'g'ri javob**. `where` dan `and` yo'qolishi, `RETURNING`
-ustun o'rniga affected-count qaytarishi, native'da decimal `null` bo'lib
-kelishi. Va ularning hech biri foydalanuvchi shikoyatidan kelmadi —
-qaralganda topildi.
-
-Shuning uchun v0.10.0 dan boshlab: **har bir yangi query shakli differensial
-testsiz tugallangan hisoblanmaydi.** Qo'lda yozilgan SQL bilan natija
-solishtirilmasa, u "ishlaydi" deb aytilmaydi. Unit test SQL matnini
-tekshiradi, matn esa har doim to'g'ri ko'rinadi.
-
----
-
-Post-1.0 (xohlasak): jwc-registry server, jwc publish/login, modul
-sistemasi, qo'shimcha package ekotizimi. Hammasi opsional, north star
-fokusini buzmasligi shart.
-
----
-
-## Sprint Tracker
-
-Phase tashqaridagi tactical sprint-by-sprint progress (2026 sessiyalari).
-
-| # | Sprint | Status | Eslatma |
-|---|--------|--------|---------|
-| 1 | Verify & Hygiene | ✅ qisman | rustfmt + clippy + CI gate ✅, CONTRIBUTING.md ✅, code map refresh ✅. 10.1 perf bench ⏳ blocked-on-infra. |
-| 2 | Type system finishing | ⏳ qisman | uuid/datetime/decimal/json/bigint ✅ (Phase 2.1). `bytea` entity column + `bytes`/`byte[]` typed-param (base64 runtime check via `looks_like_base64`) ✅. `src/sema.rs` skeleton (forwards to validate_program; future state-extraction hook) ✅. Real `Value::Bytes` variant + explicit koersiyalar — qoldi. |
-| 3 | LSP power | ⏳ qisman | `textDocument/documentSymbol` outline ✅. `textDocument/definition` go-to-def (same-doc, function / model / middleware) ✅. `textDocument/completion` — 30 keywords + 33 builtins ✅. Semantic tokens + cross-file definition lookup — qoldi. |
-| 4 | Diagnostics polish | ⏳ qisman | W003 empty body, W004 missing-`first`, W005 builtin-shadow, W006 unreachable-after-return ✅. Typed-catch closest-match ✅ (Phase 10.5). `jwc lint --json` editor/CI output ✅. Numbered-code catalog `src/error_codes.rs` ✅ (W001..W006, E001..E010). Bail-site wiring: E001/E002/E004/E005/E007/E008/E009/E010 ✅; E003/E006 — qoldi. |
-| 5 | `jwc fmt` | ✅ v1 | Line-based formatter (`src/fmt.rs`) + `--check` rejim. AST → source renderer + comment preservation — v2. |
-| 6 | SQL completeness | ⏳ qisman | `group by` + `having` ✅. `jwc migrate list` offline enumerator ✅. Insert/FieldAssign payload field-name compile-time check ✅ (tracks `let v = new Entity()` bindings + if/else/loop branch-aware intersect). Live DB schema drift — qoldi. |
-| 7 | Code health refactor | ⏳ qisman | 8 cmd modullari: `pkg`, `migrate`, `lint`, `check`, `fmt`, `build`, `run`, `serve` ✅ + `builtins.rs` ✅. main.rs 349 qator — pure Clap dispatcher, har handler `cmd::<sub>::run` ortida. runner.rs `src/runner/{mod,builtins}.rs` ga ajratildi ✅ (v0.4.0). parser.rs modul ajratish — qoldi. |
-| 8 | Native vs interpreter parity | ⏳ qisman | `--emit-rust-source` flag ✅, `tests/native_emit.rs` ✅, `tests/examples_parse.rs` ✅, `tests/native_parity.rs` ✅ (golden harness). v0.4.0 parity auditi: array literal, hash builtinlari, `const`, custom MIME bayt-aynan. **v0.6.x: Query Layer native parity** ✅ — nav eager-load (belongs-to/has-many/one/m2m/nested), grouped aggregation, explicit JOIN + aliased cols, `op?` optional predicate — barchasi interpreter SQL builder'larini qayta ishlaydi (`build_navigation_subqueries`/`where_col_sql`/`agg_select_sql` `pub(crate)`), natija `row_to_json(r)::text` → `jwc_db_query_json`. **camelCase funksiya-chaqiruv rezolyutsiya bug fix** (`rewrite_expr`) — `byStatus()` kabi root call FQN'ga o'tmasdan "unknown function" berardi; real app'lar uchun native'ni ochdi. **Qolgan kamchiliklar:** (a) ~~JWT builtinlari native'da yo'q~~ — **yopilgan**, `jwt_sign`/`jwt_verify` registry'da `native: true`; (b) dinamik in-list `= ANY` native'da interpreter-only; (c) JOIN WHERE joined-entity ustuni native'da interpreter-only; (d) native runtime faqat Linux/CI (Windows — emit + SQL-probe). **v0.9.6: Cargo-build-and-diff v2** ✅ — `tests/differential.rs` generatsiya qilingan crate'ni haqiqatan `cargo` bilan quradi, binarni ishga tushiradi va ikkala backend'ga real HTTP so'rov yuboradi; kutilgan natija fixture'da e'lon qilinadi, backend'lar ovoz bermaydi. Shu harness darhol yangi divergensiya topdi: string argumentli `notFound`/`badRequest`/`internalError`/`unauthorized`/`forbidden` native'da `{"error":...}` konvertiga o'ralmasdan xom matn qaytarardi. |
-| 9-10 | Registry server | ⬜ blocked-on-infra | Alohida repo `jwc-registry.1kb.uz` kerak; bu sessiyada bajarib bo'lmaydi. |
-| 11 | Publish & login | ⬜ blocked | Registry server ishga tushgandan keyin. |
-| 12-13 | Native cross-target | ⏳ qisman | Sprint 12 `--target` flag ✅ + 5-triple allowlist + `tests/native_target.rs` (5 tests). Sprint 13 `src/native_ir.rs` skeleton ✅. End-to-end AST → IR → LLVM via inkwell — deferred. |
-| 14 | Queue robustness | ✅ qisman | Retry policy + exponential backoff ✅. `enqueue_urgent` 2-tier priority (front-of-queue + FIFO within urgent block) ✅. Dead-letter queue (`JWC_QUEUE_DLQ_MAX`, `dlq_count()`/`dlq_drain()` built-ins) ✅. Persistent backing (Postgres `_jwc_jobs`) + n-level priority — deferred. |
-| 15-18 | Phase 5 ecosystem | ⬜ deferred | WASM, Redis cache, S3, SSE — Phase 10 davomida. |
-| 19+ | Long-term | ⬜ | IR + zero-cost abstractions + self-hosting. |
-
----
-
-## Ultimate Goal
-
-> Web backend yozish → config yozish darajasida oson.
-> Performance → Rust/Go darajasida.
-
----
-
-## Kod xaritasi (orientir uchun)
-
-```
-src/
-  lexer.rs           441  tokenizer + template string + raw strings + comment skip
-  ast.rs             404  Program / Model / Route / Function / Stmt / Expr
-  parser.rs         4037  recursive-descent + validate_program (column + catch-type checks)
-  runner.rs         5414  async tree-walking Vm + classify_jwc_error + HTTP dispatch
-  engine.rs          528  deadpool-postgres + tokio-postgres + prep cache + TTL cache
-  server.rs          380  axum + tokio::spawn + WebSocket + metrics
-  sql.rs             315  Postgres DDL generator
-  migrate.rs         443  migrate new / up / down (advisory lock)
-  schema_diff.rs    1020  entity ↔ .up.sql diff for migrate new
-  project.rs         634  jwcproj parser + dotenv loader + source walker + import resolver
-  diag.rs             31  byte offset → (line, col)
-  lint.rs            272  unused fn (W001) / unused middleware (W002)
-  queue.rs           380  in-process job queue + worker pool
-  native_build.rs   2494  AST → Rust source (async tokio AOT path)
-  cache.rs           147  in-memory TTL cache (cache_set/get/del/clear)
-  jwt.rs             115  HS256 sign/verify
-  password.rs         55  Argon2id hash/verify
-  email.rs           183  lettre + rustls SMTP transport
-  pkg_cache.rs       121  path/git package fetch cache
-  lockfile.rs        152  jwcproj lockfile read/write
-  error_report.rs     40  CLI error chain pretty-printer
-  main.rs            585  CLI subcommands + embedded launcher
-  bin/jwc_lsp.rs     429  tower-lsp server (diagnostics + hover)
-```
-
-Jami: ~18.2k qator Rust.

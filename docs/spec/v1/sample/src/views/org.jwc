@@ -1,0 +1,29 @@
+namespace views.org;
+
+import app;
+
+
+view OrgWithMembers of App.org {
+    select Orgs from App.org.Orgs
+        left join Members  on Members.org_id == Orgs.id             as many members
+        left join Accounts on Accounts.id == Members.account_id     as one account
+        as {
+            id,
+            slug,
+            name,
+            created_at,
+            members: { role, joined_at,
+                       account: { id, email, display_name } }
+        }
+}
+
+view MemberAccess of App.org {
+    select Members from App.org.Members
+        left join Orgs on Orgs.id == Members.org_id as one org
+        as {
+            org_id,
+            account_id,
+            role,
+            org: { id, slug, name }
+        }
+}

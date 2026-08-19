@@ -1,0 +1,49 @@
+namespace routes.auth;
+
+import dto.auth;
+import services.auth;
+import middleware.auth;
+import middleware.ratelimit;
+
+
+routes "/api/v1/auth" use StrictRateLimit {
+
+    route POST "register" {
+        let req     = request.body() as Register;
+        let account = AuthService.register(req);
+
+        return created(json(account));
+    }
+
+    route POST "login" {
+        let req     = request.body() as Login;
+        let session = AuthService.login(req);
+
+        return json(session);
+    }
+}
+
+routes "/api/v1/me" use RequireAuth {
+
+    route GET "" {
+        let account_id = context.get("account_id");
+        let account    = AuthService.profile(account_id);
+
+        return json(account);
+    }
+
+    route PATCH "" {
+        let account_id = context.get("account_id");
+        let req        = request.body() as AccountEdit;
+        let account    = AuthService.update_profile(account_id, req);
+
+        return json(account);
+    }
+
+    route GET "orgs" {
+        let account_id = context.get("account_id");
+        let orgs       = AuthService.orgs_of(account_id);
+
+        return json(orgs);
+    }
+}

@@ -1276,7 +1276,7 @@ fn check_limit_literal(_e: &Expr) -> Result<()> {
 fn unsupported(what: &str) -> String {
     format!(
         "Native build does not yet support {what}.\n\
-         The compiled backend is being rolled out incrementally — see ROADMAP.md Phase 4.\n\
+         The compiled backend is rolled out incrementally — see docs/spec/roadmap-0.9.x.md Phase 4.\n\
          Use `jwc build` (without --native) or `jwc run` for the interpreter for now."
     )
 }
