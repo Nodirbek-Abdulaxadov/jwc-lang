@@ -1,0 +1,53 @@
+namespace writes;
+
+-- Write rules (writes.md).
+service Writes {
+    function update_needs_a_where(org_id: bigint) {
+        return update App.s.Notes set body = "x";       -- expect: E0605
+    }
+
+    function delete_needs_a_where() {
+        return delete from App.s.Notes;                 -- expect: E0605
+    }
+
+    function cannot_write_to_a_view(id: bigint) {
+        return delete from App.s.OrgList where id == $id;  -- expect: E0601
+    }
+
+    function unknown_column(org_id: bigint) {
+        return insert into App.s.Notes {
+            org_id = $org_id,
+            nope = 1,                                   -- expect: E0602
+            body = "x",
+            amount = 1.00
+        };
+    }
+
+    function on_conflict_may_return_nothing(org_id: bigint) {
+        let row = insert into App.s.Notes { org_id = $org_id, body = "x", amount = 1.00 }
+            on conflict (id) do nothing
+            as { id };
+        if ($row == null) { return { status: "duplicate" }; }
+        return { status: "ok" };
+    }
+
+    -- `delete ... as { } first` is what makes "404 if it did not exist"
+    -- writable (writes.md §5.1).
+    function delete_first_returns_a_row(id: bigint) {
+        return delete from App.s.Notes where id == $id as { id } first
+            or throw NotFound("yo'q");
+    }
+
+    -- A service returning a response is E0330 whatever it wraps.
+    function services_do_not_know_http(id: bigint) {
+        let gone = delete from App.s.Notes where id == $id as { id } first
+            or throw NotFound("yo'q");
+        return json($gone);                             -- expect: E0330
+    }
+
+    function transaction_only_in_a_service(id: bigint) {
+        transaction {
+            return delete from App.s.Notes where id == $id as { id } first;
+        }
+    }
+}

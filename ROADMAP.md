@@ -324,6 +324,43 @@ annotatsiyasi bilan; `jwc check` 100% mos keladi; namunadagi 6 ta ikki
 ma'noli `where` ning hammasi rad etiladi; `9007199254740993` id raw va
 record yo'lida bayt-bir xil chiqadi (test).
 
+**Holat: yopildi (bitta mezon qisman).** `src/v1/{types,symbols,check}.rs`.
+`jwc v1 check docs/spec/v1/sample` — 21 fayl, 0 xato, 0 ogohlantirish.
+`tests/type_corpus/` — 15 ta holat fayli, umumiy `prelude.jwc` ustida.
+Annotatsiya qatorning o'zida turadi (`-- expect: E0310`), `@line` emas:
+raqam qator pozitsiyasidan kelib chiqadi, ya'ni fayl tahrirlanganda
+annotatsiya siljimaydi. Moslik **ikki tomonlama qat'iy** — yetishmagan
+diagnostika ham, kutilmagani ham testni yiqitadi; shuning uchun corpus
+diagnostikaning *yo'qligini* ham xuddi borligi kabi mahkamlaydi.
+
+**Ikki ma'noli `where` masalasi**: 6 ta sayt endi *rad etilmaydi* — ular
+**yozib bo'lmaydigan** bo'ldi. `$` majburiy bo'lgani uchun query bandidagi
+yalang'och nom faqat ustun bo'ladi (v0.21.0). `sigils.jwc` shu qarorni
+mahkamlaydi: sigilsiz lokal `E0376`/`E0211` beradi, `where org_id == org_id`
+esa `W0104` ("har doim rost").
+
+Implementatsiya to'rtta bandni aniqlashtirishga majbur qildi, hammasi
+spec'ga yozildi:
+- **queries §6.1** — proyeksiyadagi yalang'och nom **haydovchi** binding
+  ustuni. Aks holda joinli har bir query'da `id` ikki ma'noli bo'lardi.
+- **queries §4.6** — join natijasining o'z `orderby`/`limit` i o'sha
+  qo'shilgan jadvalga scoped.
+- **types §6.4** — query bandi ichida nullable maydonga murojaat xato emas:
+  bu SQL, NULL o'zi tarqaladi. `E0320` — koddagi qiymatlar haqida.
+- **schema §3.1** — `private` qoidasi aniqlashtirildi. `#35` topgan narsa
+  to'g'ri edi: login query'si private ustunni nomlaydi va nomlashi **kerak**
+  (`hash.verify` ga hash kerak). Qoida qiymatni **o'qish** haqida emas,
+  **chiqib ketishi** haqida: lokalga proyeksiya qilish mumkin, javobga
+  berish — `E0410`. `view` da esa umuman mumkin emas.
+- **errors §1.1** — har bir xato `message: text` tashiydi, e'lon qilinganmi
+  yo'qmi.
+
+**Qisman:** `9007199254740993` uchun **uchdan ikki** qism bor — wire
+qoidasi (`bigint`/`numeric` → string) lattice'da va emitter'ning cast'ida
+tekshiriladi va ikkovi mos kelishi test qilinadi. **Uchinchi qismi —
+haqiqiy so'rovni ikkala yo'ldan o'tkazib baytlarni solishtirish — runtime
+talab qiladi va v0.24.0 ga qoladi.**
+
 ---
 
 ### v0.24.0 — **Runtime** — routing, middleware, error model, bir jadvalli CRUD

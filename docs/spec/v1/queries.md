@@ -131,7 +131,11 @@ serialises as `null`.
 left join App.billing.Payments on … as many payments orderby created_at desc limit 20
 ```
 
-The `orderby`/`limit` bind to the child collection, not the outer query.
+The `orderby`/`limit` bind to the child collection, not the outer query — and
+so does their **name resolution**: inside a join result's own `orderby` and
+`limit`, an unqualified name is a column of that joined table. `as many lines
+orderby id asc` orders the lines by *their* id.
+
 Unbounded `as many` on a collection with no natural bound is `W0501`.
 
 ---
@@ -191,6 +195,14 @@ as {
 - `alias: expr` projects an expression;
 - `alias: { … }` projects a nested shape and requires `alias` to be a join
   result name from §4.3.
+
+**A bare name in a projection is a column of the driving binding.** Not of
+"whichever binding has it": a joined table reaches the projection through its
+own nested shape, so resolving across every binding would make `id`
+ambiguous in every joined query. To project a joined table's column at the
+top level, qualify it — `owner_id: M.account_id`. The same rule applies to a
+bare name on the right of `alias:`, which is why `org_id: id` means the
+driving table's `id`.
 
 A projection field naming a `private` column is `E0410` (schema §3.1).
 

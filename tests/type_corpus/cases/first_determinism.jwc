@@ -1,0 +1,42 @@
+namespace first_determinism;
+
+-- `first` must be deterministic (queries.md §5.2).
+service First {
+    function by_primary_key(id: bigint) {
+        return select O from App.s.Orgs where id == $id first;
+    }
+
+    function by_unique(slug: text) {
+        return select O from App.s.Orgs where slug == $slug first;
+    }
+
+    function by_composite_primary_key(org_id: bigint, account_id: bigint) {
+        return select M from App.s.Members
+            where org_id == $org_id and account_id == $account_id
+            first;
+    }
+
+    function by_partial_unique(org_id: bigint, body: text) {
+        return select N from App.s.Notes
+            where org_id == $org_id and body == $body and retired == null
+            first;
+    }
+
+    function partial_unique_without_its_predicate(org_id: bigint, body: text) {
+        return select N from App.s.Notes      -- expect: E0520
+            where org_id == $org_id and body == $body
+            first;
+    }
+
+    function plain_predicate(org_id: bigint) {
+        return select N from App.s.Notes where org_id == $org_id first;  -- expect: E0520
+    }
+
+    function plain_predicate_with_an_order(org_id: bigint) {
+        return select N from App.s.Notes where org_id == $org_id orderby id asc first;
+    }
+
+    function view_inherits_the_driving_key(id: bigint) {
+        return select V from App.s.OrgList where id == $id first;
+    }
+}

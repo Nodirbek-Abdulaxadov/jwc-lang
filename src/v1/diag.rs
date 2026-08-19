@@ -129,7 +129,11 @@ impl SourceFile {
         let gutter = line.to_string().len();
         out.push_str(&format!("{:width$} |\n", "", width = gutter));
         out.push_str(&format!("{line} | {src}\n"));
-        let width = (d.span.end.saturating_sub(d.span.start) as usize).max(1);
+        // A span can cover a whole multi-line query; the caret stops at the
+        // end of the first line so the rendering stays readable.
+        let width = (d.span.end.saturating_sub(d.span.start) as usize)
+            .max(1)
+            .min(src.chars().count().saturating_sub(col - 1).max(1));
         out.push_str(&format!(
             "{:gw$} | {:pad$}{}\n",
             "",

@@ -321,6 +321,9 @@ enum V1Command {
         /// Print diagnostics only; no success line.
         #[arg(long)]
         quiet: bool,
+        /// Stop after the front-end: no schema model, no type checking.
+        #[arg(long)]
+        parse_only: bool,
     },
     /// Rewrite 1.0 sources in canonical form.
     Fmt {
@@ -535,7 +538,11 @@ fn real_main() -> Result<()> {
             cmd::pkg::tree(&root)?;
         }
         Command::V1 { cmd } => match cmd {
-            V1Command::Check { path, quiet } => cmd::v1::check(path, quiet)?,
+            V1Command::Check {
+                path,
+                quiet,
+                parse_only,
+            } => cmd::v1::check(path, quiet, parse_only)?,
             V1Command::Fmt { path, check } => cmd::v1::fmt(path, check)?,
             V1Command::GenSql { path, explain, out } => cmd::v1::gen_sql(path, explain, out)?,
             V1Command::Ast { path } => cmd::v1::ast(path)?,

@@ -1,0 +1,42 @@
+namespace expressions;
+
+-- The expression core (types.md §12): three `+` overloads, no truthiness,
+-- enums compare but do not order.
+service Exprs {
+    function concat() -> text {
+        return "a" + "b";
+    }
+
+    function no_implicit_stringify() -> text {
+        return "a" + 1;                         -- expect: E0370
+    }
+
+    function time_arithmetic() -> timestamptz {
+        return date.now() + date.days(7);
+    }
+
+    function no_truthiness(org_id: bigint) {
+        if ($org_id) { return 1; }              -- expect: E0371
+        return 2;
+    }
+
+    function enums_do_not_order() {
+        return select M from App.s.Members where role > Role.member;  -- expect: E0304
+    }
+
+    function enums_compare() {
+        return select M from App.s.Members where role == Role.owner;
+    }
+
+    function unqualified_enum_member() {
+        return select M from App.s.Members where role == owner;       -- expect: E0211
+    }
+
+    function unknown_enum_member() {
+        return select M from App.s.Members where role == Role.wizard; -- expect: E0303
+    }
+
+    function bare_now_is_not_a_call() -> timestamptz {
+        return now();                           -- expect: E0302
+    }
+}

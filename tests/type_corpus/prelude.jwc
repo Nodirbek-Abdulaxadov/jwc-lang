@@ -1,0 +1,71 @@
+namespace prelude;
+
+database App : Postgres;
+schema s of App;
+
+enum Role of App.s { owner, admin, member }
+enum Status { draft, live }
+
+table Orgs of App.s {
+    id         bigint primary key identity;
+    slug       varchar(40) unique;
+    name       varchar(120);
+    region     varchar(20)?;
+    created_at timestamptz default now();
+}
+
+table Members of App.s {
+    org_id     bigint;
+    account_id bigint;
+    role       Role default Role.member;
+    secret     varchar(64) private;
+    added_by   bigint server;
+
+    primary key (org_id, account_id);
+    foreign key (org_id) references App.s.Orgs (id) on delete cascade;
+}
+
+table Notes of App.s {
+    id      bigint primary key identity;
+    org_id  bigint;
+    body    text;
+    status  Status default Status.draft;
+    amount  numeric(14, 2);
+    retired timestamptz?;
+
+    foreign key (org_id) references App.s.Orgs (id);
+
+    unique (org_id, body) where retired == null : "band";
+}
+
+view OrgList of App.s {
+    select O from App.s.Orgs
+        left join App.s.Members M on M.org_id == O.id as many members
+        as { id, slug, name, members: { account_id, role } }
+}
+
+class NoteInput {
+    body   text           required;
+    amount numeric(14, 2) required, min(0);
+    status Status?;
+}
+
+class WithExtra {
+    body     text required;
+    nickname text?;
+}
+
+class MemberInput {
+    role   Role?;
+    secret text?;
+}
+
+class ServerInput {
+    role     Role?;
+    added_by bigint?;
+}
+
+class WithTransient {
+    body  text required;
+    debug text? transient;
+}

@@ -1,0 +1,25 @@
+namespace raw_composition;
+
+-- A raw value may be a field of an object literal — that is a text splice,
+-- not a parse (types.md §5.4). Anywhere else it is an error.
+service Compose {
+    function envelope(org_id: bigint) {
+        let rows = select N from App.s.Notes where org_id == $org_id;
+        return { items: $rows, count: 1 };
+    }
+
+    function iterate(org_id: bigint) {
+        let rows = select N from App.s.Notes where org_id == $org_id;
+        for (r in $rows) {                      -- expect: E0311
+            let x = 1;
+        }
+        return 1;
+    }
+
+    function spread_raw(id: bigint) {
+        let row = select N from App.s.Notes where id == $id first;
+        return insert into App.s.Notes {
+            ...$row                             -- expect: E0311
+        };
+    }
+}

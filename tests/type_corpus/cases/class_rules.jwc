@@ -1,0 +1,20 @@
+namespace class_rules;
+
+-- Validation rules are typed to the field (types.md §11.1).
+class BadArrayRule {
+    lines text[] required, minLength(1);        -- expect: E0360
+}
+
+class BadScalarRule {
+    body text required, minItems(1);            -- expect: E0360
+}
+
+class Contradiction {
+    body text? required;                        -- expect: E0361
+}
+
+class Fine {
+    lines text[] required, minItems(1), maxItems(10);
+    body  text   required, minLength(1);
+    note  text?  maxLength(200);
+}

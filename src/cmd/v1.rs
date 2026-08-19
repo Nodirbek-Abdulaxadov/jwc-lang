@@ -42,24 +42,49 @@ mod jwc_v1_paths {
     }
 }
 
-/// `jwc v1 check <path>` — parse only. Type checking arrives in v0.23.0,
-/// so this reports lexical and syntactic diagnostics and nothing else.
-pub fn check(path: PathBuf, quiet: bool) -> Result<()> {
-    let files = collect_sources(&path)?;
-    if files.is_empty() {
+/// `jwc v1 check <path>` — parse, resolve the schema, and type-check.
+///
+/// `--parse-only` stops after the front-end, which is what the parse corpus
+/// exercises. The full pass adds the schema model (schema.md §11) and the
+/// type checker (types.md, queries.md, writes.md).
+pub fn check(path: PathBuf, quiet: bool, parse_only: bool) -> Result<()> {
+    use crate::v1::diag::Severity;
+
+    let ws = crate::v1::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
         bail!("no .jwc files under {}", path.display());
     }
 
     let mut errors = 0usize;
     let mut warnings = 0usize;
-    for f in &files {
-        let parsed = crate::v1::parse_file(f)?;
-        for d in &parsed.diags {
+    for f in &ws.files {
+        for d in &f.diags {
             match d.severity {
-                crate::v1::diag::Severity::Error => errors += 1,
-                crate::v1::diag::Severity::Warning => warnings += 1,
+                Severity::Error => errors += 1,
+                Severity::Warning => warnings += 1,
             }
-            eprint!("{}", parsed.source.render(d));
+            eprint!("{}", f.source.render(d));
+        }
+    }
+    if errors > 0 {
+        bail!("{errors} parse error{}", plural(errors));
+    }
+
+    if !parse_only {
+        let built = crate::v1::model::build(&ws);
+        let symbols = crate::v1::symbols::build(&ws, &built.model);
+        let checked = crate::v1::check::check(&ws, &symbols, &built.model);
+        for (loc, d) in built
+            .diags
+            .iter()
+            .chain(&symbols.diags)
+            .chain(&checked.diags)
+        {
+            match d.severity {
+                Severity::Error => errors += 1,
+                Severity::Warning => warnings += 1,
+            }
+            eprint!("{}", ws.render(*loc, d));
         }
     }
 
@@ -67,15 +92,15 @@ pub fn check(path: PathBuf, quiet: bool) -> Result<()> {
         bail!(
             "{errors} error{} in {} file{}",
             plural(errors),
-            files.len(),
-            plural(files.len())
+            ws.files.len(),
+            plural(ws.files.len())
         );
     }
     if !quiet {
         println!(
-            "ok — {} file{} parsed, {warnings} warning{}",
-            files.len(),
-            plural(files.len()),
+            "ok — {} file{} checked, {warnings} warning{}",
+            ws.files.len(),
+            plural(ws.files.len()),
             plural(warnings)
         );
     }

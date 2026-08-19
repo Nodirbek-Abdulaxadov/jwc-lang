@@ -169,6 +169,10 @@ Reading a field of a `Raw` value is `E0310: cannot read a field of a raw
 result`, with a fix-it naming the projection to add. Indexing a `Raw` is the
 same error.
 
+When a value is both raw and nullable — `select … first` with no projection
+produces `Raw?` — the **raw** diagnostic is the one reported. Adding a null
+guard would not make the read legal; adding a projection would.
+
 ### 5.3 Every producer, classified
 
 This table is total. If a construct is not here, it does not produce a value.
@@ -270,6 +274,11 @@ Reading a field of, calling a method on, or passing a `T?` where `T` is
 required is `E0320: value may be null`. `json(x)` with `x : T?` is also
 `E0320` — a route that answers `200 null` where it means 404 is the exact
 bug #19 names.
+
+**Inside a query clause this rule does not apply.** A nullable field access
+there is SQL: `left join … as one org` then `orderby org.name asc` compiles
+to an ordering over a LEFT JOIN column, and the database propagates NULL —
+there is no application value to guard. `E0320` is about values in code.
 
 ### 6.5 Absent vs null on class fields
 

@@ -1,0 +1,67 @@
+namespace nullability;
+
+-- `first` introduces `?`; `as many` never does; `count` never does;
+-- `sum`/`min`/`max` always do (types.md §6.3). `json(...)` lives in a
+-- route, because a service returning a response is E0330.
+service Nulls {
+    function optional_row(org_id: bigint) {
+        return select O from App.s.Orgs where id == $org_id as { id, slug } first;
+    }
+
+    function or_throw_strips_it(org_id: bigint) {
+        return select O from App.s.Orgs where id == $org_id as { id, slug } first
+            or throw NotFound("yo'q");
+    }
+
+    function coalesce_strips_it(org_id: bigint) -> text {
+        let row = select O from App.s.Orgs where id == $org_id as { region } first
+            or throw NotFound("yo'q");
+        return $row.region ?? "unknown";
+    }
+
+    function optional_field_needs_a_guard(org_id: bigint) {
+        let row = select O from App.s.Orgs where id == $org_id as { region } first
+            or throw NotFound("yo'q");
+        return string.len($row.region);
+    }
+
+    function aggregate_nullability() {
+        return select N from App.s.Notes
+            group by org_id
+            as { org_id, n: count(id), total: sum(amount) };
+    }
+}
+
+routes "/orgs/{org_id: bigint}" {
+
+    route GET "" {
+        let row = select O from App.s.Orgs where id == @org_id as { id, slug } first;
+        return json($row);                      -- expect: E0320
+    }
+
+    route GET "guarded" {
+        let row = select O from App.s.Orgs where id == @org_id as { id, slug } first;
+        if ($row == null) { throw NotFound("yo'q"); }
+        return json($row);
+    }
+
+    route GET "then-branch" {
+        let row = select O from App.s.Orgs where id == @org_id as { id, slug } first;
+        if ($row != null) {
+            return json($row);
+        }
+        throw NotFound("yo'q");
+    }
+
+    route GET "no-divergence" {
+        let row = select O from App.s.Orgs where id == @org_id as { id, slug } first;
+        if ($row == null) { let x = 1; }
+        return json($row);                      -- expect: E0320
+    }
+
+    route GET "or-throw" {
+        let row = select O from App.s.Orgs where id == @org_id as { id, slug } first
+            or throw NotFound("yo'q");
+        return json($row);
+    }
+}
