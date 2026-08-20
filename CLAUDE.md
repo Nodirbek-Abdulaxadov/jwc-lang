@@ -61,6 +61,10 @@ JWC_V1_PG='-h 127.0.0.1 -p 5432 -U postgres' cargo test --test migrate_golden
 
 # up / down / status / verify. Serial: they share one database.
 JWC_V1_DATABASE_URL=postgres://…  cargo test --test migrate_apply -- --test-threads=1
+
+# v0.26.0's acceptance test. 20 random walks by default, 200 for the full run.
+JWC_V1_DATABASE_URL=postgres://…  JWC_ROUNDTRIP_SEQUENCES=200 \
+  cargo test --test migrate_roundtrip -- --test-threads=1
 ```
 
 What each suite is for:
@@ -81,6 +85,7 @@ What each suite is for:
 | `diff_corpus` | two schemas in, the migration's operations and phases out |
 | `migrate_golden` | emitted migrations, byte for byte, and that they apply |
 | `migrate_apply` | `up`, `down`, `status`, `verify` against a real database |
+| `migrate_roundtrip` | a migrated database *is* a created database |
 
 The corpora are **exact in both directions**: a missing diagnostic and an
 unannotated one both fail. That is what makes them a specification rather

@@ -260,10 +260,31 @@ reversibility that cannot exist is worse than refusing it (ROADMAP §7).
 10.1 Two runs of `jwc migrate new` on the same source and snapshot produce
 byte-identical output.
 
-10.2 The round-trip property — *apply every migration in order to an empty
-database, snapshot the result, and it equals the source's snapshot* — is a
-property test: 20 random operation sequences per PR, 200 nightly
+10.2 The round-trip property — *a database you migrated into a shape is the
+same database as one created in that shape* — is a property test: a random
+walk of schema edits applied one migration at a time, against `gen-sql` of
+the final source applied to an empty database, compared with
+`pg_dump --schema-only`. 20 random sequences per change, 200 for a release
 (ROADMAP §10).
+
+Four things are normalised away, and only these four, each because no
+migration can control it:
+
+| Normalised | Why |
+|---|---|
+| `\restrict` / `\unrestrict` | a random nonce per `pg_dump` run |
+| column order | Postgres appends; a column written into the middle of a declaration sits at the end of a migrated table. No `ALTER` moves it and nothing depends on it |
+| statement order | `pg_dump` emits by OID, which is creation order — migration order on one side, declaration order on the other |
+| an identity column's sequence name | Postgres does not rename it when the table is renamed |
+
+Types, nullability, defaults, identity, every constraint and index with its
+generated name and canonical predicate, enum members *in order*, view
+bodies, triggers and comments are all compared literally.
+
+The walk's first two edits are pinned by the sequence number so that a run
+covers the whole edit vocabulary rather than leaving the tail to luck, and
+the test asserts afterwards that every operation class actually occurred. A
+generator that stopped generating would otherwise read as a pass.
 
 ---
 
