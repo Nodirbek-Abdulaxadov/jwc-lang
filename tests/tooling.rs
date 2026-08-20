@@ -207,6 +207,128 @@ fn a_message_less_constraint_a_route_can_reach_is_a_warning() {
     assert!(!jwc(&["lint", path, "--deny-warnings"]).status.success());
 }
 
+#[test]
+fn openapi_describes_every_route_and_validates() {
+    let path = sample();
+    let path = path.to_str().expect("utf8");
+    let out = jwc(&["openapi", path]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+
+    assert_eq!(doc["openapi"], "3.1.0");
+    let paths = doc["paths"].as_object().expect("paths");
+    // 25 endpoints over 18 distinct patterns.
+    assert_eq!(paths.len(), 18, "{:?}", paths.keys().collect::<Vec<_>>());
+    let operations: usize = paths.values().map(|p| p.as_object().map_or(0, |o| o.len())).sum();
+    assert_eq!(operations, 25);
+
+    let invoices = &paths["/api/v1/orgs/{org_id}/invoices"]["get"];
+    // routing.md §3.1 — a typed path parameter, in its wire form: `bigint`
+    // is a JSON string because JavaScript loses digits above 2^53
+    // (types.md §2.3).
+    assert_eq!(invoices["parameters"][0]["name"], "org_id");
+    assert_eq!(invoices["parameters"][0]["schema"]["type"], "string");
+    assert_eq!(invoices["parameters"][0]["schema"]["format"], "int64");
+    // errors.md §4.3 — a declared error's default status is the answer
+    // whether or not an `errorHandler` arm names it, so the non-2xx set is
+    // the raise set.
+    assert!(invoices["responses"]["401"].is_object(), "{invoices}");
+    assert!(invoices["responses"]["403"].is_object(), "{invoices}");
+    // The middleware chain is not an OpenAPI concept, but it is what decides
+    // whether a call needs a token.
+    assert_eq!(invoices["x-jwc-middleware"][0], "RequireAuth");
+
+    // A 200 whose shape the compiler knows is documented, nested types and
+    // enum members included — even though the service function carries no
+    // return annotation, because types.md §10.2 only demands one when two
+    // returns disagree.
+    let org = &paths["/api/v1/orgs/{org_id}"]["get"]["responses"]["200"];
+    let schema = &org["content"]["application/json"]["schema"];
+    assert_eq!(schema["properties"]["id"]["format"], "int64");
+    assert_eq!(schema["properties"]["members"]["type"], "array");
+    let role = &schema["properties"]["members"]["items"]["properties"]["role"];
+    assert_eq!(role["enum"][0], "owner", "{role}");
+
+    // A `class` a route validates its body against becomes a schema.
+    let login = &paths["/api/v1/auth/login"]["post"];
+    assert_eq!(
+        login["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/Login"
+    );
+    // Class rules have exact JSON Schema spellings, so the document rejects
+    // what the server would reject.
+    let invite = &doc["components"]["schemas"]["InviteCreate"]["properties"]["email"];
+    assert!(invite["pattern"].is_string(), "{invite}");
+
+    // Every `$ref` resolves.
+    let schemas = doc["components"]["schemas"].as_object().expect("schemas");
+    for name in refs(&doc) {
+        assert!(schemas.contains_key(&name), "dangling $ref to `{name}`");
+    }
+}
+
+#[test]
+fn openapi_passes_a_real_validator() {
+    // `pip install openapi-spec-validator`. Without it this prints SKIPPED —
+    // and a SKIPPED line is not a pass: the structural test above checks
+    // what this repository knows to check, and only a real validator checks
+    // the rest of the 3.1 specification.
+    let probe = Command::new("python3")
+        .args(["-c", "import openapi_spec_validator"])
+        .output();
+    if !probe.map(|o| o.status.success()).unwrap_or(false) {
+        eprintln!(
+            "SKIPPED openapi_passes_a_real_validator — pip install \
+             openapi-spec-validator. A SKIPPED line is not a pass."
+        );
+        return;
+    }
+    let path = sample();
+    let out = jwc(&["openapi", path.to_str().expect("utf8")]);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let doc = dir.path().join("openapi.json");
+    std::fs::write(&doc, stdout(&out)).expect("write");
+
+    let v = Command::new("python3")
+        .args([
+            "-c",
+            "import sys,json; from openapi_spec_validator import validate; \
+             validate(json.load(open(sys.argv[1])))",
+            doc.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("python3");
+    assert!(
+        v.status.success(),
+        "{}",
+        String::from_utf8_lossy(&v.stderr)
+    );
+}
+
+/// Every `$ref` target name in a document.
+fn refs(v: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match v {
+        serde_json::Value::Object(o) => {
+            for (k, x) in o {
+                if k == "$ref" {
+                    if let Some(s) = x.as_str().and_then(|s| s.rsplit('/').next()) {
+                        out.push(s.to_string());
+                    }
+                }
+                out.extend(refs(x));
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for x in a {
+                out.extend(refs(x));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// The lines under one route heading in `--constraints` output.
 fn section<'a>(text: &'a str, route: &str) -> &'a str {
     let start = match text.find(&format!("{route}\u{1b}[0m")) {

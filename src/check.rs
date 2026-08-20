@@ -18,15 +18,60 @@ use std::collections::{HashMap, HashSet};
 
 pub struct Checked {
     pub diags: Vec<(Loc, Diagnostic)>,
+    /// What each route answers, recorded while the response builders are
+    /// typed. `jwc openapi` reads it rather than re-inferring: one type
+    /// engine, one answer (tooling.md §5.2).
+    pub responses: Vec<RouteResponse>,
+    /// `route key -> the class its body validates the request body against`,
+    /// from `request.body() as C` (types.md §4.1).
+    pub request_bodies: Vec<(String, String)>,
+    /// The return type of every function, **inferred** where types.md §10.2
+    /// does not require an annotation — which is most of them, since one is
+    /// only mandatory when two returns disagree.
+    ///
+    /// The compiler has always known these; it just had nowhere to publish
+    /// them. `jwc openapi` reads them so that a route returning
+    /// `json(OrgService.get(...))` documents a shape rather than shrugging.
+    pub function_returns: std::collections::BTreeMap<String, Ty>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RouteResponse {
+    /// `GET /api/v1/orgs/{org_id}` — the declared pattern.
+    pub route: String,
+    pub status: u16,
+    /// The payload's type. `Ty::Void` for a bodiless response.
+    pub payload: Ty,
 }
 
 pub fn check(ws: &Workspace, sym: &Symbols, model: &crate::model::SchemaModel) -> Checked {
+    check_with(ws, sym, model, &Default::default())
+}
+
+/// The same pass, with the return types a previous run inferred.
+///
+/// One run cannot know the return type of a function it has not reached
+/// yet, and reordering would only move the problem. Running twice costs a
+/// second pass over the AST and gives every call site the shape its callee
+/// actually produces.
+pub fn check_with(
+    ws: &Workspace,
+    sym: &Symbols,
+    model: &crate::model::SchemaModel,
+    known_returns: &std::collections::BTreeMap<String, Ty>,
+) -> Checked {
     let mut c = Checker {
         ws,
         sym,
         model,
         file: 0,
         diags: Vec::new(),
+        responses: Vec::new(),
+        request_bodies: Vec::new(),
+        function_returns: Default::default(),
+        known_returns: known_returns.clone(),
+        route: None,
+        fn_key: None,
         scopes: Vec::new(),
         params: HashMap::new(),
         query: Vec::new(),
@@ -43,7 +88,12 @@ pub fn check(ws: &Workspace, sym: &Symbols, model: &crate::model::SchemaModel) -
         returns: Vec::new(),
     };
     c.run();
-    Checked { diags: c.diags }
+    Checked {
+        diags: c.diags,
+        responses: c.responses,
+        request_bodies: c.request_bodies,
+        function_returns: c.function_returns,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -81,6 +131,14 @@ struct Checker<'a> {
     model: &'a crate::model::SchemaModel,
     file: usize,
     diags: Vec<(Loc, Diagnostic)>,
+    responses: Vec<RouteResponse>,
+    request_bodies: Vec<(String, String)>,
+    function_returns: std::collections::BTreeMap<String, Ty>,
+    known_returns: std::collections::BTreeMap<String, Ty>,
+    /// The route being checked, as its declared pattern. `None` outside one.
+    route: Option<String>,
+    /// The function being checked, keyed the way a call site writes it.
+    fn_key: Option<String>,
     scopes: Vec<HashMap<String, Ty>>,
     params: HashMap<String, Ty>,
     query: Vec<QueryScope>,
@@ -151,6 +209,17 @@ impl<'a> Checker<'a> {
             },
             Diagnostic::warning(code, span, msg).clause(clause),
         ));
+    }
+
+    /// tooling.md §5.2 — what this route answers, recorded where the type
+    /// is already known. Outside a route there is nothing to attach it to.
+    fn record_response(&mut self, status: u16, payload: Ty) {
+        let Some(route) = &self.route else { return };
+        self.responses.push(RouteResponse {
+            route: route.clone(),
+            status,
+            payload,
+        });
     }
 
     fn warn_note(
@@ -257,6 +326,10 @@ impl<'a> Checker<'a> {
     fn function(&mut self, f: &FunctionDecl, kind: BodyKind, service: Option<String>) {
         self.body = kind;
         self.current_fn = Some(f.name.name.clone());
+        self.fn_key = Some(match &service {
+            Some(s) => format!("{s}.{}", f.name.name),
+            None => f.name.name.clone(),
+        });
         self.returns.clear();
         self.push_scope();
 
@@ -279,9 +352,26 @@ impl<'a> Checker<'a> {
         }
 
         self.block(&f.body);
+        self.record_return_type();
         self.check_return_shapes(f);
         self.pop_scope();
         self.current_fn = None;
+        self.fn_key = None;
+    }
+
+    /// The shape this function produces, for the next pass to hand to its
+    /// callers. An annotation wins; otherwise the returns agree by §10.2, so
+    /// the first of them is the answer.
+    fn record_return_type(&mut self) {
+        let Some(key) = self.fn_key.clone() else { return };
+        let ty = match self.sym.functions.get(&key).and_then(|f| f.returns.clone()) {
+            Some(t) => t,
+            None => match self.returns.first() {
+                Some((t, _)) => t.clone(),
+                None => return,
+            },
+        };
+        self.function_returns.insert(key, ty);
     }
 
     /// types.md §10.2 — a return annotation is mandatory when two returns
@@ -351,6 +441,11 @@ impl<'a> Checker<'a> {
     fn routes(&mut self, r: &RoutesDecl) {
         let prefix_params = path_params(&r.prefix);
         for route in &r.routes {
+            self.route = Some(format!(
+                "{} {}",
+                route.method.name.to_uppercase(),
+                crate::wiring::route_pattern(&r.prefix, &route.suffix)
+            ));
             self.body = BodyKind::Route;
             self.enter_body();
             self.params.clear();
@@ -365,6 +460,7 @@ impl<'a> Checker<'a> {
             self.block(&route.body);
             self.pop_scope();
             self.untyped_params.clear();
+            self.route = None;
             // routing.md §6.4 — every path ends in a response. A body that
             // can fall off the end has no answer to send, and the runtime's
             // only recourse is a 204 nobody asked for.
@@ -1118,7 +1214,14 @@ impl<'a> Checker<'a> {
                     self.expr(value);
                 }
                 match self.sym.classes.get(&ty.name) {
-                    Some(_) => Ty::Class(ty.name.clone()),
+                    Some(_) => {
+                        if is_body {
+                            if let Some(route) = &self.route {
+                                self.request_bodies.push((route.clone(), ty.name.clone()));
+                            }
+                        }
+                        Ty::Class(ty.name.clone())
+                    }
                     None => {
                         self.err_note(
                             ty.span,
@@ -1704,7 +1807,16 @@ impl<'a> Checker<'a> {
             }
             // `Service.method`
             if let Some(f) = self.sym.functions.get(&path).cloned() {
-                return self.user_call(&f, &arg_types, args, span);
+                let ty = self.user_call(&f, &arg_types, args, span);
+                // An unannotated function has no declared return, but a
+                // previous pass inferred one (types.md §10.2 only demands an
+                // annotation when two returns disagree).
+                if f.returns.is_none() {
+                    if let Some(known) = self.known_returns.get(&path) {
+                        return known.clone();
+                    }
+                }
+                return ty;
             }
             if path.contains('.') {
                 let (head, _) = path.split_once('.').unwrap_or((path.as_str(), ""));
@@ -1860,6 +1972,13 @@ impl<'a> Checker<'a> {
             // --- responses (routing.md §6.1)
             "json" | "created" | "accepted" | "badRequest" => {
                 arity(self, 1);
+                let status = match path {
+                    "created" => 201,
+                    "accepted" => 202,
+                    "badRequest" => 400,
+                    _ => 200,
+                };
+                self.record_response(status, a0.clone());
                 self.reject_private_response(exprs.first(), path, span);
                 // types.md §6.4 — `json(x)` with `x : T?` answers 200 null
                 // where it means 404.
@@ -1877,18 +1996,35 @@ impl<'a> Checker<'a> {
             }
             "noContent" | "internalError" => {
                 arity(self, 0);
+                self.record_response(if path == "noContent" { 204 } else { 500 }, Ty::Void);
                 Ty::Response
             }
             "unauthorized" | "forbidden" | "notFound" | "conflict" | "tooManyRequests" => {
                 arity(self, 1);
+                let status = match path {
+                    "unauthorized" => 401,
+                    "forbidden" => 403,
+                    "notFound" => 404,
+                    "conflict" => 409,
+                    _ => 429,
+                };
+                // `{"error": m}` — routing.md §6.1, the same envelope a
+                // declared error produces.
+                self.record_response(status, Ty::Unknown);
                 Ty::Response
             }
             "statusCode" => {
                 arity(self, 2);
+                if let Some(n) = exprs.first().and_then(literal_status) {
+                    self.record_response(n, args.get(1).cloned().unwrap_or(Ty::Unknown));
+                }
                 Ty::Response
             }
             "redirect" => {
                 arity(self, 2);
+                if let Some(n) = exprs.first().and_then(literal_status) {
+                    self.record_response(n, Ty::Void);
+                }
                 Ty::Response
             }
             "cookie" => Ty::Response,
@@ -3748,6 +3884,18 @@ fn untyped_path_params(path: &str) -> Vec<String> {
         rest = &rest[open + close + 1..];
     }
     out
+}
+
+/// A literal status in `statusCode(n, v)` / `redirect(n, url)`. A computed
+/// one has no single answer to document, and is left out rather than
+/// guessed.
+fn literal_status(e: &Expr) -> Option<u16> {
+    match &*e.kind {
+        // The lexer keeps integer literals as text so a `bigint` never
+        // passes through an `i64` on the way in.
+        ExprKind::Int(n) => n.parse().ok(),
+        _ => None,
+    }
 }
 
 fn path_params(path: &str) -> Vec<(String, Ty)> {

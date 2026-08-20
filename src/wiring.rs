@@ -530,20 +530,7 @@ impl<'a> Wiring<'a> {
     /// writes — minus anything a postfix `catch` swallows (errors.md §3.1,
     /// §6.4).
     fn direct_raises(&self, b: &Block) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        walk_block(b, &mut |s| match s {
-            Stmt::Throw { error, .. } => {
-                out.insert(error.name.clone());
-            }
-            Stmt::Expr { expr, .. } | Stmt::Let { value: expr, .. } => {
-                collect_expr_raises(expr, self.sym, &mut out);
-            }
-            Stmt::Return {
-                value: Some(expr), ..
-            } => collect_expr_raises(expr, self.sym, &mut out),
-            _ => {}
-        });
-        out
+        direct_raises(b, self.sym)
     }
 
     fn check_error_model(&mut self) {
@@ -1164,6 +1151,45 @@ fn promote(
     if t.has_foreign_key {
         out.insert("BadRequest".to_string());
     }
+}
+
+/// Own `throw`s, `or throw`s, and the constraints of the tables this body
+/// writes — minus anything a postfix `catch` swallows (errors.md §3.1,
+/// §6.4).
+pub fn direct_raises(b: &Block, sym: &Symbols) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    walk_block(b, &mut |s| match s {
+        Stmt::Throw { error, .. } => {
+            out.insert(error.name.clone());
+        }
+        Stmt::Expr { expr, .. } | Stmt::Let { value: expr, .. } => {
+            collect_expr_raises(expr, sym, &mut out);
+        }
+        Stmt::Return {
+            value: Some(expr), ..
+        } => collect_expr_raises(expr, sym, &mut out),
+        _ => {}
+    });
+    out
+}
+
+/// Everything a block can raise, transitively over the call graph.
+///
+/// The same set `errorHandler` exhaustiveness reads (errors.md §3), exposed
+/// because `jwc openapi` answers "which non-2xx responses can this route
+/// produce" with exactly it — nothing is discovered at runtime (§6.4).
+pub fn raises_from(
+    sym: &Symbols,
+    bodies: &std::collections::BTreeMap<String, &Block>,
+    start: &Block,
+) -> BTreeSet<String> {
+    let mut out = direct_raises(start, sym);
+    for f in reachable_from(bodies, start) {
+        if let Some(b) = bodies.get(&f) {
+            out.extend(direct_raises(b, sym));
+        }
+    }
+    out
 }
 
 /// The body of every named function, keyed the way a call site writes it:

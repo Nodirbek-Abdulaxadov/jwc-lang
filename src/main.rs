@@ -77,6 +77,20 @@ enum Command {
         #[arg(long)]
         analyze: bool,
     },
+    /// Emit an OpenAPI 3.1 document for the route table.
+    ///
+    /// Offline: derived from the typed signatures and the raise sets, never
+    /// from a running server.
+    Openapi {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Write to a file instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// `info.title`. Defaults to the `database` name.
+        #[arg(long)]
+        title: Option<String>,
+    },
     /// `check`, plus the whole-program lints that are advisory.
     Lint {
         #[arg(default_value = ".")]
@@ -198,6 +212,7 @@ fn main() -> Result<()> {
             route,
             analyze,
         } => cmd::explain(path, sql, function, route, analyze),
+        Command::Openapi { path, out, title } => cmd::openapi(path, out, title),
         Command::Lint {
             path,
             constraints,

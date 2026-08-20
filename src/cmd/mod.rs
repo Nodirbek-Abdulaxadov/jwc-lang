@@ -796,6 +796,133 @@ pub fn migrate_verify(path: PathBuf) -> Result<()> {
     bail!("{} problem{}", problems.len(), plural(problems.len()))
 }
 
+/// `jwc openapi [path] [--out f]` — an OpenAPI 3.1 document, derived from
+/// the route table, the typed signatures and the raise sets (tooling.md §5).
+///
+/// Offline. Every part of the document already exists in the compiler; this
+/// arranges them and infers nothing of its own.
+pub fn openapi(path: PathBuf, out: Option<PathBuf>, title: Option<String>) -> Result<()> {
+    use crate::diag::Severity;
+
+    let ws = crate::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
+        bail!("no .jwc files under {}", path.display());
+    }
+    if ws.has_parse_errors() {
+        eprint!("{}", ws.parse_errors().join(""));
+        bail!("source did not parse");
+    }
+    let built = crate::model::build(&ws);
+    let symbols = crate::symbols::build(&ws, &built.model);
+    // Two passes: the first infers the return type of every unannotated
+    // function, the second hands each call site the shape its callee
+    // actually produces. One pass cannot know the type of a function it has
+    // not reached yet, and reordering would only move the problem.
+    let first = crate::check::check(&ws, &symbols, &built.model);
+    let checked =
+        crate::check::check_with(&ws, &symbols, &built.model, &first.function_returns);
+    let wired = crate::wiring::wire(&ws, &symbols);
+
+    let errors = built
+        .diags
+        .iter()
+        .chain(&symbols.diags)
+        .chain(&checked.diags)
+        .chain(&wired.diags)
+        .filter(|(_, d)| d.severity == Severity::Error)
+        .count();
+    if errors > 0 {
+        for (loc, d) in built
+            .diags
+            .iter()
+            .chain(&symbols.diags)
+            .chain(&checked.diags)
+            .chain(&wired.diags)
+        {
+            if d.severity == Severity::Error {
+                eprint!("{}", ws.render(*loc, d));
+            }
+        }
+        bail!("{errors} error{} — no document written", plural(errors));
+    }
+
+    // Which declared errors each route can raise. errors.md §4.3 makes a
+    // declared error's default status the answer whether or not an
+    // `errorHandler` arm names it, so this is exactly the non-2xx set.
+    let bodies = crate::wiring::function_bodies(&ws);
+    let mut raises: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for file in &ws.files {
+        for d in &file.program.decls {
+            let crate::ast::Decl::Routes(r) = d else {
+                continue;
+            };
+            for rt in &r.routes {
+                let key = format!(
+                    "{} {}",
+                    rt.method.name.to_uppercase(),
+                    crate::wiring::route_pattern(&r.prefix, &rt.suffix)
+                );
+                let mut set: Vec<String> =
+                    crate::wiring::raises_from(&symbols, &bodies, &rt.body)
+                        .into_iter()
+                        .collect();
+                // Middleware runs before the handler and can answer on its
+                // own, so what it raises the route can produce.
+                for m in &rt.uses {
+                    if let Some(b) = middleware_body(&ws, &m.name) {
+                        set.extend(crate::wiring::raises_from(&symbols, &bodies, b));
+                    }
+                }
+                for m in &r.uses {
+                    if let Some(b) = middleware_body(&ws, &m.name) {
+                        set.extend(crate::wiring::raises_from(&symbols, &bodies, b));
+                    }
+                }
+                set.sort();
+                set.dedup();
+                raises.insert(key, set);
+            }
+        }
+    }
+
+    let title = title.unwrap_or_else(|| {
+        built
+            .model
+            .database
+            .clone()
+            .unwrap_or_else(|| "JWC application".to_string())
+    });
+    let doc = crate::openapi::document(&crate::openapi::Input {
+        title,
+        version: "1.0.0".to_string(),
+        sym: &symbols,
+        wired: &wired,
+        checked: &checked,
+        raises,
+    });
+    let text = format!("{}\n", serde_json::to_string_pretty(&doc)?);
+    match out {
+        Some(p) => {
+            std::fs::write(&p, text)?;
+            println!("{}", display_relative(&p));
+        }
+        None => print!("{text}"),
+    }
+    Ok(())
+}
+
+fn middleware_body<'a>(
+    ws: &'a crate::workspace::Workspace,
+    name: &str,
+) -> Option<&'a crate::ast::Block> {
+    ws.files.iter().find_map(|f| {
+        f.program.decls.iter().find_map(|d| match d {
+            crate::ast::Decl::Middleware(m) if m.name.name == name => Some(&m.body),
+            _ => None,
+        })
+    })
+}
+
 /// `jwc lint [path] [--constraints]` — `jwc check` plus the whole-program
 /// lints that are advisory rather than definitional (tooling.md §4).
 pub fn lint(path: PathBuf, constraints: bool, deny_warnings: bool) -> Result<()> {

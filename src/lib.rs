@@ -33,6 +33,7 @@ pub mod lexer;
 pub mod migrate;
 pub mod model;
 pub mod naming;
+pub mod openapi;
 pub mod parser;
 pub mod query;
 pub mod query_sql;

@@ -33,6 +33,8 @@ cargo run -- explain docs/spec/v1/sample     # every query, with its SQL
 cargo run -- explain docs/spec/v1/sample --route "GET /api/v1/orgs/{org_id}"
 cargo run -- gen-sql docs/spec/v1/sample     # the schema as DDL
 cargo run -- serve docs/spec/v1/sample --port 8080
+cargo run -- lint docs/spec/v1/sample --constraints
+cargo run -- openapi docs/spec/v1/sample --out openapi.json
 cargo run -- migrate new add_region docs/spec/v1/sample --explain
 ```
 
@@ -88,6 +90,10 @@ What each suite is for:
 | `migrate_apply` | `up`, `down`, `status`, `verify` against a real database |
 | `migrate_roundtrip` | a migrated database *is* a created database |
 | `tooling` | the CLI contract: which flag selects what, and what a wrong name prints |
+
+`tests/tooling.rs` validates the emitted OpenAPI against
+`openapi-spec-validator` when it is importable, and prints SKIPPED when it is
+not. `pip install openapi-spec-validator` to actually run it.
 
 The corpora are **exact in both directions**: a missing diagnostic and an
 unannotated one both fail. That is what makes them a specification rather
