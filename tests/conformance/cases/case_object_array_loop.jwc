@@ -1,9 +1,0 @@
-// Conformance: loop over array of object literals (ForIn fast path).
-function main() {
-    let items = [{ n: 10 }, { n: 20 }, { n: 30 }];
-    let sum = 0;
-    for it in items {
-        sum = sum + it.n;
-    }
-    print(sum);
-}

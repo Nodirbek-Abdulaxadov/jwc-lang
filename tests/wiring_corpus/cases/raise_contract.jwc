@@ -1,0 +1,46 @@
+namespace raise_contract;
+
+import prelude;
+
+-- errors.md §3.3 and §4.1 — a declared raise set is a public contract, and
+-- there is exactly one error boundary.
+service Notes {
+    -- Declares less than it raises. A caller reads `raises` and handles
+    -- exactly what it names, so a short declaration is worse than none.
+    function get(id: bigint) raises (NotFound) {   -- expect: E1002
+        let note = select N from App.s.Notes
+            where id == $id
+            as { id, body }
+            first or throw NotFound("yo'q");
+
+        if ($note.body == "") {
+            throw BadRequest("bo'sh");
+        }
+
+        return $note;
+    }
+
+    -- Declares everything it raises.
+    function get_ok(id: bigint) raises (NotFound, BadRequest) {
+        let note = select N from App.s.Notes
+            where id == $id
+            as { id, body }
+            first or throw NotFound("yo'q");
+
+        if ($note.body == "") {
+            throw BadRequest("bo'sh");
+        }
+
+        return $note;
+    }
+}
+
+errorHandler (e) {
+    catch (err) { return internalError(); }
+}
+
+-- With two, which one answers depends on the order the files happened to
+-- load in.
+errorHandler (e2) {                                -- expect: E1010
+    catch (err) { return internalError(); }
+}

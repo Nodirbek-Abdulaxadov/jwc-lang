@@ -1,6 +1,6 @@
 [package]
 name = "jwc"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2021"
 # Workspace-private until a license decision lands (see deny.toml [licenses]
 # `private = { ignore = true }`). Set to false explicitly so cargo-deny v2
@@ -42,10 +42,6 @@ path = "src/lib.rs"
 name = "jwc"
 path = "src/main.rs"
 
-[[bin]]
-name = "jwc-lsp"
-path = "src/bin/jwc_lsp.rs"
-
 [dependencies]
 jwc-runtime = { path = "crates/jwc-runtime" }
 anyhow = "1"
@@ -83,6 +79,24 @@ tokio = { version = "1", features = ["full"] }
 tokio-postgres = { version = "0.7.18", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
 tower-lsp = "0.20"
 url = "2"
+
+# The listener. `axum::serve` is a convenience wrapper over exactly these
+# and it hides the two knobs config.md §3 promises: `hyper-util`'s auto
+# builder is where `header_read_timeout` lives, and TLS means owning the
+# accept loop so a `TcpStream` can be wrapped before hyper sees it. All
+# four already compile as part of the tree (axum, reqwest), so naming them
+# directly costs no extra build — it only makes them nameable.
+#
+# rustls uses the `ring` provider, which is already a direct dependency;
+# `aws-lc-rs` would drag cmake and a C toolchain into every build.
+# PEM parsing comes from `rustls-pki-types` rather than `rustls-pemfile`,
+# which carries an open advisory and is dev-only here — a fact
+# `tests/hardening.rs` asserts against the real dependency tree.
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio", "service"] }
+tower = { version = "0.5", features = ["util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
 
 # Optional OTLP tracing exporter (Sprint 5B). Gated behind the `otlp`
 # Cargo feature so the default build doesn't pull these in. The runtime

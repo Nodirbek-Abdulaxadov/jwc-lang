@@ -1,22 +1,26 @@
 namespace db.audit;
 
 import app;
+import db.auth;
+import db.org;
 
-
+--- Append-only. Every FK is `on delete set null` so a deleted org never
+--- blocks the log, and every column that could be missing is nullable —
+--- an `after` block cannot recover from a failed insert (middleware.md §5.5).
 table Events of App.audit {
     id         bigint primary key identity;
     org_id     bigint?;
     actor_id   bigint?;
     action     varchar(60);
-    entity     varchar(60);
+    route      varchar(200);
     entity_id  bigint?;
     payload    jsonb?;
     ip         inet?;
     created_at timestamptz default now();
 
-    foreign key (org_id)   references App.org.Orgs (id)     on delete set null;
+    foreign key (org_id) references App.org.Orgs (id) on delete set null;
     foreign key (actor_id) references App.auth.Accounts (id) on delete set null;
 
     index on (org_id, created_at);
-    index on (entity, entity_id);
+    index on (route, created_at);
 }

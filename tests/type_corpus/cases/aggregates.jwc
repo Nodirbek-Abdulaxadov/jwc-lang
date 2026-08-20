@@ -1,0 +1,59 @@
+namespace aggregates;
+
+-- Aggregates need a `group by` naming every non-aggregate field
+-- (queries.md §6.2).
+service Aggs {
+    function grouped() {
+        return select N from App.s.Notes
+            group by org_id
+            as { org_id, n: count(id), paid: sum(amount where status == Status.live) };
+    }
+
+    function ungrouped() {
+        return select N from App.s.Notes
+            as { org_id, n: count(id) };        -- expect: E0530
+    }
+
+    function missing_from_group_by() {
+        return select N from App.s.Notes
+            group by org_id
+            as { org_id, body, n: count(id) };  -- expect: E0531
+    }
+
+    function aggregate_outside_a_query() {
+        return count(1);                        -- expect: E0530
+    }
+
+    function aggregation_with_as_many() {
+        return select O from App.s.Orgs                                  -- expect: E0532
+            left join App.s.Notes N on N.org_id == O.id as group
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc limit 200
+            group by O.id
+            as { id, n: count(N.id), members: { account_id } };          -- expect: E0531
+    }
+}
+
+-- Two bare joins fan out: `count(N.id)` also counts the members, so a note
+-- count reports notes × members (queries.md §6.2).
+service FanOut {
+    function counts() {
+        return select O from App.s.Orgs
+            left join App.s.Notes N on N.org_id == O.id as group
+            left join App.s.Members M on M.org_id == O.id as group
+            group by O.id
+            as {
+                id,
+                notes:   count(N.id),                  -- expect: W0502
+                members: count.distinct(M.account_id)
+            };
+    }
+
+    -- One bare join cannot fan out, so a plain `count` is right here.
+    function single() {
+        return select O from App.s.Orgs
+            left join App.s.Notes N on N.org_id == O.id as group
+            group by O.id
+            as { id, notes: count(N.id) };
+    }
+}

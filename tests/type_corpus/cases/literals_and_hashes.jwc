@@ -1,0 +1,43 @@
+namespace literals_and_hashes;
+
+-- types.md §2.2 and builtins.md §6 — two things that read correctly and
+-- are wrong.
+service Edges {
+    -- Past `bigint` there is no type to give the literal: Postgres has
+    -- none, so it cannot round-trip.
+    function too_big() {
+        let n = 99999999999999999999;   -- expect: E0107
+        return $n;
+    }
+
+    function fits_in_bigint() {
+        let n = 9223372036854775807;
+        return $n;
+    }
+
+    -- `hash.password` salts, so two calls on the same input differ. This
+    -- comparison never matches: the login rejects everybody, and the code
+    -- reads correctly.
+    function login_that_never_matches(email: text, password: text) {
+        return select A from App.s.Accounts
+            where email == $email and password_hash == hash.password($password)   -- expect: W1201
+            as { id }
+            first;
+    }
+
+    -- The right shape: read the stored hash, then verify against it.
+    function login(email: text, password: text) {
+        let account = select A from App.s.Accounts
+            where email == $email
+            as { id, password_hash }
+            first or throw NotFound("yo'q");
+
+        let ok = hash.verify($password, $account.password_hash);
+
+        if (!$ok) {
+            throw Unauthorized("noto'g'ri");
+        }
+
+        return $account.id;
+    }
+}

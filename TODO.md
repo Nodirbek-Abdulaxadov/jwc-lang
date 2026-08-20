@@ -118,6 +118,18 @@ rps" write-path measurement happened — it was measuring rejections.
 
 ## Found while moving jwc-shortener from 0.6.3 → 0.8.8 (2026-08-06)
 
+> **Re-checked against v1 (2026-08-20).** Every file path below — `src/runner/`,
+> `src/native_build.rs`, `src/project.rs`, `src/server.rs` — was deleted at the
+> v0.25.0 cutover, so none of these entries could be closed by pointing at a
+> line. Each was re-derived against the current tree instead:
+>
+> | | v1 verdict |
+> |---|---|
+> | 1 `raw_sql` first column must be text | **Moot by construction.** Every statement the runtime sends projects one text column: the query compiler wraps in `json_agg(…)::text` / `row_to_json(…)::text`, and so does the `raw()` hatch (`exec_call.rs`). There is no path left that returns a bare `int8` to read. The adjacent bug was real, though — `db::run_on` reached the same column with `.unwrap_or(None)`, which turned a projection that *was* wrong into "no rows": 404 under `Shape::First`, `[]` under `Shape::Rows`, indistinguishable from an empty table. It now surfaces as a fault. |
+> | 2 unqualified call into a dependency namespace | **Resolved by the flat declaration space** (names §5.1, §6.4.1): a free function is callable unqualified from anywhere, and `import` is checked without scoping, so there is no resolver step left to be missing. The hyphen half went with it — an `import` names a `dependencies` key, and the `redis` package is named without one for exactly this reason. |
+> | 3 Windows `[::]` bound without clearing `IPV6_V6ONLY` | **Moot:** v1 binds `0.0.0.0` explicitly, so the dual-stack ambiguity never arises. It left a successor, now closed: the address was not configurable at all, so a development machine had no way to keep the listener off the LAN. `server { bind = … }` (config §3.2). |
+> | 4 `return { status: N, … }` silently answers 200 | **Resolved, and harder than this entry asked for.** It proposed a `W0xx` lint; v1 makes it `E0732` at check time — a route body that returns a non-response does not compile. |
+
 All four were reproduced against jwc 0.8.7 on Windows, with the
 [jwc-shortener](https://github.com/just-web-code/jwc-shortener) app running on a
 throwaway Postgres 17 container. The first three are interpreter/native

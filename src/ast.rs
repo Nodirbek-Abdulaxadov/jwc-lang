@@ -1,737 +1,933 @@
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SourceFile {
-    /// Display label for the file. The project loader sets this to a
-    /// repo-relative path (`"main.jwc"`, `"users/login.jwc"`); single-file
-    /// `parse_program` callers leave it empty and only `at line X, col Y`
-    /// is rendered.
-    pub label: String,
-    /// Verbatim text the parser saw. Used by `validate_program` to look up
-    /// line/col for an AST-stamped offset.
-    pub text: String,
+//! v1 AST. One node per grammar production; nothing from the pre-1.0 tree is
+//! reused (`crate::ast` describes a different language).
+//!
+//! Every declaration carries `docs` (from `---` doc comments, which become
+//! `COMMENT ON` — schema.md §7) and `comments` (from `--` line comments,
+//! which exist so `jwc v1 fmt` does not delete them).
+
+use crate::token::Span;
+
+#[derive(Clone, Debug, Default)]
+pub struct Attached {
+    pub docs: Vec<String>,
+    pub comments: Vec<String>,
+    /// A blank line preceded this item in the source. `fmt` reproduces it.
+    pub blank_before: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, Debug)]
+pub struct Ident {
+    pub name: String,
+    pub span: Span,
+}
+
+impl Ident {
+    pub fn new(name: impl Into<String>, span: Span) -> Self {
+        Self {
+            name: name.into(),
+            span,
+        }
+    }
+}
+
+/// `a.b.c`
+#[derive(Clone, Debug)]
+pub struct DottedName {
+    pub parts: Vec<Ident>,
+    pub span: Span,
+}
+
+impl DottedName {
+    pub fn text(&self) -> String {
+        self.parts
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+// ---------------------------------------------------------------- program
+
+#[derive(Clone, Debug, Default)]
 pub struct Program {
-    pub dbcontexts: Vec<DbContextDecl>,
-    pub models: Vec<ModelDecl>,
-    pub routes: Vec<RouteDecl>,
-    pub functions: Vec<FunctionDecl>,
-    pub middlewares: Vec<MiddlewareDecl>,
-    /// Optional top-level fallback that catches uncaught errors from any
-    /// route handler. Body sees `<catch_var>` bound to the error JSON.
-    pub error_handler: Option<ErrorHandlerDecl>,
-    /// All `using ns.path;` statements collected from every file. Each entry
-    /// is attached to a namespace scope; used by the runtime resolver.
-    pub imports: Vec<ImportDecl>,
-    /// All `mount <ns> [at "/prefix"];` declarations. Library routes are
-    /// inactive until a mount references their namespace. The same namespace
-    /// may be mounted multiple times at different prefixes (e.g. `/api/foo`
-    /// and `/public/foo`) — each mount produces its own active route set.
-    pub mounts: Vec<MountDecl>,
-    /// Module-level `const NAME = <expr>;` declarations. Evaluated once and
-    /// frozen; inside route/function bodies a const name resolves like a
-    /// read-only variable (locals shadow consts).
-    pub consts: Vec<ConstDecl>,
-    /// One entry per `.jwc` file the parser saw. Each top-level decl carries
-    /// a `file_idx` into this vec, so the validator can render
-    /// `at <label>:<line>:<col>` even in multi-file projects. Empty for
-    /// hand-built `Program::default()` instances; the validator falls back
-    /// to the bare `<msg>` shape when sources is empty or `file_idx` is
-    /// out of range.
-    pub sources: Vec<SourceFile>,
+    pub decls: Vec<Decl>,
 }
 
-/// `const NAME = <expr>;` — a module-level immutable binding. The expression
-/// must be a constant expression (literals, other consts, arithmetic /
-/// comparison / logical ops, unary `-`/`!`, array/object literals).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConstDecl {
-    pub name: String,
-    pub expr: Expr,
-    /// Byte offset of the `const` keyword in the source. 0 for synthesized
-    /// nodes — `validate_program` treats `0` as "no location available".
-    pub offset: usize,
-    /// Index into [`Program::sources`] for the file this decl came from.
-    /// Defaults to 0 (the first / only file).
-    pub file_idx: usize,
+#[derive(Clone, Debug)]
+pub enum Decl {
+    Namespace(NamespaceDecl),
+    Import(ImportDecl),
+    Database(DatabaseDecl),
+    Schema(SchemaDecl),
+    Table(TableDecl),
+    View(ViewDecl),
+    Enum(EnumDecl),
+    Class(ClassDecl),
+    Error(ErrorDecl),
+    Service(ServiceDecl),
+    Middleware(MiddlewareDecl),
+    Routes(RoutesDecl),
+    ErrorHandler(ErrorHandlerDecl),
+    Server(ServerDecl),
+    Function(FunctionDecl),
+    Test(TestDecl),
 }
 
-/// Visibility marker for top-level declarations. Default is `Private` —
-/// only callable from within the same namespace. `pub function ...`,
-/// `pub entity ...`, etc., opt into export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Visibility {
-    Public,
-    #[default]
-    Private,
+impl Decl {
+    pub fn span(&self) -> Span {
+        match self {
+            Decl::Namespace(d) => d.span,
+            Decl::Import(d) => d.span,
+            Decl::Database(d) => d.span,
+            Decl::Schema(d) => d.span,
+            Decl::Table(d) => d.span,
+            Decl::View(d) => d.span,
+            Decl::Enum(d) => d.span,
+            Decl::Class(d) => d.span,
+            Decl::Error(d) => d.span,
+            Decl::Service(d) => d.span,
+            Decl::Middleware(d) => d.span,
+            Decl::Routes(d) => d.span,
+            Decl::ErrorHandler(d) => d.span,
+            Decl::Server(d) => d.span,
+            Decl::Function(d) => d.span,
+            Decl::Test(d) => d.span,
+        }
+    }
+
+    pub fn attached(&self) -> &Attached {
+        match self {
+            Decl::Namespace(d) => &d.at,
+            Decl::Import(d) => &d.at,
+            Decl::Database(d) => &d.at,
+            Decl::Schema(d) => &d.at,
+            Decl::Table(d) => &d.at,
+            Decl::View(d) => &d.at,
+            Decl::Enum(d) => &d.at,
+            Decl::Class(d) => &d.at,
+            Decl::Error(d) => &d.at,
+            Decl::Service(d) => &d.at,
+            Decl::Middleware(d) => &d.at,
+            Decl::Routes(d) => &d.at,
+            Decl::ErrorHandler(d) => &d.at,
+            Decl::Server(d) => &d.at,
+            Decl::Function(d) => &d.at,
+            Decl::Test(d) => &d.at,
+        }
+    }
 }
 
-/// `using foo.bar;` — opens namespace `foo.bar` for the file (and the
-/// namespace it declares). Names from that namespace become reachable
-/// both with and without the `foo.bar.` prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub struct NamespaceDecl {
+    pub at: Attached,
+    pub name: DottedName,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
 pub struct ImportDecl {
-    /// Dot-split namespace path, e.g. `"math.utils"` → `["math", "utils"]`.
-    pub path: Vec<String>,
-    /// Namespace declared by the file this `using` lives in. Empty Vec
-    /// means root. Used to compute import-visibility per call site.
-    pub in_namespace: Vec<String>,
+    pub at: Attached,
+    pub name: DottedName,
+    pub span: Span,
 }
 
-/// `mount <ns> [at "/prefix"];` — activate a library namespace's routes
-/// (optionally under a path prefix). Middlewares come from the surrounding
-/// `group` block, not the mount itself, so the same `use` syntax that
-/// per-route uses can scope across both library mounts and own routes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MountDecl {
-    /// Namespace path being mounted, e.g. `["greet"]` or `["pkg", "sub"]`.
-    pub target: Vec<String>,
-    /// Optional path prefix prepended to every route from the target ns.
-    /// `None` means mount at root (`/`).
-    pub prefix: Option<String>,
-    /// Middleware chain inherited from enclosing `group` blocks. Each name
-    /// is resolved against the symbol table at runtime (FQN-aware).
-    pub middlewares: Vec<String>,
+#[derive(Clone, Debug)]
+pub struct DatabaseDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub driver: Ident,
+    pub init: Vec<Assignment>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ErrorHandlerDecl {
-    pub catch_var: String,
-    pub body: Vec<Stmt>,
+#[derive(Clone, Debug)]
+pub struct Assignment {
+    pub key: Ident,
+    pub value: Expr,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MiddlewareDecl {
-    pub name: String,
-    /// Pre-handler statements. Runs before the route's handler. May
-    /// short-circuit by `return`ing — that response becomes the
-    /// route's response and the rest of the chain (plus `after_body`)
-    /// is skipped.
-    pub body: Vec<Stmt>,
-    /// Optional `after { ... }` block — runs AFTER the route handler
-    /// completes successfully. Reads `response_status()` /
-    /// `response_duration_ms()` so middleware can record real
-    /// observed latencies and statuses (the dogfooding gap
-    /// jwc-shortener flagged: `latency_ms` stuck at 0 because the
-    /// pre-handler middleware couldn't see the response).
-    pub after_body: Option<Vec<Stmt>>,
-    /// Namespace this declaration lives in. Empty = root.
-    pub namespace: Vec<String>,
-    pub visibility: Visibility,
-    /// Byte offset of the `middleware` keyword.
-    pub offset: usize,
-    /// Index into [`Program::sources`] for the file this decl came from.
-    pub file_idx: usize,
+#[derive(Clone, Debug)]
+pub struct SchemaDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub database: Ident,
+    pub physical: Option<String>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ModelKind {
-    Entity,
-    Class,
+// ---------------------------------------------------------------- table
+
+#[derive(Clone, Debug)]
+pub struct TableDecl {
+    pub at: Attached,
+    pub name: Ident,
+    /// `App.auth`
+    pub schema: QualifiedSchema,
+    pub physical: Option<String>,
+    pub was: Option<String>,
+    pub columns: Vec<ColumnDef>,
+    pub constraints: Vec<TableConstraint>,
+    pub indexes: Vec<IndexDef>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouteProtocol {
-    Http,
-    Ws,
-    /// Server-Sent Events. Syntax is recognised end-to-end (parser +
-    /// validator) but the runtime dispatch is a stub — Phase 10.4 v2 will
-    /// flesh out the chunked `text/event-stream` transport, `sse_send`,
-    /// `sse_close`, and the per-topic `sse_broadcast` registry.
-    Sse,
+#[derive(Clone, Debug)]
+pub struct QualifiedSchema {
+    pub database: Ident,
+    pub schema: Ident,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouteDecl {
-    /// HTTP method for HTTP routes (`"GET"`, `"POST"`, ...). For WS routes,
-    /// this is the literal `"WS"` so existing routing/diagnostic code keeps a
-    /// uniform shape.
-    pub method: String,
-    pub path: String,
-    pub handler: Option<String>,
-    pub body: Vec<Stmt>,
-    /// Names of middlewares applied to this route (in declaration order).
-    pub middlewares: Vec<String>,
-    pub protocol: RouteProtocol,
-    /// Namespace this route lives in. Routes from non-root namespaces are
-    /// inactive until activated via a `mount <ns> [at "/p"];` declaration.
-    pub namespace: Vec<String>,
-    /// Byte offset of the `route` keyword.
-    pub offset: usize,
-    /// Index into [`Program::sources`] for the file this decl came from.
-    pub file_idx: usize,
+/// `App.auth.Accounts`
+#[derive(Clone, Debug)]
+pub struct QualifiedTable {
+    pub database: Ident,
+    pub schema: Ident,
+    pub object: Ident,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DbContextDecl {
-    pub name: String,
-    pub driver: String,
-    /// Namespace this dbcontext lives in. Non-root dbcontexts come along
-    /// automatically whenever the project imports or mounts the namespace.
-    pub namespace: Vec<String>,
-    /// Byte offset of the `dbcontext` keyword.
-    pub offset: usize,
-    /// Index into [`Program::sources`] for the file this decl came from.
-    pub file_idx: usize,
+impl QualifiedTable {
+    pub fn text(&self) -> String {
+        format!(
+            "{}.{}.{}",
+            self.database.name, self.schema.name, self.object.name
+        )
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelDecl {
-    pub kind: ModelKind,
-    pub name: String,
-    /// Optional owning dbcontext name from: `entity X of AppDbContext { ... }`
-    pub context_name: Option<String>,
-    pub fields: Vec<FieldDecl>,
-    /// Navigation properties (relations) declared inside this entity.
-    /// Empty for plain DTO classes.
-    pub navigations: Vec<NavigationField>,
-    /// Table-level `unique(a, b);` declarations — one entry per constraint,
-    /// each listing the columns it spans.
-    ///
-    /// A join table's `(taskId, labelId)` pair can't be expressed with the
-    /// per-column `unique` modifier, so uniqueness ended up enforced in
-    /// application code with a select-then-insert: a TOCTOU race with nothing
-    /// holding the invariant at the database level.
-    pub unique_constraints: Vec<Vec<String>>,
-    /// Namespace this model lives in. Empty = root.
-    pub namespace: Vec<String>,
-    pub visibility: Visibility,
-    /// Byte offset of the `entity` / `class` keyword.
-    pub offset: usize,
-    /// Index into [`Program::sources`] for the file this decl came from.
-    pub file_idx: usize,
+#[derive(Clone, Debug)]
+pub struct ColumnDef {
+    pub at: Attached,
+    pub name: Ident,
+    pub ty: TypeRef,
+    pub modifiers: Vec<ColumnModifier>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NavigationKind {
-    /// `name: List<Other> via Other.fk_col;` — the target holds the FK.
-    OneToMany,
-    /// `name: Other via Other.fk_col;` — the target holds the FK, at most one row.
-    OneToOne,
-    /// `name: Parent via local_fk_col;` — *this* entity holds the FK that
-    /// points at the parent's PK (belongs-to). Materialises as a single nested
-    /// object. Distinguished from `OneToOne` by a bare (undotted) `via` column.
-    BelongsTo,
-    /// `name: List<Other> via JoinTable(near_col, far_col);` — many-to-many
-    /// through a join (link) table. Materialises as an array.
-    ManyToMany,
+#[derive(Clone, Debug)]
+pub enum ColumnModifier {
+    PrimaryKey(Span),
+    Identity(Span),
+    Unique {
+        message: Option<String>,
+        span: Span,
+    },
+    Private(Span),
+    Server(Span),
+    Default(Expr, Span),
+    OnUpdate(Expr, Span),
+    Physical(String, Span),
+    Was(String, Span),
+    /// `minLength(2)`, `pattern(r"…")`, `required`, `transient`, …
+    Rule(RuleCall),
 }
 
-/// Join-table coordinates for a `ManyToMany` navigation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NavJoin {
-    /// The join (link) table entity.
-    pub table: String,
-    /// Join-table column pointing at *this* entity's PK.
-    pub near_col: String,
-    /// Join-table column pointing at the *target* entity's PK.
-    pub far_col: String,
+#[derive(Clone, Debug)]
+pub struct RuleCall {
+    pub name: Ident,
+    pub args: Vec<Expr>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NavigationField {
-    pub name: String,
-    pub kind: NavigationKind,
-    pub target_entity: String,
-    /// The join FK column. For `OneToMany`/`OneToOne` it is the FK column *on
-    /// the target* that points back at this entity's PK. For `BelongsTo` it is
-    /// the FK column *on this entity* that points at the target's PK.
-    pub target_field: String,
-    /// Optional column subset for the materialised nav (`author: User { id,
-    /// name } via authorId`). Empty = the whole row. Lets an eager-loaded
-    /// relation hide sensitive columns (e.g. `passwordHash`).
-    pub projection: Vec<String>,
-    /// Join-table coordinates for a `ManyToMany` nav; `None` for the others.
-    pub join: Option<NavJoin>,
-    /// Optional ordering for the materialised collection
-    /// (`... via T.fk order by T.col [asc|desc]`). Applied inside the
-    /// `json_agg(... ORDER BY ...)` so a `OneToMany` nav comes back in a
-    /// deterministic order instead of arbitrary `json_agg` order.
-    pub order_by: Option<NavOrder>,
+#[derive(Clone, Debug)]
+pub enum TableConstraint {
+    PrimaryKey {
+        columns: Vec<Ident>,
+        span: Span,
+    },
+    ForeignKey {
+        columns: Vec<Ident>,
+        target: QualifiedTable,
+        target_columns: Vec<Ident>,
+        on_delete: Option<RefAction>,
+        on_update: Option<RefAction>,
+        span: Span,
+    },
+    Unique {
+        columns: Vec<Ident>,
+        predicate: Option<Expr>,
+        message: Option<String>,
+        span: Span,
+    },
+    Check {
+        expr: Expr,
+        message: Option<String>,
+        span: Span,
+    },
 }
 
-/// Ordering for a navigation collection: a target column + direction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NavOrder {
-    pub col: String,
-    pub dir: SortDir,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FieldDecl {
-    pub name: String,
-    pub ty: TypeSpec,
-    pub is_nullable: bool,
-    pub is_primary_key: bool,
-    /// `id int pk autoincrement;` — emits `GENERATED BY DEFAULT AS IDENTITY`
-    /// in DDL and lets Postgres pick an id when the value is omitted from
-    /// the insert payload.
-    pub is_auto_increment: bool,
-    /// `email varchar(120) unique;` — emits a column-level `UNIQUE` constraint
-    /// in the generated DDL / migration diff.
-    pub is_unique: bool,
-    /// `user_id int references User.id index;` — emits a standalone
-    /// `CREATE INDEX`. Postgres does **not** index a foreign key for you, so
-    /// without this every `where user_id == @u` was a sequential scan and
-    /// there was no way to say otherwise short of a hand-written migration.
-    /// Redundant on `pk` / `unique` columns, which already have an index.
-    pub is_indexed: bool,
-    pub references: Option<FieldReference>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FieldReference {
-    /// Target entity name.
-    pub entity: String,
-    /// Target column name (typically the PK).
-    pub column: String,
-    pub on_delete: OnDeleteAction,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnDeleteAction {
-    NoAction,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RefAction {
     Cascade,
     Restrict,
+    NoAction,
     SetNull,
+    SetDefault,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeSpec {
-    pub name: String,
-    pub args: Vec<i64>,
-}
-
-/// A function parameter with an optional type annotation.
-/// `name: string`  → `TypedParam { name: "name", ty: Some("string") }`
-/// `x`             → `TypedParam { name: "x",    ty: None }`
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedParam {
-    pub name: String,
-    /// Type name if annotated, e.g. `"string"`, `"int"`, `"bool"`, `"User"` …
-    pub ty: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionDecl {
-    pub name: String,
-    pub params: Vec<TypedParam>,
-    /// Optional return-type annotation: `function foo(): User`
-    pub return_type: Option<String>,
-    pub body: Vec<Stmt>,
-    /// True when the function was declared `async function ...`. Reserved —
-    /// the interpreter executes everything synchronously today; flag exists so
-    /// AST is forward-compatible with the future tokio-based runtime.
-    pub is_async: bool,
-    /// Namespace this function lives in. Empty = root.
-    pub namespace: Vec<String>,
-    pub visibility: Visibility,
-    /// Byte offset of the `function` keyword (or `async` if present).
-    pub offset: usize,
-    /// Index into [`Program::sources`] for the file this decl came from.
-    pub file_idx: usize,
-}
-
-/// Single comparison: `field op value`
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DbWhere {
-    /// Column path, e.g. `"Entity.field"` or `"field"`. Runner strips the entity prefix.
-    pub field: String,
-    /// SQL comparison operator: `"="`, `"=="`, `"!="`, `"<"`, `"<="`, `">"`, `">="`
-    pub op: String,
-    /// Right-hand side value expression
-    pub rhs: Expr,
-}
-
-/// Boolean tree over comparisons — supports `and`/`or` and parenthesised
-/// sub-expressions. Builds SQL like `(a = $1 AND (b > $2 OR c IS NULL))`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WhereExpr {
-    Atom(DbWhere),
-    /// `having count(*) > 5` / `having sum(Task.hours) >= @budget` — an
-    /// aggregate function on the left of a comparison.
-    ///
-    /// Only reachable from `having`. `where` runs before aggregation, so an
-    /// aggregate there is meaningless and the parser doesn't accept one.
-    AggAtom {
-        kind: AggregateKind,
-        /// Aggregated column path, or `*` for `count(*)`.
-        col: String,
-        /// SQL comparison operator, same set as [`DbWhere::op`].
-        op: String,
-        rhs: Expr,
-    },
-    /// `field in (expr1, expr2, ...)` — SQL `"field" IN ($1, $2, ...)`.
-    InList {
-        field: String,
-        values: Vec<Expr>,
-    },
-    /// `field between @low and @high` — SQL `"field" BETWEEN $1 AND $2`.
-    Between {
-        field: String,
-        low: Expr,
-        high: Expr,
-    },
-    And(Box<WhereExpr>, Box<WhereExpr>),
-    Or(Box<WhereExpr>, Box<WhereExpr>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortDir {
-    Asc,
-    Desc,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AggregateKind {
-    Sum,
-    Avg,
-    Min,
-    Max,
-    /// `count(*)` — only valid in an aliased grouped projection.
-    Count,
-}
-
-impl AggregateKind {
-    /// The JWC surface spelling — what the formatter emits and the parser
-    /// reads back.
-    pub fn keyword(self) -> &'static str {
+impl RefAction {
+    pub fn as_sql(self) -> &'static str {
         match self {
-            AggregateKind::Sum => "sum",
-            AggregateKind::Avg => "avg",
-            AggregateKind::Min => "min",
-            AggregateKind::Max => "max",
-            AggregateKind::Count => "count",
+            RefAction::Cascade => "CASCADE",
+            RefAction::Restrict => "RESTRICT",
+            RefAction::NoAction => "NO ACTION",
+            RefAction::SetNull => "SET NULL",
+            RefAction::SetDefault => "SET DEFAULT",
         }
     }
 }
 
-/// One aliased aggregate term in a grouped projection
-/// (`select { status, total: count(*) } ... group by status`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AggProj {
-    /// Result key in the row JSON (the part before `:`).
-    pub alias: String,
-    pub kind: AggregateKind,
-    /// Aggregated column path, or `*` for `count(*)`.
-    pub col: String,
+#[derive(Clone, Debug)]
+pub struct IndexDef {
+    pub at: Attached,
+    pub columns: Vec<IndexColumn>,
+    pub predicate: Option<Expr>,
+    pub method: Option<Ident>,
+    pub span: Span,
 }
 
-/// Rewrite `having <alias> <op> <rhs>` into the aggregate that alias names.
-///
-/// Postgres accepts a SELECT output alias in `GROUP BY` and `ORDER BY` but
-/// **not** in `HAVING`, so `having total > 2` against a projection of
-/// `{ status, total: count(*) }` emits `HAVING "total" > $1` and dies at the
-/// database with `column "total" does not exist`. Naming the alias is the
-/// obvious thing to write, so resolve it to the aggregate it stands for
-/// instead of making the caller repeat `count(*)`.
-///
-/// A field that matches no alias is left alone — it's a group key, and the
-/// validator has already confirmed it is one.
-pub fn resolve_having_aliases(expr: &WhereExpr, aggregates: &[AggProj]) -> WhereExpr {
-    match expr {
-        WhereExpr::Atom(w) => match aggregates.iter().find(|a| a.alias == w.field) {
-            Some(agg) => WhereExpr::AggAtom {
-                kind: agg.kind,
-                col: agg.col.clone(),
-                op: w.op.clone(),
-                rhs: w.rhs.clone(),
-            },
-            None => expr.clone(),
-        },
-        WhereExpr::And(a, b) => WhereExpr::And(
-            Box::new(resolve_having_aliases(a, aggregates)),
-            Box::new(resolve_having_aliases(b, aggregates)),
-        ),
-        WhereExpr::Or(a, b) => WhereExpr::Or(
-            Box::new(resolve_having_aliases(a, aggregates)),
-            Box::new(resolve_having_aliases(b, aggregates)),
-        ),
-        // `in (...)` / `between` over an aggregate isn't accepted by the
-        // parser, so there is no alias to resolve on these.
-        WhereExpr::InList { .. } | WhereExpr::Between { .. } | WhereExpr::AggAtom { .. } => {
-            expr.clone()
-        }
-    }
+#[derive(Clone, Debug)]
+pub struct IndexColumn {
+    pub name: Ident,
+    pub desc: bool,
+    pub nulls: Option<NullsOrder>,
 }
 
-/// An aliased plain column in a projection, used to surface a column from a
-/// joined entity (`{ columnName: Column.name }`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AliasedCol {
-    /// Result key in the row JSON.
-    pub alias: String,
-    /// Source field path, e.g. `Column.name`.
-    pub field: String,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NullsOrder {
+    First,
+    Last,
 }
 
-/// `join Entity on <field> == <field>` — an explicit equi-join to another
-/// entity in the same dbcontext. Both `left` / `right` are field paths
-/// (`Entity.col`); the SQL builder resolves them to table aliases.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JoinClause {
-    pub entity: String,
-    pub left: String,
-    pub right: String,
+// ---------------------------------------------------------------- enum, view, class
+
+#[derive(Clone, Debug)]
+pub struct EnumDecl {
+    pub at: Attached,
+    pub name: Ident,
+    /// `None` = varchar + CHECK; `Some` = a real `CREATE TYPE` (schema.md §5).
+    pub schema: Option<QualifiedSchema>,
+    pub physical: Option<String>,
+    pub members: Vec<Ident>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DbOrderBy {
-    /// Column path, e.g. `"Entity.created_at"` or `"created_at"`.
-    pub field: String,
-    pub dir: SortDir,
+#[derive(Clone, Debug)]
+pub struct ViewDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub schema: QualifiedSchema,
+    pub physical: Option<String>,
+    pub body: Box<SelectExpr>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ValidateRule {
-    /// Field must be present and non-null.
-    Required,
-    /// String length must be ≥ n.
-    MinLength(i64),
-    /// String length must be ≤ n.
-    MaxLength(i64),
-    /// Numeric value must be ≥ n (string-stored to allow ints or decimals).
-    Min(String),
-    /// Numeric value must be ≤ n.
-    Max(String),
-    /// String must match the given regular expression (full-match semantics).
-    Pattern(String),
+#[derive(Clone, Debug)]
+pub struct ClassDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub fields: Vec<ClassField>,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidateField {
+#[derive(Clone, Debug)]
+pub struct ClassField {
+    pub at: Attached,
+    pub name: Ident,
+    pub ty: TypeRef,
+    pub rules: Vec<RuleCall>,
+    pub transient: bool,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------- error, service, middleware
+
+#[derive(Clone, Debug)]
+pub struct ErrorDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub status: u16,
+    pub message: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServiceDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub functions: Vec<FunctionDecl>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct FunctionDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub returns: Option<TypeRef>,
+    pub raises: Vec<Ident>,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub name: Ident,
+    pub ty: TypeRef,
+    pub default: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct MiddlewareDecl {
+    pub at: Attached,
+    pub name: Ident,
+    /// `(@org_id: bigint)` — declared path-parameter dependencies.
+    pub binders: Vec<Binder>,
+    /// `requires RequireAuth`
+    pub requires: Vec<Ident>,
+    /// `provides account_id: bigint`
+    pub provides: Vec<CtxDecl>,
+    pub body: Block,
+    pub after: Option<Block>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Binder {
+    pub name: Ident,
+    pub ty: TypeRef,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct CtxDecl {
+    pub name: Ident,
+    pub ty: TypeRef,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------- routing
+
+#[derive(Clone, Debug)]
+pub struct RoutesDecl {
+    pub at: Attached,
+    pub prefix: String,
+    pub prefix_span: Span,
+    pub uses: Vec<Ident>,
+    pub routes: Vec<RouteDecl>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct RouteDecl {
+    pub at: Attached,
+    pub method: Ident,
+    pub suffix: String,
+    pub suffix_span: Span,
+    pub uses: Vec<Ident>,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ErrorHandlerDecl {
+    pub at: Attached,
+    pub binder: Ident,
+    pub arms: Vec<CatchArm>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct CatchArm {
+    /// `None` = the untyped arm, which catches faults only (errors.md §4.4).
+    pub error: Option<Ident>,
+    pub binder: Ident,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerDecl {
+    pub at: Attached,
+    pub entries: Vec<ServerEntry>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ServerEntry {
+    Set(Assignment),
+    Group {
+        name: Ident,
+        entries: Vec<Assignment>,
+        span: Span,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct TestDecl {
+    pub at: Attached,
     pub name: String,
-    pub rules: Vec<ValidateRule>,
+    pub body: Block,
+    pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// ---------------------------------------------------------------- types
+
+#[derive(Clone, Debug)]
+pub struct TypeRef {
+    pub kind: TypeKind,
+    /// Number of `[]` suffixes.
+    pub array_depth: u8,
+    /// `?` on the base type.
+    pub optional: bool,
+    /// `?` on each array level, outermost last.
+    pub array_optional: Vec<bool>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum TypeKind {
+    /// `bigint`, `varchar(255)`, `numeric(14, 2)`, …
+    Scalar { name: String, args: Vec<u32> },
+    /// `{ status: text }` — types.md §1.
+    Record(Vec<(Ident, TypeRef)>),
+    /// A declared name: enum, class, view.
+    Named(DottedName),
+}
+
+// ---------------------------------------------------------------- statements
+
+pub type Block = Vec<Stmt>;
+
+#[derive(Clone, Debug)]
 pub enum Stmt {
     Let {
-        name: String,
+        at: Attached,
+        name: Ident,
+        ty: Option<TypeRef>,
         value: Expr,
+        span: Span,
     },
     Assign {
-        name: String,
+        at: Attached,
+        target: AssignTarget,
         value: Expr,
+        span: Span,
     },
-    /// `var.field = value;` — sets one field on a JSON-object variable
-    FieldAssign {
-        var: String,
-        field: String,
-        value: Expr,
-    },
-    Print(Expr),
     If {
+        at: Attached,
         cond: Expr,
-        then_body: Vec<Stmt>,
-        else_body: Option<Vec<Stmt>>,
+        then: Block,
+        otherwise: Option<Block>,
+        span: Span,
     },
-    While {
-        cond: Expr,
-        body: Vec<Stmt>,
+    For {
+        at: Attached,
+        binder: Ident,
+        iterable: Expr,
+        body: Block,
+        span: Span,
     },
-    Break,
-    Continue,
-    Expr(Expr),
-    Return(Option<Expr>),
-    /// `validate body { field: rule, rule; ... }` — runs against `body()` JSON
-    /// and short-circuits the route with a 400 response if any rule fails.
-    ValidateBody {
-        fields: Vec<ValidateField>,
+    Return {
+        at: Attached,
+        value: Option<Expr>,
+        span: Span,
     },
-    /// `try { ... } catch (var[: ErrorType]) { ... }` — catches any runtime
-    /// error from the try body and binds the error to `var` as a JSON object
-    /// `{"message": "..."}` before running the catch body.
-    Try {
-        body: Vec<Stmt>,
-        catch_var: String,
-        /// Optional error type filter (e.g. `DbError`). Reserved — currently
-        /// matches all errors.
-        catch_type: Option<String>,
-        catch_body: Vec<Stmt>,
+    Throw {
+        at: Attached,
+        error: Ident,
+        args: Vec<Expr>,
+        span: Span,
     },
-    /// `transaction { ... }` — all DB statements inside run on a single
-    /// pooled connection wrapped in a SQL transaction; an uncaught error
-    /// rolls back, otherwise commits at the end of the block.
     Transaction {
-        body: Vec<Stmt>,
+        at: Attached,
+        body: Block,
+        span: Span,
     },
-    /// **Sprint 4B [1.0-blocker]** — `savepoint <name> { ... }` — nested
-    /// rollback boundary INSIDE a `transaction { ... }`. Emits
-    /// `SAVEPOINT <name>` at entry, `RELEASE SAVEPOINT <name>` on normal
-    /// exit, and `ROLLBACK TO SAVEPOINT <name>; RELEASE SAVEPOINT <name>`
-    /// on error so the outer transaction stays usable. Validator (E017)
-    /// rejects savepoints declared outside a transaction. The legacy
-    /// `transaction { transaction { ... } }` literal is rejected by the
-    /// parser with E016 directing users at savepoint.
-    Savepoint {
-        name: String,
-        body: Vec<Stmt>,
+    Assert {
+        at: Attached,
+        kind: AssertKind,
+        span: Span,
     },
-    /// `for VAR in EXPR { ... }` — iterate over a JSON array (returned by
-    /// `select`, `body()` parsed array, etc). `VAR` is rebound per iteration.
-    ForIn {
-        var: String,
-        iter: Expr,
-        body: Vec<Stmt>,
-    },
-    /// `insert VAR into CTX.TABLE;`
-    DbInsert {
-        var: String,
-        context_var: String,
-        table: String,
-    },
-    /// `update VAR in CTX.TABLE;`
-    DbUpdate {
-        var: String,
-        context_var: String,
-        table: String,
-    },
-    /// `delete VAR from CTX.TABLE;`
-    DbDelete {
-        var: String,
-        context_var: String,
-        table: String,
-    },
-    /// `delete from CTX.TABLE where COND ...;` — bulk delete without a
-    /// preloaded object. `where` is required (a missing where would wipe the
-    /// whole table) and is enforced at parse time.
-    DbDeleteWhere {
-        context_var: String,
-        table: String,
-        where_clause: Box<WhereExpr>,
-    },
-    /// `update CTX.TABLE set col1 = expr1, col2 = expr2 where COND ...;` —
-    /// atomic partial-row update. Compiles to a single SQL `UPDATE … SET …
-    /// WHERE …`, no preceding read. Closes the lost-update window that the
-    /// whole-row `update var in CTX.Table` form has under concurrent
-    /// reads (observed in production: jwc-shortener's `hits` counter).
-    /// `where` is required for the same reason `delete from` requires it
-    /// — a missing predicate would touch every row in the table.
-    DbUpdateSet {
-        context_var: String,
-        table: String,
-        /// Each entry is (column, RHS expression). RHS can reference
-        /// other columns of the same row directly by name (the column
-        /// validator accepts `Entity.col` references inside the RHS just
-        /// like `where Entity.col == …` does).
-        assignments: Vec<(String, Expr)>,
-        where_clause: Box<WhereExpr>,
+    Expr {
+        at: Attached,
+        expr: Expr,
+        span: Span,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
-    Int(i64),
-    /// Decimal literal kept as source text (e.g. `0.2`) and parsed at runtime.
-    Float(String),
+#[derive(Clone, Debug)]
+pub enum AssignTarget {
+    /// `$x = …`
+    Local(Ident),
+    /// `context.k = …`
+    Context(Ident),
+}
+
+#[derive(Clone, Debug)]
+pub enum AssertKind {
+    Expr(Expr),
+    Fails {
+        /// Mandatory since v0.28.0: an untyped `assert fails` passes when a
+        /// typo makes the block raise something unrelated (testing.md §4.1).
+        error: Option<Ident>,
+        body: Block,
+        /// `with "…"` — the raised error's message, compared exactly
+        /// (testing.md §4.2).
+        message: Option<String>,
+        message_span: Option<Span>,
+    },
+}
+
+// ---------------------------------------------------------------- expressions
+
+#[derive(Clone, Debug)]
+pub struct Expr {
+    pub kind: Box<ExprKind>,
+    pub span: Span,
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Self {
+        Self {
+            kind: Box::new(kind),
+            span,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprKind {
+    Int(String),
+    Decimal(String),
     Str(String),
+    RawStr(String),
     Bool(bool),
     Null,
-    Var(String),
+
+    /// A bare name: a column inside a query clause, a declaration name
+    /// elsewhere (names.md §5.3).
+    Name(Ident),
+    /// `$x`
+    Local(Ident),
+    /// `@x`
+    PathParam(Ident),
+
+    Field {
+        base: Expr,
+        field: Ident,
+    },
+    Index {
+        base: Expr,
+        index: Expr,
+    },
     Call {
-        name: String,
+        callee: Expr,
+        args: Vec<Expr>,
+        /// `count(x where pred)` — queries.md §6.3.
+        filter: Option<Expr>,
+    },
+
+    Unary {
+        op: UnaryOp,
+        rhs: Expr,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Expr,
+        rhs: Expr,
+    },
+    Ternary {
+        cond: Expr,
+        then: Expr,
+        otherwise: Expr,
+    },
+    Coalesce {
+        lhs: Expr,
+        rhs: Expr,
+    },
+    /// `x in (a, b)` / `x not in ($xs)`
+    In {
+        lhs: Expr,
+        items: Vec<Expr>,
+        negated: bool,
+    },
+    /// `exists (select …)` / `not exists (…)`
+    Exists {
+        query: Expr,
+        negated: bool,
+    },
+
+    Object(Vec<ObjEntry>),
+    Array(Vec<Expr>),
+
+    Select(Box<SelectExpr>),
+    Insert(Box<InsertExpr>),
+    Update(Box<UpdateExpr>),
+    Delete(Box<DeleteExpr>),
+
+    /// `<expr> or throw E(args)` — errors.md §5.
+    OrThrow {
+        value: Expr,
+        error: Ident,
         args: Vec<Expr>,
     },
-    /// `var.field` — reads one field from a JSON-object variable
-    FieldGet {
-        var: String,
-        field: String,
+    /// `<expr> catch E (err) { … }` — errors.md §7.
+    CatchPostfix {
+        value: Expr,
+        error: Ident,
+        binder: Ident,
+        body: Block,
     },
-    /// `new EntityName()` — creates an empty JSON object `{}`
-    NewEntity {
-        entity: String,
+    /// `request.body() as Register` — the validated-input cast
+    /// (routing.md §5.2). Only legal outside a query clause.
+    Cast {
+        value: Expr,
+        ty: Ident,
     },
-    /// `select count(*) from CTX.TABLE [where COND ...]` — returns `int`.
-    DbCount {
-        context_var: String,
-        table: String,
-        where_clause: Option<Box<WhereExpr>>,
+    /// `<response> with { … }` — routing.md §6.2.
+    WithHeaders {
+        value: Expr,
+        headers: Vec<ObjEntry>,
     },
-    /// `select sum|avg|min|max(Entity.col) from CTX.TABLE [where COND ...]`.
-    /// Result is parsed to int/float/string depending on the SQL response.
-    DbAggregate {
-        kind: AggregateKind,
-        field: String,
-        context_var: String,
-        table: String,
-        where_clause: Option<Box<WhereExpr>>,
+    /// `<response> cookie(name, value, opts)` — one `Set-Cookie` per
+    /// occurrence. A JSON object cannot carry a duplicate key, so repeated
+    /// headers need their own chained form (routing.md §6.2).
+    Cookie {
+        value: Expr,
+        args: Vec<Expr>,
     },
-    /// `select [Entity|*] [ { col1, col2, ... } ] [with rel, ...] from CTX.TABLE
-    ///        [where COND [and|or COND ...]]
-    ///        [group by Entity.col [, ...]]
-    ///        [having COND [and|or COND ...]]
-    ///        [orderby FIELD [asc|desc]]
-    ///        [limit N] [offset N] [first]`
-    DbSelect {
-        entity: String,
-        context_var: String,
-        table: String,
-        where_clause: Option<Box<WhereExpr>>,
-        order_by: Option<DbOrderBy>,
-        limit: Option<Box<Expr>>,
-        offset: Option<Box<Expr>>,
-        first: bool,
-        /// Navigation property names to eagerly join (`with posts, comments`).
-        with_relations: Vec<String>,
-        /// Column-name subset to project (`select User { name, email } ...`).
-        /// Empty vec means `SELECT *` — every column from the source table.
-        projection: Vec<String>,
-        /// Aliased aggregate terms in the projection (`{ total: count(*) }`).
-        /// Combined with `group_by` this is grouped aggregation; the SELECT
-        /// list is `projection` columns + these `<fn>(col) AS alias` terms.
-        aggregates: Vec<AggProj>,
-        /// Aliased plain columns (`{ columnName: Column.name }`) — surfaces a
-        /// column from a joined entity under a result key.
-        aliased_cols: Vec<AliasedCol>,
-        /// Explicit `join Entity on a == b` clauses (cross-entity queries).
-        joins: Vec<JoinClause>,
-        /// `group by Entity.col [, ...]` — column paths to GROUP BY at the
-        /// SQL layer. Each entry is a `field` string in the same shape as
-        /// `where Entity.col`. Empty vec when no `group by` was written.
-        group_by: Vec<String>,
-        /// `select distinct ...` — emits `SELECT DISTINCT`, collapsing rows
-        /// that are identical across every selected column.
-        distinct: bool,
-        /// `having <cond>` — post-aggregation filter applied after GROUP BY.
-        /// Same shape as `where_clause`; only meaningful when `group_by` is
-        /// non-empty, but the parser stores it unconditionally and the
-        /// emitter just inlines whatever's here.
-        having: Option<Box<WhereExpr>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnaryOp {
+    Not,
+    Neg,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BinOp {
+    And,
+    Or,
+    Eq,
+    Ne,
+    /// `==?` — dropped when the right operand is null (queries.md §3.2).
+    EqOpt,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Like,
+    ILike,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+impl BinOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BinOp::And => "and",
+            BinOp::Or => "or",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::EqOpt => "==?",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::Like => "like",
+            BinOp::ILike => "ilike",
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ObjEntry {
+    /// `k: v` (projection / JSON) or `k = v` (write target).
+    Field {
+        key: Ident,
+        value: Expr,
+        /// `=` rather than `:`.
+        assign: bool,
+        span: Span,
     },
-    /// `await expr` — placeholder for the future async runtime; today this
-    /// is a transparent pass-through that evaluates the inner expression.
-    Await(Box<Expr>),
-    /// `!expr` — boolean negation. Inner must evaluate to a bool.
-    Not(Box<Expr>),
-    /// `cond ? a : b`. Only the taken branch is evaluated.
-    Ternary {
-        cond: Box<Expr>,
-        then_expr: Box<Expr>,
-        else_expr: Box<Expr>,
+    /// `...$x except a, b`
+    Spread {
+        source: Ident,
+        except: Vec<Ident>,
+        span: Span,
     },
-    /// `a ?? b` — yields `a` unless it is null, else `b`. The right side is
-    /// only evaluated when needed, so `x ?? expensive()` stays cheap.
-    Coalesce(Box<Expr>, Box<Expr>),
-    /// `{ key: value, key2: value2 }` — JSON object literal. Each value is
-    /// evaluated and the result is serialised as a JSON string Value.
-    ObjectLit(Vec<(String, Expr)>),
-    /// `[expr, expr, ...]` — array literal. Elements may be heterogeneous
-    /// (`[1, "two", true]`); a trailing comma and the empty form `[]` are both
-    /// valid. Evaluates to `Value::Array` in the interpreter.
-    ArrayLit(Vec<Expr>),
-    Add(Box<Expr>, Box<Expr>),
-    Sub(Box<Expr>, Box<Expr>),
-    Mul(Box<Expr>, Box<Expr>),
-    Div(Box<Expr>, Box<Expr>),
-    Mod(Box<Expr>, Box<Expr>),
-    Neg(Box<Expr>),
-    Eq(Box<Expr>, Box<Expr>),
-    Neq(Box<Expr>, Box<Expr>),
-    Lt(Box<Expr>, Box<Expr>),
-    Lte(Box<Expr>, Box<Expr>),
-    Gt(Box<Expr>, Box<Expr>),
-    Gte(Box<Expr>, Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
+}
+
+// ---------------------------------------------------------------- queries
+
+#[derive(Clone, Debug)]
+pub struct SelectExpr {
+    pub binder: Ident,
+    pub source: QualifiedTable,
+    pub joins: Vec<JoinClause>,
+    pub filter: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
+    pub projection: Option<ObjectShape>,
+    pub order_by: Vec<SortKey>,
+    pub limit: Option<Expr>,
+    pub page: Option<PageClause>,
+    pub first: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct JoinClause {
+    pub kind: JoinKind,
+    pub table: QualifiedTable,
+    pub binder: Ident,
+    pub on: Expr,
+    /// `left join … on … where … as many admins` — filters the child
+    /// collection, not the driving rows (queries.md §4.7).
+    pub filter: Option<Expr>,
+    /// `None` only on a malformed join; a bare join is `Cardinality::Group`
+    /// and says so (queries.md §6.2).
+    pub result: Option<JoinResult>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JoinKind {
+    Left,
+    Inner,
+}
+
+#[derive(Clone, Debug)]
+pub struct JoinResult {
+    pub cardinality: Cardinality,
+    pub name: Ident,
+    /// `under <binding>` — the explicit attachment (queries.md §4.4).
+    pub under: Option<Ident>,
+    pub order_by: Vec<SortKey>,
+    pub limit: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cardinality {
+    One,
+    Many,
+    /// `as group` — the join contributes to filtering and to aggregates and
+    /// produces no field. Written out rather than inferred from a missing
+    /// `as`, because "I forgot the projection" and "I meant to aggregate"
+    /// used to be the same syntax (queries.md §6.2).
+    Group,
+}
+
+#[derive(Clone, Debug)]
+pub struct ObjectShape {
+    pub fields: Vec<ProjField>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProjField {
+    /// `id`
+    Column(Ident),
+    /// `alias: expr`
+    Expr {
+        alias: Ident,
+        value: Expr,
+        span: Span,
+    },
+    /// `alias: { … }`
+    Nested {
+        alias: Ident,
+        shape: ObjectShape,
+        span: Span,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct SortKey {
+    pub expr: Expr,
+    pub desc: bool,
+    pub nulls: Option<NullsOrder>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct PageClause {
+    pub after: Option<Expr>,
+    pub size: Expr,
+    pub max: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct InsertExpr {
+    pub table: QualifiedTable,
+    pub values: Vec<ObjEntry>,
+    pub conflict: Option<ConflictClause>,
+    pub projection: Option<ObjectShape>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConflictClause {
+    pub columns: Vec<Ident>,
+    pub action: ConflictAction,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ConflictAction {
+    DoNothing,
+    DoUpdate(Vec<SetItem>),
+}
+
+#[derive(Clone, Debug)]
+pub struct UpdateExpr {
+    pub table: QualifiedTable,
+    pub sets: Vec<SetItem>,
+    pub filter: Option<Expr>,
+    pub projection: Option<ObjectShape>,
+    pub order_by: Vec<SortKey>,
+    pub first: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum SetItem {
+    Set {
+        column: Ident,
+        value: Expr,
+        /// `=?` — skipped when the value is null (writes.md §3.3).
+        optional: bool,
+        span: Span,
+    },
+    Spread {
+        source: Ident,
+        except: Vec<Ident>,
+        span: Span,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct DeleteExpr {
+    pub table: QualifiedTable,
+    pub filter: Option<Expr>,
+    pub projection: Option<ObjectShape>,
+    pub order_by: Vec<SortKey>,
+    pub first: bool,
+    pub span: Span,
 }

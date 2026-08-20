@@ -1,98 +1,173 @@
-/// Byte offset → (line, col) plus snippet rendering for diagnostics.
-///
-/// Keeps the source text alongside the line-start index so we can render
-/// rustc-style snippets — the offending line with a caret pointing at the
-/// offset. Cheap: source text is stored once per file; line_starts is a
-/// single Vec<usize>.
-#[derive(Debug, Clone)]
-pub struct SourceMap {
-    source: String,
+//! v1 diagnostics: a code, a span, a message, and an optional fix-it note.
+//!
+//! Codes are the ones the specification names (`E0210`, `E0900`, `W0104`, …)
+//! so a diagnostic can be grepped straight back to its clause.
+
+use crate::token::Span;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Severity::Error => write!(f, "error"),
+            Severity::Warning => write!(f, "warning"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Diagnostic {
+    pub severity: Severity,
+    /// e.g. `E0900`.
+    pub code: &'static str,
+    pub message: String,
+    pub span: Span,
+    /// Fix-it text, rendered under the caret.
+    pub note: Option<String>,
+    /// The clause that defines this rule, e.g. `routing.md §10`.
+    pub clause: Option<&'static str>,
+}
+
+impl Diagnostic {
+    pub fn error(code: &'static str, span: Span, message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Error,
+            code,
+            message: message.into(),
+            span,
+            note: None,
+            clause: None,
+        }
+    }
+
+    pub fn warning(code: &'static str, span: Span, message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            code,
+            message: message.into(),
+            span,
+            note: None,
+            clause: None,
+        }
+    }
+
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    pub fn clause(mut self, clause: &'static str) -> Self {
+        self.clause = Some(clause);
+        self
+    }
+}
+
+/// Renders diagnostics against the source text they came from.
+pub struct SourceFile {
+    pub path: PathBuf,
+    pub text: String,
     line_starts: Vec<usize>,
 }
 
-impl SourceMap {
-    pub fn new(source: &str) -> Self {
-        let mut line_starts = vec![0];
-        for (i, b) in source.bytes().enumerate() {
+impl SourceFile {
+    pub fn new(path: impl AsRef<Path>, text: impl Into<String>) -> Self {
+        let text = text.into();
+        let mut line_starts = vec![0usize];
+        for (i, b) in text.bytes().enumerate() {
             if b == b'\n' {
                 line_starts.push(i + 1);
             }
         }
         Self {
-            source: source.to_string(),
+            path: path.as_ref().to_path_buf(),
+            text,
             line_starts,
         }
     }
 
-    /// Convert a byte offset into 1-based (line, col).
-    pub fn line_col(&self, offset: usize) -> (usize, usize) {
-        // Find greatest line_start <= offset
-        let line_idx = match self.line_starts.binary_search(&offset) {
+    /// 1-based line and column (in characters) for a byte offset.
+    ///
+    /// The offset is clamped to a character boundary first. A span that
+    /// lands inside a multi-byte character is a bug in whoever produced
+    /// it, but slicing there panics — and a diagnostic printer that
+    /// crashes on the file it is describing turns a one-line error into
+    /// a compiler stack trace with the real message scrolled off the top.
+    /// It is worth being total here even so.
+    pub fn line_col(&self, offset: u32) -> (usize, usize) {
+        let mut offset = (offset as usize).min(self.text.len());
+        while offset > 0 && !self.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        let line = match self.line_starts.binary_search(&offset) {
             Ok(i) => i,
-            Err(0) => 0,
             Err(i) => i - 1,
         };
-        let line_start = self.line_starts[line_idx];
-        (line_idx + 1, (offset - line_start) + 1)
+        let start = self.line_starts[line];
+        let col = self.text[start..offset].chars().count() + 1;
+        (line + 1, col)
     }
 
-    /// Extract the line containing `offset` (without the trailing `\n`).
-    /// Out-of-range offsets clamp to the last line.
-    pub fn line_at(&self, offset: usize) -> &str {
-        let (line, _) = self.line_col(offset);
-        let line_idx = line - 1;
-        let start = self.line_starts[line_idx];
+    fn line_text(&self, line: usize) -> &str {
+        let start = self.line_starts[line - 1];
         let end = self
             .line_starts
-            .get(line_idx + 1)
+            .get(line)
             .copied()
-            .unwrap_or(self.source.len());
-        let raw = &self.source[start..end];
-        raw.trim_end_matches('\n').trim_end_matches('\r')
+            .unwrap_or(self.text.len());
+        self.text[start..end].trim_end_matches(['\n', '\r'])
     }
 
-    /// Render a rustc-style snippet for `offset`:
-    ///
-    /// ```text
-    ///   |
-    /// 3 |     field foo;
-    ///   |     ^ here
-    /// ```
-    ///
-    /// The caret column matches the byte column reported by [`line_col`]
-    /// (1-based). The leading line-number gutter is sized to the line
-    /// number so multi-digit lines still align. Synthesized in pure
-    /// strings — no terminal colour codes, so it survives being captured
-    /// into anyhow chains, log files, or LSP diagnostics.
-    pub fn snippet(&self, offset: usize) -> String {
-        let (line, col) = self.line_col(offset);
-        let line_text = self.line_at(offset);
-        let gutter_width = line.to_string().len();
-        let gutter_pad = " ".repeat(gutter_width);
-        let caret_pad = " ".repeat(col.saturating_sub(1));
-        format!("\n  {gutter_pad} |\n  {line} | {line_text}\n  {gutter_pad} | {caret_pad}^ here")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn line_col_handles_multi_line_input() {
-        let sm = SourceMap::new("a\nbc\nxyz");
-        assert_eq!(sm.line_col(0), (1, 1));
-        assert_eq!(sm.line_col(2), (2, 1));
-        assert_eq!(sm.line_col(3), (2, 2));
-        assert_eq!(sm.line_col(5), (3, 1));
-    }
-
-    #[test]
-    fn snippet_points_at_offset() {
-        let sm = SourceMap::new("first\nsecond line here\nthird\n");
-        let s = sm.snippet(8); // 'c' in "second"
-        assert!(s.contains("second line here"), "snippet missing line: {s}");
-        assert!(s.contains("^ here"), "snippet missing caret: {s}");
-        assert!(s.contains("2 | "), "snippet missing line gutter: {s}");
+    pub fn render(&self, d: &Diagnostic) -> String {
+        let (line, col) = self.line_col(d.span.start);
+        let mut out = format!(
+            "{}[{}]: {}\n  --> {}:{}:{}\n",
+            d.severity,
+            d.code,
+            d.message,
+            self.path.display(),
+            line,
+            col
+        );
+        let src = self.line_text(line);
+        let gutter = line.to_string().len();
+        out.push_str(&format!("{:width$} |\n", "", width = gutter));
+        out.push_str(&format!("{line} | {src}\n"));
+        // A span can cover a whole multi-line query; the caret stops at the
+        // end of the first line so the rendering stays readable.
+        let width = (d.span.end.saturating_sub(d.span.start) as usize)
+            .max(1)
+            .min(src.chars().count().saturating_sub(col - 1).max(1));
+        out.push_str(&format!(
+            "{:gw$} | {:pad$}{}\n",
+            "",
+            "",
+            "^".repeat(width),
+            gw = gutter,
+            pad = col - 1
+        ));
+        if let Some(note) = &d.note {
+            // A multi-line note — E0440's expand/contract recipe, E1102's
+            // five-statement enum rebuild — is indented to the same column
+            // as the first line. Left flush, the continuation reads as a
+            // separate diagnostic rather than as part of this one.
+            let mut lines = note.lines();
+            if let Some(first) = lines.next() {
+                out.push_str(&format!("{:gw$} = help: {first}\n", "", gw = gutter));
+                for l in lines {
+                    out.push_str(&format!("{:gw$}          {l}\n", "", gw = gutter));
+                }
+            }
+        }
+        if let Some(clause) = d.clause {
+            out.push_str(&format!("{:gw$} = spec: {clause}\n", "", gw = gutter));
+        }
+        out
     }
 }

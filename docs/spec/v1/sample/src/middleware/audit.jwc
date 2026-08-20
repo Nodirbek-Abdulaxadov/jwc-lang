@@ -1,29 +1,40 @@
 namespace middleware.audit;
 
 import app;
+import db.audit;
 
-
+--- Runs on every outcome, including a middleware short-circuit and an
+--- errorHandler response, and sees the status actually being sent
+--- (middleware.md §5.1).
 middleware Audit {
     after {
         let method = request.method();
         let status = response.status();
 
-        let is_read   = method == "GET";
-        let is_failed = status >= 400;
+        let is_read = $method == "GET";
+        let is_failed = $status >= 400;
 
-        if (is_read or is_failed) { return; }
+        if ($is_read or $is_failed) {
+            return;
+        }
 
-        let org_id   = context.get("org_id");
-        let actor_id = context.get("account_id");
-        let path     = request.path();
-        let ip       = request.client_ip();
+        let route = request.route();
+        let ip = request.client_ip();
+        let org_id = context.org_id?;
+        let actor_id = context.account_id?;
 
-        log_insert(App.audit.Events, {
-            org_id   = org_id,
-            actor_id = actor_id,
-            action   = method,
-            entity   = path,
-            ip       = ip
-        });
+        -- An `after` block has no outer handler, so its raise set must be
+        -- empty (middleware.md §5.5). The FK can still fail if the org was
+        -- deleted concurrently; swallowing it here is the only correct
+        -- option, and the postfix catch makes that visible.
+        insert into App.audit.Events {
+            org_id   = $org_id,
+            actor_id = $actor_id,
+            action   = $method,
+            route    = $route,
+            ip       = $ip
+        } catch BadRequest (err) {
+            return;
+        };
     }
 }

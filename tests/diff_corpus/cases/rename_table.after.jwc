@@ -1,0 +1,16 @@
+-- ops: 2 rename_table org.orgs -> tenants
+-- ops: 4 rename_constraint org.tenants.pk_orgs -> pk_tenants
+-- ops: 4 rename_constraint org.tenants.uq_orgs__slug -> uq_tenants__slug
+
+namespace c;
+database App : Postgres;
+schema org of App;
+
+enum Plan of App.org { free, pro }
+
+table Tenants of App.org was "orgs" {
+    id   bigint primary key identity;
+    slug varchar(40) unique;
+    plan Plan;
+    name varchar(80)?;
+}

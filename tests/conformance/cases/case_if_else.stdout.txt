@@ -1,6 +1,0 @@
-neg
-zero
-small
-big
-pos
-nonzero

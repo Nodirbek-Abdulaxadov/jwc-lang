@@ -2,7 +2,9 @@
 # writes cycle CSVs, bombardier JSON, and a per-cycle log here; analyze.py
 # renders summary.png alongside. None of it is committed — the workflow
 # uploads results/ as an Actions artifact for the operator.
-results/*.csv
-results/*.json
-results/*.log
-results/*.png
+# `**` so a run kept in its own subdirectory (SOAK_RESULTS_DIR=results/run1)
+# is ignored too — the flat patterns matched only results/ itself.
+results/**/*.csv
+results/**/*.json
+results/**/*.log
+results/**/*.png

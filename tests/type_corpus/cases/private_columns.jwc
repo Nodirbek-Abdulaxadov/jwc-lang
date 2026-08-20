@@ -1,0 +1,29 @@
+namespace private_columns;
+
+-- A `private` column may be read in code — `hash.verify` needs the stored
+-- hash — but it may never reach a response (schema.md §3.1).
+service Private {
+    function verify_reads_it(org_id: bigint, account_id: bigint, given: text) {
+        let m = select M from App.s.Members
+            where org_id == $org_id and account_id == $account_id
+            as { org_id, secret }
+            first
+            or throw NotFound("yo'q");
+        let ok = hash.verify($given, $m.secret);
+        if (!$ok) { throw Unauthorized("xato"); }
+        return { ok: true };
+    }
+
+}
+
+routes "/orgs/{org_id: bigint}/members/{account_id: bigint}" {
+
+    route GET "" {
+        let m = select M from App.s.Members
+            where org_id == @org_id and account_id == @account_id
+            as { org_id, secret }
+            first
+            or throw NotFound("yo'q");
+        return json($m);                        -- expect: E0410
+    }
+}

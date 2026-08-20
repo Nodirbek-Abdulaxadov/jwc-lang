@@ -1,0 +1,39 @@
+--- An `inner join … as one` cannot miss, so the projected object needs no
+--- null guard. The `left join` beside it does.
+namespace inner_one;
+
+database App : Postgres;
+schema s of App;
+
+table Accounts of App.s {
+    id    bigint primary key identity;
+    email varchar(255) unique;
+}
+
+table Profiles of App.s {
+    account_id bigint primary key;
+    nickname   varchar(60);
+
+    foreign key (account_id) references App.s.Accounts (id);
+}
+
+table Sessions of App.s {
+    id         bigint primary key identity;
+    account_id bigint;
+
+    foreign key (account_id) references App.s.Accounts (id);
+}
+
+view SessionAccount of App.s {
+    select S from App.s.Sessions
+        inner join App.s.Accounts A on A.id == S.account_id
+            as one account
+        as { id, account: { id, email } }
+}
+
+view SessionProfile of App.s {
+    select S from App.s.Sessions
+        left join App.s.Profiles P on P.account_id == S.account_id
+            as one profile
+        as { id, profile: { account_id, nickname } }
+}

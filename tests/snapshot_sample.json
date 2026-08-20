@@ -1,0 +1,1436 @@
+{
+  "format": 1,
+  "scheme": "v1",
+  "schemas": [
+    {
+      "name": "audit",
+      "declared": "audit"
+    },
+    {
+      "name": "auth",
+      "declared": "auth"
+    },
+    {
+      "name": "billing",
+      "declared": "billing"
+    },
+    {
+      "name": "org",
+      "declared": "org"
+    }
+  ],
+  "enums": [
+    {
+      "schema": "billing",
+      "name": "billing_interval",
+      "declared": "BillingInterval",
+      "values": [
+        "monthly",
+        "yearly"
+      ]
+    },
+    {
+      "schema": "billing",
+      "name": "invoice_status",
+      "declared": "InvoiceStatus",
+      "values": [
+        "draft",
+        "open",
+        "paid",
+        "void"
+      ]
+    },
+    {
+      "schema": "billing",
+      "name": "payment_status",
+      "declared": "PaymentStatus",
+      "values": [
+        "pending",
+        "succeeded",
+        "failed",
+        "refunded"
+      ]
+    },
+    {
+      "schema": "billing",
+      "name": "subscription_status",
+      "declared": "SubscriptionStatus",
+      "values": [
+        "trialing",
+        "active",
+        "past_due",
+        "canceled"
+      ]
+    },
+    {
+      "schema": "org",
+      "name": "member_role",
+      "declared": "MemberRole",
+      "values": [
+        "owner",
+        "admin",
+        "member",
+        "viewer"
+      ]
+    }
+  ],
+  "tables": [
+    {
+      "schema": "audit",
+      "name": "events",
+      "declared": "Events",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "org_id",
+          "declared": "org_id",
+          "ty": "bigint",
+          "nullable": true
+        },
+        {
+          "name": "actor_id",
+          "declared": "actor_id",
+          "ty": "bigint",
+          "nullable": true
+        },
+        {
+          "name": "action",
+          "declared": "action",
+          "ty": "varchar(60)",
+          "nullable": false
+        },
+        {
+          "name": "route",
+          "declared": "route",
+          "ty": "varchar(200)",
+          "nullable": false
+        },
+        {
+          "name": "entity_id",
+          "declared": "entity_id",
+          "ty": "bigint",
+          "nullable": true
+        },
+        {
+          "name": "payload",
+          "declared": "payload",
+          "ty": "jsonb",
+          "nullable": true
+        },
+        {
+          "name": "ip",
+          "declared": "ip",
+          "ty": "inet",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_events",
+        "columns": [
+          "id"
+        ]
+      },
+      "foreign_keys": [
+        {
+          "name": "fk_events__org_id",
+          "columns": [
+            "org_id"
+          ],
+          "target_schema": "org",
+          "target_table": "orgs",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        },
+        {
+          "name": "fk_events__actor_id",
+          "columns": [
+            "actor_id"
+          ],
+          "target_schema": "auth",
+          "target_table": "accounts",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_events__org_id_created_at",
+          "columns": [
+            {
+              "name": "org_id"
+            },
+            {
+              "name": "created_at"
+            }
+          ]
+        },
+        {
+          "name": "ix_events__route_created_at",
+          "columns": [
+            {
+              "name": "route"
+            },
+            {
+              "name": "created_at"
+            }
+          ]
+        }
+      ],
+      "comment": "Append-only. Every FK is `on delete set null` so a deleted org never\nblocks the log, and every column that could be missing is nullable —\nan `after` block cannot recover from a failed insert (middleware.md §5.5)."
+    },
+    {
+      "schema": "auth",
+      "name": "accounts",
+      "declared": "Accounts",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true,
+          "comment": "Surrogate key. Exposed to clients as a string (types.md §2.3)."
+        },
+        {
+          "name": "email",
+          "declared": "email",
+          "ty": "varchar(255)",
+          "nullable": false
+        },
+        {
+          "name": "display_name",
+          "declared": "display_name",
+          "ty": "varchar(80)",
+          "nullable": false
+        },
+        {
+          "name": "password_hash",
+          "declared": "password_hash",
+          "ty": "varchar(255)",
+          "nullable": false,
+          "comment": "Argon2id. Never leaves the database (schema.md §3.1)."
+        },
+        {
+          "name": "email_verified",
+          "declared": "email_verified",
+          "ty": "boolean",
+          "nullable": false,
+          "default": "false"
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_accounts",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_accounts__email",
+          "columns": [
+            "email"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_accounts__email__pattern",
+          "expr": "email ~ '^[^@]+@[^@]+\\.[^@]+$'"
+        },
+        {
+          "name": "ck_accounts__display_name__minlength",
+          "expr": "char_length(display_name) >= 2"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_accounts__created_at",
+          "columns": [
+            {
+              "name": "created_at"
+            }
+          ]
+        }
+      ],
+      "comment": "One human identity. Email is the login handle and is immutable."
+    },
+    {
+      "schema": "auth",
+      "name": "api_keys",
+      "declared": "ApiKeys",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "org_id",
+          "declared": "org_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "declared": "name",
+          "ty": "varchar(80)",
+          "nullable": false
+        },
+        {
+          "name": "key_hash",
+          "declared": "key_hash",
+          "ty": "varchar(64)",
+          "nullable": false
+        },
+        {
+          "name": "scopes",
+          "declared": "scopes",
+          "ty": "text[]",
+          "nullable": false
+        },
+        {
+          "name": "last_used_at",
+          "declared": "last_used_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "revoked_at",
+          "declared": "revoked_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_api_keys",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_api_keys__key_hash",
+          "columns": [
+            "key_hash"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_api_keys__org_id",
+          "columns": [
+            "org_id"
+          ],
+          "target_schema": "org",
+          "target_table": "orgs",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_api_keys__org_id__4db1527c",
+          "columns": [
+            {
+              "name": "org_id"
+            }
+          ],
+          "predicate": "revoked_at IS NULL"
+        }
+      ]
+    },
+    {
+      "schema": "auth",
+      "name": "sessions",
+      "declared": "Sessions",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "account_id",
+          "declared": "account_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "token_hash",
+          "declared": "token_hash",
+          "ty": "varchar(64)",
+          "nullable": false
+        },
+        {
+          "name": "user_agent",
+          "declared": "user_agent",
+          "ty": "varchar(255)",
+          "nullable": true
+        },
+        {
+          "name": "ip",
+          "declared": "ip",
+          "ty": "inet",
+          "nullable": true
+        },
+        {
+          "name": "expires_at",
+          "declared": "expires_at",
+          "ty": "timestamptz",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_sessions",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_sessions__token_hash",
+          "columns": [
+            "token_hash"
+          ]
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_sessions__account_id",
+          "columns": [
+            "account_id"
+          ],
+          "target_schema": "auth",
+          "target_table": "accounts",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_sessions__account_id_expires_at",
+          "columns": [
+            {
+              "name": "account_id"
+            },
+            {
+              "name": "expires_at"
+            }
+          ]
+        }
+      ],
+      "comment": "Bearer-token sessions. `token_hash` is an unsalted SHA-256 of a\n32-byte CSPRNG token, so it can be looked up by equality\n(builtins.md §6)."
+    },
+    {
+      "schema": "billing",
+      "name": "counters",
+      "declared": "Counters",
+      "columns": [
+        {
+          "name": "name",
+          "declared": "name",
+          "ty": "varchar(40)",
+          "nullable": false
+        },
+        {
+          "name": "value",
+          "declared": "value",
+          "ty": "bigint",
+          "nullable": false,
+          "default": "0"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_counters",
+        "columns": [
+          "name"
+        ]
+      },
+      "comment": "Monotonic counters. `update … first` emits FOR UPDATE, which is what\nmakes this safe under concurrency (writes.md §4). Sequences are\nDEFERRED-17."
+    },
+    {
+      "schema": "billing",
+      "name": "invoice_lines",
+      "declared": "InvoiceLines",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "invoice_id",
+          "declared": "invoice_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "description",
+          "declared": "description",
+          "ty": "varchar(200)",
+          "nullable": false
+        },
+        {
+          "name": "quantity",
+          "declared": "quantity",
+          "ty": "integer",
+          "nullable": false
+        },
+        {
+          "name": "unit_price",
+          "declared": "unit_price",
+          "ty": "numeric(14, 2)",
+          "nullable": false
+        }
+      ],
+      "primary_key": {
+        "name": "pk_invoice_lines",
+        "columns": [
+          "id"
+        ]
+      },
+      "checks": [
+        {
+          "name": "ck_invoice_lines__description__minlength",
+          "expr": "char_length(description) >= 1"
+        },
+        {
+          "name": "ck_invoice_lines__quantity__min",
+          "expr": "quantity >= 1"
+        },
+        {
+          "name": "ck_invoice_lines__unit_price__min",
+          "expr": "unit_price >= 0"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_invoice_lines__invoice_id",
+          "columns": [
+            "invoice_id"
+          ],
+          "target_schema": "billing",
+          "target_table": "invoices",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_invoice_lines__invoice_id",
+          "columns": [
+            {
+              "name": "invoice_id"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "billing",
+      "name": "invoices",
+      "declared": "Invoices",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "org_id",
+          "declared": "org_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "subscription_id",
+          "declared": "subscription_id",
+          "ty": "bigint",
+          "nullable": true
+        },
+        {
+          "name": "number",
+          "declared": "number",
+          "ty": "varchar(20)",
+          "nullable": false
+        },
+        {
+          "name": "amount",
+          "declared": "amount",
+          "ty": "numeric(14, 2)",
+          "nullable": false
+        },
+        {
+          "name": "currency",
+          "declared": "currency",
+          "ty": "varchar(3)",
+          "nullable": false,
+          "default": "'USD'"
+        },
+        {
+          "name": "status",
+          "declared": "status",
+          "ty": "billing.invoice_status",
+          "nullable": false,
+          "default": "'draft'::billing.invoice_status"
+        },
+        {
+          "name": "issued_at",
+          "declared": "issued_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "due_at",
+          "declared": "due_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "paid_at",
+          "declared": "paid_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_invoices",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_invoices__number",
+          "columns": [
+            "number"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_invoices__amount__min",
+          "expr": "amount >= 0"
+        },
+        {
+          "name": "ck_invoices__status_paid_at__1",
+          "expr": "(paid_at IS NULL) OR (status = 'paid')"
+        },
+        {
+          "name": "ck_invoices__status_paid_at__2",
+          "expr": "(paid_at IS NOT NULL) OR (status <> 'paid')"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_invoices__org_id",
+          "columns": [
+            "org_id"
+          ],
+          "target_schema": "org",
+          "target_table": "orgs",
+          "target_columns": [
+            "id"
+          ]
+        },
+        {
+          "name": "fk_invoices__subscription_id",
+          "columns": [
+            "subscription_id"
+          ],
+          "target_schema": "billing",
+          "target_table": "subscriptions",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "SET NULL"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_invoices__org_id_status",
+          "columns": [
+            {
+              "name": "org_id"
+            },
+            {
+              "name": "status"
+            }
+          ]
+        },
+        {
+          "name": "ix_invoices__org_id_issued_at_id",
+          "columns": [
+            {
+              "name": "org_id"
+            },
+            {
+              "name": "issued_at",
+              "desc": true
+            },
+            {
+              "name": "id",
+              "desc": true
+            }
+          ]
+        },
+        {
+          "name": "ix_invoices__due_at__d4a78ad7",
+          "columns": [
+            {
+              "name": "due_at"
+            }
+          ],
+          "predicate": "status = 'open'"
+        }
+      ]
+    },
+    {
+      "schema": "billing",
+      "name": "payments",
+      "declared": "Payments",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "invoice_id",
+          "declared": "invoice_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "provider",
+          "declared": "provider",
+          "ty": "varchar(20)",
+          "nullable": false
+        },
+        {
+          "name": "provider_ref",
+          "declared": "provider_ref",
+          "ty": "varchar(120)",
+          "nullable": false,
+          "comment": "The provider's idempotency key. `on conflict do nothing` on this\nconstraint is what makes webhook redelivery safe (writes.md §2.3)."
+        },
+        {
+          "name": "amount",
+          "declared": "amount",
+          "ty": "numeric(14, 2)",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "declared": "status",
+          "ty": "billing.payment_status",
+          "nullable": false,
+          "default": "'pending'::billing.payment_status"
+        },
+        {
+          "name": "failure_code",
+          "declared": "failure_code",
+          "ty": "varchar(60)",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_payments",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_payments__provider_ref",
+          "columns": [
+            "provider_ref"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_payments__amount__min",
+          "expr": "amount >= 0"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_payments__invoice_id",
+          "columns": [
+            "invoice_id"
+          ],
+          "target_schema": "billing",
+          "target_table": "invoices",
+          "target_columns": [
+            "id"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_payments__invoice_id_status",
+          "columns": [
+            {
+              "name": "invoice_id"
+            },
+            {
+              "name": "status"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "billing",
+      "name": "plans",
+      "declared": "Plans",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "code",
+          "declared": "code",
+          "ty": "varchar(40)",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "declared": "name",
+          "ty": "varchar(80)",
+          "nullable": false
+        },
+        {
+          "name": "price",
+          "declared": "price",
+          "ty": "numeric(14, 2)",
+          "nullable": false
+        },
+        {
+          "name": "currency",
+          "declared": "currency",
+          "ty": "varchar(3)",
+          "nullable": false,
+          "default": "'USD'"
+        },
+        {
+          "name": "interval",
+          "declared": "interval",
+          "ty": "billing.billing_interval",
+          "nullable": false,
+          "default": "'monthly'::billing.billing_interval"
+        },
+        {
+          "name": "features",
+          "declared": "features",
+          "ty": "jsonb",
+          "nullable": true
+        },
+        {
+          "name": "active",
+          "declared": "active",
+          "ty": "boolean",
+          "nullable": false,
+          "default": "true"
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_plans",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_plans__code",
+          "columns": [
+            "code"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_plans__code__pattern",
+          "expr": "code ~ '^[a-z0-9_]+$'"
+        },
+        {
+          "name": "ck_plans__price__min",
+          "expr": "price >= 0"
+        },
+        {
+          "name": "ck_plans__currency__pattern",
+          "expr": "currency ~ '^[A-Z]{3}$'"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_plans__active_code",
+          "columns": [
+            {
+              "name": "active"
+            },
+            {
+              "name": "code"
+            }
+          ]
+        }
+      ],
+      "comment": "Money is `numeric`, never an integer count of cents (types.md §2.1).\n`price` is per `interval`."
+    },
+    {
+      "schema": "billing",
+      "name": "subscriptions",
+      "declared": "Subscriptions",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "org_id",
+          "declared": "org_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "plan_id",
+          "declared": "plan_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "declared": "status",
+          "ty": "billing.subscription_status",
+          "nullable": false,
+          "default": "'trialing'::billing.subscription_status"
+        },
+        {
+          "name": "current_period_start",
+          "declared": "current_period_start",
+          "ty": "timestamptz",
+          "nullable": false
+        },
+        {
+          "name": "current_period_end",
+          "declared": "current_period_end",
+          "ty": "timestamptz",
+          "nullable": false
+        },
+        {
+          "name": "cancel_at",
+          "declared": "cancel_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "canceled_at",
+          "declared": "canceled_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        },
+        {
+          "name": "updated_at",
+          "declared": "updated_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_subscriptions",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_subscriptions__org_id__d671f003",
+          "columns": [
+            "org_id"
+          ],
+          "predicate": "status <> 'canceled'"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_subscriptions__current_period_end_current_period_start__1",
+          "expr": "current_period_end > current_period_start"
+        },
+        {
+          "name": "ck_subscriptions__status_canceled_at__2",
+          "expr": "(canceled_at IS NULL) OR (status = 'canceled')"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_subscriptions__org_id",
+          "columns": [
+            "org_id"
+          ],
+          "target_schema": "org",
+          "target_table": "orgs",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "fk_subscriptions__plan_id",
+          "columns": [
+            "plan_id"
+          ],
+          "target_schema": "billing",
+          "target_table": "plans",
+          "target_columns": [
+            "id"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_subscriptions__status_current_period_end",
+          "columns": [
+            {
+              "name": "status"
+            },
+            {
+              "name": "current_period_end"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "org",
+      "name": "invites",
+      "declared": "Invites",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "org_id",
+          "declared": "org_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "declared": "email",
+          "ty": "varchar(255)",
+          "nullable": false
+        },
+        {
+          "name": "role",
+          "declared": "role",
+          "ty": "org.member_role",
+          "nullable": false,
+          "default": "'member'::org.member_role"
+        },
+        {
+          "name": "token_hash",
+          "declared": "token_hash",
+          "ty": "varchar(64)",
+          "nullable": false
+        },
+        {
+          "name": "invited_by",
+          "declared": "invited_by",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "expires_at",
+          "declared": "expires_at",
+          "ty": "timestamptz",
+          "nullable": false
+        },
+        {
+          "name": "accepted_at",
+          "declared": "accepted_at",
+          "ty": "timestamptz",
+          "nullable": true
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_invites",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_invites__token_hash",
+          "columns": [
+            "token_hash"
+          ]
+        },
+        {
+          "name": "uq_invites__org_id_email__03f9d236",
+          "columns": [
+            "org_id",
+            "email"
+          ],
+          "predicate": "accepted_at IS NULL"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_invites__email__pattern",
+          "expr": "email ~ '^[^@]+@[^@]+\\.[^@]+$'"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_invites__org_id",
+          "columns": [
+            "org_id"
+          ],
+          "target_schema": "org",
+          "target_table": "orgs",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "fk_invites__invited_by",
+          "columns": [
+            "invited_by"
+          ],
+          "target_schema": "auth",
+          "target_table": "accounts",
+          "target_columns": [
+            "id"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_invites__expires_at",
+          "columns": [
+            {
+              "name": "expires_at"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "org",
+      "name": "members",
+      "declared": "Members",
+      "columns": [
+        {
+          "name": "org_id",
+          "declared": "org_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "account_id",
+          "declared": "account_id",
+          "ty": "bigint",
+          "nullable": false
+        },
+        {
+          "name": "role",
+          "declared": "role",
+          "ty": "org.member_role",
+          "nullable": false,
+          "default": "'member'::org.member_role"
+        },
+        {
+          "name": "joined_at",
+          "declared": "joined_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_members",
+        "columns": [
+          "org_id",
+          "account_id"
+        ]
+      },
+      "foreign_keys": [
+        {
+          "name": "fk_members__org_id",
+          "columns": [
+            "org_id"
+          ],
+          "target_schema": "org",
+          "target_table": "orgs",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        },
+        {
+          "name": "fk_members__account_id",
+          "columns": [
+            "account_id"
+          ],
+          "target_schema": "auth",
+          "target_table": "accounts",
+          "target_columns": [
+            "id"
+          ],
+          "on_delete": "CASCADE"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_members__account_id",
+          "columns": [
+            {
+              "name": "account_id"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema": "org",
+      "name": "orgs",
+      "declared": "Orgs",
+      "columns": [
+        {
+          "name": "id",
+          "declared": "id",
+          "ty": "bigint",
+          "nullable": false,
+          "identity": true
+        },
+        {
+          "name": "slug",
+          "declared": "slug",
+          "ty": "varchar(40)",
+          "nullable": false,
+          "comment": "URL-safe handle. Immutable after creation."
+        },
+        {
+          "name": "name",
+          "declared": "name",
+          "ty": "varchar(120)",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "declared": "created_at",
+          "ty": "timestamptz",
+          "nullable": false,
+          "default": "now()"
+        }
+      ],
+      "primary_key": {
+        "name": "pk_orgs",
+        "columns": [
+          "id"
+        ]
+      },
+      "uniques": [
+        {
+          "name": "uq_orgs__slug",
+          "columns": [
+            "slug"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_orgs__slug__pattern",
+          "expr": "slug ~ '^[a-z0-9-]{3,40}$'"
+        },
+        {
+          "name": "ck_orgs__name__minlength",
+          "expr": "char_length(name) >= 2"
+        }
+      ],
+      "comment": "Tenant. Every billing and audit row hangs off one of these."
+    }
+  ],
+  "functions": [
+    {
+      "schema": "billing",
+      "name": "tg_subscriptions__touch",
+      "table": "subscriptions",
+      "sets_now": [
+        "updated_at"
+      ]
+    }
+  ],
+  "triggers": [
+    {
+      "name": "tg_subscriptions__touch",
+      "schema": "billing",
+      "table": "subscriptions",
+      "function": "tg_subscriptions__touch",
+      "timing": "BEFORE",
+      "event": "UPDATE"
+    }
+  ],
+  "views": [
+    {
+      "schema": "billing",
+      "name": "invoice_detail",
+      "declared": "InvoiceDetail",
+      "body": "SELECT t0.id AS id,\n       t0.org_id AS org_id,\n       t0.number AS number,\n       t0.amount AS amount,\n       t0.currency AS currency,\n       t0.status AS status,\n       t0.issued_at AS issued_at,\n       t0.due_at AS due_at,\n       t0.paid_at AS paid_at,\n       coalesce(t1_agg.data, '[]'::json) AS lines,\n       coalesce(t2_agg.data, '[]'::json) AS payments\n  FROM billing.invoices t0\n  LEFT JOIN LATERAL (\n      SELECT coalesce(json_agg(c.j), '[]'::json) AS data\n        FROM (SELECT json_build_object('id', t1.id::text, 'description', t1.description, 'quantity', t1.quantity, 'unit_price', t1.unit_price::text) AS j\n        FROM billing.invoice_lines t1\n        WHERE t1.invoice_id = t0.id\n        ORDER BY t1.id\n        LIMIT 200) c\n  ) t1_agg ON true\n  LEFT JOIN LATERAL (\n      SELECT coalesce(json_agg(c.j), '[]'::json) AS data\n        FROM (SELECT json_build_object('id', t2.id::text, 'provider', t2.provider, 'provider_ref', t2.provider_ref, 'amount', t2.amount::text, 'status', t2.status, 'created_at', t2.created_at) AS j\n        FROM billing.payments t2\n        WHERE t2.invoice_id = t0.id\n        ORDER BY t2.created_at DESC\n        LIMIT 20) c\n  ) t2_agg ON true",
+      "comment": "Two `as many` children. A paged select against this view compiles to\nthe two-stage form so children are aggregated for the page only\n(queries.md §8.3).",
+      "reads": [
+        "InvoiceLines",
+        "Invoices",
+        "Payments"
+      ]
+    },
+    {
+      "schema": "billing",
+      "name": "subscription_detail",
+      "declared": "SubscriptionDetail",
+      "body": "SELECT t0.id AS id,\n       t0.org_id AS org_id,\n       t0.status AS status,\n       t0.current_period_start AS current_period_start,\n       t0.current_period_end AS current_period_end,\n       t0.cancel_at AS cancel_at,\n       CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, 'code', t1.code, 'name', t1.name, 'price', t1.price::text, 'currency', t1.currency, 'interval', t1.interval) END AS plan,\n       t1.id AS plan__id,\n       t1.code AS plan__code,\n       t1.name AS plan__name,\n       t1.price AS plan__price,\n       t1.currency AS plan__currency,\n       t1.interval AS plan__interval,\n       CASE WHEN t2.id IS NULL THEN NULL ELSE json_build_object('id', t2.id::text, 'slug', t2.slug, 'name', t2.name) END AS org,\n       t2.id AS org__id,\n       t2.slug AS org__slug,\n       t2.name AS org__name\n  FROM billing.subscriptions t0\n  LEFT JOIN billing.plans t1 ON t1.id = t0.plan_id\n  LEFT JOIN org.orgs t2 ON t2.id = t0.org_id",
+      "reads": [
+        "Orgs",
+        "Plans",
+        "Subscriptions"
+      ]
+    },
+    {
+      "schema": "org",
+      "name": "member_access",
+      "declared": "MemberAccess",
+      "body": "SELECT t0.org_id AS org_id,\n       t0.account_id AS account_id,\n       t0.role AS role,\n       CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, 'slug', t1.slug, 'name', t1.name) END AS org,\n       t1.id AS org__id,\n       t1.slug AS org__slug,\n       t1.name AS org__name\n  FROM org.members t0\n  LEFT JOIN org.orgs t1 ON t1.id = t0.org_id",
+      "comment": "The membership gate reads `role` off this view, which is legal because\na view is a projection and therefore a Record (types.md §5.3).",
+      "reads": [
+        "Members",
+        "Orgs"
+      ]
+    },
+    {
+      "schema": "org",
+      "name": "org_billing_summary",
+      "declared": "OrgBillingSummary",
+      "body": "SELECT t0.id AS org_id,\n       t0.slug AS slug,\n       count(t1.id)::int AS invoice_count,\n       (count(t1.id) FILTER (WHERE t1.status = 'open'::billing.invoice_status))::int AS open_count,\n       sum(t1.amount) FILTER (WHERE t1.status = 'paid'::billing.invoice_status) AS paid_total,\n       min(t1.due_at) FILTER (WHERE t1.status = 'open'::billing.invoice_status) AS oldest_due\n  FROM org.orgs t0\n  LEFT JOIN billing.invoices t1 ON t1.org_id = t0.id\n  GROUP BY t0.id, t0.slug",
+      "comment": "Bare join + aggregates + group by. No `as many` in the same query,\nwhich is what keeps it out of E0532 (queries.md §6.2).",
+      "reads": [
+        "Invoices",
+        "Orgs"
+      ]
+    },
+    {
+      "schema": "org",
+      "name": "org_with_members",
+      "declared": "OrgWithMembers",
+      "body": "SELECT t0.id AS id,\n       t0.slug AS slug,\n       t0.name AS name,\n       t0.created_at AS created_at,\n       coalesce(t1_agg.data, '[]'::json) AS members\n  FROM org.orgs t0\n  LEFT JOIN LATERAL (\n      SELECT coalesce(json_agg(c.j), '[]'::json) AS data\n        FROM (SELECT json_build_object('role', t1.role, 'joined_at', t1.joined_at, 'account', CASE WHEN t2.id IS NULL THEN NULL ELSE json_build_object('id', t2.id::text, 'email', t2.email, 'display_name', t2.display_name) END) AS j\n        FROM org.members t1\n        LEFT JOIN auth.accounts t2 ON t2.id = t1.account_id\n        WHERE t1.org_id = t0.id\n        ORDER BY t1.joined_at\n        LIMIT 200) c\n  ) t1_agg ON true",
+      "comment": "One org with its members, each member carrying its account.\n`account` attaches to `members` because its `on` clause names only\n`Members` besides the joined table (queries.md §4.4).\n\nThe `limit` is not decoration: without it the collection is unbounded\n(`W0501`), and an org with fifty thousand members would be built in\nmemory to answer one detail request.",
+      "reads": [
+        "Accounts",
+        "Members",
+        "Orgs"
+      ]
+    }
+  ]
+}

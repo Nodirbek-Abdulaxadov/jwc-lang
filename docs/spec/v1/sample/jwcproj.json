@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "entry": "src/app.jwc",
   "dependencies": {
-    "redis": "^1.2.0"
+    "redis": "^1.2.0",
+    "mail": "^0.3.0"
   }
 }

@@ -1,0 +1,17 @@
+namespace enums;
+
+database App : Postgres;
+schema s of App;
+
+--- `of` creates a real type; without `of` it is varchar + CHECK
+--- (schema.md §5). Both forms in one file so the difference is visible
+--- side by side.
+enum Priority { low, normal, high }
+enum Status of App.s { draft, live, archived }
+
+table Items of App.s {
+    id       bigint primary key identity;
+    priority Priority default Priority.normal;
+    status   Status default Status.draft;
+    fallback Priority?;
+}

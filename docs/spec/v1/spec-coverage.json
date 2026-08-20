@@ -1,0 +1,761 @@
+{
+  "generated_by": "docs/spec/v1/check_sample.py",
+  "dangling_clauses": [],
+  "sample": "docs/spec/v1/sample",
+  "files": 21,
+  "constructs": 125,
+  "unspecified": 0,
+  "coverage": [
+    {
+      "construct": "aggregate",
+      "clause": "queries \u00a76.3",
+      "uses": 3,
+      "first_use": "src/db/billing.jwc:20"
+    },
+    {
+      "construct": "aggregate.filter",
+      "clause": "queries \u00a76.3",
+      "uses": 1,
+      "first_use": "src/views/billing.jwc:55"
+    },
+    {
+      "construct": "builtin.array",
+      "clause": "builtins \u00a75",
+      "uses": 1,
+      "first_use": "src/services/billing.jwc:95"
+    },
+    {
+      "construct": "builtin.coercion",
+      "clause": "types \u00a77.2",
+      "uses": 6,
+      "first_use": "src/app.jwc:5"
+    },
+    {
+      "construct": "builtin.crypto",
+      "clause": "builtins \u00a76",
+      "uses": 1,
+      "first_use": "src/services/org.jwc:97"
+    },
+    {
+      "construct": "builtin.date",
+      "clause": "builtins \u00a73",
+      "uses": 3,
+      "first_use": "src/services/billing.jwc:49"
+    },
+    {
+      "construct": "builtin.enum_coercion",
+      "clause": "builtins \u00a72",
+      "uses": 1,
+      "first_use": "src/routes/billing.jwc:49"
+    },
+    {
+      "construct": "builtin.env",
+      "clause": "builtins \u00a72",
+      "uses": 5,
+      "first_use": "src/app.jwc:5"
+    },
+    {
+      "construct": "builtin.hash",
+      "clause": "builtins \u00a76",
+      "uses": 3,
+      "first_use": "src/middleware/ratelimit.jwc:36"
+    },
+    {
+      "construct": "builtin.jwt",
+      "clause": "builtins \u00a76",
+      "uses": 2,
+      "first_use": "src/middleware/auth.jwc:13"
+    },
+    {
+      "construct": "builtin.package",
+      "clause": "builtins \u00a78",
+      "uses": 2,
+      "first_use": "src/middleware/ratelimit.jwc:13"
+    },
+    {
+      "construct": "builtin.serve",
+      "clause": "builtins \u00a72",
+      "uses": 1,
+      "first_use": "src/app.jwc:52"
+    },
+    {
+      "construct": "builtin.string",
+      "clause": "builtins \u00a74",
+      "uses": 6,
+      "first_use": "src/middleware/auth.jwc:10"
+    },
+    {
+      "construct": "catch_postfix",
+      "clause": "errors \u00a77",
+      "uses": 1,
+      "first_use": "src/middleware/audit.jwc:36"
+    },
+    {
+      "construct": "class",
+      "clause": "types \u00a74",
+      "uses": 3,
+      "first_use": "src/dto/auth.jwc:3"
+    },
+    {
+      "construct": "class.nested_array",
+      "clause": "types \u00a711.4",
+      "uses": 1,
+      "first_use": "src/dto/billing.jwc:27"
+    },
+    {
+      "construct": "class.rule_minItems",
+      "clause": "types \u00a711.1",
+      "uses": 1,
+      "first_use": "src/dto/billing.jwc:27"
+    },
+    {
+      "construct": "class.rule_required",
+      "clause": "types \u00a711.1",
+      "uses": 3,
+      "first_use": "src/dto/auth.jwc:4"
+    },
+    {
+      "construct": "coalesce",
+      "clause": "types \u00a76.6",
+      "uses": 5,
+      "first_use": "src/app.jwc:5"
+    },
+    {
+      "construct": "column.default",
+      "clause": "schema \u00a72.4",
+      "uses": 4,
+      "first_use": "src/db/audit.jwc:19"
+    },
+    {
+      "construct": "column.identity",
+      "clause": "schema \u00a72.3",
+      "uses": 4,
+      "first_use": "src/db/audit.jwc:11"
+    },
+    {
+      "construct": "column.nullable",
+      "clause": "types \u00a76.1",
+      "uses": 6,
+      "first_use": "src/db/audit.jwc:12"
+    },
+    {
+      "construct": "column.on_update",
+      "clause": "schema \u00a76",
+      "uses": 1,
+      "first_use": "src/db/billing.jwc:40"
+    },
+    {
+      "construct": "column.private",
+      "clause": "schema \u00a73.1",
+      "uses": 2,
+      "first_use": "src/db/auth.jwc:13"
+    },
+    {
+      "construct": "column.rule",
+      "clause": "schema \u00a74.4",
+      "uses": 7,
+      "first_use": "src/db/auth.jwc:10"
+    },
+    {
+      "construct": "column.server",
+      "clause": "schema \u00a73.2",
+      "uses": 1,
+      "first_use": "src/db/org.jwc:36"
+    },
+    {
+      "construct": "column.unique_msg",
+      "clause": "errors \u00a76.1",
+      "uses": 3,
+      "first_use": "src/db/auth.jwc:10"
+    },
+    {
+      "construct": "constraint.check",
+      "clause": "schema \u00a74.4",
+      "uses": 1,
+      "first_use": "src/db/billing.jwc:44"
+    },
+    {
+      "construct": "constraint.fk",
+      "clause": "schema \u00a74.2",
+      "uses": 4,
+      "first_use": "src/db/audit.jwc:21"
+    },
+    {
+      "construct": "constraint.fk_action",
+      "clause": "schema \u00a74.2",
+      "uses": 4,
+      "first_use": "src/db/audit.jwc:7"
+    },
+    {
+      "construct": "constraint.pk_table",
+      "clause": "schema \u00a74.1",
+      "uses": 1,
+      "first_use": "src/db/org.jwc:23"
+    },
+    {
+      "construct": "constraint.unique",
+      "clause": "schema \u00a74.3",
+      "uses": 2,
+      "first_use": "src/db/billing.jwc:46"
+    },
+    {
+      "construct": "constraint.unique_partial",
+      "clause": "schema \u00a74.3",
+      "uses": 2,
+      "first_use": "src/db/billing.jwc:46"
+    },
+    {
+      "construct": "context.read",
+      "clause": "middleware \u00a76.2",
+      "uses": 3,
+      "first_use": "src/middleware/auth.jwc:24"
+    },
+    {
+      "construct": "context.read_opt",
+      "clause": "middleware \u00a76.3",
+      "uses": 1,
+      "first_use": "src/middleware/audit.jwc:23"
+    },
+    {
+      "construct": "context.write",
+      "clause": "middleware \u00a76.4",
+      "uses": 1,
+      "first_use": "src/middleware/auth.jwc:17"
+    },
+    {
+      "construct": "database",
+      "clause": "config \u00a72",
+      "uses": 1,
+      "first_use": "src/app.jwc:3"
+    },
+    {
+      "construct": "database.init",
+      "clause": "config \u00a72.3",
+      "uses": 1,
+      "first_use": "src/app.jwc:4"
+    },
+    {
+      "construct": "delete",
+      "clause": "writes \u00a75",
+      "uses": 1,
+      "first_use": "src/services/org.jwc:53"
+    },
+    {
+      "construct": "doc_comment",
+      "clause": "schema \u00a77",
+      "uses": 17,
+      "first_use": "src/app.jwc:35"
+    },
+    {
+      "construct": "enum.member_ref",
+      "clause": "types \u00a73.3",
+      "uses": 12,
+      "first_use": "src/db/audit.jwc:10"
+    },
+    {
+      "construct": "enum.typed",
+      "clause": "schema \u00a75.2",
+      "uses": 2,
+      "first_use": "src/db/billing.jwc:6"
+    },
+    {
+      "construct": "error.decl",
+      "clause": "errors \u00a71.1",
+      "uses": 1,
+      "first_use": "src/app.jwc:37"
+    },
+    {
+      "construct": "errorHandler",
+      "clause": "errors \u00a74.1",
+      "uses": 1,
+      "first_use": "src/app.jwc:42"
+    },
+    {
+      "construct": "errorHandler.arm",
+      "clause": "errors \u00a74.2",
+      "uses": 1,
+      "first_use": "src/app.jwc:43"
+    },
+    {
+      "construct": "errorHandler.fault_arm",
+      "clause": "errors \u00a74.4",
+      "uses": 1,
+      "first_use": "src/app.jwc:46"
+    },
+    {
+      "construct": "for",
+      "clause": "types \u00a712.5",
+      "uses": 1,
+      "first_use": "src/services/billing.jwc:109"
+    },
+    {
+      "construct": "function.free",
+      "clause": "names \u00a76.4",
+      "uses": 5,
+      "first_use": "src/app.jwc:51"
+    },
+    {
+      "construct": "function.return_annot",
+      "clause": "types \u00a710.2",
+      "uses": 4,
+      "first_use": "src/services/auth.jwc:15"
+    },
+    {
+      "construct": "function.typed_params",
+      "clause": "types \u00a710.1",
+      "uses": 4,
+      "first_use": "src/services/auth.jwc:20"
+    },
+    {
+      "construct": "import.namespace",
+      "clause": "names \u00a76.2",
+      "uses": 19,
+      "first_use": "src/db/audit.jwc:3"
+    },
+    {
+      "construct": "import.package",
+      "clause": "names \u00a76.2.3",
+      "uses": 2,
+      "first_use": "src/middleware/ratelimit.jwc:4"
+    },
+    {
+      "construct": "index",
+      "clause": "schema \u00a71",
+      "uses": 4,
+      "first_use": "src/db/audit.jwc:24"
+    },
+    {
+      "construct": "index.desc",
+      "clause": "schema \u00a74.3",
+      "uses": 1,
+      "first_use": "src/db/billing.jwc:78"
+    },
+    {
+      "construct": "index.partial",
+      "clause": "schema \u00a74.3",
+      "uses": 2,
+      "first_use": "src/db/auth.jwc:49"
+    },
+    {
+      "construct": "insert",
+      "clause": "writes \u00a72",
+      "uses": 5,
+      "first_use": "src/middleware/audit.jwc:30"
+    },
+    {
+      "construct": "insert.on_conflict",
+      "clause": "writes \u00a72.3",
+      "uses": 1,
+      "first_use": "src/services/billing.jwc:159"
+    },
+    {
+      "construct": "insert.returning",
+      "clause": "writes \u00a72.2",
+      "uses": 4,
+      "first_use": "src/services/auth.jwc:26"
+    },
+    {
+      "construct": "join.alias",
+      "clause": "queries \u00a74.2",
+      "uses": 3,
+      "first_use": "src/services/org.jwc:61"
+    },
+    {
+      "construct": "join.bare",
+      "clause": "queries \u00a76.2",
+      "uses": 1,
+      "first_use": "src/views/billing.jwc:49"
+    },
+    {
+      "construct": "join.child_limit",
+      "clause": "queries \u00a74.6",
+      "uses": 2,
+      "first_use": "src/views/billing.jwc:28"
+    },
+    {
+      "construct": "join.child_order",
+      "clause": "queries \u00a74.6",
+      "uses": 2,
+      "first_use": "src/views/billing.jwc:28"
+    },
+    {
+      "construct": "join.left_many",
+      "clause": "queries \u00a74.3",
+      "uses": 2,
+      "first_use": "src/views/billing.jwc:28"
+    },
+    {
+      "construct": "join.left_one",
+      "clause": "queries \u00a74.3",
+      "uses": 3,
+      "first_use": "src/services/org.jwc:61"
+    },
+    {
+      "construct": "let",
+      "clause": "names \u00a75.5",
+      "uses": 11,
+      "first_use": "src/middleware/audit.jwc:11"
+    },
+    {
+      "construct": "local.sigil",
+      "clause": "names \u00a75.3",
+      "uses": 12,
+      "first_use": "src/app.jwc:44"
+    },
+    {
+      "construct": "middleware",
+      "clause": "middleware \u00a71",
+      "uses": 3,
+      "first_use": "src/middleware/audit.jwc:9"
+    },
+    {
+      "construct": "middleware.after",
+      "clause": "middleware \u00a75",
+      "uses": 1,
+      "first_use": "src/middleware/audit.jwc:10"
+    },
+    {
+      "construct": "middleware.bare_return",
+      "clause": "middleware \u00a75.3",
+      "uses": 1,
+      "first_use": "src/middleware/audit.jwc:18"
+    },
+    {
+      "construct": "middleware.binder",
+      "clause": "middleware \u00a72",
+      "uses": 1,
+      "first_use": "src/middleware/auth.jwc:20"
+    },
+    {
+      "construct": "middleware.provides",
+      "clause": "middleware \u00a76.1",
+      "uses": 1,
+      "first_use": "src/middleware/auth.jwc:22"
+    },
+    {
+      "construct": "middleware.requires",
+      "clause": "middleware \u00a73",
+      "uses": 1,
+      "first_use": "src/middleware/auth.jwc:21"
+    },
+    {
+      "construct": "namespace",
+      "clause": "names \u00a76.1",
+      "uses": 21,
+      "first_use": "src/app.jwc:1"
+    },
+    {
+      "construct": "or_throw",
+      "clause": "errors \u00a75",
+      "uses": 1,
+      "first_use": "src/middleware/auth.jwc:14"
+    },
+    {
+      "construct": "path_param.ref",
+      "clause": "names \u00a75.2",
+      "uses": 4,
+      "first_use": "src/middleware/auth.jwc:20"
+    },
+    {
+      "construct": "path_param.typed",
+      "clause": "routing \u00a73.1",
+      "uses": 2,
+      "first_use": "src/routes/billing.jwc:16"
+    },
+    {
+      "construct": "request.body_as",
+      "clause": "routing \u00a75.2",
+      "uses": 5,
+      "first_use": "src/middleware/ratelimit.jwc:31"
+    },
+    {
+      "construct": "request.client_ip",
+      "clause": "routing \u00a75.4",
+      "uses": 2,
+      "first_use": "src/middleware/audit.jwc:22"
+    },
+    {
+      "construct": "request.header",
+      "clause": "routing \u00a75.3",
+      "uses": 2,
+      "first_use": "src/middleware/auth.jwc:8"
+    },
+    {
+      "construct": "request.method",
+      "clause": "builtins \u00a77",
+      "uses": 1,
+      "first_use": "src/middleware/audit.jwc:11"
+    },
+    {
+      "construct": "request.query",
+      "clause": "routing \u00a75.3",
+      "uses": 1,
+      "first_use": "src/routes/billing.jwc:48"
+    },
+    {
+      "construct": "request.raw_body",
+      "clause": "routing \u00a75.1",
+      "uses": 1,
+      "first_use": "src/middleware/ratelimit.jwc:49"
+    },
+    {
+      "construct": "request.route",
+      "clause": "routing \u00a75.4",
+      "uses": 2,
+      "first_use": "src/middleware/audit.jwc:21"
+    },
+    {
+      "construct": "response.created",
+      "clause": "routing \u00a76.1",
+      "uses": 3,
+      "first_use": "src/routes/auth.jwc:13"
+    },
+    {
+      "construct": "response.internalError",
+      "clause": "routing \u00a76.1",
+      "uses": 1,
+      "first_use": "src/app.jwc:47"
+    },
+    {
+      "construct": "response.json",
+      "clause": "routing \u00a76.1",
+      "uses": 4,
+      "first_use": "src/routes/auth.jwc:13"
+    },
+    {
+      "construct": "response.noContent",
+      "clause": "routing \u00a76.1",
+      "uses": 1,
+      "first_use": "src/routes/orgs.jwc:34"
+    },
+    {
+      "construct": "response.status",
+      "clause": "middleware \u00a75.1",
+      "uses": 1,
+      "first_use": "src/middleware/audit.jwc:12"
+    },
+    {
+      "construct": "response.statusCode",
+      "clause": "routing \u00a76.1",
+      "uses": 1,
+      "first_use": "src/app.jwc:44"
+    },
+    {
+      "construct": "response.with_headers",
+      "clause": "routing \u00a76.2",
+      "uses": 1,
+      "first_use": "src/routes/billing.jwc:12"
+    },
+    {
+      "construct": "route",
+      "clause": "routing \u00a71",
+      "uses": 4,
+      "first_use": "src/routes/auth.jwc:9"
+    },
+    {
+      "construct": "route.use",
+      "clause": "middleware \u00a74.1",
+      "uses": 2,
+      "first_use": "src/routes/billing.jwc:23"
+    },
+    {
+      "construct": "routes",
+      "clause": "routing \u00a71",
+      "uses": 4,
+      "first_use": "src/routes/auth.jwc:8"
+    },
+    {
+      "construct": "routes.use",
+      "clause": "middleware \u00a74.1",
+      "uses": 4,
+      "first_use": "src/routes/auth.jwc:8"
+    },
+    {
+      "construct": "schema",
+      "clause": "schema \u00a71",
+      "uses": 1,
+      "first_use": "src/app.jwc:12"
+    },
+    {
+      "construct": "select",
+      "clause": "queries \u00a71",
+      "uses": 6,
+      "first_use": "src/middleware/auth.jwc:26"
+    },
+    {
+      "construct": "select.first",
+      "clause": "queries \u00a75.1",
+      "uses": 4,
+      "first_use": "src/middleware/auth.jwc:28"
+    },
+    {
+      "construct": "select.group_by",
+      "clause": "queries \u00a76.2",
+      "uses": 1,
+      "first_use": "src/views/billing.jwc:50"
+    },
+    {
+      "construct": "select.nested_proj",
+      "clause": "queries \u00a76.1",
+      "uses": 3,
+      "first_use": "src/services/org.jwc:67"
+    },
+    {
+      "construct": "select.optional_pred",
+      "clause": "queries \u00a73.2",
+      "uses": 2,
+      "first_use": "src/routes/billing.jwc:44"
+    },
+    {
+      "construct": "select.orderby",
+      "clause": "queries \u00a75.3",
+      "uses": 3,
+      "first_use": "src/services/auth.jwc:84"
+    },
+    {
+      "construct": "select.page",
+      "clause": "queries \u00a79.2",
+      "uses": 1,
+      "first_use": "src/services/billing.jwc:84"
+    },
+    {
+      "construct": "select.projection",
+      "clause": "queries \u00a76.1",
+      "uses": 5,
+      "first_use": "src/services/auth.jwc:41"
+    },
+    {
+      "construct": "select.where",
+      "clause": "queries \u00a73",
+      "uses": 5,
+      "first_use": "src/middleware/auth.jwc:27"
+    },
+    {
+      "construct": "server",
+      "clause": "config \u00a73",
+      "uses": 1,
+      "first_use": "src/app.jwc:20"
+    },
+    {
+      "construct": "server.cors",
+      "clause": "config \u00a73.4",
+      "uses": 1,
+      "first_use": "src/app.jwc:27"
+    },
+    {
+      "construct": "service",
+      "clause": "types \u00a710",
+      "uses": 3,
+      "first_use": "src/services/auth.jwc:19"
+    },
+    {
+      "construct": "spread",
+      "clause": "types \u00a79",
+      "uses": 3,
+      "first_use": "src/services/auth.jwc:24"
+    },
+    {
+      "construct": "spread.except",
+      "clause": "types \u00a79.1",
+      "uses": 1,
+      "first_use": "src/services/auth.jwc:24"
+    },
+    {
+      "construct": "table",
+      "clause": "schema \u00a71",
+      "uses": 4,
+      "first_use": "src/db/audit.jwc:10"
+    },
+    {
+      "construct": "ternary",
+      "clause": "types \u00a712",
+      "uses": 1,
+      "first_use": "src/services/billing.jwc:51"
+    },
+    {
+      "construct": "test",
+      "clause": "DEFERRED-11",
+      "uses": 1,
+      "first_use": "tests/billing_test.jwc:26"
+    },
+    {
+      "construct": "test.assert",
+      "clause": "DEFERRED-11",
+      "uses": 1,
+      "first_use": "tests/billing_test.jwc:40"
+    },
+    {
+      "construct": "test.assert_fails",
+      "clause": "DEFERRED-11",
+      "uses": 1,
+      "first_use": "tests/billing_test.jwc:62"
+    },
+    {
+      "construct": "throw",
+      "clause": "errors \u00a72.1",
+      "uses": 5,
+      "first_use": "src/middleware/auth.jwc:43"
+    },
+    {
+      "construct": "transaction",
+      "clause": "writes \u00a77",
+      "uses": 2,
+      "first_use": "src/services/billing.jwc:94"
+    },
+    {
+      "construct": "type.array",
+      "clause": "types \u00a72.1",
+      "uses": 2,
+      "first_use": "src/db/auth.jwc:42"
+    },
+    {
+      "construct": "type.bigint",
+      "clause": "types \u00a72.3",
+      "uses": 12,
+      "first_use": "src/db/audit.jwc:11"
+    },
+    {
+      "construct": "type.inet",
+      "clause": "types \u00a72.1",
+      "uses": 2,
+      "first_use": "src/db/audit.jwc:18"
+    },
+    {
+      "construct": "type.jsonb",
+      "clause": "types \u00a75.6",
+      "uses": 3,
+      "first_use": "src/db/audit.jwc:17"
+    },
+    {
+      "construct": "type.numeric",
+      "clause": "types \u00a72.1",
+      "uses": 2,
+      "first_use": "src/db/billing.jwc:20"
+    },
+    {
+      "construct": "type.record_inline",
+      "clause": "types \u00a71",
+      "uses": 3,
+      "first_use": "src/services/auth.jwc:38"
+    },
+    {
+      "construct": "update",
+      "clause": "writes \u00a73",
+      "uses": 3,
+      "first_use": "src/services/billing.jwc:12"
+    },
+    {
+      "construct": "update.first",
+      "clause": "writes \u00a73.2",
+      "uses": 4,
+      "first_use": "src/middleware/auth.jwc:28"
+    },
+    {
+      "construct": "view",
+      "clause": "queries \u00a78.1",
+      "uses": 2,
+      "first_use": "src/views/billing.jwc:7"
+    }
+  ],
+  "declared_but_unused": []
+}

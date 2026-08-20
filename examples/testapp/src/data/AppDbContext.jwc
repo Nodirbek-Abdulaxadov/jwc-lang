@@ -1,1 +1,0 @@
-dbcontext AppDbContext : Postgres;

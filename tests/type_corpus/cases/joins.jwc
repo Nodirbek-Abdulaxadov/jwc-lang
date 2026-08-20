@@ -1,0 +1,159 @@
+namespace joins;
+
+-- The join layer (queries.md §4). A join says three things: what it joins,
+-- what it produces, and — when more than one binding could be its parent —
+-- which one.
+service Joins {
+
+    -- The alias is the only binding: two joins to the same table work
+    -- because each carries its own name (queries.md §4.2).
+    function self_join(org_id: bigint) {
+        return select I from App.s.Invites
+            left join App.s.Orgs inviter on inviter.id == I.invited_by as one inviter
+            left join App.s.Orgs acceptor on acceptor.id == I.accepted_by as one acceptor
+            where org_id == $org_id
+            as {
+                id,
+                email,
+                inviter:  { id, slug },
+                acceptor: { id, slug }
+            };
+    }
+
+    -- Without an alias the second join reuses the table's declared name.
+    function self_join_without_aliases(org_id: bigint) {
+        return select I from App.s.Invites
+            left join App.s.Orgs on Orgs.id == I.invited_by as one inviter
+            left join App.s.Orgs on Orgs.id == I.accepted_by as one acceptor  -- expect: E0212
+            as { id };
+    }
+
+    -- The projection tree follows the attachment tree, so an `on` clause
+    -- that could hang off two bindings has to say which (queries.md §4.4).
+    function ambiguous_attachment(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc limit 200
+            left join App.s.Notes N                                       -- expect: E0510
+                on N.org_id == O.id and N.org_id == M.org_id
+                as many notes orderby id asc limit 200
+            as { id, members: { account_id }, notes: { id } };
+    }
+
+    function under_resolves_it(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc limit 200
+            left join App.s.Notes N on N.org_id == O.id and N.org_id == M.org_id
+                as many notes under members orderby id asc limit 200
+            as { id, members: { account_id, notes: { id } } };
+    }
+
+    function under_names_nothing(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id
+                as many members under nope orderby account_id asc limit 200         -- expect: E0511
+            as { id, members: { account_id } };
+    }
+
+    -- A collection with no stated order returns its elements in whatever
+    -- order the plan produced (queries.md §4.6).
+    function unordered_collection(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id as many members  -- expect: E0536, W0501
+            as { id, members: { account_id } };
+    }
+
+    -- A join always states what it produces (queries.md §4.3).
+    function join_without_a_result(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id                  -- expect: E0535
+            as { id };
+    }
+
+    -- `as group` is the third mode: it feeds aggregates and produces no
+    -- field.
+    function bare_join_feeds_aggregates() {
+        return select O from App.s.Orgs
+            left join App.s.Notes N on N.org_id == O.id as group
+            group by O.id
+            as { id, n: count(N.id) };
+    }
+
+    -- ... and it cannot share a query with a collection (DEFERRED-12).
+    function group_and_many_together() {
+        return select O from App.s.Orgs                                    -- expect: E0532
+            left join App.s.Notes N on N.org_id == O.id as group
+            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc limit 200
+            group by O.id
+            as { id, n: count(N.id), members: { account_id } };            -- expect: E0531
+    }
+
+    -- `inner join … as one` cannot miss, so the field is not optional;
+    -- `left join … as one` can, so it is (types.md §6.3).
+    function inner_join_is_not_optional(org_id: bigint) {
+        let row = select M from App.s.Members
+            inner join App.s.Orgs O on O.id == M.org_id as one org
+            where org_id == $org_id and account_id == 1
+            as { account_id, org: { id, slug } }
+            first
+            or throw NotFound("yo'q");
+        return $row.org.slug;
+    }
+
+    function left_join_one_needs_a_guard(org_id: bigint) {
+        let row = select M from App.s.Members
+            left join App.s.Orgs O on O.id == M.org_id as one org
+            where org_id == $org_id and account_id == 1
+            as { account_id, org: { id, slug } }
+            first
+            or throw NotFound("yo'q");
+        return $row.org.slug;                                              -- expect: E0320
+    }
+
+    -- A `where` on the join filters the child collection, not the driving
+    -- rows (queries.md §4.7).
+    function filtered_collection(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id where M.role == Role.admin
+                as many admins orderby account_id asc limit 200
+            as { id, admins: { account_id, role } };
+    }
+}
+
+-- queries.md §4.6 — a collection with no bound is W0501: it works on the
+-- test data and takes the process down on the one row with fifty thousand
+-- children.
+service Bounds {
+    function unbounded() {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc   -- expect: W0501
+            as { id, members: { account_id } };
+    }
+
+    function bounded() {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc limit 200
+            as { id, members: { account_id } };
+    }
+}
+
+-- queries.md §5.4 — `orderby` reaches a nested `as one` field, because a
+-- join order key exists for it. A collection has no single value to sort
+-- by, so the same syntax over `as many` is E0521.
+service Ordering {
+    function by_nested_one() {
+        return select M from App.s.Members
+            left join App.s.Orgs O on O.id == M.org_id as one org
+            as { account_id, org: { id, name } }
+            orderby org.name asc;
+    }
+
+    function by_collection() {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc limit 200
+            as { id, members: { account_id } }
+            orderby members asc;              -- expect: E0521
+    }
+}

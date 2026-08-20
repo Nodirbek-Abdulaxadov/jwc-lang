@@ -1,0 +1,27 @@
+namespace raw_field_read;
+
+-- The rule the lattice exists for: a query with no projection is raw, and
+-- reading a field of a raw value is a compile error (types.md §5.2).
+service RawSvc {
+    -- Raw wins over nullable: adding a guard would not help, adding a
+    -- projection would, so that is the diagnostic.
+    function bad(id: bigint) {
+        let row = select N from App.s.Notes where id == $id first;
+        return $row.body;                       -- expect: E0310
+    }
+
+    function guarded(id: bigint) {
+        let row = select N from App.s.Notes where id == $id first;
+        if ($row == null) { throw NotFound("yo'q"); }
+        return $row.body;                       -- expect: E0310
+    }
+
+    function projected(id: bigint) {
+        let row = select N from App.s.Notes
+            where id == $id
+            as { id, body }
+            first;
+        if ($row == null) { throw NotFound("yo'q"); }
+        return $row.body;
+    }
+}

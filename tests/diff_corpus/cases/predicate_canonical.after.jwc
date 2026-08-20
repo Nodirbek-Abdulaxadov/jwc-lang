@@ -1,0 +1,11 @@
+namespace c;
+database App : Postgres;
+schema org of App;
+
+table Orgs of App.org {
+    id         bigint primary key identity;
+    slug       varchar(40);
+    retired_at timestamptz?;
+
+    unique (slug) where id > 0 and retired_at == null : "faol slug bitta";
+}

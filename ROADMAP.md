@@ -86,6 +86,33 @@ Reliz tartibi beshta qoidaga bo'ysunadi.
    xatosi bo'ladi, "biz birini tanladik" emas. Feature keyin qo'shiladi;
    jim noto'g'ri javobni keyin tuzatib bo'lmaydi.
 
+### Implementatsiya joylashuvi — rejadan chekinish
+
+§0 "eski sintaksis bir relizda o'ladi" deydi. Amalda uni **o'sha yerda**
+o'ldirish v0.21.0–v0.24.0 ni jo'natib bo'lmaydigan qiladi: yangi front-end
+v0.25.0 gacha namunani ishga tushira olmaydi, ya'ni eski kodni v0.21.0 da
+o'chirish to'rt reliz davomida hech narsa qilmaydigan kompilyator qoldiradi
+va mavjud test to'plamini butunlay qizil qiladi.
+
+Shuning uchun yangi til **`src/v1/`** daraxtida qurildi va `jwc v1 …`
+buyruqlari orqali ochildi. Eski front-end o'z joyida qoldi, `cargo test`
+yashil qoldi, va **kesish nuqtasi v0.25.0** bo'ldi.
+
+**Bajarildi.** v0.25.0 da eski `parser/`, `runner/`, `sql.rs`,
+`typecheck.rs`, `native_build.rs`, `server.rs`, `project.rs`,
+`schema_diff.rs`, `migrate.rs`, paket menejeri va LSP o'chirildi;
+`src/v1/` yuqoriga ko'chdi va `jwc v1 …` prefiksi yo'qoldi. Eski hujjatlar
+— `docs/docs/`, `docs/spec/` ning v1 dan tashqari qismi va eski README —
+`docs/archive-0.9/` ga arxivlandi: ular joylashtirilgan 0.9.x binarlari
+nimani bajarishini tasvirlaydi, bu kompilyatorni emas.
+
+O'chgan narsalardan qaytadiganlari: migratsiyalar — v0.26.0, LSP va
+`jwc openapi` — v0.27.0, test freymvorki va paketlar — v0.28.0. Native AOT
+`DEFERRED-2` bo'yicha 1.1 ga qoldirilgan.
+
+Bu — joylashuv haqidagi qaror, semantika haqida emas: `src/v1/` eski
+grammatikaning bironta konstruksiyasini qabul qilmaydi.
+
 ---
 
 ## 3. Relizlar
@@ -112,6 +139,18 @@ keyingi relizlar ixtiro qilmasin.
 har biri `spec/` da band raqamiga yoki `DEFERRED` jadvaliga havola qiladi;
 qayta yozilgan namuna 3 kishi tomonidan o'qib chiqilgan va spec bandiga
 tayanmagan bironta konstruksiya qolmagan.
+
+**Holat: yopildi.** `docs/spec/v1/` da 13 ta normativ hujjat
+(`grammar.ebnf` + 11 `.md` + `DEFERRED.md`). `check_sample.py` namunaning
+125 konstruksiyasini tasniflaydi, har birini band raqamiga bog'laydi,
+bandning mavjudligini tekshiradi va olib tashlangan lug'atni rad etadi —
+`unspecified: 0`, `dangling_clauses: []`. Namuna 4 ta nuqsonidan
+qutuldi (403→401, e'lon qilinmagan `context` bog'liqligi, webhook TOCTOU,
+6 ta ikki ma'noli `where`).
+
+Uchinchi qabul mezoni — "3 kishi o'qib chiqqan" — **bajarilmadi**: bu
+tashqi ko'rib chiqish, kod emas. Namunani o'qiydigan uchta muhandis
+topilgunga qadar ochiq qoladi.
 
 ---
 
@@ -145,6 +184,29 @@ tayanmagan bironta konstruksiya qolmagan.
 o'qiydi; `tests/parse_corpus/` grammatikaning har bir produksiyasini qamrab
 oladi (qamrov skripti 100% talab qiladi); `jwc fmt` corpus'da idempotent;
 eski grammatikaning 10 ta kalit so'zi uchun 10 ta `E0900` testi bor.
+
+**Holat: yopildi.** `src/v1/` — token, lexer, ast, parser, fmt, diag
+(~4 600 satr). `jwc v1 check` namunaning 21 faylini 0 xato bilan o'qiydi;
+`tests/v1_parse_corpus.rs` 110 ta snippet bilan grammatikaning **har bir**
+produksiyasini qamrab oladi va qamrov testi grammatikani o'qib tekshiradi —
+yangi produksiya qo'shilsa va corpus'da bandi bo'lmasa, test yiqiladi.
+`jwc v1 fmt` — AST'dan qayta chop etadi, ya'ni qat'iy nuqta konstruksiya
+bo'yicha; namuna **formatlangan holda** commit qilingan, shuning uchun
+layout regressiyasi namunada diff sifatida ko'rinadi. 10 ta `E0900` testi
+bor.
+
+Ikki chekinish, ikkalasi ham namunaning o'zi topdi:
+
+- **Zaxiralangan so'z yo'q** (names §2.6). `route`, `server`, `size`,
+  `max`, `check`, `key`, `text`, `date`, `int` — hammasi namunada oddiy
+  ustun nomi, qoida nomi yoki builtin namespace sifatida uchraydi.
+  Zaxiralangan so'zlar ro'yxati tilning **o'z misolini** taqiqlagan bo'lardi.
+- **`except (a, b)`** qavs ichida (types §9.1). Spread vergul bilan
+  ajratilgan obyekt literali ichida turadi, u yerda `except a, b` ni
+  `except a` + keyingi band'dan ajratib bo'lmaydi.
+
+Namunaning uchta so'rovi `orderby` ni `as { }` dan oldin yozgan edi;
+parser E0501 bilan ushladi va ular tuzatildi.
 
 ---
 
@@ -183,6 +245,36 @@ eski grammatikaning 10 ta kalit so'zi uchun 10 ta `E0900` testi bor.
 `jwc gen-sql` bayt-ma-bayt mos; chiqish bo'sh Postgres 16/17 ga xatosiz
 qo'llanadi; `jwc gen-sql --explain` har bir statementga `file:line` beradi;
 DBA protokoli bir marta o'tkazilgan va farqlar 0.
+
+**Holat: yopildi (DBA auditidan tashqari).** `src/v1/{naming,model,ddl,
+workspace}.rs`. `jwc v1 gen-sql` — offline, deterministik, 7 fazali
+tartibda. `tests/ddl_golden/` da 5 ta etalon (4 ta fokusli holat + to'liq
+namuna); `tests/v1_ddl_golden.rs` bayt-ma-bayt solishtiradi, ikki yurishning
+bir xilligini, har bir statementning `file:line` iga egaligini va faza
+tartibini tekshiradi. `tests/v1_schema_diagnostics.rs` — 24 test, har bir
+qoida uchun bittadan.
+
+**Haqiqiy Postgres 16.13 ga qo'llandi** (`JWC_V1_PG` bilan, skip emas):
+beshta etalonning hammasi toza tushdi, keyin tekshirildi — `identity`
+(`bigserial` emas, `nextval` yo'q), qisman unique indekslar ikkinchi faol
+obunani bloklaydi va bekor qilingandan keyin ruxsat beradi, `on update
+now()` triggeri ishlaydi, `check` buzilishi generatsiya qilingan nom bilan
+qaytadi (errors §6.5 shunga tayanadi), pul ustunlari `numeric(14,2)`.
+
+Postgres ikki xatoni topdi, ikkalasi ham tuzatildi:
+- bir xil ustunlar ustidagi ikki indeks (btree + gin) bir xil nom olardi;
+  endi metod nomga kiradi;
+- jadval `check` ining tartib raqami ustun qoidalarini ham sanardi, ya'ni
+  `minLength(...)` qo'shilishi mavjud constraint'ni qayta nomlardi.
+
+Yangi qoida — `E0431`: `using gin` skalyar `varchar`/`text` ustida rad
+etiladi (`gin_trgm_ops` kerak, JWC extension o'rnatmaydi).
+
+**Ochiq qolgani:**
+- ~~**`E0440`**~~ (`NOT NULL ADD COLUMN`) — v0.26.0 da differ bilan keldi.
+- **DBA protokoli** — tashqi muhandis. v0.20.0 dagi "3 kishi o'qidi" bilan
+  bir xil sababdan ochiq.
+- **`view` DDL** — ataylab bu relizda emas (query compiler'ga bog'liq).
 
 ---
 
@@ -239,6 +331,43 @@ annotatsiyasi bilan; `jwc check` 100% mos keladi; namunadagi 6 ta ikki
 ma'noli `where` ning hammasi rad etiladi; `9007199254740993` id raw va
 record yo'lida bayt-bir xil chiqadi (test).
 
+**Holat: yopildi (bitta mezon qisman).** `src/v1/{types,symbols,check}.rs`.
+`jwc v1 check docs/spec/v1/sample` — 21 fayl, 0 xato, 0 ogohlantirish.
+`tests/type_corpus/` — 15 ta holat fayli, umumiy `prelude.jwc` ustida.
+Annotatsiya qatorning o'zida turadi (`-- expect: E0310`), `@line` emas:
+raqam qator pozitsiyasidan kelib chiqadi, ya'ni fayl tahrirlanganda
+annotatsiya siljimaydi. Moslik **ikki tomonlama qat'iy** — yetishmagan
+diagnostika ham, kutilmagani ham testni yiqitadi; shuning uchun corpus
+diagnostikaning *yo'qligini* ham xuddi borligi kabi mahkamlaydi.
+
+**Ikki ma'noli `where` masalasi**: 6 ta sayt endi *rad etilmaydi* — ular
+**yozib bo'lmaydigan** bo'ldi. `$` majburiy bo'lgani uchun query bandidagi
+yalang'och nom faqat ustun bo'ladi (v0.21.0). `sigils.jwc` shu qarorni
+mahkamlaydi: sigilsiz lokal `E0376`/`E0211` beradi, `where org_id == org_id`
+esa `W0104` ("har doim rost").
+
+Implementatsiya to'rtta bandni aniqlashtirishga majbur qildi, hammasi
+spec'ga yozildi:
+- **queries §6.1** — proyeksiyadagi yalang'och nom **haydovchi** binding
+  ustuni. Aks holda joinli har bir query'da `id` ikki ma'noli bo'lardi.
+- **queries §4.6** — join natijasining o'z `orderby`/`limit` i o'sha
+  qo'shilgan jadvalga scoped.
+- **types §6.4** — query bandi ichida nullable maydonga murojaat xato emas:
+  bu SQL, NULL o'zi tarqaladi. `E0320` — koddagi qiymatlar haqida.
+- **schema §3.1** — `private` qoidasi aniqlashtirildi. `#35` topgan narsa
+  to'g'ri edi: login query'si private ustunni nomlaydi va nomlashi **kerak**
+  (`hash.verify` ga hash kerak). Qoida qiymatni **o'qish** haqida emas,
+  **chiqib ketishi** haqida: lokalga proyeksiya qilish mumkin, javobga
+  berish — `E0410`. `view` da esa umuman mumkin emas.
+- **errors §1.1** — har bir xato `message: text` tashiydi, e'lon qilinganmi
+  yo'qmi.
+
+**Qisman:** `9007199254740993` uchun **uchdan ikki** qism bor — wire
+qoidasi (`bigint`/`numeric` → string) lattice'da va emitter'ning cast'ida
+tekshiriladi va ikkovi mos kelishi test qilinadi. **Uchinchi qismi —
+haqiqiy so'rovni ikkala yo'ldan o'tkazib baytlarni solishtirish — runtime
+talab qiladi va v0.24.0 ga qoladi.**
+
 ---
 
 ### v0.24.0 — **Runtime** — routing, middleware, error model, bir jadvalli CRUD
@@ -286,6 +415,46 @@ record yo'lida bayt-bir xil chiqadi (test).
 `tests/http_golden/` dagi 40+ so'rov-javob juftligi (status, header, body)
 mos keladi; route-conflict corpus'i (12 holat) mos diagnostika beradi;
 error model conformance corpus'i (E1–E14 uchun kamida 2 test) o'tadi.
+
+**Holat: yopildi (bitta endpoint guruhidan tashqari).**
+`src/v1/{wiring,sql,value,db,validate,exec,exec_call,serve}.rs`.
+
+**Statik yarmi** — `src/v1/wiring.rs`: route jadvali, dublikat
+`(method, path)` (E0710), slot kelishuvi (E0701), middleware zanjiri
+(E0802/E0803/E0804/E0805), tiplangan `context` (E0820/E0821), raise-set
+fixpoint'i, `after` bloki bo'sh raise-set (E0811), nested transaction
+(E0620), yetib bo'lmaydigan arm (W1001), javob bermaydigan arm (E1011).
+`tests/wiring_corpus/` — 5 fayl, `-- expect:` annotatsiyasi bilan.
+
+**Runtime yarmi** — `jwc v1 serve` haqiqiy Postgres 16.13 ga qarshi ishlaydi.
+`tests/v1_http_golden.rs` — **47 ta so'rov-javob juftligi**, `serve::handle`
+ni to'g'ridan-to'g'ri chaqiradi (server chaqiradigan aynan o'sha funksiya),
+ya'ni tartib, middleware, error model va SQL — hech biri stub emas. Soket
+ham alohida tekshirildi: `curl` bilan 200 (`with { }` header'i bilan), 404,
+400 (yaroqsiz path parametri) va 401 (middleware) olindi.
+
+Uchta xato faqat haqiqiy ishga tushirishda chiqdi:
+- **Parametr bog'lash** — `$1::bigint` Postgres'ga `$1` ni `bigint` deb
+  ko'rsatadi va string'ni rad etadi. `($1::text)::bigint` — bitta bog'lash
+  yo'li, hamma tip uchun.
+- **`created(json(x))` kompozitsiya qilmasdi.** Javob endi **qiymat**
+  (`Value::Response`), shuning uchun `json` 200 da quradi va `created` uni
+  201 ga o'zgartiradi — o'rab olmaydi.
+- **`jsonb` kalitlarni saralaydi.** Proyeksiya tartibi = JSON kalit
+  tartibi, shuning uchun `json_build_object`; va `serde_json` ning default
+  map'i ham saralangani uchun record yo'li proyeksiya tartibida qayta
+  yig'iladi.
+
+Bittasi validatsiyada: `min`/`max` o'nlik son ustida jimgina o'tib ketardi
+(`"-1.00".parse::<i64>()` xato beradi). Endi o'nlik sifatida solishtiriladi
+va chegara ham o'nlik bo'lishi mumkin.
+
+**Ochiq qolgani:**
+- ~~**`/api/v1/me/orgs`**~~ va ~~**`page`**~~ — ikkalasi ham v0.25.0 da
+  yopildi. Namunaning **25 ta endpoint'ining hammasi** javob beradi.
+- `E1`–`E14` ning `E3` (exhaustiveness) qismi amalda har doim qanoatlanadi,
+  chunki 1.0 grammatikasida har bir e'lon qilingan xatoning default status'i
+  bor (errors §4.3). Bu — dizayn, kamchilik emas.
 
 ---
 
@@ -361,6 +530,61 @@ merge qilinadi.
 raw-tracking diagnostikasi namunadagi har bir query uchun to'g'ri
 `preserved`/`lost` beradi.
 
+**Holat: yopildi.** Besh bosqich, beshta alohida commit.
+`src/v1/{query,query_sql,views,cursor}.rs` + `ddl.rs`, `check.rs`,
+`exec.rs`, `sql.rs`.
+
+**25.a** — join daraxti. Biriktirish endi ochiq: join natijasi `on` bandi
+nomlagan (qo'shilayotgandan boshqa) binding'ga osiladi; ikki nomzod —
+`E0510`, yechimi `under <nom>`. `under` alias'ni ham, join chiqaradigan
+maydon nomini ham qabul qiladi. `as group` kalit so'zi qo'shildi: ilgari
+`as` siz join "agregat uchun" degani edi, ya'ni "men agregat qilmoqchi
+edim" bilan "proyeksiyani unutdim" bir xil matn edi (`E0535`). Join ustida
+`where` — bola kolleksiyasini filtrlaydi, haydovchi qatorni emas.
+
+**25.b** — emissiya. `as one` + `left join` → bola PK'si bo'yicha
+`CASE WHEN … IS NULL THEN NULL` (null obyekt, null'lardan iborat obyekt
+emas); `inner join` da guard yo'q. `as many` → `LEFT JOIN LATERAL`,
+`where`/`orderby`/`limit` lateral ichida — `json_agg(… ORDER BY …)` emas:
+u tartiblaydi, lekin chegaralay olmaydi, va yonma-yon ikki kolleksiya
+bir-birining qatorlarini ko'paytiradi. `sql.rs::select` o'chirildi: bitta
+yo'l qoldi. `tests/sql_golden/` — namunaning har bir query'si + fokusli
+holatlar, SQL va bind parametrlari bilan muzlatilgan; jonli Postgres'da
+esa golden ko'rmaydigan narsalar tekshiriladi (3 nota + 2 tag → 3 va 2,
+6 va 6 emas).
+
+**25.c** — agregatlar. `count`/`sum`/`min`/`max`/`avg`, `count.distinct`,
+`FILTER (WHERE …)`, `having`. **`sum` kengayadi** (`int → bigint`,
+`bigint`/`numeric` → `numeric`) va `avg` — `numeric?`: operand kengligini
+saqlagan `sum` aynan sumni ma'noli qiladigan ma'lumotda toshib ketadi.
+`W0502` — ikki bare join fan-out beradi, `count` ikkinchisining qatorlarini
+ham sanaydi; yechimi `count.distinct`.
+
+**25.d** — view'lar. `CREATE VIEW` chiqadi, view — haqiqiy DB obyekti.
+Ustunlari — proyeksiyasi; skalyarlar Postgres tipini saqlaydi (aks holda
+`where org_id == @org_id` sonni matn bilan solishtirardi), nested `one`
+qo'shimcha `x__<maydon>` ustunlarini beradi — `orderby org.name` shularga
+tushadi, JSON path'ga emas (N6). **Ikki bosqichli pushdown** (#44):
+kolleksiyali relation ustidan chegaralangan sahifa avval kalitlarni oladi
+(`WITH page AS MATERIALIZED`, **base jadval** ustidan — view ustidan
+kalit olish uning lateral'larini baribir bajaradi). Isbotlanmasa —
+`E0542`, jimgina O(table) plan emas. `EXPLAIN ANALYZE` bilan tasdiqlandi
+va test o'z kontrolini olib yuradi: indekssiz tartibda rewrite'siz shakl
+kolleksiyani 200 marta quradi, rewrite bilan 5 marta.
+
+**25.e** — pagination va valve. Keyset kursor imzolanadi (`E1205` —
+`cursor_secret` siz `page` yo'q): kursor — mijoz beradigan predikat, imzosiz
+u hech kim tekshirmagan ikkinchi filtr bo'lardi. Konvert uch ustun bilan
+qaytadi, chunki `items` Postgres bergan matn bo'lib yetib borishi kerak.
+`exists` / `not exists`, `in (…)` va `in ($massiv)`. `raw()` — SQL literal
+bo'lishi shart (`E0610`), `view` ichida taqiqlangan (`E0611`),
+`jwc v1 explain` hammasini sanab beradi. `W0501` — chegarasiz kolleksiya.
+
+Yo'l-yo'lakay ikkita runtime kamchiligi topildi: `set value = value + 1`
+jarayonda hisoblanardi (endi SQL'da — aks holda avval o'qish kerak, ikki
+chaqiruvchi esa bir xil sonni o'qiydi), va `==?` dagi yalang'och
+`$2 IS NULL` Postgres'ga tip bermasdi.
+
 ---
 
 ### v0.26.0 — **Migrations** — snapshot, fazalar, e'lon qilingan rename
@@ -404,6 +628,33 @@ yangi `gen-sql` ni bo'sh bazaga qo'llash bilan **bir xil** (`pg_dump
 o'tadi; `varchar(20)→varchar(40)` on `Invoices.number` (view ostidagi ustun)
 xatosiz qo'llanadi.
 
+**Bajarildi.** Besh bosqich, har biri alohida commit: snapshot modeli
+(`src/snapshot.rs`), differ (`src/diff.rs`, 29 ta operatsiya, 28 ta korpus
+keysi), fazali emissiya va `down` (`src/migrate.rs`), applier
+(`src/apply.rs` — `up`/`down`/`status`/`verify` + advisory lock), va
+qabul testi. 200 ta ketma-ketlik ×8 tahrir Postgres 16.13 da 43 soniyada
+o'tdi; 18 ta operatsiya sinfining hammasi haqiqatan ham chiqqani
+tekshiriladi.
+
+Yo'l-yo'lakay topilgan uchta narsa:
+
+- **View ustida view umuman emissiya bo'lmasdi.** `views::attach` ustunlarni
+  e'lon tartibida, `model.views` hali bo'sh holatda hisoblardi — tashqi view
+  hech qanday diagnostika bermasdan yo'qolib ketardi, holbuki
+  `ddl.rs::ordered_views` shu holat uchun butun boshli funksiya tutib
+  turardi. Endi u ham qo'zg'almas nuqta.
+- **`ddl.rs` endi snapshot tiplari ustidan yozadi.** `gen-sql` va
+  `jwc migrate` bitta renderer'dan chiqadi, ya'ni bir xil obyekt uchun
+  boshqacha DDL chiqarishi *konstruksiya bo'yicha* mumkin emas.
+- Spetsifikatsiyada uchta qarama-qarshilik: §2 "olti sinf" deb yozib yetti
+  tasini sanagan; §5.3 enum reorder'ni ikki abzats oralig'ida ham rad
+  etgan ham "operatsiya bermaydi" degan; §4 view kommentini 7-fazaga
+  qo'ygan, holbuki view 8-fazada yaratiladi. Uchalasi ham tuzatildi.
+
+**Ochiq qolgani:**
+- **`E0910`** — `--native` rad etish kodi. `jwc build` bu daraxtda yo'q
+  (DEFERRED-2), shuning uchun rad etadigan narsa ham yo'q.
+
 ---
 
 ### v0.27.0 — **Tooling** — SQL ko'rinadigan bo'ladi
@@ -428,7 +679,39 @@ xatosiz qo'llanadi.
 **Tugadi =** namunadagi 25 endpoint uchun `jwc explain` chiqishi
 `tests/sql_golden/` bilan mos; LSP smoke testi hover-SQL ni tekshiradi;
 `jwc openapi` chiqishi OpenAPI 3.1 validatoridan o'tadi;
-`jwc lint --constraints` namunadagi 5 ta xabarsiz unique'ni ko'rsatadi.
+`jwc lint --constraints` namunadagi xabarsiz unique'larni ko'rsatadi.
+(Reliz yozilganda "5 ta" deb taxmin qilingan edi; v0.20.0 da namuna spec'ga
+moslashtirilgandan keyin ular **3 ta** — `Sessions.token_hash`,
+`ApiKeys.key_hash`, `Invites.token_hash` — va shulardan bittasigina bugun
+route'dan yetib boriladi. Aynan shu uchtasi v0.29.0 ning hash mavzusi.)
+
+**Bajarildi.** To'rt bosqich, har biri alohida commit: `jwc explain`
+nishonlari + `JWC_LOG_SQL` + `debug.dump` (`docs/spec/v1/tooling.md` —
+yangi normativ hujjat), `jwc lint --constraints`, `jwc openapi`, va til
+serveri (`src/lsp.rs`). Barcha to'rt qabul mezoni testda:
+`explain_and_the_sql_golden_are_the_same_compiler`,
+`openapi_passes_a_real_validator` (haqiqiy `openapi-spec-validator`),
+`tests/lsp.rs` dagi hover-SQL, va `lint_constraints_...`.
+
+Yo'l-yo'lakay:
+
+- **Route pattern'i ikki qatorning yopishtirilishi emas edi.** v0.24.0 dan
+  beri `jwc explain` `/api/v1/authregister` va
+  `/api/v1/orgs/{org_id: bigint}/invoices` deb yozib kelgan. Endi uchala
+  chaqiruvchi ham bitta `wiring::route_pattern` dan o'tadi — bu
+  `request.route()` javob beradigan qator (routing §5.4).
+- **Annotatsiyasiz funksiyaning qaytish tipi endi e'lon qilinadi.**
+  types.md §10.2 annotatsiyani faqat ikki `return` kelishmaganda talab
+  qiladi, shuning uchun ko'pchilik funksiyada u yo'q va har bir chaqiruv
+  joyi `Unknown` ko'rardi. `Checked` endi ularni chiqaradi; `jwc openapi`
+  pass'ni ikki marta yuritadi. `jwc check` hamon bir marta.
+- **`delete` hech qanday unique/check buzmaydi.** `wiring::promote` uni
+  raise set'ga qo'shadi (u yerda ortiqcha baho xavfsiz), lekin
+  `--constraints` aniq javobni beradi: `DELETE /orgs/{org_id}` →
+  `fk_invoices__org_id`, 400.
+
+**Ochiq qolgani:**
+- **`E0910`** — hamon `jwc build` yo'q (DEFERRED-2).
 
 ---
 
@@ -458,6 +741,30 @@ ishga tushiradi va tartibdan qat'i nazar takrorlanadi (shuffle testi);
 `assert fails ... with` noto'g'ri xabarda yiqiladi (negativ test);
 `raises` narrowing urinishi kompilyatsiya xatosi beradi.
 
+**Bajarildi.** Uch bosqich: `jwc test` + izolyatsiya + `assert fails … with`
+(`docs/spec/v1/testing.md`), paket kontent modeli (`packages.md`, N8), va
+registry klienti. Namunada 3 emas **4 ta** test bor va to'rttasi ham yashil;
+teskari tartibda ham. Barcha uch mezon testda.
+
+`seed.*` bu relizga kirmadi va kirmaydi: `DEFERRED-11` uni hali v0.20.0 da
+hal qilgan — umumiy fixture modeli aynan N9 ko'rsatgan narsa, va namunaning
+testlari o'z ma'lumotini o'zi quradigan qilib qayta yozilgan. Ro'yxatdagi
+band o'sha qarordan oldin yozilgan.
+
+Yo'l-yo'lakay topilganlar:
+
+- **`transaction { }` tranzaksiya emas edi.** `exec::transaction` pool'dan
+  ulanish olib unda `BEGIN` qilardi, ichidagi har bir statement esa
+  `db.rs` orqali *boshqa* ulanishga tushardi. writes §7.1 v0.24.0 dan beri
+  atomarlikni va'da qilib, uni bermay kelgan. 0.9.x engine'da shu uchun
+  `TX_CONN` bor edi; v1 `db.rs` uni hech qachon o'qimagan. Endi o'qiydi, va
+  test izolyatsiyasi ham xuddi shu mexanizm.
+- **`assert fails` deyarli hech narsani tekshirmasdi** — berilgan xato
+  tipini e'tiborsiz qoldirib, *nimadir* yiqilsa o'tib ketardi.
+- **Namunaning o'zida ikki nuqson**: `Invoices` da qarama-qarshi yo'nalishli
+  check yozilgan edi (test boshqa qoidani tekshirardi), va test
+  `ConstraintViolation` kutardi — uni hech narsa ko'tarmaydi (errors §6.1).
+
 ---
 
 ### v0.29.0 — **Hardening**
@@ -484,6 +791,205 @@ ishga tushiradi va tartibdan qat'i nazar takrorlanadi (shuffle testi);
 o'tolmaydi; 413 body-limit testi middleware'gacha yetmaydi; timing testi
 `login` ning ikki tarmog'i orasida statistik farq bermaydi (yoki farq
 hujjatlashtiriladi); 24h soak'da RSS o'sishi < 5%, 0 ta pool leak.
+
+**Bajarildi (soak'dan tashqari).** To'rt bosqich. Uchta mezon testda:
+`serve::client_ip_tests` (besh xil XFF shakli hech narsani o'zgartirmaydi),
+`an_oversized_body_never_reaches_the_chain` (413, va nazorat sifatida
+limitdan past tanada 403), va
+`the_two_failure_branches_of_login_cost_the_same`.
+
+**24 soatlik soak** — quyidagi tuzatish o'tishida yurgizildi, qarang.
+
+Yo'l-yo'lakay topilgan eng muhim narsa: **`login` da timing orakuli bor
+edi.** Noma'lum email Argon2id'gacha yetmasdan qaytardi — **2.4ms**, ma'lum
+email esa **415.8ms**. "Ikkala xato uchun bir xil xabar" ni soat butunlay
+bekor qilardi. Endi ikkala tarmoq ham verify qiladi (nomaʼlumi decoy'ga
+qarshi): 410.9ms va 414.8ms.
+
+Boshqalar:
+
+- **`hash.*` bo'linishi allaqachon bor edi** (v0.24.0 dan), lekin
+  namunada hashlangan tokenni **qidiradigan** joy yo'q edi — endi
+  `POST /api/v1/invites/accept` bor, va `Invites.token_hash` ustidagi
+  `unique` shu tufayli ma'noga ega.
+- **`server { }` ning ko'p kaliti o'qilib tashlab yuborilardi.**
+  `request_timeout`, `shutdown_grace`, `cors { }` endi ishlaydi; `tls { }`
+  va `header_timeout` esa **boot'da rad etiladi** — e'lon qilingan TLS
+  ostida ochiq HTTP xizmat qilish operator ko'ra olmaydigan yagona
+  noto'g'ri sozlama.
+- **`cargo audit` dagi 7 ta advisory faqat dev-dependency'da**, va bu
+  grafik haqidagi da'vo — `cargo audit` uni tekshira olmaydi, shuning uchun
+  test tekshiradi.
+
+#### Tuzatish o'tishi (2026-08-20)
+
+v0.29.0 dan keyin ochiq qolgan bandlar bo'yicha. Ikkitasi yopildi, biri
+ochiq qoladi (24 soatlik soak), va yo'l-yo'lakay ulardan kattarog'i
+topildi.
+
+**`tls { }` va `header_timeout` endi rad etmaydi — ishlaydi.** Ikkalasi
+ham `axum::serve` ostida yashiringan edi, shuning uchun listener
+`hyper-util` ning accept sikliga ko'chirildi: TLS `tokio-rustls` bilan
+(ALPN `h2` + `http/1.1`), header muddati esa hyper'ning `http1` builder'ida.
+Sertifikat boot'da o'qiladi — yechilmagan `tls { }` serverni to'xtatadi,
+ochiq HTTP'ga qaytmaydi.
+
+> Bu yerda **unit testlar ko'rmaydigan** nuqson chiqdi: `header_read_timeout`
+> yonida `Timer` bo'lmasa, hyper **har bir HTTP/1 ulanishida** o'z poll'i
+> ichida panic qiladi. Barcha unit testlar yashil edi. `tests/serve_listener.rs`
+> haqiqiy soketga gapiradi va `TokioTimer` olib tashlansa yiqiladi.
+
+**`server { bind }`** qo'shildi (config §3.2.1). Manzil umuman
+sozlanmas edi — `0.0.0.0` yozib qo'yilgandi.
+
+**`server { }` da xato yozilgan kalit jim edi** — endi `E1206`.
+`init()` da bu `E1202` bilan yopilgan, `server { }` da esa hech narsa
+yo'q edi: `trusted_proxie` proksi ro'yxatini bo'sh qoldirardi, ya'ni
+`client_ip()` har so'rovda proksining o'z manzilini qaytarar va unga
+kalitlangan rate limiter bitta umumiy paqirga aylanardi — aynan o'sha
+kalit oldini olishi kerak bo'lgan nosozlik. `jwc check` toza o'tardi.
+
+**`db::run_on` noto'g'ri proyeksiyani "qator yo'q" ga aylantirardi**
+(`.unwrap_or(None)`): `Shape::First` → 404, `Shape::Rows` → `[]`, ikkalasi
+ham bo'sh jadvaldan farq qilmaydi. Endi fault.
+
+**Eng kattasi: testlarning bir qismi hech qachon yurmagan.** `tests/` dagi
+7 ta suite (`hardening` ham!) CI'ning birorta ish o'rnida nomlanmagan, yana
+4 tasi esa faqat **ma'lumotlar bazasisiz** yurgan — ular esa bazasiz
+`SKIPPED` chop etib, `ok` qaytaradi. Bu muhitga Postgres 16 o'rnatilib
+birinchi marta qaratilganda **7 suite'da 21 ta test yiqildi**:
+
+| Suite | Yiqilgan | Sabab |
+|---|---|---|
+| `sql_golden` | 9 | psql'ga URI'dan keyin `-d` berilgan — psql uni yangi ulanish deb oladi va host/port/user'ni tashlab, standart unix soketga qaytadi |
+| `migrate_apply` | 5 | bitta bazani bo'lishadi, mutex yo'q — biri `reset` qilar ekan ikkinchisi yarmida edi |
+| `jwc_test` | 3 | shu sabab |
+| `ddl_golden` | 1 | psql `-d` |
+| `migrate_golden` | 1 | psql `-d`, va baza yaratishda `postgres` maintenance bazasi ko'rsatilmagan — CI'da foydalanuvchi `postgres` bo'lgani uchun tasodifan ishlagan |
+| `migrate_roundtrip` | 1 | ikki test bitta `_rt_a`/`_rt_b` juftini bo'lishardi |
+| `http_golden` | 1 | `answered == 25` deb yozib qo'yilgan, namunada esa 26 ta route — v0.29.a da qo'shilgan, va test o'sha kuni yurmagan |
+
+Hammasi tuzatildi; psql yordamchisi `tests/common/mod.rs` ga chiqarildi.
+CI endi har bir suite'ni nomlaydi va `hardening` ni **bazali** ham yuradi
+(timing testi faqat shu yerda ma'noga ega). Takrorlanmasligi uchun
+`every_test_suite_is_named_in_ci` — `tests/` ni `ci.yml` ga solishtiradi,
+bu ham `no_triaged_advisory_crate_reaches_the_shipped_binary` bilan bir xil
+shakl: repo haqidagi da'vo, repoga qarshi tekshiriladi.
+
+**`redis.*` butunlay stub edi, va ulardan biri xavfsizlik nuqsoni.**
+`builtins.md` §8 yetti nomni hujjatlashtiradi. Amalda: `redis.enabled()`
+doim `false`, **`redis.rate_limit()` doim `true`**, qolgan beshtasi esa
+umuman yo'q — tipdan o'tardi va har so'rovda `unknown function` fault'i
+bilan yiqilardi. Ya'ni hujjatlashtirilgan API'ga qarshi yozilgan rate
+limiter **hamma so'rovni o'tkazib yuborardi**, va javobda buni aytadigan
+hech narsa yo'q edi.
+
+Sababi bitta qatorda: `src/redis_engine.rs` da to'liq drayver bor —
+`get/set/del/incr/expire/eval`, pool, retry, transient tasnifi — lekin
+**uni hech kim boshlatmasdi.** v1 da `redis_engine::init_from_env()` ga
+birorta chaqiruv yo'q edi, shuning uchun `--features redis` bilan
+yig'ilgan va `JWC_REDIS_URL` qo'yilgan binarda ham `is_enabled()` `false`
+qaytarardi. Butun drayver o'lik kod edi.
+
+Endi `redis.*` drayverga ulangan (`exec_call.rs::redis_call`), boot'da
+`serve` va `test` ikkalasida ham init qilinadi, va **server bo'lmasa
+`enabled()` dan boshqa hammasi raise qiladi** — rate limiter uchun
+"Redis yo'q" hech qachon "ruxsat" degani bo'lmasligi kerak.
+`the_redis_package_surface_reaches_the_server` haqiqiy serverga qarshi
+200/200/429/429 ni tekshiradi; stub'ni qaytarsam `limit = 2 did not bind`
+deb yiqiladi.
+
+Buning natijasi darhol ko'rindi: **namunaning `RateLimit` middleware'i ham
+hech qachon cheklamagan.** U to'g'ri yozilgan — `redis.enabled()` bilan
+o'ralmagan, chunki do'koni yo'q bo'lganda so'rovni o'tkazadigan limiter
+limiter emas — lekin stub ostida har doim `true` olardi. v0.29.b ning
+kalit qurilishi haqidagi testlari o'z o'rnida turadi (`client_ip` ni
+to'g'ridan-to'g'ri tekshiradi), ammo middleware'ning o'zi ishlamasdi.
+Endi `http_golden` va timing testi Redis talab qiladi — namuna Postgres'ni
+qanday talab qilsa, shunday — va CI'ning Postgres ish o'rniga Redis
+xizmati qo'shildi.
+
+**`redis` paketi v0.25.0 cutover'idan beri kompilyatsiya bo'lmasdi.**
+`//` izohlar (v1 da `--`), `public function`, `const`, `cache_*` — hech
+biri 1.0 lug'atida yo'q, va repoda `jwc check` yurgizadigan CI yo'q edi.
+Manifest nomi ham `jwc-redis` edi — `packages.md` §1 bo'yicha chiziqchali
+nom `jwc publish` tomonidan rad etiladi. Paket v1 ga ko'chirildi: nomi
+`redis`, va kodi yo'q — sirt kompilyatorniki, paket esa `import redis;`
+ni yechadigan manifest (names §6.2.3).
+
+Shu qatorda: **`spec-coverage.json` ni ham hech kim yangilamasdi.**
+§10 uni "namuna spec'dan ortda qolsa build yiqiladi" mitigatsiyasi deb
+sanaydi, lekin `check_sample.py` ni na CI, na test chaqirardi — fayl
+oxirgi qo'lda yurgizilgan payt suratiga aylanib qolgan va namunadan
+uzilgan edi. `the_spec_coverage_map_is_current` endi generatorni yurgizib
+solishtiradi.
+
+#### Soak: "yurmaydi" emas edi, harness ishlamasdi
+
+Avval bu mezon "bu muhitda yurgizib bo'lmaydi" deb yopilgandi. Sabab
+boshqa bo'lib chiqdi: **harness'ning o'zi hech qachon ishlamagan.** Beshta
+nuqson, hammasi "bir marta ham yurgizilmagan" turkumidan:
+
+| Nuqson | Oqibati |
+|---|---|
+| `--format=json` yolg'iz — bombardier intro va progress bar'ni ham shu stdout'ga yozadi | JSON emas; parser `char 0` da o'ladi |
+| tayyorlik probe'i `curl --fail http://.../` | namunada `/` yo'q, ya'ni sog'lom jarayon 30s kutib "boot failure" deb yiqiladi |
+| port band bo'lsa ham probe o'tardi | sikl **boshqa birovning** serverini o'lchaydi, RSS'ni bog'lanolmagan pid'dan oladi |
+| `kill -TERM` himoyasiz, `set -e` ostida | oxirgi sikl yiqilsa, undan oldingi hamma soat chiqindiga ketadi |
+| latency `percentiles` yo'q bilan | p50/p95/p99 doim 0.00 — abadiy tekis p99 |
+
+Bundan tashqari `analyze.py` `pandas` talab qilib, u bo'lmasa `exit 2`
+qilardi, va **pool mezonini umuman tekshirmasdi** — chunki tekshiradigan
+raqam yo'q edi (yuqoriga qarang).
+
+Tuzatilgandan keyin **yurgizildi**, namunaga qarshi, haqiqiy Postgres 16
+va Redis 7 bilan, `/api/v1/plans` (bazaga tegadigan route) ustida:
+
+```
+8 sikl, har birida 75s yuk, orasida graceful restart
+  480,051 so'rov      480,051 2xx      0 yo'qolgan
+  RSS  18.9 → 19.5 MB      drift 3.2%   (chegara 10%)
+  pool max waiting 0       oxirida available 42   (chegara: >0)
+PASS
+```
+
+**Bu 24 soat emas — 8 sikl, ~12 daqiqa,** va shuni ochiq aytish kerak:
+sekin o'sadigan sizish uchun bu qisqa. Lekin mezon endi **o'lchanmagan**
+emas: harness ishlaydi, gauge'lar bor, `analyze.py` hukm chiqaradi, va
+`soak.yml` o'sha buyruq bilan 72 siklni yurgizadi. `p99 drift 40%` —
+0.05ms dan 0.07ms ga, ya'ni 20 mikrosekund; informatsion, va bu
+bombardier build'i persentil bermagani uchun mean/max'ga tushadi.
+
+#### `jwc-shortener`: o'lchandi, va bu port emas — qayta yozish
+
+Avval "`jwc build` yo'qligi uchun bloklangan" deb aytilgandi. O'lchov
+aniqroq javob beradi. v1 checker 873 qatorli manbada **801 xato** topadi;
+izohlarni `--` ga o'tkazgandan keyin ham **616**, va ulardan 576 tasi —
+`views.jwc` dagi ko'p qatorli `r"..."` ichidagi `'`. Qolganlari esa:
+`E0900: 'dbcontext' was removed in 1.0`, `E0900: 'entity' ...`, `try/catch`,
+`routes` bloki tashqarisidagi `route`, deklaratsiya sifatidagi `after`.
+
+Ya'ni shortener boshidan oxirigacha **0.9.x dasturi**, va uchta narsa
+bir vaqtda kerak:
+
+1. **Ko'p qatorli literal 1.0 lug'atida yo'q** — names §2.3 satr ichida
+   yangi qator taqiqlaydi, §2.4 esa `r"..."` ni *regulyar ifodalar uchun*
+   deb belgilaydi. 484 qatorli landing sahifasining v1 da ifodasi yo'q.
+   Bu til qarori, nuqson emas. (Diagnostika esa noto'g'ri edi: raw satrga
+   ham "`\n` yozing" deb maslahat berardi — `r"..."` da `\n` teskari
+   chiziq va `n`. Tuzatildi.)
+2. `qr-lite` — chiziqchali nom, v1 da `import` qilib bo'lmaydi.
+3. `--native` → `E0910` (`DEFERRED-2`).
+
+Bu aynan ROADMAP'ning **v1.0.0-rc.1** dagi "pilot loyiha ko'chirish"
+bandi, va u ishlab turgan xizmatni (1kb.uz) o'zi pin qilgan kompilyatordan
+uzadi. Yo'l-yo'lakay qilinadigan ish emas — lekin endi taxmin emas,
+o'lchov: 616 xato, uchta aniq to'siq.
+
+**`TODO.md`** dagi to'rt dala nuqsoniga v1 hukmi berildi: ikkitasi
+qayta yozuvda yopilgan (tekis e'lon fazosi; `E0732`), biri
+konstruksiya bo'yicha ma'nosiz (har bir statement `::text` proyeksiya
+qiladi), biri esa `bind` bilan yopildi.
 
 ---
 

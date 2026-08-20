@@ -1,86 +1,89 @@
 namespace routes.orgs;
 
 import dto.org;
-import services.org;
-import middleware.auth;
 import middleware.audit;
-
+import middleware.auth;
+import services.org;
 
 routes "/api/v1/orgs" use RequireAuth, Audit {
-
     route POST "" {
-        let owner_id = context.get("account_id");
-        let req      = request.body() as OrgCreate;
-        let org      = OrgService.create(req, owner_id);
+        let req = request.body() as OrgCreate;
+        let org = OrgService.create($req, context.account_id);
 
-        return created(json(org));
+        return created(json($org)) with { Location: "/api/v1/orgs/" + string.of($org.id) };
     }
 }
 
-routes "/api/v1/orgs/{org_id}" use RequireAuth, RequireOrgMember, Audit {
-
+routes "/api/v1/orgs/{org_id: bigint}" use RequireAuth, RequireOrgMember, Audit {
     route GET "" {
         let org = OrgService.detail(@org_id);
 
-        return json(org);
+        return json($org);
     }
 
     route PATCH "" use RequireOrgAdmin {
         let req = request.body() as OrgEdit;
-        let org = OrgService.update(@org_id, req);
+        let org = OrgService.update(@org_id, $req);
 
-        return json(org);
+        return json($org);
     }
 
     route DELETE "" use RequireOrgAdmin {
-        let role = context.get("role");
-
-        OrgService.remove(@org_id, role);
+        OrgService.remove(@org_id, context.role);
 
         return noContent();
     }
 }
 
-routes "/api/v1/orgs/{org_id}/members" use RequireAuth, RequireOrgMember, Audit {
-
+routes "/api/v1/orgs/{org_id: bigint}/members" use RequireAuth, RequireOrgMember, Audit {
     route GET "" {
         let members = OrgService.members(@org_id);
 
-        return json(members);
+        return json($members);
     }
 
-    route PATCH "{account_id}" use RequireOrgAdmin {
-        let req    = request.body() as MemberEdit;
-        let member = OrgService.set_role(@org_id, @account_id, req);
+    route PATCH "{account_id: bigint}" use RequireOrgAdmin {
+        let req = request.body() as MemberEdit;
+        let member = OrgService.set_role(@org_id, @account_id, $req);
 
-        return json(member);
+        return json($member);
     }
 
-    route DELETE "{account_id}" use RequireOrgAdmin {
+    route DELETE "{account_id: bigint}" use RequireOrgAdmin {
         OrgService.remove_member(@org_id, @account_id);
 
         return noContent();
     }
 }
 
-routes "/api/v1/orgs/{org_id}/invites" use RequireAuth, RequireOrgMember, RequireOrgAdmin, Audit {
+--- Accepting an invitation is not scoped to an org: the token *is* the
+--- authority for which org, and the invitee is by definition not a member
+--- yet, so `RequireOrgMember` could never pass.
+routes "/api/v1/invites/accept" use RequireAuth, Audit {
+    route POST "" {
+        let req = request.body() as InviteAccept;
+        let invite = OrgService.accept_invite($req, context.account_id);
 
+        return created(json($invite));
+    }
+}
+
+routes "/api/v1/orgs/{org_id: bigint}/invites" use RequireAuth, RequireOrgMember, RequireOrgAdmin, Audit {
     route GET "" {
         let invites = OrgService.invites(@org_id);
 
-        return json(invites);
+        return json($invites);
     }
 
     route POST "" {
-        let inviter_id = context.get("account_id");
-        let req        = request.body() as InviteCreate;
-        let invite     = OrgService.invite(@org_id, req, inviter_id);
+        let req = request.body() as InviteCreate;
+        let invite = OrgService.invite(@org_id, $req, context.account_id);
 
-        return created(json(invite));
+        return created(json($invite));
     }
 
-    route DELETE "{id}" {
-        OrgService.revoke_invite(@org_id, @id);
+    route DELETE "{invite_id: bigint}" {
+        OrgService.revoke_invite(@org_id, @invite_id);
 
         return noContent();
     }

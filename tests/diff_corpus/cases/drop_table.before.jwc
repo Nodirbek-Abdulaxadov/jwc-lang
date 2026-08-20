@@ -1,0 +1,16 @@
+namespace c;
+database App : Postgres;
+schema org of App;
+
+table Orgs of App.org {
+    id bigint primary key identity;
+}
+
+table Notes of App.org {
+    id      bigint primary key identity;
+    org_id  bigint;
+    body    text;
+
+    foreign key (org_id) references App.org.Orgs (id) on delete cascade;
+    index on (org_id);
+}

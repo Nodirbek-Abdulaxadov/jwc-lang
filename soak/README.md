@@ -13,12 +13,23 @@ per cycle and needs a real Postgres + a real network surface.
 
 ## Exit-criteria contract
 
-The 72h soak passes when **both** of the following hold:
+The 72h soak passes when **all** of the following hold:
 
 | Metric                | Pass when                                              | Source of truth                          |
 |------------------------|--------------------------------------------------------|-------------------------------------------|
 | **Zero lost responses** | `sum(bombardier 2xx) == sum(total_requests)` across every cycle in `results/*.csv`, including the cycles that straddle a graceful restart. | `analyze.py` reads the `2xx_count` / `total_count` columns from each cycle CSV and asserts the difference is `0`. |
 | **Memory flat**         | `abs(rss_at_cycle_N − rss_at_cycle_1) / rss_at_cycle_1 ≤ 0.10` (±10% drift over 72 cycles). | `analyze.py` plots the `rss_mb` column from each cycle CSV and asserts the drift stays within ±10%. |
+| **No pool leak**        | `max(pool_waiting_end) == 0` and `pool_available_end` at the last cycle is above zero. | `run-soak.sh` scrapes `jwc_db_pool_*` from `/metrics` at each cycle boundary; `analyze.py` turns it into a verdict. |
+
+The pool row was in this contract from the start and **was not checked**,
+because nothing exposed the numbers: `engine::pool_status()` existed and no
+endpoint read it. `/metrics` (config.md §4) does now. RSS drift cannot
+stand in for it — a leaked connection costs a few KB, and the shape to look
+for is `available` pinned at zero while `waiting` climbs.
+
+A run with no pool columns recorded is a **FAIL**, not a pass: the
+criterion is unmeasured, and an unmeasured criterion reported as green is
+the thing this file exists to prevent.
 
 The plan additionally tracks p99 latency drift; we surface it for
 diagnosis but it is NOT a strict gate (a slow Postgres + cold-cache
@@ -43,7 +54,11 @@ sudo apt-get install -y \
     build-essential pkg-config libssl-dev \
     postgresql postgresql-contrib \
     python3-pip
-pip3 install matplotlib pandas
+# Optional: matplotlib draws the RSS/p99 plot. `analyze.py` reads the CSVs
+# with the standard library and prints its verdict without it — it used to
+# require pandas and exit 2 without it, which made the analyser one more
+# thing to install before the soak could tell you anything.
+pip3 install matplotlib
 
 # bombardier — single static binary, drop into PATH:
 wget -O /usr/local/bin/bombardier \
@@ -59,7 +74,17 @@ sudo cp target/release/jwc /usr/local/bin/jwc
 
 Postgres should be running locally with a `jwc_soak` role + `jwc_soak`
 database; `export DATABASE_URL=postgres://jwc_soak:jwc_soak@localhost/jwc_soak`
-before invoking `run-soak.sh`.
+before invoking `run-soak.sh`. The app inherits this shell's environment, so
+whatever else the fixture project needs — `CURSOR_SECRET`, `JWT_SECRET`,
+`JWC_REDIS_URL` — is exported the same way. The sample rate-limits every
+route through `redis.rate_limit`, so it needs a Redis and a binary built
+`--features redis`; without one every request is a 500 and the run measures
+the error path.
+
+Point the load at a route that touches the database. `SOAK_PATH` defaults to
+`/healthz`, which is deliberately dependency-free — good for the readiness
+probe, useless as a leak test, because it never checks out a connection.
+`/api/v1/plans` is what the reference run used.
 
 ## Operator playbook
 

@@ -1,0 +1,40 @@
+namespace context_keys;
+
+middleware Provider provides account_id: bigint {
+    context.account_id = 1;
+}
+
+middleware Undeclared {
+    -- middleware.md §6.4 — writing needs a `provides` declaration.
+    context.role = 1;                           -- expect: E0821
+}
+
+middleware Reader {
+    -- §6.2 — reading needs a dependency that provably ran first. This is
+    -- the sample's own admin-gate bug, made into a compile error.
+    let who = context.account_id;               -- expect: E0820
+}
+
+middleware ReaderWithRequires requires Provider {
+    let who = context.account_id;
+}
+
+routes "/api/reads" use Provider {
+    route GET "" {
+        let who = context.account_id;
+        return json($who);
+    }
+}
+
+routes "/api/reads-without" {
+    route GET "" {
+        let who = context.account_id;           -- expect: E0820
+        return json($who);
+    }
+
+    -- §6.3 — the nullable read is always legal for a declared key.
+    route GET "optional" {
+        let who = context.account_id?;
+        return json(1);
+    }
+}

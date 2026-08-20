@@ -1,0 +1,30 @@
+namespace raw_hatch;
+
+-- writes.md §6 — the one unchecked boundary. The rules exist so that
+-- "unchecked" means the *shape* of the result, never the values.
+service Reports {
+    function ok() {
+        return raw("select id, count(*) from s.notes where org_id = {} group by id", 1);
+    }
+
+    function too_few_arguments() {
+        return raw("select {} , {}", 1);          -- expect: E0610
+    }
+
+    function too_many_arguments() {
+        return raw("select {}", 1, 2);            -- expect: E0610
+    }
+
+    -- A computed string cannot be counted, and counting is the only thing
+    -- standing between this and interpolation.
+    function computed_sql(fragment: text) {
+        return raw($fragment, 1);                 -- expect: E0610
+    }
+}
+
+-- A view is snapshotted and diffed, so its body has to be one the
+-- migration generator can read.
+view HandWritten of App.s {
+    select N from App.s.Notes
+        as { id, extra: raw("select 1") }         -- expect: E0611
+}

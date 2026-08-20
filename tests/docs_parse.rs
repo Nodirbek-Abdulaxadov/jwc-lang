@@ -1,25 +1,27 @@
-//! Every ```jwc block in the README and `docs/` must be real JWC.
+//! Every ```jwc block in the README and `docs/spec/v1/` must be real JWC.
 //!
-//! Nothing checked the documentation against the compiler, so it drifted: the
-//! README's headline example, the getting-started page and the `dbcontext`
-//! reference page all showed a `dbcontext AppDb { ... }` block form and
-//! colon-separated entity fields that the parser has never accepted. A reader
-//! copying the first example on the front page got a syntax error.
+//! Nothing checked the documentation against the compiler, so it drifted:
+//! the README's headline example and three reference pages showed forms the
+//! parser had never accepted. A reader copying the first example on the
+//! front page got a syntax error.
 //!
-//! Only `parse_program` is asserted, never `validate_program`: documentation
-//! deliberately references entities and classes it doesn't define.
+//! Only parsing is asserted, never checking: documentation deliberately
+//! references tables and classes it does not define.
+//!
+//! `docs/archive-0.9/` is **not** checked. It documents the language that
+//! the v0.25.0 cutover removed, and checking it against this compiler would
+//! assert that a dead grammar still parses.
 //!
 //! ## Illustrative blocks
 //!
-//! Some blocks are prose, not programs — operator tables, `{ ... }` elisions,
-//! bare expression lists with trailing comments. Only a **bare** ```` ```jwc ````
-//! fence is compiled, so mark those with ```` ```jwc no-compile ````. The
-//! marker sits in the fence's info string, which the docs site ignores, so it
-//! costs the reader nothing while keeping the exemption explicit in source.
+//! Some blocks are prose, not programs — operator tables, `{ ... }`
+//! elisions, bare expression lists with trailing comments. Only a **bare**
+//! ```` ```jwc ```` fence is compiled, so mark those with
+//! ```` ```jwc no-compile ````. The marker sits in the fence's info string,
+//! which the docs site ignores, so it costs the reader nothing while
+//! keeping the exemption explicit in source.
 
 use std::path::{Path, PathBuf};
-
-use jwc::parser::parse_program;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -38,7 +40,13 @@ fn markdown_files() -> Vec<PathBuf> {
             if p.is_dir() {
                 // Vendored site build output, not authored docs.
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if matches!(name, "node_modules" | "build" | ".docusaurus") {
+                // `archive-0.9` documents the language the cutover
+                // removed; checking it here would assert that a dead
+                // grammar still parses.
+                if matches!(
+                    name,
+                    "node_modules" | "build" | ".docusaurus" | "archive-0.9"
+                ) {
                     continue;
                 }
                 stack.push(p);
@@ -74,22 +82,29 @@ fn jwc_blocks(text: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// Blocks are written as excerpts, so try the positions an excerpt can
-/// legally occupy before calling it broken.
+/// v1 spec blocks, checked with the v1 front-end. Same excerpt problem:
+/// a clause shown on its own is not a program, so try the positions an
+/// excerpt can legally occupy.
 fn parses_somewhere(body: &str) -> bool {
     const HEADER: &str = concat!(
-        "dbcontext AppDb: Postgres;\n",
-        "entity Item of AppDb { id int pk autoincrement; name varchar(50); }\n",
+        "database App : Postgres;\n",
+        "schema s of App;\n",
+        "table T of App.s { id bigint primary key identity; }\n",
     );
     let contexts = [
-        // `namespace` / `mount` have to precede every other declaration.
         body.to_string(),
         format!("{HEADER}{body}\n"),
         format!("{HEADER}function f() {{\n{body}\n}}\n"),
-        format!("{HEADER}route GET \"/x\" {{\n{body}\n}}\n"),
-        format!("{HEADER}dome S {{\n  function f() {{\n{body}\n  }}\n}}\n"),
+        format!("{HEADER}function f() {{\nreturn {body};\n}}\n"),
+        format!("{HEADER}table U of App.s {{\n{body}\n}}\n"),
+        format!("{HEADER}class C {{\n{body}\n}}\n"),
+        format!("{HEADER}middleware M {{\n{body}\n}}\n"),
+        format!("{HEADER}routes \"/x\" {{\nroute GET \"\" {{\n{body}\n}}\n}}\n"),
+        format!("{HEADER}view V of App.s {{\n{body}\n}}\n"),
     ];
-    contexts.iter().any(|src| parse_program(src).is_ok())
+    contexts
+        .iter()
+        .any(|src| !jwc::parse_str("<doc>", src).has_errors())
 }
 
 #[test]
@@ -107,15 +122,19 @@ fn every_documented_jwc_example_parses() {
                 continue;
             }
             checked += 1;
-            if !parses_somewhere(&body) {
+            let ok = parses_somewhere(&body);
+            if !ok {
                 let rel: &Path = file.strip_prefix(&root).unwrap_or(&file);
                 broken.push(format!("{}:{line}", rel.display()));
             }
         }
     }
 
+    // A floor, not a target: it exists so a broken block-scanner reads as
+    // a failure rather than as "nothing to check". It dropped when the
+    // 0.9.x docs were archived and the spec became the corpus.
     assert!(
-        checked > 50,
+        checked > 20,
         "expected to find the documented examples, saw {checked}"
     );
     assert!(
@@ -125,5 +144,45 @@ fn every_documented_jwc_example_parses() {
          (elisions, operator tables), change its fence to ```jwc no-compile:\n  {}",
         broken.len(),
         broken.join("\n  ")
+    );
+}
+
+/// `spec-coverage.json` matches the sample it claims to describe.
+///
+/// ROADMAP §10 lists this file as the mitigation for "the sample stops
+/// keeping up with the spec": a construct not tied to a clause is supposed
+/// to fail the build. Nothing ran the generator — not CI, not a test — so
+/// the file was a snapshot of whenever it was last produced by hand, and
+/// it had drifted from the sample it names. A mitigation nothing executes
+/// is not one.
+#[test]
+fn the_spec_coverage_map_is_current() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let map = root.join("docs/spec/v1/spec-coverage.json");
+    let before = std::fs::read_to_string(&map).expect("spec-coverage.json");
+
+    let out = std::process::Command::new("python3")
+        .arg(root.join("docs/spec/v1/check_sample.py"))
+        .output();
+    let Ok(out) = out else {
+        eprintln!("SKIPPED the_spec_coverage_map_is_current — no python3");
+        return;
+    };
+
+    // The generator rewrites the file in place, so restore it before
+    // asserting: a failing test must not leave the tree dirty.
+    let after = std::fs::read_to_string(&map).expect("spec-coverage.json");
+    std::fs::write(&map, &before).expect("restore");
+
+    assert!(
+        out.status.success(),
+        "check_sample.py rejected the sample:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        before == after,
+        "spec-coverage.json is stale — run `python3 docs/spec/v1/check_sample.py` \
+         and commit the result"
     );
 }

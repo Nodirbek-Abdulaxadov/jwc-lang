@@ -1,0 +1,28 @@
+namespace builtins;
+
+-- Builtin arity and the lambda replacement (builtins.md §5).
+service B {
+    function array_sum(req: NoteInput) {
+        return array.sum_product($req.lines, "quantity", "unit_price");  -- expect: E0312
+    }
+
+    function wrong_arity() {
+        return string.pad_left("x", 8);         -- expect: E0205
+    }
+
+    function field_name_must_be_a_literal(xs: NoteInput[]) {
+        return array.sum($xs, $xs);             -- expect: E0206
+    }
+
+    function unknown_field_name(xs: NoteInput[]) {
+        return array.sum($xs, "nope");          -- expect: E0301
+    }
+
+    function known_field_name(xs: NoteInput[]) {
+        return array.sum($xs, "amount");
+    }
+
+    function unknown_builtin() {
+        return string.reverse("x");             -- expect: E0204
+    }
+}

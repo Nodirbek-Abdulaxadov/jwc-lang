@@ -1,26 +1,28 @@
 namespace db.billing;
 
 import app;
+import db.org;
 
+enum BillingInterval of App.billing { monthly, yearly }
 
-enum BillingInterval   of App.billing { monthly, yearly }
 enum SubscriptionStatus of App.billing { trialing, active, past_due, canceled }
-enum InvoiceStatus     of App.billing { draft, open, paid, void }
-enum PaymentStatus     of App.billing { pending, succeeded, failed, refunded }
 
+enum InvoiceStatus of App.billing { draft, open, paid, void }
 
+enum PaymentStatus of App.billing { pending, succeeded, failed, refunded }
+
+--- Money is `numeric`, never an integer count of cents (types.md §2.1).
+--- `price` is per `interval`.
 table Plans of App.billing {
-    id          bigint primary key identity;
-    code        varchar(40) unique, pattern(r"^[a-z0-9_]+$");
-    name        varchar(80);
-    price_cents int;
-    currency    varchar(3) default "USD" pattern(r"^[A-Z]{3}$");
-    interval    BillingInterval default BillingInterval.monthly;
-    features    jsonb?;
-    active      boolean default true;
-    created_at  timestamptz default now();
-
-    check (price_cents >= 0) : "narx manfiy bo'lolmaydi";
+    id         bigint primary key identity;
+    code       varchar(40) unique, pattern(r"^[a-z0-9_]+$");
+    name       varchar(80);
+    price      numeric(14, 2) min(0);
+    currency   varchar(3) default "USD" pattern(r"^[A-Z]{3}$");
+    interval   BillingInterval default BillingInterval.monthly;
+    features   jsonb?;
+    active     boolean default true;
+    created_at timestamptz default now();
 
     index on (active, code);
 }
@@ -37,25 +39,29 @@ table Subscriptions of App.billing {
     created_at           timestamptz default now();
     updated_at           timestamptz default now() on update now();
 
-    foreign key (org_id)  references App.org.Orgs (id)      on delete cascade;
+    foreign key (org_id) references App.org.Orgs (id) on delete cascade;
     foreign key (plan_id) references App.billing.Plans (id);
+    check (current_period_end > current_period_start) : "davr oxiri boshidan keyin bo'lishi kerak";
+    check (status == SubscriptionStatus.canceled or canceled_at == null) : "canceled_at faqat bekor qilingan obunada";
+    unique (org_id) where status != SubscriptionStatus.canceled : "bu tashkilotda faol obuna allaqachon bor";
 
-    check (current_period_end > current_period_start)
-        : "davr oxiri boshidan keyin bo'lishi kerak";
-    check (status == SubscriptionStatus.canceled or canceled_at == null)
-        : "canceled_at faqat bekor qilingan obunada";
-
-    unique (org_id) where status != SubscriptionStatus.canceled
-        : "bu tashkilotda faol obuna allaqachon bor";
     index on (status, current_period_end);
+}
+
+--- Monotonic counters. `update … first` emits FOR UPDATE, which is what
+--- makes this safe under concurrency (writes.md §4). Sequences are
+--- DEFERRED-17.
+table Counters of App.billing {
+    name  varchar(40) primary key;
+    value bigint default 0;
 }
 
 table Invoices of App.billing {
     id              bigint primary key identity;
     org_id          bigint;
     subscription_id bigint?;
-    number          varchar(20) unique;
-    amount_cents    int;
+    number          varchar(20) unique : "bu hisob raqami band";
+    amount          numeric(14, 2) min(0);
     currency        varchar(3) default "USD";
     status          InvoiceStatus default InvoiceStatus.draft;
     issued_at       timestamptz?;
@@ -63,13 +69,13 @@ table Invoices of App.billing {
     paid_at         timestamptz?;
     created_at      timestamptz default now();
 
-    foreign key (org_id)          references App.org.Orgs (id);
+    foreign key (org_id) references App.org.Orgs (id);
     foreign key (subscription_id) references App.billing.Subscriptions (id) on delete set null;
-
-    check (status == InvoiceStatus.paid or paid_at == null)
-        : "paid_at faqat to'langan hisobda";
+    check (status == InvoiceStatus.paid or paid_at == null) : "paid_at faqat to'langan hisobda";
+    check (status != InvoiceStatus.paid or paid_at != null) : "to'langan hisobda paid_at bo'lishi shart";
 
     index on (org_id, status);
+    index on (org_id, issued_at desc, id desc);
     index on (due_at) where status == InvoiceStatus.open;
 }
 
@@ -77,12 +83,10 @@ table InvoiceLines of App.billing {
     id          bigint primary key identity;
     invoice_id  bigint;
     description varchar(200) minLength(1);
-    quantity    int default 1;
-    unit_cents  int;
+    quantity    int min(1);
+    unit_price  numeric(14, 2) min(0);
 
     foreign key (invoice_id) references App.billing.Invoices (id) on delete cascade;
-
-    check (quantity > 0) : "miqdor musbat bo'lishi kerak";
 
     index on (invoice_id);
 }
@@ -91,8 +95,10 @@ table Payments of App.billing {
     id           bigint primary key identity;
     invoice_id   bigint;
     provider     varchar(20);
+    --- The provider's idempotency key. `on conflict do nothing` on this
+    --- constraint is what makes webhook redelivery safe (writes.md §2.3).
     provider_ref varchar(120) unique : "bu to'lov allaqachon qayd etilgan";
-    amount_cents int;
+    amount       numeric(14, 2) min(0);
     status       PaymentStatus default PaymentStatus.pending;
     failure_code varchar(60)?;
     created_at   timestamptz default now();

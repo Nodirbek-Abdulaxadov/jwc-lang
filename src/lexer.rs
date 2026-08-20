@@ -1,485 +1,565 @@
-use anyhow::{anyhow, Result};
+//! v1 scanner.
+//!
+//! Hand-written, like `crate::lexer`. Differences that matter:
+//!
+//! * keywords are contextual, so every word comes out as [`Tok::Ident`]
+//!   (names.md §2.6);
+//! * `@name` and `$name` are single tokens — `@ name` does not lex
+//!   (names.md §2.5);
+//! * `---` doc comments and `--` line comments are kept as [`Trivia`] on the
+//!   following token, so `jwc v1 fmt` can round-trip them;
+//! * `r"..."` raw strings do no escape processing except `\"`.
 
-/// A segment inside a template string literal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TemplatePart {
-    Literal(String),
-    /// Raw source code of the `${...}` expression hole.
-    Hole(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Keyword {
-    DbContext,
-    Entity,
-    Class,
-    Route,
-    Function,
-    Dome,
-    Let,
-    Const,
-    Return,
-    Print,
-    If,
-    Else,
-    While,
-    Break,
-    Continue,
-    And,
-    Or,
-    Namespace,
-    Import,
-    True,
-    False,
-    Null,
-    Validate,
-    Try,
-    Catch,
-    Middleware,
-    Use,
-    Async,
-    Await,
-    Transaction,
-    /// Sprint 4B [1.0-blocker] — `savepoint <name> { ... }` nested rollback
-    /// boundary inside a `transaction { ... }` block.
-    Savepoint,
-    ErrorHandler,
-    For,
-    In,
-    /// `public function/entity/class/middleware/route ...` — makes the
-    /// declaration visible to other namespaces. Default is `private`.
-    Public,
-    /// `private function ...` — explicit private (same as omitting any
-    /// modifier; available for clarity).
-    Private,
-    /// `mount foo at "/path";` — activate a library namespace's routes
-    /// under an optional prefix. Inherits middlewares from any enclosing
-    /// `group` block.
-    Mount,
-    /// `group "/prefix" use Mw, ... { ... }` — wrap inner routes/mounts
-    /// with a shared prefix and middleware chain. Composes via nesting.
-    /// Either the prefix string or the `use` clause (or both) must be
-    /// present; both empty is rejected at parse time.
-    Group,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TokenKind {
-    Keyword(Keyword),
-    Ident(String),
-    Number(String),
-    String(String),
-    /// Backtick template string: ``\`hello ${expr}\` ``
-    TemplateStr(Vec<TemplatePart>),
-    Symbol(char),
-    Eof,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Token {
-    pub kind: TokenKind,
-    /// Byte offset of the token's first character into the source string.
-    /// Retained because most existing parser sites (and `error_here`) key
-    /// off a single offset; new code should prefer [`Token::end_offset`]
-    /// or pass a [`crate::span::Span`] when stamping AST nodes.
-    pub offset: usize,
-    /// Byte offset one past the token's last character (half-open
-    /// `[offset, end_offset)`). Lets callers span across the full token —
-    /// used by future `Span`-carrying AST nodes so a diagnostic can
-    /// underline the whole identifier instead of just its first char.
-    pub end_offset: usize,
-}
-
-impl Token {
-    /// Length of the token in bytes (`end_offset - offset`). `0` is
-    /// legal for synthetic/EOF tokens.
-    pub fn byte_len(&self) -> usize {
-        self.end_offset.saturating_sub(self.offset)
-    }
-}
+use crate::diag::Diagnostic;
+use crate::token::{Span, Tok, Token, Trivia};
 
 pub struct Lexer<'a> {
-    src: &'a str,
+    src: &'a [u8],
+    text: &'a str,
     i: usize,
+    pending: Vec<Trivia>,
+    pub diags: Vec<Diagnostic>,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(src: &'a str) -> Self {
-        Self { src, i: 0 }
+    pub fn new(text: &'a str) -> Self {
+        Self {
+            src: text.as_bytes(),
+            text,
+            i: 0,
+            pending: Vec::new(),
+            diags: Vec::new(),
+        }
     }
 
-    pub fn next_token(&mut self) -> Result<Token> {
-        self.skip_ws_and_comments();
-        let offset = self.i;
-
-        let Some(ch) = self.peek_char() else {
-            return Ok(Token {
-                kind: TokenKind::Eof,
-                offset,
-                end_offset: offset,
-            });
-        };
-
-        // Raw string literal: `r"..."`. No escape processing; the closing
-        // `"` ends the token. Useful for regex patterns where `\` should
-        // reach the regex engine unaltered (`pattern(r"\d+")`).
-        if ch == 'r' && self.src[self.i..].starts_with("r\"") {
-            self.i += 1; // consume 'r'
-            let value = self.consume_raw_string()?;
-            return Ok(Token {
-                kind: TokenKind::String(value),
-                offset,
-                end_offset: self.i,
-            });
-        }
-
-        if is_ident_start(ch) {
-            let ident = self.consume_while(is_ident_continue);
-            let kind = match ident.as_str() {
-                "dbcontext" => TokenKind::Keyword(Keyword::DbContext),
-                "entity" => TokenKind::Keyword(Keyword::Entity),
-                "class" => TokenKind::Keyword(Keyword::Class),
-                "route" => TokenKind::Keyword(Keyword::Route),
-                "function" => TokenKind::Keyword(Keyword::Function),
-                "dome" => TokenKind::Keyword(Keyword::Dome),
-                "let" => TokenKind::Keyword(Keyword::Let),
-                "const" => TokenKind::Keyword(Keyword::Const),
-                "return" => TokenKind::Keyword(Keyword::Return),
-                "print" => TokenKind::Keyword(Keyword::Print),
-                "if" => TokenKind::Keyword(Keyword::If),
-                "else" => TokenKind::Keyword(Keyword::Else),
-                "while" => TokenKind::Keyword(Keyword::While),
-                "break" => TokenKind::Keyword(Keyword::Break),
-                "continue" => TokenKind::Keyword(Keyword::Continue),
-                "and" => TokenKind::Keyword(Keyword::And),
-                "or" => TokenKind::Keyword(Keyword::Or),
-                "namespace" => TokenKind::Keyword(Keyword::Namespace),
-                "import" => TokenKind::Keyword(Keyword::Import),
-                "public" => TokenKind::Keyword(Keyword::Public),
-                "private" => TokenKind::Keyword(Keyword::Private),
-                "mount" => TokenKind::Keyword(Keyword::Mount),
-                "group" => TokenKind::Keyword(Keyword::Group),
-                "true" => TokenKind::Keyword(Keyword::True),
-                "false" => TokenKind::Keyword(Keyword::False),
-                "null" => TokenKind::Keyword(Keyword::Null),
-                "validate" => TokenKind::Keyword(Keyword::Validate),
-                "try" => TokenKind::Keyword(Keyword::Try),
-                "catch" => TokenKind::Keyword(Keyword::Catch),
-                "middleware" => TokenKind::Keyword(Keyword::Middleware),
-                "use" => TokenKind::Keyword(Keyword::Use),
-                "async" => TokenKind::Keyword(Keyword::Async),
-                "await" => TokenKind::Keyword(Keyword::Await),
-                "transaction" => TokenKind::Keyword(Keyword::Transaction),
-                "savepoint" => TokenKind::Keyword(Keyword::Savepoint),
-                "errorHandler" => TokenKind::Keyword(Keyword::ErrorHandler),
-                "for" => TokenKind::Keyword(Keyword::For),
-                "in" => TokenKind::Keyword(Keyword::In),
-                _ => TokenKind::Ident(ident),
-            };
-            return Ok(Token {
-                kind,
-                offset,
-                end_offset: self.i,
-            });
-        }
-
-        if ch == '"' {
-            let value = self.consume_string()?;
-            return Ok(Token {
-                kind: TokenKind::String(value),
-                offset,
-                end_offset: self.i,
-            });
-        }
-
-        if ch == '`' {
-            let parts = self.consume_template_string()?;
-            return Ok(Token {
-                kind: TokenKind::TemplateStr(parts),
-                offset,
-                end_offset: self.i,
-            });
-        }
-
-        if ch.is_ascii_digit() {
-            let number = self.consume_number()?;
-            return Ok(Token {
-                kind: TokenKind::Number(number),
-                offset,
-                end_offset: self.i,
-            });
-        }
-
-        self.i += ch.len_utf8();
-        Ok(Token {
-            kind: TokenKind::Symbol(ch),
-            offset,
-            end_offset: self.i,
-        })
-    }
-
-    fn skip_ws_and_comments(&mut self) {
+    /// Tokenise the whole input. Always terminates with `Eof`; lexical errors
+    /// are collected rather than aborting, so one bad string does not hide
+    /// every later diagnostic.
+    pub fn tokenize(mut self) -> (Vec<Token>, Vec<Diagnostic>) {
+        let mut out = Vec::new();
         loop {
-            while let Some(ch) = self.peek_char() {
-                if ch.is_whitespace() {
-                    self.i += ch.len_utf8();
-                } else {
-                    break;
+            self.skip_trivia();
+            let start = self.i;
+            if self.i >= self.src.len() {
+                out.push(Token {
+                    tok: Tok::Eof,
+                    span: Span::new(start, start),
+                    leading: std::mem::take(&mut self.pending),
+                });
+                break;
+            }
+            match self.scan_one() {
+                Some(tok) => out.push(Token {
+                    tok,
+                    span: Span::new(start, self.i),
+                    leading: std::mem::take(&mut self.pending),
+                }),
+                None => {
+                    // scan_one already recorded a diagnostic and advanced.
                 }
             }
+        }
+        (out, self.diags)
+    }
 
-            if self.starts_with("//") {
-                while let Some(ch) = self.peek_char() {
-                    self.i += ch.len_utf8();
-                    if ch == '\n' {
-                        break;
-                    }
+    fn peek(&self) -> u8 {
+        *self.src.get(self.i).unwrap_or(&0)
+    }
+
+    fn peek_at(&self, n: usize) -> u8 {
+        *self.src.get(self.i + n).unwrap_or(&0)
+    }
+
+    fn skip_trivia(&mut self) {
+        loop {
+            let mut newlines = 0usize;
+            while matches!(self.peek(), b' ' | b'\t' | b'\r' | b'\n') {
+                if self.peek() == b'\n' {
+                    newlines += 1;
                 }
+                self.i += 1;
+            }
+            if newlines > 1 {
+                self.pending.push(Trivia::Blank);
+            }
+            if self.peek() == b'-' && self.peek_at(1) == b'-' {
+                let doc = self.peek_at(2) == b'-';
+                self.i += if doc { 3 } else { 2 };
+                let start = self.i;
+                while self.i < self.src.len() && self.peek() != b'\n' {
+                    self.i += 1;
+                }
+                let body = self.text[start..self.i].trim().to_string();
+                self.pending.push(if doc {
+                    Trivia::Doc(body)
+                } else {
+                    Trivia::Line(body)
+                });
                 continue;
             }
-
             break;
         }
     }
 
-    fn starts_with(&self, s: &str) -> bool {
-        self.src[self.i..].starts_with(s)
-    }
+    fn scan_one(&mut self) -> Option<Tok> {
+        let c = self.peek();
 
-    fn peek_char(&self) -> Option<char> {
-        self.src[self.i..].chars().next()
-    }
-
-    fn consume_while<F>(&mut self, mut keep: F) -> String
-    where
-        F: FnMut(char) -> bool,
-    {
-        let start = self.i;
-        while let Some(ch) = self.peek_char() {
-            if keep(ch) {
-                self.i += ch.len_utf8();
-            } else {
-                break;
-            }
+        // r"..." raw string, before the identifier rule claims the `r`.
+        if c == b'r' && self.peek_at(1) == b'"' {
+            self.i += 1;
+            return self.scan_string(true);
         }
-        self.src[start..self.i].to_string()
-    }
 
-    fn consume_number(&mut self) -> Result<String> {
-        let start = self.i;
-        while let Some(ch) = self.peek_char() {
-            if ch.is_ascii_digit() {
+        if c.is_ascii_alphabetic() {
+            let start = self.i;
+            while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
                 self.i += 1;
-            } else {
-                break;
             }
+            return Some(Tok::Ident(self.text[start..self.i].to_string()));
         }
 
-        // Optional fractional part: digits '.' digits
-        if self.peek_char() == Some('.') {
-            let mut it = self.src[self.i..].chars();
-            let _dot = it.next();
-            let next = it.next();
-            if matches!(next, Some(c) if c.is_ascii_digit()) {
-                self.i += 1; // consume '.'
-                while let Some(ch) = self.peek_char() {
-                    if ch.is_ascii_digit() {
-                        self.i += 1;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-
-        let token = &self.src[start..self.i];
-        if token.parse::<f64>().is_err() {
-            return Err(anyhow!("Invalid numeric literal"));
-        }
-
-        Ok(token.to_string())
-    }
-
-    fn consume_template_string(&mut self) -> Result<Vec<TemplatePart>> {
-        self.i += 1; // skip opening `
-        let mut parts = Vec::new();
-        let mut lit = String::new();
-
-        loop {
-            let Some(ch) = self.peek_char() else {
-                return Err(anyhow!("Unterminated template string"));
-            };
-
-            if ch == '`' {
+        if c == b'_' {
+            let start = self.i;
+            while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
                 self.i += 1;
-                if !lit.is_empty() {
-                    parts.push(TemplatePart::Literal(lit));
-                }
-                return Ok(parts);
             }
+            self.diags.push(
+                Diagnostic::error(
+                    "E0105",
+                    Span::new(start, self.i),
+                    "identifiers may not start with `_`",
+                )
+                .note("a leading underscore is reserved for compiler temporaries in generated SQL")
+                .clause("names.md §2.1"),
+            );
+            return None;
+        }
 
-            // `${...}` hole
-            if ch == '$' && self.src[self.i..].starts_with("${") {
-                self.i += 2; // skip ${
-                if !lit.is_empty() {
-                    parts.push(TemplatePart::Literal(std::mem::take(&mut lit)));
+        if c.is_ascii_digit() {
+            let start = self.i;
+            while self.peek().is_ascii_digit() {
+                self.i += 1;
+            }
+            if self.peek() == b'.' && self.peek_at(1).is_ascii_digit() {
+                self.i += 1;
+                while self.peek().is_ascii_digit() {
+                    self.i += 1;
                 }
-                let mut hole = String::new();
-                let mut depth: usize = 1;
-                loop {
-                    let Some(hc) = self.peek_char() else {
-                        return Err(anyhow!("Unterminated template expression"));
-                    };
-                    self.i += hc.len_utf8();
-                    match hc {
-                        '{' => {
-                            depth += 1;
-                            hole.push(hc);
-                        }
-                        '}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
+                return Some(Tok::Decimal(self.text[start..self.i].to_string()));
+            }
+            return Some(Tok::Int(self.text[start..self.i].to_string()));
+        }
+
+        if c == b'"' {
+            return self.scan_string(false);
+        }
+
+        if c == b'@' || c == b'$' {
+            let sigil = c;
+            let start = self.i;
+            self.i += 1;
+            if !(self.peek().is_ascii_alphabetic()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "E0106",
+                        Span::new(start, self.i),
+                        format!("`{}` must be followed immediately by a name", sigil as char),
+                    )
+                    .clause("names.md §2.5"),
+                );
+                return None;
+            }
+            let nstart = self.i;
+            while self.peek().is_ascii_alphanumeric() || self.peek() == b'_' {
+                self.i += 1;
+            }
+            let name = self.text[nstart..self.i].to_string();
+            return Some(if sigil == b'@' {
+                Tok::PathParam(name)
+            } else {
+                Tok::Local(name)
+            });
+        }
+
+        // Punctuation, longest match first.
+        let two = (c, self.peek_at(1));
+        let three = (c, self.peek_at(1), self.peek_at(2));
+        let tok = match three {
+            (b'=', b'=', b'?') => {
+                self.i += 3;
+                Tok::EqEqOpt
+            }
+            (b'.', b'.', b'.') => {
+                self.i += 3;
+                Tok::DotDotDot
+            }
+            _ => match two {
+                (b'=', b'=') => {
+                    self.i += 2;
+                    Tok::EqEq
+                }
+                (b'=', b'?') => {
+                    self.i += 2;
+                    Tok::EqOpt
+                }
+                (b'!', b'=') => {
+                    self.i += 2;
+                    Tok::BangEq
+                }
+                (b'<', b'=') => {
+                    self.i += 2;
+                    Tok::LtEq
+                }
+                (b'>', b'=') => {
+                    self.i += 2;
+                    Tok::GtEq
+                }
+                (b'-', b'>') => {
+                    self.i += 2;
+                    Tok::Arrow
+                }
+                (b'?', b'?') => {
+                    self.i += 2;
+                    Tok::Coalesce
+                }
+                _ => {
+                    self.i += 1;
+                    match c {
+                        b'(' => Tok::LParen,
+                        b')' => Tok::RParen,
+                        b'{' => Tok::LBrace,
+                        b'}' => Tok::RBrace,
+                        b'[' => Tok::LBracket,
+                        b']' => Tok::RBracket,
+                        b',' => Tok::Comma,
+                        b';' => Tok::Semi,
+                        b':' => Tok::Colon,
+                        b'.' => Tok::Dot,
+                        b'?' => Tok::Question,
+                        b'=' => Tok::Eq,
+                        b'!' => Tok::Bang,
+                        b'<' => Tok::Lt,
+                        b'>' => Tok::Gt,
+                        b'+' => Tok::Plus,
+                        b'-' => Tok::Minus,
+                        b'*' => Tok::Star,
+                        b'/' => Tok::Slash,
+                        b'%' => Tok::Percent,
+                        _ => {
+                            // A non-ASCII byte is the *first* byte of a
+                            // character, not a character. Reporting
+                            // `self.i - 1 .. self.i` would put the span
+                            // inside it, and `SourceFile::line_col` then
+                            // slices the source there — so the compiler
+                            // panicked while rendering the diagnostic it
+                            // had just produced. Consume the whole
+                            // character and name it.
+                            let start = self.i - 1;
+                            while self.i < self.src.len()
+                                && (self.src[self.i] & 0b1100_0000) == 0b1000_0000
+                            {
+                                self.i += 1;
                             }
-                            hole.push(hc);
+                            let text = String::from_utf8_lossy(&self.src[start..self.i]);
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "E0100",
+                                    Span::new(start, self.i),
+                                    format!("unexpected character `{text}`"),
+                                )
+                                .clause("names.md §2"),
+                            );
+                            return None;
                         }
-                        _ => hole.push(hc),
                     }
                 }
-                parts.push(TemplatePart::Hole(hole));
-                continue;
-            }
-
-            if ch == '\\' {
-                self.i += 1;
-                let Some(esc) = self.peek_char() else {
-                    return Err(anyhow!("Unterminated template string"));
-                };
-                self.i += esc.len_utf8();
-                match esc {
-                    '`' => lit.push('`'),
-                    '\\' => lit.push('\\'),
-                    'n' => lit.push('\n'),
-                    'r' => lit.push('\r'),
-                    't' => lit.push('\t'),
-                    '$' => lit.push('$'),
-                    _ => {
-                        lit.push('\\');
-                        lit.push(esc);
-                    }
-                }
-                continue;
-            }
-
-            self.i += ch.len_utf8();
-            lit.push(ch);
-        }
+            },
+        };
+        Some(tok)
     }
 
-    /// `r"..."` — no escape processing; closing `"` terminates the literal.
-    fn consume_raw_string(&mut self) -> Result<String> {
-        self.i += 1; // opening "
-        let start = self.i;
-        while let Some(ch) = self.peek_char() {
-            if ch == '"' {
-                let out = self.src[start..self.i].to_string();
-                self.i += 1;
-                return Ok(out);
-            }
-            self.i += ch.len_utf8();
-        }
-        Err(anyhow!("Unterminated raw string literal"))
-    }
-
-    fn consume_string(&mut self) -> Result<String> {
-        self.i += 1;
+    fn scan_string(&mut self, raw: bool) -> Option<Tok> {
+        let open = self.i;
+        self.i += 1; // opening quote
         let mut out = String::new();
-
-        while let Some(ch) = self.peek_char() {
-            if ch == '"' {
-                self.i += 1;
-                return Ok(out);
+        loop {
+            if self.i >= self.src.len() {
+                self.diags.push(
+                    Diagnostic::error("E0102", Span::new(open, self.i), "unterminated string")
+                        .clause("names.md §2.3"),
+                );
+                return None;
             }
-
-            if ch == '\\' {
-                self.i += 1;
-                let Some(esc) = self.peek_char() else {
-                    return Err(anyhow!("Unterminated string literal"));
-                };
-                self.i += esc.len_utf8();
-                match esc {
-                    '"' => out.push('"'),
-                    '\\' => out.push('\\'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    _ => return Err(anyhow!("Unsupported escape sequence")),
+            match self.peek() {
+                b'"' => {
+                    self.i += 1;
+                    break;
                 }
-                continue;
+                b'\n' => {
+                    // The help has to differ by kind. `\n` is the answer in
+                    // a `"..."` and is *not* an answer in an `r"..."`,
+                    // where a backslash is a backslash — telling someone to
+                    // write an escape into a literal that has no escapes
+                    // sends them in a circle. A raw string is scoped to
+                    // regular expressions (names.md §2.4); a multi-line
+                    // document has no literal form in 1.0.
+                    let (message, help) = if raw {
+                        (
+                            "a raw string literal may not span lines",
+                            "`r\"...\"` is for regular expressions and ends at the line. \
+                             `\\n` inside it is a backslash and an `n`, not a newline — \
+                             build multi-line text by concatenating, or keep it out of \
+                             the source",
+                        )
+                    } else {
+                        (
+                            "a string literal may not contain a literal newline",
+                            "write `\\n`",
+                        )
+                    };
+                    self.diags.push(
+                        Diagnostic::error("E0103", Span::new(open, self.i), message)
+                            .note(help)
+                            .clause(if raw {
+                                "names.md §2.4"
+                            } else {
+                                "names.md §2.3"
+                            }),
+                    );
+                    return None;
+                }
+                b'\\' if raw => {
+                    // Raw strings process only \" — everything else is text,
+                    // which is what makes `r"^[a-z0-9-]{3,40}$"` and
+                    // `r"^[^@]+@[^@]+\.[^@]+$"` mean what they look like.
+                    if self.peek_at(1) == b'"' {
+                        out.push('"');
+                        self.i += 2;
+                    } else {
+                        out.push('\\');
+                        self.i += 1;
+                    }
+                }
+                b'\\' => {
+                    self.i += 1;
+                    let e = self.peek();
+                    self.i += 1;
+                    match e {
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'0' => out.push('\0'),
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'u' => {
+                            if self.peek() != b'{' {
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        "E0108",
+                                        Span::new(self.i - 2, self.i),
+                                        "`\\u` must be followed by `{XXXX}`",
+                                    )
+                                    .clause("names.md §2.3"),
+                                );
+                                return None;
+                            }
+                            self.i += 1;
+                            let hs = self.i;
+                            while self.peek() != b'}' && self.i < self.src.len() {
+                                self.i += 1;
+                            }
+                            let hex = &self.text[hs..self.i];
+                            self.i += 1; // closing }
+                            match u32::from_str_radix(hex, 16).ok().and_then(char::from_u32) {
+                                Some(ch) => out.push(ch),
+                                None => {
+                                    self.diags.push(
+                                        Diagnostic::error(
+                                            "E0108",
+                                            Span::new(hs, self.i),
+                                            format!("`{hex}` is not a Unicode scalar value"),
+                                        )
+                                        .clause("names.md §2.3"),
+                                    );
+                                    return None;
+                                }
+                            }
+                        }
+                        other => {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "E0109",
+                                    Span::new(self.i - 2, self.i),
+                                    format!("unknown escape `\\{}`", other as char),
+                                )
+                                .clause("names.md §2.3"),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                _ => {
+                    let start = self.i;
+                    while self.i < self.src.len() && !matches!(self.peek(), b'"' | b'\\' | b'\n') {
+                        self.i += 1;
+                    }
+                    out.push_str(&self.text[start..self.i]);
+                }
             }
-
-            self.i += ch.len_utf8();
-            out.push(ch);
         }
-
-        Err(anyhow!("Unterminated string literal"))
+        Some(if raw { Tok::RawStr(out) } else { Tok::Str(out) })
     }
-}
-
-fn is_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
-}
-
-fn is_ident_continue(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn lexes_core_keywords() {
-        let mut lexer = Lexer::new("dbcontext App : Postgres; entity User { id uuid; }");
-
-        assert!(matches!(
-            lexer.next_token().unwrap().kind,
-            TokenKind::Keyword(Keyword::DbContext)
-        ));
-        assert!(matches!(
-            lexer.next_token().unwrap().kind,
-            TokenKind::Ident(_)
-        ));
+    fn toks(src: &str) -> Vec<Tok> {
+        let (t, d) = Lexer::new(src).tokenize();
+        assert!(d.is_empty(), "unexpected diagnostics: {:?}", d);
+        t.into_iter().map(|t| t.tok).collect()
     }
 
     #[test]
-    fn lexes_raw_string_literal_without_escape_processing() {
-        let mut lexer = Lexer::new(r#"r"\d+\.\d+""#);
-        let tok = lexer.next_token().unwrap();
-        match tok.kind {
-            TokenKind::String(s) => assert_eq!(s, "\\d+\\.\\d+"),
-            other => panic!("expected raw string, got {other:?}"),
-        }
+    fn sigils_are_single_tokens() {
+        assert_eq!(
+            toks("@org_id $req"),
+            vec![
+                Tok::PathParam("org_id".into()),
+                Tok::Local("req".into()),
+                Tok::Eof
+            ]
+        );
     }
 
     #[test]
-    fn r_prefix_only_lexes_as_raw_when_followed_by_quote() {
-        // Plain identifier starting with 'r' must stay an identifier.
-        let mut lexer = Lexer::new("ret value");
-        let tok = lexer.next_token().unwrap();
-        assert!(matches!(tok.kind, TokenKind::Ident(ref v) if v == "ret"));
+    fn detached_sigil_is_an_error() {
+        let (_, d) = Lexer::new("@ org_id").tokenize();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "E0106");
     }
 
     #[test]
-    fn lexes_decimal_number_literal() {
-        let mut lexer = Lexer::new("let x = 0.25;");
-        let _ = lexer.next_token().unwrap(); // let
-        let _ = lexer.next_token().unwrap(); // x
-        let _ = lexer.next_token().unwrap(); // =
-        let tok = lexer.next_token().unwrap();
-        match tok.kind {
-            TokenKind::Number(v) => assert_eq!(v, "0.25"),
-            other => panic!("expected Number token, got {other:?}"),
-        }
+    fn longest_match_operators() {
+        assert_eq!(
+            toks("==? == =? = ?? ... . -> !="),
+            vec![
+                Tok::EqEqOpt,
+                Tok::EqEq,
+                Tok::EqOpt,
+                Tok::Eq,
+                Tok::Coalesce,
+                Tok::DotDotDot,
+                Tok::Dot,
+                Tok::Arrow,
+                Tok::BangEq,
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_strings_keep_backslashes() {
+        assert_eq!(
+            toks(r###"r"^[^@]+@[^@]+\.[^@]+$""###),
+            vec![Tok::RawStr(r"^[^@]+@[^@]+\.[^@]+$".into()), Tok::Eof]
+        );
+    }
+
+    #[test]
+    fn doc_and_line_comments_become_trivia() {
+        let (t, d) = Lexer::new("--- doc\n-- plain\ntable").tokenize();
+        assert!(d.is_empty());
+        assert_eq!(
+            t[0].leading,
+            vec![Trivia::Doc("doc".into()), Trivia::Line("plain".into())]
+        );
+        assert_eq!(t[0].tok, Tok::Ident("table".into()));
+    }
+
+    #[test]
+    fn a_stray_multibyte_character_is_named_whole_and_does_not_split() {
+        // The span used to be one byte wide, which put it *inside* the
+        // character. `SourceFile::line_col` then sliced the source there
+        // and panicked, so the compiler crashed while rendering the error
+        // it had just produced — and the message printed a mojibake first
+        // byte (`â` for `—`) besides.
+        let (_, d) = Lexer::new("table — x").tokenize();
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, "E0100");
+        assert!(
+            d[0].message.contains('—'),
+            "the character is not named whole: {}",
+            d[0].message
+        );
+        let span = d[0].span;
+        assert_eq!(
+            (span.end - span.start) as usize,
+            "—".len(),
+            "the span must cover the whole character"
+        );
+        // The renderer is the half that used to panic.
+        let file = crate::diag::SourceFile::new("t.jwc", "table — x");
+        assert!(file.render(&d[0]).contains("E0100"));
+    }
+
+    #[test]
+    fn a_newline_in_a_raw_string_is_not_told_to_write_an_escape() {
+        // `\n` is the answer for `"..."` and is *not* an answer for
+        // `r"..."`, which processes no escapes — a backslash there stays a
+        // backslash. Both literals used to get the same help, which sends
+        // whoever hit it in a circle.
+        // The trailing quote is left dangling, so an `E0102` follows each
+        // of these. It is the first diagnostic that gets read.
+        let (_, plain) = Lexer::new("\"a\nb\"").tokenize();
+        assert_eq!(plain[0].code, "E0103", "{plain:?}");
+        assert!(plain[0].note.as_deref().unwrap_or_default().contains(r"\n"));
+
+        let (_, raw) = Lexer::new("r\"a\nb\"").tokenize();
+        assert_eq!(raw[0].code, "E0103", "{raw:?}");
+        let note = raw[0].note.as_deref().unwrap_or_default();
+        assert!(
+            note.contains("backslash"),
+            "the raw-string help still points at an escape: {note}"
+        );
+        assert_eq!(raw[0].clause, Some("names.md §2.4"));
+    }
+
+    #[test]
+    fn blank_lines_are_recorded_once() {
+        let (t, _) = Lexer::new("a\n\n\n\nb").tokenize();
+        assert_eq!(t[1].leading, vec![Trivia::Blank]);
+    }
+
+    #[test]
+    fn keywords_are_plain_identifiers() {
+        // `route` is a column name in the sample's audit table.
+        assert_eq!(
+            toks("route varchar"),
+            vec![
+                Tok::Ident("route".into()),
+                Tok::Ident("varchar".into()),
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn decimal_literals() {
+        assert_eq!(
+            toks("10.00 42"),
+            vec![
+                Tok::Decimal("10.00".into()),
+                Tok::Int("42".into()),
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn leading_underscore_rejected() {
+        let (_, d) = Lexer::new("_tmp").tokenize();
+        assert_eq!(d[0].code, "E0105");
     }
 }

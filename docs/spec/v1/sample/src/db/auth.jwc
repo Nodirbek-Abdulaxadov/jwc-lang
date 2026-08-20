@@ -1,13 +1,15 @@
 namespace db.auth;
 
 import app;
+import db.org;
 
-
+--- One human identity. Email is the login handle and is immutable.
 table Accounts of App.auth {
+    --- Surrogate key. Exposed to clients as a string (types.md §2.3).
     id             bigint primary key identity;
-    email          varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan",
-                                pattern(r"^[^@]+@[^@]+\.[^@]+$");
+    email          varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan", pattern(r"^[^@]+@[^@]+\.[^@]+$");
     display_name   varchar(80) minLength(2);
+    --- Argon2id. Never leaves the database (schema.md §3.1).
     password_hash  varchar(255) private;
     email_verified boolean default false;
     created_at     timestamptz default now();
@@ -15,10 +17,13 @@ table Accounts of App.auth {
     index on (created_at);
 }
 
+--- Bearer-token sessions. `token_hash` is an unsalted SHA-256 of a
+--- 32-byte CSPRNG token, so it can be looked up by equality
+--- (builtins.md §6).
 table Sessions of App.auth {
     id         bigint primary key identity;
     account_id bigint;
-    token_hash varchar(255) private, unique;
+    token_hash varchar(64) private, unique;
     user_agent varchar(255)?;
     ip         inet?;
     expires_at timestamptz;
@@ -33,7 +38,7 @@ table ApiKeys of App.auth {
     id           bigint primary key identity;
     org_id       bigint;
     name         varchar(80);
-    key_hash     varchar(255) private, unique;
+    key_hash     varchar(64) private, unique;
     scopes       text[];
     last_used_at timestamptz?;
     revoked_at   timestamptz?;

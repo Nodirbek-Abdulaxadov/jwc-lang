@@ -36,6 +36,12 @@ pub struct JwcEngine {
 
 static ENGINE: OnceLock<JwcEngine> = OnceLock::new();
 
+/// `DATABASE_URL`, or `JWC_DATABASE_URL`. The migrate CLI reads it through
+/// here so it fails with the same sentence the runtime does.
+pub fn database_url_from_env() -> Result<String> {
+    read_database_url()
+}
+
 fn read_database_url() -> Result<String> {
     std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("JWC_DATABASE_URL"))
@@ -243,6 +249,17 @@ fn engine() -> Result<&'static JwcEngine> {
     ENGINE
         .get()
         .ok_or_else(|| anyhow!("DB engine initialization failed"))
+}
+
+/// The connection this task is pinned to, when it is inside a
+/// `transaction { }` (or a test's rollback scope).
+///
+/// `db.rs` reads it so that statements issued inside a transaction land on
+/// the connection the `BEGIN` was issued on. Without it the block begins a
+/// transaction on one pooled connection and runs its statements on
+/// whichever others the pool hands out — which is not a transaction at all.
+pub fn pinned_connection() -> Option<Arc<Mutex<Option<PgConn>>>> {
+    TX_CONN.try_with(|cell| cell.clone()).ok()
 }
 
 pub async fn get_connection() -> Result<PgConn> {
@@ -987,6 +1004,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard is held across the awaited retry loop on purpose: it
+    // serialises the process-wide environment these tests mutate, and
+    // dropping it early is exactly the race it exists to prevent. Single
+    // test thread, no contention, no deadlock to have.
+    #[allow(clippy::await_holding_lock)]
     async fn retry_honours_max_attempts_env() {
         // Force the loop to give up after 2 attempts so the test stays
         // fast — and use a 0 ms backoff so we don't sleep at all.

@@ -1,0 +1,11 @@
+namespace config_blocks;
+
+-- config.md §3 — one `server` block. With two, which settings apply
+-- depends on the order the files happened to load in.
+server {
+    max_body_bytes = 1024;
+}
+
+server {                             -- expect: E1204
+    max_body_bytes = 2048;
+}

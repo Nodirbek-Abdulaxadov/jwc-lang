@@ -1,0 +1,26 @@
+namespace debug_dump;
+
+-- `debug.dump` is the one builtin that accepts a `Raw` (tooling.md §3.2):
+-- the one place a raw result's shape can be inspected is where the shape is
+-- in question. It returns its argument unchanged, so wrapping a
+-- subexpression in it changes nothing but what is printed — which is what
+-- makes it usable without restructuring the code around it.
+service Dump {
+    function raw_passes_through() {
+        let rows = select N from App.s.Notes;      -- raw: no projection
+        return debug.dump($rows);                  -- expect: W1301
+    }
+
+    function a_record_passes_through_too(org_id: bigint) -> text {
+        let row = select O from App.s.Orgs where id == $org_id as { id, slug } first
+            or throw NotFound("yo'q");
+        let seen = debug.dump($row);               -- expect: W1301
+        -- Still a record afterwards. Reading a field off it would be E0310
+        -- if `dump` had flattened it to `Raw`.
+        return $seen.slug;
+    }
+
+    function arity_is_one() {
+        return debug.dump();                       -- expect: E0205, W1301
+    }
+}

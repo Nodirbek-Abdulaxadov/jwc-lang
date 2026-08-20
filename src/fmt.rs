@@ -1,1331 +1,1564 @@
-//! Source-level formatter for `.jwc` files.
+//! Canonical printer for the v1 AST.
 //!
-//! Phase 8F: the formatter is a two-tier dispatcher.
+//! `jwc v1 fmt` re-prints from the AST rather than editing tokens, so the
+//! output is a fixed point by construction: anything the printer would
+//! normalise is already normalised on the second pass. The test that matters
+//! is `fmt(fmt(x)) == fmt(x)` over the corpus and the sample.
 //!
-//! 1. **AST renderer** ([`format_program`]). When the source parses cleanly
-//!    *and* contains no comments, we round-trip through the AST and emit a
-//!    canonical, opinionated rendering. This is the "real" formatter — it
-//!    asserts a single house style for braces, semicolons, indentation,
-//!    spacing, and declaration order.
-//! 2. **Line-based normaliser** ([`format_source_line_based`]). When the
-//!    source contains comments (which would be lost on the AST round-trip)
-//!    or fails to parse, we fall back to a comment-preserving whitespace
-//!    normaliser: tabs → 4 spaces, strip trailing whitespace, collapse
-//!    runs of 3+ blank lines, single trailing newline.
-//!
-//! Both tiers are **idempotent**: `format(format(src)) == format(src)`.
-//!
-//! ## Why the comment gate
-//!
-//! The AST renderer can't recover lexical comments because the parser drops
-//! them. Re-emitting from `Program` would silently delete every `// ...` and
-//! `/* ... */` block. We err on the side of "treat as has-comments" — a
-//! false positive (e.g. `"//"` inside a string literal) is safe; it just
-//! routes through the line-based normaliser. A false negative (real comment
-//! we missed) would drop code, so the heuristic only consults coarse
-//! delimiter presence.
-//!
-//! ## What the AST renderer covers
-//!
-//! Every variant in [`crate::ast::Program`], [`Stmt`](crate::ast::Stmt),
-//! and [`Expr`](crate::ast::Expr) — declarations
-//! (`dbcontext`, `entity`/`class`, `route`, `function`, `middleware`,
-//! `const`, `mount`, `using`), every statement form (control flow, try,
-//! transaction, savepoint, validate, DB CRUD), and the full expression
-//! ladder (literals, calls, arithmetic, comparison, boolean, `select`,
-//! `await`, object/array literals).
+//! Doc comments (`---`) and line comments (`--`) survive: the parser hangs
+//! them on the AST node that follows them (`Attached`), and the printer
+//! emits them back in place. Trailing comments on the same line as code are
+//! not preserved — they become leading comments of the next item.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-
-use anyhow::{Context, Result};
-
-use crate::ast::{
-    ConstDecl, DbContextDecl, DbOrderBy, DbWhere, ErrorHandlerDecl, Expr, FieldDecl,
-    FieldReference, FunctionDecl, ImportDecl, MiddlewareDecl, ModelDecl, ModelKind, MountDecl,
-    NavigationField, NavigationKind, OnDeleteAction, Program, RouteDecl, RouteProtocol, SortDir,
-    Stmt, TypeSpec, TypedParam, ValidateField, ValidateRule, Visibility, WhereExpr,
-};
+use crate::ast::*;
 
 const INDENT: &str = "    ";
 
-/// Apply formatting to `src`. Routes through the AST renderer when the
-/// source is comment-free and parses cleanly; otherwise falls back to the
-/// line-based normaliser so comments are preserved.
-pub fn format_source(src: &str) -> String {
-    if has_comments(src) {
-        // Comments would be lost on the AST round-trip. Fall back to the
-        // line-based normaliser which preserves them.
-        return format_source_line_based(src);
-    }
-    match crate::parser::parse_program(src) {
-        Ok(program) => format_program(&program),
-        Err(_) => format_source_line_based(src),
-    }
-}
-
-/// Coarse heuristic — quick scan for `//` or `/*` anywhere in `src`. We
-/// deliberately err on the side of "treat as has-comments" (false positives
-/// inside string literals are safe; they just route through line-based).
-pub fn has_comments(src: &str) -> bool {
-    src.contains("//") || src.contains("/*")
-}
-
-/// Line-based whitespace normaliser — preserves comments.
-///
-/// Rules applied to every `.jwc` file routed through this tier:
-///
-/// 1. Tabs are expanded to four spaces (consistent with the rest of the
-///    codebase, which uses spaces).
-/// 2. Trailing whitespace at end of each line is stripped.
-/// 3. Three or more consecutive blank lines collapse to two.
-/// 4. The file ends with exactly one trailing newline.
-///
-/// These four together are *idempotent*.
-pub fn format_source_line_based(src: &str) -> String {
-    // Pass 1 — normalise per line: tabs → 4 spaces, strip trailing whitespace.
-    let normalised: Vec<String> = src
-        .split('\n')
-        .map(|line| {
-            let expanded = line.replace('\t', "    ");
-            expanded.trim_end_matches([' ', '\r']).to_string()
-        })
-        .collect();
-
-    // Pass 2 — collapse runs of 3+ empty lines down to 2. We walk the
-    // sequence and track how many empties we've emitted in the current run.
-    let mut out: Vec<String> = Vec::with_capacity(normalised.len());
-    let mut empty_run = 0usize;
-    for line in normalised {
-        if line.is_empty() {
-            empty_run += 1;
-            if empty_run <= 2 {
-                out.push(line);
+pub fn format_program(p: &Program) -> String {
+    let mut w = Writer::default();
+    for (i, d) in p.decls.iter().enumerate() {
+        if i > 0 {
+            let solo = matches!(d, Decl::Import(_) | Decl::Namespace(_))
+                && matches!(p.decls[i - 1], Decl::Import(_) | Decl::Namespace(_));
+            // Consecutive imports stay together; everything else gets air.
+            if solo && !d.attached().blank_before {
+                // no blank line
+            } else {
+                w.blank();
             }
-        } else {
-            empty_run = 0;
-            out.push(line);
         }
+        w.decl(d);
     }
-
-    // Pass 3 — exactly one trailing newline. After Pass 2 the source might
-    // end with N empties; trim them all off and reattach a single `\n`.
-    while out.last().map(|s| s.is_empty()).unwrap_or(false) {
+    let mut out = w.out;
+    while out.ends_with("\n\n") {
         out.pop();
     }
-    let mut result = out.join("\n");
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    result
-}
-
-/// Return `true` when `src` is already in canonical form.
-pub fn is_formatted(src: &str) -> bool {
-    format_source(src) == src
-}
-
-/// Walk `root` (a file or a directory) and collect every `.jwc` file path
-/// reachable from it, breadth-first. Skips the conventional build caches
-/// (`.jwc-build/`, `target/`, `node_modules/`) so we don't reformat
-/// generated Rust scratch or vendor JS.
-pub fn collect_jwc_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let meta = fs::metadata(&path).with_context(|| format!("stat: {}", path.display()))?;
-        if meta.is_file() {
-            if path.extension().and_then(|e| e.to_str()) == Some("jwc") {
-                out.push(path);
-            }
-            continue;
-        }
-        if !meta.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&path).with_context(|| format!("read_dir: {}", path.display()))? {
-            let entry = entry?;
-            let p = entry.path();
-            if p.is_dir() {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if matches!(name, ".jwc-build" | "target" | "node_modules" | ".git") {
-                    continue;
-                }
-                stack.push(p);
-            } else if p.extension().and_then(|e| e.to_str()) == Some("jwc") {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// Outcome of running the formatter on a single file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FormatOutcome {
-    /// Already canonical — no change needed.
-    Unchanged,
-    /// Was rewritten (write mode) or *would* be rewritten (check mode).
-    Changed,
-}
-
-/// Format (or in check mode, diff) a single file. On `check=true` the file
-/// is left untouched and the return value tells the caller whether it was
-/// canonical. On `check=false` the rewritten content is written back.
-pub fn format_file(path: &Path, check: bool) -> Result<FormatOutcome> {
-    let src = fs::read_to_string(path).with_context(|| format!("read: {}", path.display()))?;
-    let formatted = format_source(&src);
-    if formatted == src {
-        return Ok(FormatOutcome::Unchanged);
-    }
-    if !check {
-        fs::write(path, &formatted).with_context(|| format!("write: {}", path.display()))?;
-    }
-    Ok(FormatOutcome::Changed)
-}
-
-// ----------------------------------------------------------------------
-// AST renderer
-// ----------------------------------------------------------------------
-
-/// Render a parsed [`Program`] as canonical `.jwc` source.
-///
-/// Declaration order:
-/// 1. `using` imports (one per declared namespace)
-/// 2. `const` bindings
-/// 3. `dbcontext` declarations
-/// 4. `entity` / `class` models
-/// 5. `mount` declarations
-/// 6. `middleware` declarations
-/// 7. `function` declarations
-/// 8. `route` declarations
-/// 9. `error` handler (if any)
-///
-/// Within each group, the source order from the merged [`Program`] is
-/// preserved.
-pub fn format_program(program: &Program) -> String {
-    let mut w = Writer::new();
-
-    let mut printed_block = false;
-
-    // 1. Imports.
-    if !program.imports.is_empty() {
-        for imp in &program.imports {
-            render_import(&mut w, imp);
-        }
-        printed_block = true;
-    }
-
-    // 2. Consts.
-    if !program.consts.is_empty() {
-        if printed_block {
-            w.blank();
-        }
-        for c in &program.consts {
-            render_const(&mut w, c);
-        }
-        printed_block = true;
-    }
-
-    // 3. DbContexts.
-    if !program.dbcontexts.is_empty() {
-        if printed_block {
-            w.blank();
-        }
-        for d in &program.dbcontexts {
-            render_dbcontext(&mut w, d);
-        }
-        printed_block = true;
-    }
-
-    // 4. Models.
-    if !program.models.is_empty() {
-        if printed_block {
-            w.blank();
-        }
-        for (i, m) in program.models.iter().enumerate() {
-            if i > 0 {
-                w.blank();
-            }
-            render_model(&mut w, m);
-        }
-        printed_block = true;
-    }
-
-    // 5. Mounts.
-    if !program.mounts.is_empty() {
-        if printed_block {
-            w.blank();
-        }
-        for m in &program.mounts {
-            render_mount(&mut w, m);
-        }
-        printed_block = true;
-    }
-
-    // 6. Middlewares.
-    if !program.middlewares.is_empty() {
-        if printed_block {
-            w.blank();
-        }
-        for (i, m) in program.middlewares.iter().enumerate() {
-            if i > 0 {
-                w.blank();
-            }
-            render_middleware(&mut w, m);
-        }
-        printed_block = true;
-    }
-
-    // 7. Functions, with dome members regrouped into their `dome` block.
-    //
-    // The parser flattens `dome S { function f() }` into a single function
-    // named `S.f`, so rendering the list verbatim emitted
-    // `function S.f() { ... }` — the dome was gone and the dotted name is not
-    // a legal declaration, so formatting any comment-free file containing a
-    // dome produced source that no longer parsed.
-    if !program.functions.is_empty() {
-        if printed_block {
-            w.blank();
-        }
-        let mut first = true;
-        let mut rendered_domes: Vec<&str> = Vec::new();
-        for f in program.functions.iter() {
-            match f.name.split_once('.') {
-                None => {
-                    if !first {
-                        w.blank();
-                    }
-                    render_function(&mut w, f, None);
-                    first = false;
-                }
-                Some((dome, _)) => {
-                    // Emit the whole dome the first time one of its members
-                    // is reached, so members stay together and in order.
-                    if rendered_domes.contains(&dome) {
-                        continue;
-                    }
-                    rendered_domes.push(dome);
-                    if !first {
-                        w.blank();
-                    }
-                    w.line(&format!("dome {} {{", dome));
-                    w.push_indent();
-                    let members: Vec<&FunctionDecl> = program
-                        .functions
-                        .iter()
-                        .filter(|m| m.name.split_once('.').map(|(d, _)| d) == Some(dome))
-                        .collect();
-                    for (i, m) in members.iter().enumerate() {
-                        if i > 0 {
-                            w.blank();
-                        }
-                        let base = m.name.split_once('.').map(|(_, b)| b).unwrap_or(&m.name);
-                        render_function(&mut w, m, Some(base));
-                    }
-                    w.pop_indent();
-                    w.line("}");
-                    first = false;
-                }
-            }
-        }
-        printed_block = true;
-    }
-
-    // 8. Routes.
-    if !program.routes.is_empty() {
-        if printed_block {
-            w.blank();
-        }
-        for (i, r) in program.routes.iter().enumerate() {
-            if i > 0 {
-                w.blank();
-            }
-            render_route(&mut w, r);
-        }
-        printed_block = true;
-    }
-
-    // 9. Error handler.
-    if let Some(eh) = &program.error_handler {
-        if printed_block {
-            w.blank();
-        }
-        render_error_handler(&mut w, eh);
-    }
-
-    w.into_string()
-}
-
-/// Indent-aware line buffer. Owns the running output, the current indent
-/// depth, and a small "did we just emit a blank line?" flag so multiple
-/// `blank()` calls collapse to one.
-struct Writer {
-    out: String,
-    indent: usize,
-    last_was_blank: bool,
-    just_started: bool,
-}
-
-impl Writer {
-    fn new() -> Self {
-        Self {
-            out: String::new(),
-            indent: 0,
-            last_was_blank: false,
-            just_started: true,
-        }
-    }
-
-    fn push_indent(&mut self) {
-        self.indent += 1;
-    }
-
-    fn pop_indent(&mut self) {
-        debug_assert!(self.indent > 0);
-        self.indent -= 1;
-    }
-
-    /// Emit `text` as one line, prefixed by the current indentation.
-    fn line(&mut self, text: &str) {
-        if text.is_empty() {
-            self.blank();
-            return;
-        }
-        for _ in 0..self.indent {
-            self.out.push_str(INDENT);
-        }
-        self.out.push_str(text);
-        self.out.push('\n');
-        self.last_was_blank = false;
-        self.just_started = false;
-    }
-
-    /// Emit a blank separator line. No-op at file start; collapses runs.
-    fn blank(&mut self) {
-        if self.just_started || self.last_was_blank {
-            return;
-        }
-        self.out.push('\n');
-        self.last_was_blank = true;
-    }
-
-    fn into_string(mut self) -> String {
-        // Ensure single trailing newline, no leading or trailing blanks.
-        while self.out.ends_with("\n\n") {
-            self.out.pop();
-        }
-        if !self.out.is_empty() && !self.out.ends_with('\n') {
-            self.out.push('\n');
-        }
-        self.out
-    }
-}
-
-fn render_import(w: &mut Writer, imp: &ImportDecl) {
-    w.line(&format!("using {};", imp.path.join(".")));
-}
-
-fn render_const(w: &mut Writer, c: &ConstDecl) {
-    w.line(&format!("const {} = {};", c.name, render_expr(&c.expr)));
-}
-
-fn render_dbcontext(w: &mut Writer, d: &DbContextDecl) {
-    // `parse_dbcontext_decl` requires the colon: `dbcontext AppDb: Postgres;`.
-    // Emitting `dbcontext AppDb Postgres;` produced a file the parser then
-    // rejected — the same round-trip break the validate-rule renderer had.
-    let driver = if d.driver.is_empty() {
-        String::new()
-    } else {
-        format!(": {}", d.driver)
-    };
-    w.line(&format!("dbcontext {}{};", d.name, driver));
-}
-
-fn render_mount(w: &mut Writer, m: &MountDecl) {
-    let target = m.target.join(".");
-    match &m.prefix {
-        Some(p) => w.line(&format!("mount {} at \"{}\";", target, escape_string(p))),
-        None => w.line(&format!("mount {};", target)),
-    }
-}
-
-fn render_model(w: &mut Writer, m: &ModelDecl) {
-    let vis = vis_prefix(m.visibility);
-    let kw = match m.kind {
-        ModelKind::Entity => "entity",
-        ModelKind::Class => "class",
-    };
-    let ctx = m
-        .context_name
-        .as_ref()
-        .map(|n| format!(" of {}", n))
-        .unwrap_or_default();
-    w.line(&format!("{}{} {}{} {{", vis, kw, m.name, ctx));
-    w.push_indent();
-    for f in &m.fields {
-        render_field(w, f);
-    }
-    for n in &m.navigations {
-        render_navigation(w, n);
-    }
-    // Table-level constraints last — they read as a summary of the columns
-    // above rather than as another column.
-    for cols in &m.unique_constraints {
-        w.line(&format!("unique({});", cols.join(", ")));
-    }
-    w.pop_indent();
-    w.line("}");
-}
-
-fn render_field(w: &mut Writer, f: &FieldDecl) {
-    let mut parts: Vec<String> = Vec::new();
-    parts.push(f.name.clone());
-    parts.push(render_type(&f.ty));
-    if f.is_primary_key {
-        parts.push("pk".to_string());
-    }
-    if f.is_auto_increment {
-        parts.push("autoincrement".to_string());
-    }
-    if f.is_unique {
-        parts.push("unique".to_string());
-    }
-    if f.is_nullable {
-        parts.push("nullable".to_string());
-    }
-    if f.is_indexed {
-        parts.push("index".to_string());
-    }
-    if let Some(r) = &f.references {
-        parts.push(render_field_reference(r));
-    }
-    w.line(&format!("{};", parts.join(" ")));
-}
-
-fn render_field_reference(r: &FieldReference) -> String {
-    let on_delete = match r.on_delete {
-        OnDeleteAction::NoAction => "",
-        OnDeleteAction::Cascade => " on delete cascade",
-        OnDeleteAction::Restrict => " on delete restrict",
-        OnDeleteAction::SetNull => " on delete set null",
-    };
-    format!("references {}.{}{}", r.entity, r.column, on_delete)
-}
-
-fn render_navigation(w: &mut Writer, n: &NavigationField) {
-    let ty = match n.kind {
-        NavigationKind::OneToMany | NavigationKind::ManyToMany => {
-            format!("List<{}>", n.target_entity)
-        }
-        NavigationKind::OneToOne | NavigationKind::BelongsTo => n.target_entity.clone(),
-    };
-    let proj = if n.projection.is_empty() {
-        String::new()
-    } else {
-        format!(" {{ {} }}", n.projection.join(", "))
-    };
-    // m2m prints `JoinTable(near, far)`; belongs-to prints a bare local column;
-    // has-many/one print `Target.col`.
-    let via = match n.kind {
-        NavigationKind::ManyToMany => match &n.join {
-            Some(j) => format!("{}({}, {})", j.table, j.near_col, j.far_col),
-            None => format!("{}.{}", n.target_entity, n.target_field),
-        },
-        NavigationKind::BelongsTo => n.target_field.clone(),
-        _ => format!("{}.{}", n.target_entity, n.target_field),
-    };
-    let order = match &n.order_by {
-        Some(o) => match o.dir {
-            SortDir::Asc => format!(" orderby {}", o.col),
-            SortDir::Desc => format!(" orderby {} desc", o.col),
-        },
-        None => String::new(),
-    };
-    w.line(&format!("{}: {}{} via {}{};", n.name, ty, proj, via, order));
-}
-
-fn render_type(t: &TypeSpec) -> String {
-    if t.args.is_empty() {
-        t.name.clone()
-    } else {
-        let args: Vec<String> = t.args.iter().map(|a| a.to_string()).collect();
-        format!("{}({})", t.name, args.join(", "))
-    }
-}
-
-fn render_middleware(w: &mut Writer, m: &MiddlewareDecl) {
-    let vis = vis_prefix(m.visibility);
-    w.line(&format!("{}middleware {} {{", vis, m.name));
-    w.push_indent();
-    render_block(w, &m.body);
-    if let Some(after) = &m.after_body {
-        w.pop_indent();
-        w.line("} after {");
-        w.push_indent();
-        render_block(w, after);
-    }
-    w.pop_indent();
-    w.line("}");
-}
-
-/// `name_override` supplies the bare member name when rendering inside a
-/// `dome` block, where the AST holds the qualified `Dome.member` form.
-fn render_function(w: &mut Writer, f: &FunctionDecl, name_override: Option<&str>) {
-    let vis = vis_prefix(f.visibility);
-    let async_kw = if f.is_async { "async " } else { "" };
-    let params: Vec<String> = f.params.iter().map(render_typed_param).collect();
-    let ret = f
-        .return_type
-        .as_ref()
-        .map(|t| format!(": {}", t))
-        .unwrap_or_default();
-    w.line(&format!(
-        "{}{}function {}({}){} {{",
-        vis,
-        async_kw,
-        name_override.unwrap_or(&f.name),
-        params.join(", "),
-        ret
-    ));
-    w.push_indent();
-    render_block(w, &f.body);
-    w.pop_indent();
-    w.line("}");
-}
-
-fn render_typed_param(p: &TypedParam) -> String {
-    match &p.ty {
-        Some(t) => format!("{}: {}", p.name, t),
-        None => p.name.clone(),
-    }
-}
-
-fn render_route(w: &mut Writer, r: &RouteDecl) {
-    let kw = match r.protocol {
-        RouteProtocol::Http => format!("route {}", r.method),
-        RouteProtocol::Ws => "route WS".to_string(),
-        RouteProtocol::Sse => "route SSE".to_string(),
-    };
-    let middlewares = if r.middlewares.is_empty() {
-        String::new()
-    } else {
-        format!(" use {}", r.middlewares.join(", "))
-    };
-    let handler = match &r.handler {
-        Some(h) => format!(" => {}", h),
-        None => String::new(),
-    };
-    if r.body.is_empty() && r.handler.is_some() {
-        w.line(&format!(
-            "{} \"{}\"{}{};",
-            kw,
-            escape_string(&r.path),
-            middlewares,
-            handler
-        ));
-        return;
-    }
-    w.line(&format!(
-        "{} \"{}\"{} {{",
-        kw,
-        escape_string(&r.path),
-        middlewares
-    ));
-    w.push_indent();
-    render_block(w, &r.body);
-    w.pop_indent();
-    w.line("}");
-}
-
-fn render_error_handler(w: &mut Writer, eh: &ErrorHandlerDecl) {
-    w.line(&format!("error catch ({}) {{", eh.catch_var));
-    w.push_indent();
-    render_block(w, &eh.body);
-    w.pop_indent();
-    w.line("}");
-}
-
-fn render_block(w: &mut Writer, stmts: &[Stmt]) {
-    for s in stmts {
-        render_stmt(w, s);
-    }
-}
-
-fn render_stmt(w: &mut Writer, s: &Stmt) {
-    match s {
-        Stmt::Let { name, value } => {
-            w.line(&format!("let {} = {};", name, render_expr(value)));
-        }
-        Stmt::Assign { name, value } => {
-            w.line(&format!("{} = {};", name, render_expr(value)));
-        }
-        Stmt::FieldAssign { var, field, value } => {
-            w.line(&format!("{}.{} = {};", var, field, render_expr(value)));
-        }
-        Stmt::Print(e) => {
-            w.line(&format!("print({});", render_expr(e)));
-        }
-        Stmt::If {
-            cond,
-            then_body,
-            else_body,
-        } => {
-            w.line(&format!("if ({}) {{", render_expr(cond)));
-            w.push_indent();
-            render_block(w, then_body);
-            w.pop_indent();
-            if let Some(eb) = else_body {
-                w.line("} else {");
-                w.push_indent();
-                render_block(w, eb);
-                w.pop_indent();
-            }
-            w.line("}");
-        }
-        Stmt::While { cond, body } => {
-            w.line(&format!("while ({}) {{", render_expr(cond)));
-            w.push_indent();
-            render_block(w, body);
-            w.pop_indent();
-            w.line("}");
-        }
-        Stmt::Break => w.line("break;"),
-        Stmt::Continue => w.line("continue;"),
-        Stmt::Expr(e) => w.line(&format!("{};", render_expr(e))),
-        Stmt::Return(opt) => match opt {
-            Some(e) => w.line(&format!("return {};", render_expr(e))),
-            None => w.line("return;"),
-        },
-        Stmt::ValidateBody { fields } => {
-            w.line("validate body {");
-            w.push_indent();
-            for f in fields {
-                w.line(&render_validate_field(f));
-            }
-            w.pop_indent();
-            w.line("}");
-        }
-        Stmt::Try {
-            body,
-            catch_var,
-            catch_type,
-            catch_body,
-        } => {
-            w.line("try {");
-            w.push_indent();
-            render_block(w, body);
-            w.pop_indent();
-            let head = match catch_type {
-                Some(t) => format!("}} catch ({}: {}) {{", catch_var, t),
-                None => format!("}} catch ({}) {{", catch_var),
-            };
-            w.line(&head);
-            w.push_indent();
-            render_block(w, catch_body);
-            w.pop_indent();
-            w.line("}");
-        }
-        Stmt::Transaction { body } => {
-            w.line("transaction {");
-            w.push_indent();
-            render_block(w, body);
-            w.pop_indent();
-            w.line("}");
-        }
-        Stmt::Savepoint { name, body } => {
-            w.line(&format!("savepoint {} {{", name));
-            w.push_indent();
-            render_block(w, body);
-            w.pop_indent();
-            w.line("}");
-        }
-        Stmt::ForIn { var, iter, body } => {
-            w.line(&format!("for {} in {} {{", var, render_expr(iter)));
-            w.push_indent();
-            render_block(w, body);
-            w.pop_indent();
-            w.line("}");
-        }
-        Stmt::DbInsert {
-            var,
-            context_var,
-            table,
-        } => {
-            w.line(&format!("insert {} into {}.{};", var, context_var, table));
-        }
-        Stmt::DbUpdate {
-            var,
-            context_var,
-            table,
-        } => {
-            w.line(&format!("update {} in {}.{};", var, context_var, table));
-        }
-        Stmt::DbDelete {
-            var,
-            context_var,
-            table,
-        } => {
-            w.line(&format!("delete {} from {}.{};", var, context_var, table));
-        }
-        Stmt::DbDeleteWhere {
-            context_var,
-            table,
-            where_clause,
-        } => {
-            w.line(&format!(
-                "delete from {}.{} where {};",
-                context_var,
-                table,
-                render_where(where_clause)
-            ));
-        }
-        Stmt::DbUpdateSet {
-            context_var,
-            table,
-            assignments,
-            where_clause,
-        } => {
-            let sets: Vec<String> = assignments
-                .iter()
-                .map(|(k, v)| format!("{} = {}", k, render_expr(v)))
-                .collect();
-            w.line(&format!(
-                "update {}.{} set {} where {};",
-                context_var,
-                table,
-                sets.join(", "),
-                render_where(where_clause)
-            ));
-        }
-    }
-}
-
-fn render_validate_field(f: &ValidateField) -> String {
-    let rules: Vec<String> = f.rules.iter().map(render_validate_rule).collect();
-    format!("{}: {};", f.name, rules.join(", "))
-}
-
-fn render_validate_rule(r: &ValidateRule) -> String {
-    match r {
-        ValidateRule::Required => "required".to_string(),
-        // Must match the spelling `parse_validate_rule` accepts: it lower-cases
-        // the rule name and matches `minlength` / `maxlength`, so the
-        // underscored form does not round-trip through the parser.
-        ValidateRule::MinLength(n) => format!("minLength({})", n),
-        ValidateRule::MaxLength(n) => format!("maxLength({})", n),
-        ValidateRule::Min(n) => format!("min({})", n),
-        ValidateRule::Max(n) => format!("max({})", n),
-        ValidateRule::Pattern(p) => format!("pattern(\"{}\")", escape_string(p)),
-    }
-}
-
-fn render_where(w: &WhereExpr) -> String {
-    match w {
-        WhereExpr::Atom(a) => render_db_where(a),
-        WhereExpr::AggAtom { kind, col, op, rhs } => {
-            format!("{}({}) {} {}", kind.keyword(), col, op, render_expr(rhs))
-        }
-        WhereExpr::InList { field, values } => {
-            let vs: Vec<String> = values.iter().map(render_expr).collect();
-            format!("{} in ({})", field, vs.join(", "))
-        }
-        WhereExpr::Between { field, low, high } => {
-            format!(
-                "{} between {} and {}",
-                field,
-                render_expr(low),
-                render_expr(high)
-            )
-        }
-        WhereExpr::And(a, b) => format!("({} and {})", render_where(a), render_where(b)),
-        WhereExpr::Or(a, b) => format!("({} or {})", render_where(a), render_where(b)),
-    }
-}
-
-fn render_db_where(a: &DbWhere) -> String {
-    format!("{} {} {}", a.field, a.op, render_expr(&a.rhs))
-}
-
-fn render_order_by(o: &DbOrderBy) -> String {
-    let dir = match o.dir {
-        SortDir::Asc => "asc",
-        SortDir::Desc => "desc",
-    };
-    format!("{} {}", o.field, dir)
-}
-
-fn render_expr(e: &Expr) -> String {
-    match e {
-        Expr::Int(n) => n.to_string(),
-        Expr::Float(s) => s.clone(),
-        Expr::Str(s) => format!("\"{}\"", escape_string(s)),
-        Expr::Bool(b) => b.to_string(),
-        Expr::Null => "null".to_string(),
-        Expr::Var(name) => name.clone(),
-        Expr::Call { name, args } => {
-            let parts: Vec<String> = args.iter().map(render_expr).collect();
-            format!("{}({})", name, parts.join(", "))
-        }
-        Expr::FieldGet { var, field } => format!("{}.{}", var, field),
-        Expr::NewEntity { entity } => format!("new {}()", entity),
-        Expr::DbCount {
-            context_var,
-            table,
-            where_clause,
-        } => {
-            let mut s = format!("select count(*) from {}.{}", context_var, table);
-            if let Some(wc) = where_clause {
-                s.push_str(" where ");
-                s.push_str(&render_where(wc));
-            }
-            s
-        }
-        Expr::DbAggregate {
-            kind,
-            field,
-            context_var,
-            table,
-            where_clause,
-        } => {
-            let mut s = format!(
-                "select {}({}) from {}.{}",
-                kind.keyword(),
-                field,
-                context_var,
-                table
-            );
-            if let Some(wc) = where_clause {
-                s.push_str(" where ");
-                s.push_str(&render_where(wc));
-            }
-            s
-        }
-        Expr::DbSelect {
-            entity,
-            context_var,
-            table,
-            where_clause,
-            order_by,
-            limit,
-            offset,
-            first,
-            with_relations,
-            projection,
-            aggregates,
-            aliased_cols,
-            joins,
-            group_by,
-            distinct,
-            having,
-        } => {
-            let mut s = String::from("select ");
-            if *distinct {
-                s.push_str("distinct ");
-            }
-            s.push_str(entity);
-            if !projection.is_empty() || !aggregates.is_empty() || !aliased_cols.is_empty() {
-                let mut items: Vec<String> = projection.clone();
-                for ac in aliased_cols {
-                    items.push(format!("{}: {}", ac.alias, ac.field));
-                }
-                for a in aggregates {
-                    items.push(format!("{}: {}({})", a.alias, a.kind.keyword(), a.col));
-                }
-                s.push_str(" { ");
-                s.push_str(&items.join(", "));
-                s.push_str(" }");
-            }
-            if !with_relations.is_empty() {
-                s.push_str(" with ");
-                s.push_str(&with_relations.join(", "));
-            }
-            s.push_str(&format!(" from {}.{}", context_var, table));
-            for j in joins {
-                s.push_str(&format!(" join {} on {} == {}", j.entity, j.left, j.right));
-            }
-            if let Some(wc) = where_clause {
-                s.push_str(" where ");
-                s.push_str(&render_where(wc));
-            }
-            if !group_by.is_empty() {
-                s.push_str(" group by ");
-                s.push_str(&group_by.join(", "));
-            }
-            if let Some(h) = having {
-                s.push_str(" having ");
-                s.push_str(&render_where(h));
-            }
-            if let Some(o) = order_by {
-                s.push_str(" orderby ");
-                s.push_str(&render_order_by(o));
-            }
-            if let Some(l) = limit {
-                s.push_str(&format!(" limit {}", render_expr(l)));
-            }
-            if let Some(o) = offset {
-                s.push_str(&format!(" offset {}", render_expr(o)));
-            }
-            if *first {
-                s.push_str(" first");
-            }
-            s
-        }
-        Expr::Await(inner) => format!("await {}", render_expr(inner)),
-        Expr::Not(inner) => format!("!{}", paren_expr(inner)),
-        Expr::Ternary {
-            cond,
-            then_expr,
-            else_expr,
-        } => format!(
-            "{} ? {} : {}",
-            paren_expr(cond),
-            paren_expr(then_expr),
-            paren_expr(else_expr)
-        ),
-        Expr::Coalesce(a, b) => format!("{} ?? {}", paren_expr(a), paren_expr(b)),
-        Expr::ObjectLit(fields) => {
-            let parts: Vec<String> = fields
-                .iter()
-                .map(|(k, v)| {
-                    let key = if is_ident_key(k) {
-                        k.clone()
-                    } else {
-                        format!("\"{}\"", escape_string(k))
-                    };
-                    format!("{}: {}", key, render_expr(v))
-                })
-                .collect();
-            format!("{{ {} }}", parts.join(", "))
-        }
-        Expr::ArrayLit(items) => {
-            let parts: Vec<String> = items.iter().map(render_expr).collect();
-            format!("[{}]", parts.join(", "))
-        }
-        Expr::Add(a, b) => bin(a, "+", b),
-        Expr::Sub(a, b) => bin(a, "-", b),
-        Expr::Mul(a, b) => bin(a, "*", b),
-        Expr::Div(a, b) => bin(a, "/", b),
-        Expr::Mod(a, b) => bin(a, "%", b),
-        Expr::Neg(inner) => format!("-{}", paren_expr(inner)),
-        Expr::Eq(a, b) => bin(a, "==", b),
-        Expr::Neq(a, b) => bin(a, "!=", b),
-        Expr::Lt(a, b) => bin(a, "<", b),
-        Expr::Lte(a, b) => bin(a, "<=", b),
-        Expr::Gt(a, b) => bin(a, ">", b),
-        Expr::Gte(a, b) => bin(a, ">=", b),
-        Expr::And(a, b) => bin(a, "and", b),
-        Expr::Or(a, b) => bin(a, "or", b),
-    }
-}
-
-fn bin(a: &Expr, op: &str, b: &Expr) -> String {
-    format!("{} {} {}", paren_expr(a), op, paren_expr(b))
-}
-
-/// Wrap composite expressions in parentheses so reparsing yields the same
-/// shape. Atoms and call-like forms pass through bare.
-fn paren_expr(e: &Expr) -> String {
-    match e {
-        Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::Str(_)
-        | Expr::Bool(_)
-        | Expr::Null
-        | Expr::Var(_)
-        | Expr::Call { .. }
-        | Expr::FieldGet { .. }
-        | Expr::NewEntity { .. }
-        | Expr::ObjectLit(_)
-        | Expr::ArrayLit(_) => render_expr(e),
-        _ => format!("({})", render_expr(e)),
-    }
-}
-
-fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
     out
 }
 
-/// True when an object-literal key can be emitted bare (a valid JWC
-/// identifier); otherwise the formatter quotes it.
-fn is_ident_key(k: &str) -> bool {
-    let mut chars = k.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+#[derive(Default)]
+struct Writer {
+    out: String,
+    depth: usize,
 }
 
-fn vis_prefix(v: Visibility) -> &'static str {
-    match v {
-        // The lexer only knows `public` / `private`; `pub` is not a keyword,
-        // so emitting it produced source the parser rejected.
-        Visibility::Public => "public ",
-        // `private` is the default and adds nothing but noise.
-        Visibility::Private => "",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strips_trailing_whitespace_line_based() {
-        // Has `//` so routes through line-based.
-        let src = "// hdr\nfunction foo() {  \n    return 1;   \n}\n";
-        let want = "// hdr\nfunction foo() {\n    return 1;\n}\n";
-        assert_eq!(format_source(src), want);
-    }
-
-    #[test]
-    fn expands_tabs_to_four_spaces_line_based() {
-        let src = "// hdr\nfunction foo() {\n\treturn 1;\n}\n";
-        let want = "// hdr\nfunction foo() {\n    return 1;\n}\n";
-        assert_eq!(format_source(src), want);
-    }
-
-    #[test]
-    fn collapses_triple_blank_lines_line_based() {
-        let src = "// a\n\n\n\nb\n";
-        let want = "// a\n\n\nb\n";
-        assert_eq!(format_source(src), want);
-    }
-
-    #[test]
-    fn enforces_single_trailing_newline_line_based() {
-        assert_eq!(format_source("// a\n\n\n"), "// a\n");
-        assert_eq!(format_source("// a"), "// a\n");
-        assert_eq!(format_source(""), "");
-    }
-
-    #[test]
-    fn line_based_is_idempotent_on_commented_sources() {
-        let inputs = [
-            "// header\nfunction foo() {\n  return 1;\n}\n",
-            "// a\n\nb\n",
-            "// a\t\tb\n",
-            "// trailing  \n",
-            "// \n\n\n\nonly blanks above\n",
-        ];
-        for input in inputs {
-            let once = format_source(input);
-            let twice = format_source(&once);
-            assert_eq!(once, twice, "format() must be idempotent on: {input:?}");
+impl Writer {
+    fn blank(&mut self) {
+        if !self.out.is_empty() && !self.out.ends_with("\n\n") {
+            self.out.push('\n');
         }
     }
 
-    #[test]
-    fn is_formatted_recognises_canonical_input() {
-        // Comment-free: routes through the AST tier when it parses.
-        let canonical = "function foo() {\n    return 1;\n}\n";
-        assert!(is_formatted(canonical));
+    fn line(&mut self, s: &str) {
+        for _ in 0..self.depth {
+            self.out.push_str(INDENT);
+        }
+        self.out.push_str(s);
+        self.out.push('\n');
     }
 
-    #[test]
-    fn handles_crlf_line_endings_line_based() {
-        let src = "// hdr\na\r\nb\r\n";
-        let want = "// hdr\na\nb\n";
-        assert_eq!(format_source(src), want);
-    }
-
-    #[test]
-    fn has_comments_detects_line_and_block() {
-        assert!(has_comments("// hi\n"));
-        assert!(has_comments("/* hi */\n"));
-        assert!(!has_comments("function foo() {}\n"));
-    }
-
-    #[test]
-    fn ast_tier_renders_simple_function() {
-        let src = "function main() {\n    return 1;\n}\n";
-        let out = format_source(src);
-        assert!(out.contains("function main()"));
-        assert!(out.contains("return 1;"));
-    }
-
-    #[test]
-    fn ast_tier_idempotent_on_simple_program() {
-        let src = "function main() {\n    print(2 + 3);\n}\n";
-        let once = format_source(src);
-        let twice = format_source(&once);
-        assert_eq!(once, twice);
-    }
-
-    #[test]
-    fn unparseable_input_routes_to_line_based() {
-        // `@@@` is not valid jwc — must fall back, not panic.
-        let src = "@@@ broken !!!\n";
-        let out = format_source(src);
-        assert_eq!(out, "@@@ broken !!!\n");
-    }
-
-    /// Regression: `render_validate_rule` used to emit `min_length(..)` /
-    /// `max_length(..)`, which `parse_validate_rule` rejects. Formatting a
-    /// valid file therefore produced a file that no longer parsed, so
-    /// format-on-save and `jwc fmt --check` in CI corrupted projects.
-    ///
-    /// Asserts on every rule, not just the two that regressed, so any future
-    /// spelling drift between renderer and parser is caught here.
-    #[test]
-    fn formatted_validate_rules_round_trip_through_the_parser() {
-        let src = concat!(
-            "route POST \"/users\" {\n",
-            "    validate body {\n",
-            "        name: required, minLength(1), maxLength(120);\n",
-            "        age: required, min(1), max(150);\n",
-            "        email: required, pattern(\"^[^@]+@[^@]+$\");\n",
-            "    }\n",
-            "    return json({ ok: true });\n",
-            "}\n",
-        );
-        // Precondition: the input is valid to begin with.
-        assert!(
-            crate::parser::parse_program(src).is_ok(),
-            "test input must parse"
-        );
-
-        let formatted = format_source(src);
-        assert!(
-            crate::parser::parse_program(&formatted).is_ok(),
-            "formatter emitted source the parser rejects:\n{formatted}"
-        );
-        assert_eq!(formatted, format_source(&formatted), "must stay idempotent");
-    }
-
-    /// The AST renderer and the parser have to agree on every construct, not
-    /// just the ones someone thought to test. Two had already drifted apart —
-    /// validate rules (`min_length` vs `minLength`) and `dbcontext`, which was
-    /// rendered without the `:` the parser requires. Both produced a file that
-    /// no longer compiled, which is the worst thing a formatter can do.
-    ///
-    /// This walks a program touching each declaration form and asserts the
-    /// output still parses, so the next divergence fails here instead of in a
-    /// user's editor on save.
-    #[test]
-    fn formatting_round_trips_for_every_declaration_form() {
-        let cases: &[(&str, &str)] = &[
-            ("dbcontext", "dbcontext AppDb: Postgres;\n"),
-            (
-                "entity with every column modifier",
-                concat!(
-                    "dbcontext AppDb: Postgres;\n",
-                    "entity Wallet of AppDb {\n",
-                    "    id int pk autoincrement;\n",
-                    "    email varchar(120) unique;\n",
-                    "    owner int references User.id on delete cascade index;\n",
-                    "    note varchar(200) nullable;\n",
-                    "}\n",
-                    "entity User of AppDb {\n",
-                    "    id int pk autoincrement;\n",
-                    "}\n",
-                ),
-            ),
-            (
-                "route with middleware and validate",
-                concat!(
-                    "middleware Auth { return null; }\n",
-                    "route POST \"/users\" use Auth {\n",
-                    "    validate body {\n",
-                    "        name: required, minLength(1), maxLength(120);\n",
-                    "        age: min(1), max(150);\n",
-                    "    }\n",
-                    "    return created(json({ ok: true }));\n",
-                    "}\n",
-                ),
-            ),
-            (
-                "dome with modifiers",
-                concat!(
-                    "dome Billing {\n",
-                    "    function plain() { return 1; }\n",
-                    "    public async function suspends() { return 2; }\n",
-                    "}\n",
-                ),
-            ),
-            (
-                "queries",
-                concat!(
-                    "dbcontext AppDb: Postgres;\n",
-                    "entity Sale of AppDb {\n",
-                    "    id int pk autoincrement;\n",
-                    "    country varchar(64);\n",
-                    "    amount int;\n",
-                    "}\n",
-                    "function totals() {\n",
-                    "    return select Sale from AppDb.Sale group by Sale.country;\n",
-                    "}\n",
-                ),
-            ),
-            (
-                "select distinct",
-                concat!(
-                    "dbcontext AppDb: Postgres;\n",
-                    "entity Sale of AppDb {\n",
-                    "    id int pk autoincrement;\n",
-                    "    country varchar(64);\n",
-                    "}\n",
-                    "function countries() {\n",
-                    "    return select distinct Sale { country } from AppDb.Sale;\n",
-                    "}\n",
-                ),
-            ),
-            (
-                "grouped aggregation with having",
-                concat!(
-                    "dbcontext AppDb: Postgres;\n",
-                    "entity Sale of AppDb {\n",
-                    "    id int pk autoincrement;\n",
-                    "    country varchar(64);\n",
-                    "    amount int;\n",
-                    "}\n",
-                    "function busy() {\n",
-                    "    return select Sale { country, total: count(*), taken: sum(amount) } ",
-                    "from AppDb.Sale group by Sale.country ",
-                    "having count(*) > 2 and sum(Sale.amount) >= 500;\n",
-                    "}\n",
-                ),
-            ),
-            (
-                "control flow",
-                concat!(
-                    "function f() {\n",
-                    "    let n = 0;\n",
-                    "    while (n < 3) { n = n + 1; }\n",
-                    "    if (n == 3) { return 1; } else { return 2; }\n",
-                    "}\n",
-                ),
-            ),
-        ];
-
-        for (label, src) in cases {
-            assert!(
-                crate::parser::parse_program(src).is_ok(),
-                "{label}: test input itself must parse"
-            );
-            let formatted = format_source(src);
-            assert!(
-                crate::parser::parse_program(&formatted).is_ok(),
-                "{label}: formatter emitted source the parser rejects:\n{formatted}"
-            );
-            assert_eq!(
-                formatted,
-                format_source(&formatted),
-                "{label}: must stay idempotent"
-            );
+    fn attached(&mut self, at: &Attached) {
+        for c in &at.comments {
+            let s = if c.is_empty() {
+                "--".to_string()
+            } else {
+                format!("-- {c}")
+            };
+            self.line(&s);
+        }
+        for d in &at.docs {
+            let s = if d.is_empty() {
+                "---".to_string()
+            } else {
+                format!("--- {d}")
+            };
+            self.line(&s);
         }
     }
+
+    // ------------------------------------------------------------ decls
+
+    fn decl(&mut self, d: &Decl) {
+        self.attached(d.attached());
+        match d {
+            Decl::Namespace(n) => self.line(&format!("namespace {};", n.name.text())),
+            Decl::Import(n) => self.line(&format!("import {};", n.name.text())),
+            Decl::Database(n) => self.database(n),
+            Decl::Schema(n) => {
+                let phys = n
+                    .physical
+                    .as_ref()
+                    .map(|p| format!(" as {}", quote(p)))
+                    .unwrap_or_default();
+                self.line(&format!(
+                    "schema {} of {}{phys};",
+                    n.name.name, n.database.name
+                ));
+            }
+            Decl::Table(n) => self.table(n),
+            Decl::View(n) => self.view(n),
+            Decl::Enum(n) => self.enum_decl(n),
+            Decl::Class(n) => self.class(n),
+            Decl::Error(n) => self.error_decl(n),
+            Decl::Service(n) => self.service(n),
+            Decl::Middleware(n) => self.middleware(n),
+            Decl::Routes(n) => self.routes(n),
+            Decl::ErrorHandler(n) => self.error_handler(n),
+            Decl::Server(n) => self.server(n),
+            Decl::Function(n) => self.function(n),
+            Decl::Test(n) => {
+                self.line(&format!("test {} {{", quote(&n.name)));
+                self.depth += 1;
+                self.block(&n.body);
+                self.depth -= 1;
+                self.line("}");
+            }
+        }
+    }
+
+    fn database(&mut self, n: &DatabaseDecl) {
+        if n.init.is_empty() {
+            self.line(&format!("database {} : {};", n.name.name, n.driver.name));
+            return;
+        }
+        self.line(&format!("database {} : {} {{", n.name.name, n.driver.name));
+        self.depth += 1;
+        self.line("init() {");
+        self.depth += 1;
+        let pad = n.init.iter().map(|a| a.key.name.len()).max().unwrap_or(0);
+        for a in &n.init {
+            self.line(&format!(
+                "{:pad$} = {};",
+                a.key.name,
+                expr(&a.value),
+                pad = pad
+            ));
+        }
+        self.depth -= 1;
+        self.line("}");
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn table(&mut self, n: &TableDecl) {
+        let phys = n
+            .physical
+            .as_ref()
+            .map(|p| format!(" as {}", quote(p)))
+            .unwrap_or_default();
+        let was = n
+            .was
+            .as_ref()
+            .map(|p| format!(" was {}", quote(p)))
+            .unwrap_or_default();
+        self.line(&format!(
+            "table {} of {}.{}{phys}{was} {{",
+            n.name.name, n.schema.database.name, n.schema.schema.name
+        ));
+        self.depth += 1;
+
+        // Column names are padded to a common width inside one table. This
+        // is deterministic (it depends only on the declarations), so the
+        // output stays a fixed point.
+        let pad = n
+            .columns
+            .iter()
+            .map(|c| c.name.name.len())
+            .max()
+            .unwrap_or(0);
+        for c in &n.columns {
+            self.attached(&c.at);
+            let mut s = format!("{:pad$} {}", c.name.name, type_ref(&c.ty), pad = pad);
+            let mut prev_attr = false;
+            for m in &c.modifiers {
+                let attr = is_attribute(m);
+                s.push_str(if attr && prev_attr { ", " } else { " " });
+                s.push_str(&modifier(m));
+                prev_attr = attr;
+            }
+            s.push(';');
+            self.line(&s);
+        }
+
+        if !n.constraints.is_empty() {
+            self.blank();
+        }
+        for c in &n.constraints {
+            self.constraint(c);
+        }
+        if !n.indexes.is_empty() {
+            self.blank();
+        }
+        for ix in &n.indexes {
+            self.attached(&ix.at);
+            let cols = ix
+                .columns
+                .iter()
+                .map(index_column)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pred = ix
+                .predicate
+                .as_ref()
+                .map(|p| format!(" where {}", expr(p)))
+                .unwrap_or_default();
+            let using = ix
+                .method
+                .as_ref()
+                .map(|m| format!(" using {}", m.name))
+                .unwrap_or_default();
+            self.line(&format!("index on ({cols}){pred}{using};"));
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn constraint(&mut self, c: &TableConstraint) {
+        match c {
+            TableConstraint::PrimaryKey { columns, .. } => {
+                self.line(&format!("primary key ({});", names(columns)));
+            }
+            TableConstraint::ForeignKey {
+                columns,
+                target,
+                target_columns,
+                on_delete,
+                on_update,
+                ..
+            } => {
+                let mut s = format!(
+                    "foreign key ({}) references {} ({})",
+                    names(columns),
+                    target.text(),
+                    names(target_columns)
+                );
+                if let Some(a) = on_delete {
+                    s.push_str(&format!(" on delete {}", action_text(*a)));
+                }
+                if let Some(a) = on_update {
+                    s.push_str(&format!(" on update {}", action_text(*a)));
+                }
+                s.push(';');
+                self.line(&s);
+            }
+            TableConstraint::Unique {
+                columns,
+                predicate,
+                message,
+                ..
+            } => {
+                let mut s = format!("unique ({})", names(columns));
+                if let Some(p) = predicate {
+                    s.push_str(&format!(" where {}", expr(p)));
+                }
+                if let Some(m) = message {
+                    s.push_str(&format!(" : {}", quote(m)));
+                }
+                s.push(';');
+                self.line(&s);
+            }
+            TableConstraint::Check {
+                expr: e, message, ..
+            } => {
+                let mut s = format!("check ({})", expr(e));
+                if let Some(m) = message {
+                    s.push_str(&format!(" : {}", quote(m)));
+                }
+                s.push(';');
+                self.line(&s);
+            }
+        }
+    }
+
+    fn view(&mut self, n: &ViewDecl) {
+        let phys = n
+            .physical
+            .as_ref()
+            .map(|p| format!(" as {}", quote(p)))
+            .unwrap_or_default();
+        self.line(&format!(
+            "view {} of {}.{}{phys} {{",
+            n.name.name, n.schema.database.name, n.schema.schema.name
+        ));
+        self.depth += 1;
+        self.select(&n.body, false);
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn enum_decl(&mut self, n: &EnumDecl) {
+        let of = n
+            .schema
+            .as_ref()
+            .map(|s| format!(" of {}.{}", s.database.name, s.schema.name))
+            .unwrap_or_default();
+        let phys = n
+            .physical
+            .as_ref()
+            .map(|p| format!(" as {}", quote(p)))
+            .unwrap_or_default();
+        self.line(&format!(
+            "enum {}{of}{phys} {{ {} }}",
+            n.name.name,
+            names(&n.members)
+        ));
+    }
+
+    fn class(&mut self, n: &ClassDecl) {
+        self.line(&format!("class {} {{", n.name.name));
+        self.depth += 1;
+        let pad = n
+            .fields
+            .iter()
+            .map(|f| f.name.name.len())
+            .max()
+            .unwrap_or(0);
+        for f in &n.fields {
+            self.attached(&f.at);
+            let mut s = format!("{:pad$} {}", f.name.name, type_ref(&f.ty), pad = pad);
+            let mut parts: Vec<String> = Vec::new();
+            if f.transient {
+                parts.push("transient".into());
+            }
+            for r in &f.rules {
+                parts.push(rule_call(r));
+            }
+            if !parts.is_empty() {
+                s.push(' ');
+                s.push_str(&parts.join(", "));
+            }
+            s.push(';');
+            self.line(&s);
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn error_decl(&mut self, n: &ErrorDecl) {
+        let params = if n.params.is_empty() {
+            String::new()
+        } else {
+            format!("({})", params_text(&n.params))
+        };
+        let msg = n
+            .message
+            .as_ref()
+            .map(|m| format!(" : {}", quote(m)))
+            .unwrap_or_default();
+        self.line(&format!(
+            "error {}{params} = {}{msg};",
+            n.name.name, n.status
+        ));
+    }
+
+    fn service(&mut self, n: &ServiceDecl) {
+        self.line(&format!("service {} {{", n.name.name));
+        self.depth += 1;
+        for (i, f) in n.functions.iter().enumerate() {
+            if i > 0 {
+                self.blank();
+            }
+            self.attached(&f.at);
+            self.function(f);
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    /// Does **not** print `n.at` — the caller does, because a function is
+    /// reached both as a top-level declaration (via `decl`) and as a service
+    /// member (via `service`).
+    fn function(&mut self, n: &FunctionDecl) {
+        let ret = n
+            .returns
+            .as_ref()
+            .map(|t| format!(" -> {}", type_ref(t)))
+            .unwrap_or_default();
+        let raises = if n.raises.is_empty() {
+            String::new()
+        } else {
+            format!(" raises ({})", names(&n.raises))
+        };
+        self.line(&format!(
+            "function {}({}){ret}{raises} {{",
+            n.name.name,
+            params_text(&n.params)
+        ));
+        self.depth += 1;
+        self.block(&n.body);
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn middleware(&mut self, n: &MiddlewareDecl) {
+        let mut head = format!("middleware {}", n.name.name);
+        if !n.binders.is_empty() {
+            let bs = n
+                .binders
+                .iter()
+                .map(|b| format!("@{}: {}", b.name.name, type_ref(&b.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            head.push_str(&format!("({bs})"));
+        }
+        let requires = if n.requires.is_empty() {
+            String::new()
+        } else {
+            format!("requires {}", names(&n.requires))
+        };
+        let provides = if n.provides.is_empty() {
+            String::new()
+        } else {
+            let ps = n
+                .provides
+                .iter()
+                .map(|p| format!("{}: {}", p.name.name, type_ref(&p.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("provides {ps}")
+        };
+
+        // One line while it fits; otherwise `requires` and `provides` get
+        // their own continuation lines, which is how the declaration reads
+        // in middleware.md §1.
+        let inline = [head.as_str(), requires.as_str(), provides.as_str()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if inline.len() + 2 <= 88 {
+            self.line(&format!("{inline} {{"));
+        } else {
+            self.line(&head);
+            self.depth += 1;
+            if !requires.is_empty() {
+                self.line(&requires);
+            }
+            if !provides.is_empty() {
+                self.line(&provides);
+            }
+            self.depth -= 1;
+            self.line("{");
+        }
+        self.depth += 1;
+        self.block(&n.body);
+        if let Some(after) = &n.after {
+            if !n.body.is_empty() {
+                self.blank();
+            }
+            self.line("after {");
+            self.depth += 1;
+            self.block(after);
+            self.depth -= 1;
+            self.line("}");
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn routes(&mut self, n: &RoutesDecl) {
+        let uses = if n.uses.is_empty() {
+            String::new()
+        } else {
+            format!(" use {}", names(&n.uses))
+        };
+        self.line(&format!("routes {}{uses} {{", quote(&n.prefix)));
+        self.depth += 1;
+        for (i, r) in n.routes.iter().enumerate() {
+            if i > 0 {
+                self.blank();
+            }
+            self.attached(&r.at);
+            let ruses = if r.uses.is_empty() {
+                String::new()
+            } else {
+                format!(" use {}", names(&r.uses))
+            };
+            self.line(&format!(
+                "route {} {}{ruses} {{",
+                r.method.name,
+                quote(&r.suffix)
+            ));
+            self.depth += 1;
+            self.block(&r.body);
+            self.depth -= 1;
+            self.line("}");
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn error_handler(&mut self, n: &ErrorHandlerDecl) {
+        self.line(&format!("errorHandler ({}) {{", n.binder.name));
+        self.depth += 1;
+        for a in &n.arms {
+            let ty = a
+                .error
+                .as_ref()
+                .map(|e| format!("{} ", e.name))
+                .unwrap_or_default();
+            self.line(&format!("catch {ty}({}) {{", a.binder.name));
+            self.depth += 1;
+            self.block(&a.body);
+            self.depth -= 1;
+            self.line("}");
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    fn server(&mut self, n: &ServerDecl) {
+        self.line("server {");
+        self.depth += 1;
+        let pad = n
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                ServerEntry::Set(a) => Some(a.key.name.len()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        for e in &n.entries {
+            match e {
+                ServerEntry::Set(a) => self.line(&format!(
+                    "{:pad$} = {};",
+                    a.key.name,
+                    expr(&a.value),
+                    pad = pad
+                )),
+                ServerEntry::Group { name, entries, .. } => {
+                    self.blank();
+                    self.line(&format!("{} {{", name.name));
+                    self.depth += 1;
+                    let ipad = entries.iter().map(|a| a.key.name.len()).max().unwrap_or(0);
+                    for a in entries {
+                        self.line(&format!(
+                            "{:ipad$} = {};",
+                            a.key.name,
+                            expr(&a.value),
+                            ipad = ipad
+                        ));
+                    }
+                    self.depth -= 1;
+                    self.line("}");
+                }
+            }
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+
+    // ------------------------------------------------------------ stmts
+
+    fn block(&mut self, b: &Block) {
+        for (i, s) in b.iter().enumerate() {
+            if i > 0 && stmt_attached(s).blank_before {
+                self.blank();
+            }
+            self.stmt(s);
+        }
+    }
+
+    fn stmt(&mut self, s: &Stmt) {
+        self.attached(stmt_attached(s));
+        match s {
+            Stmt::Let {
+                name, ty, value, ..
+            } => {
+                let t = ty
+                    .as_ref()
+                    .map(|t| format!(": {}", type_ref(t)))
+                    .unwrap_or_default();
+                self.assigned(&format!("let {}{t} = ", name.name), value, ";");
+            }
+            Stmt::Assign { target, value, .. } => {
+                let t = match target {
+                    AssignTarget::Local(i) => format!("${}", i.name),
+                    AssignTarget::Context(i) => format!("context.{}", i.name),
+                };
+                self.assigned(&format!("{t} = "), value, ";");
+            }
+            Stmt::If {
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                self.line(&format!("if ({}) {{", expr(cond)));
+                self.depth += 1;
+                self.block(then);
+                self.depth -= 1;
+                match otherwise {
+                    None => self.line("}"),
+                    Some(alt) => {
+                        // `else if` is printed as a nested block. It round-trips
+                        // (an `if` inside an `else` block parses back the same
+                        // way), which is what idempotency needs.
+                        self.line("} else {");
+                        self.depth += 1;
+                        self.block(alt);
+                        self.depth -= 1;
+                        self.line("}");
+                    }
+                }
+            }
+            Stmt::For {
+                binder,
+                iterable,
+                body,
+                ..
+            } => {
+                self.line(&format!("for ({} in {}) {{", binder.name, expr(iterable)));
+                self.depth += 1;
+                self.block(body);
+                self.depth -= 1;
+                self.line("}");
+            }
+            Stmt::Return { value, .. } => match value {
+                None => self.line("return;"),
+                Some(v) => self.assigned("return ", v, ";"),
+            },
+            Stmt::Throw { error, args, .. } => {
+                let a = args.iter().map(expr).collect::<Vec<_>>().join(", ");
+                if args.is_empty() {
+                    self.line(&format!("throw {};", error.name));
+                } else {
+                    self.line(&format!("throw {}({a});", error.name));
+                }
+            }
+            Stmt::Transaction { body, .. } => {
+                self.line("transaction {");
+                self.depth += 1;
+                self.block(body);
+                self.depth -= 1;
+                self.line("}");
+            }
+            Stmt::Assert { kind, .. } => match kind {
+                AssertKind::Expr(e) => self.line(&format!("assert {};", expr(e))),
+                AssertKind::Fails {
+                    error,
+                    body,
+                    message,
+                    ..
+                } => {
+                    let t = error
+                        .as_ref()
+                        .map(|e| format!("{} ", e.name))
+                        .unwrap_or_default();
+                    self.line(&format!("assert fails {t}{{"));
+                    self.depth += 1;
+                    self.block(body);
+                    self.depth -= 1;
+                    match message {
+                        Some(m) => self.line(&format!("}} with {};", quote(m))),
+                        None => self.line("};"),
+                    }
+                }
+            },
+            Stmt::Expr { expr: e, .. } => self.assigned("", e, ";"),
+        }
+    }
+
+    /// Prints `prefix<expr>suffix`, breaking a query across lines.
+    ///
+    /// Queries are the only multi-line expression form. `or throw` and a
+    /// postfix `catch` are peeled off first and become part of the suffix,
+    /// so `let x = select … first or throw NotFound("…");` breaks at its
+    /// clauses instead of running to 200 columns.
+    fn assigned(&mut self, prefix: &str, e: &Expr, suffix: &str) {
+        match &*e.kind {
+            ExprKind::OrThrow { value, error, args } => {
+                let a = args.iter().map(expr).collect::<Vec<_>>().join(", ");
+                let tail = if args.is_empty() {
+                    format!(" or throw {}{suffix}", error.name)
+                } else {
+                    format!(" or throw {}({a}){suffix}", error.name)
+                };
+                self.assigned(prefix, value, &tail);
+            }
+            ExprKind::CatchPostfix {
+                value,
+                error,
+                binder,
+                body,
+            } => {
+                self.assigned(
+                    prefix,
+                    value,
+                    &format!(" catch {} ({}) {{", error.name, binder.name),
+                );
+                self.depth += 1;
+                self.block(body);
+                self.depth -= 1;
+                self.line(&format!("}}{suffix}"));
+            }
+            ExprKind::Select(q) => {
+                self.line(&format!(
+                    "{prefix}select {} from {}",
+                    q.binder.name,
+                    q.source.text()
+                ));
+                self.depth += 1;
+                self.select_tail(q, suffix);
+                self.depth -= 1;
+            }
+            ExprKind::Insert(i) => self.insert_stmt(prefix, i, suffix),
+            ExprKind::Update(u) => self.update_stmt(prefix, u, suffix),
+            ExprKind::Delete(d) => self.delete_stmt(prefix, d, suffix),
+            _ => {
+                let body = expr(e);
+                let one_line = format!("{prefix}{body}{suffix}");
+                // `or throw` on a non-query value: break at the boundary
+                // rather than run past the margin.
+                if one_line.len() + self.depth * INDENT.len() > 92 {
+                    if let Some(cut) = suffix.find(" or throw ") {
+                        self.line(&format!("{prefix}{body}"));
+                        self.depth += 1;
+                        self.line(suffix[cut + 1..].trim_end_matches('\n'));
+                        self.depth -= 1;
+                        return;
+                    }
+                }
+                self.line(&one_line);
+            }
+        }
+    }
+
+    fn insert_stmt(&mut self, prefix: &str, i: &InsertExpr, suffix: &str) {
+        let inline = obj_entries_text(&i.values);
+        let head = format!("{prefix}insert into {}", i.table.text());
+        let mut tail: Vec<String> = Vec::new();
+        if let Some(c) = &i.conflict {
+            let cols = if c.columns.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", names(&c.columns))
+            };
+            tail.push(match &c.action {
+                ConflictAction::DoNothing => format!("on conflict{cols} do nothing"),
+                ConflictAction::DoUpdate(sets) => {
+                    format!("on conflict{cols} do update set {}", set_items_text(sets))
+                }
+            });
+        }
+
+        if inline.len() + head.len() <= 76 && tail.is_empty() && i.projection.is_none() {
+            self.line(&format!("{head} {{ {inline} }}{suffix}"));
+            return;
+        }
+
+        self.line(&format!("{head} {{"));
+        self.depth += 1;
+        let pad = i
+            .values
+            .iter()
+            .filter_map(|e| match e {
+                ObjEntry::Field {
+                    key, assign: true, ..
+                } => Some(key.name.len()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        for (n, entry) in i.values.iter().enumerate() {
+            let comma = if n + 1 < i.values.len() { "," } else { "" };
+            self.line(&format!("{}{comma}", obj_entry_text_padded(entry, pad)));
+        }
+        self.depth -= 1;
+
+        // The RETURNING list rides on the closing brace when it fits, which
+        // is how the specification's own sample writes it:
+        //     } as { id, email, display_name, created_at };
+        if tail.is_empty() {
+            match &i.projection {
+                None => self.line(&format!("}}{suffix}")),
+                Some(p) => {
+                    let one_line = format!("}} as {}{suffix}", shape_text(p));
+                    if one_line.len() + self.depth * INDENT.len() <= 88 {
+                        self.line(&one_line);
+                    } else {
+                        self.line("}");
+                        self.depth += 1;
+                        self.shape_with_suffix("as ", p, suffix);
+                        self.depth -= 1;
+                    }
+                }
+            }
+            return;
+        }
+
+        self.line("}");
+        self.depth += 1;
+        for (n, t) in tail.iter().enumerate() {
+            let last = n + 1 == tail.len() && i.projection.is_none();
+            self.line(&format!("{t}{}", if last { suffix } else { "" }));
+        }
+        if let Some(p) = &i.projection {
+            self.shape_with_suffix("as ", p, suffix);
+        }
+        self.depth -= 1;
+    }
+
+    fn update_stmt(&mut self, prefix: &str, u: &UpdateExpr, suffix: &str) {
+        self.line(&format!("{prefix}update {}", u.table.text()));
+        self.depth += 1;
+        let sets = set_items_text(&u.sets);
+        if sets.len() <= 72 {
+            self.line(&format!("set {sets}"));
+        } else {
+            self.line("set");
+            self.depth += 1;
+            for (n, it) in u.sets.iter().enumerate() {
+                let comma = if n + 1 < u.sets.len() { "," } else { "" };
+                self.line(&format!("{}{comma}", set_item_text(it)));
+            }
+            self.depth -= 1;
+        }
+        self.write_filter_projection_tail(
+            u.filter.as_ref(),
+            u.projection.as_ref(),
+            &u.order_by,
+            u.first,
+            suffix,
+        );
+        self.depth -= 1;
+    }
+
+    fn delete_stmt(&mut self, prefix: &str, d: &DeleteExpr, suffix: &str) {
+        self.line(&format!("{prefix}delete from {}", d.table.text()));
+        self.depth += 1;
+        self.write_filter_projection_tail(
+            d.filter.as_ref(),
+            d.projection.as_ref(),
+            &d.order_by,
+            d.first,
+            suffix,
+        );
+        self.depth -= 1;
+    }
+
+    fn write_filter_projection_tail(
+        &mut self,
+        filter: Option<&Expr>,
+        projection: Option<&ObjectShape>,
+        order_by: &[SortKey],
+        first: bool,
+        suffix: &str,
+    ) {
+        let mut trailing: Vec<String> = Vec::new();
+        if !order_by.is_empty() {
+            trailing.push(format!("orderby {}", sort_keys(order_by)));
+        }
+        if first {
+            trailing.push("first".into());
+        }
+
+        if let Some(f) = filter {
+            let last = projection.is_none() && trailing.is_empty();
+            self.line(&format!(
+                "where {}{}",
+                expr(f),
+                if last { suffix } else { "" }
+            ));
+        }
+        if let Some(p) = projection {
+            let last = trailing.is_empty();
+            self.shape_with_suffix("as ", p, if last { suffix } else { "" });
+        }
+        for (n, t) in trailing.iter().enumerate() {
+            let last = n + 1 == trailing.len();
+            self.line(&format!("{t}{}", if last { suffix } else { "" }));
+        }
+    }
+
+    fn shape_with_suffix(&mut self, prefix: &str, shape: &ObjectShape, suffix: &str) {
+        self.shape(prefix, shape);
+        if !suffix.is_empty() {
+            let trimmed = self.out.trim_end_matches('\n').to_string();
+            self.out = format!("{trimmed}{suffix}\n");
+        }
+    }
+
+    fn select(&mut self, s: &SelectExpr, _nested: bool) {
+        self.line(&format!(
+            "select {} from {}",
+            s.binder.name,
+            s.source.text()
+        ));
+        self.depth += 1;
+        self.select_tail(s, "");
+        self.depth -= 1;
+    }
+
+    fn select_tail(&mut self, s: &SelectExpr, suffix: &str) {
+        let mut lines: Vec<String> = Vec::new();
+        for j in &s.joins {
+            lines.push(join_text(j));
+        }
+        if let Some(f) = &s.filter {
+            lines.push(format!("where {}", expr(f)));
+        }
+        if !s.group_by.is_empty() {
+            lines.push(format!(
+                "group by {}",
+                s.group_by.iter().map(expr).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if let Some(h) = &s.having {
+            lines.push(format!("having {}", expr(h)));
+        }
+
+        let mut tail: Vec<String> = Vec::new();
+        if !s.order_by.is_empty() {
+            tail.push(format!("orderby {}", sort_keys(&s.order_by)));
+        }
+        if let Some(p) = &s.page {
+            tail.push(page_text(p));
+        } else if let Some(l) = &s.limit {
+            tail.push(format!("limit {}", expr(l)));
+        }
+        if s.first {
+            tail.push("first".into());
+        }
+
+        let n_lines = lines.len();
+        for (i, l) in lines.iter().enumerate() {
+            let last = i + 1 == n_lines && s.projection.is_none() && tail.is_empty();
+            self.line(&format!("{l}{}", if last { suffix } else { "" }));
+        }
+        if let Some(p) = &s.projection {
+            let last = tail.is_empty();
+            self.shape_with_suffix("as ", p, if last { suffix } else { "" });
+        }
+        for (i, t) in tail.iter().enumerate() {
+            let last = i + 1 == tail.len();
+            self.line(&format!("{t}{}", if last { suffix } else { "" }));
+        }
+        if lines.is_empty() && s.projection.is_none() && tail.is_empty() && !suffix.is_empty() {
+            let trimmed = self.out.trim_end_matches('\n').to_string();
+            self.out = format!("{trimmed}{suffix}\n");
+        }
+    }
+
+    fn shape(&mut self, prefix: &str, shape: &ObjectShape) {
+        if shape
+            .fields
+            .iter()
+            .all(|f| matches!(f, ProjField::Column(_)))
+            && shape_inline_len(shape) <= 72
+        {
+            let inner = shape
+                .fields
+                .iter()
+                .map(proj_field_text)
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.line(&format!("{prefix}{{ {inner} }}"));
+            return;
+        }
+        self.line(&format!("{prefix}{{"));
+        self.depth += 1;
+        for (i, f) in shape.fields.iter().enumerate() {
+            let comma = if i + 1 < shape.fields.len() { "," } else { "" };
+            match f {
+                ProjField::Nested {
+                    alias,
+                    shape: inner,
+                    ..
+                } => {
+                    self.shape(&format!("{}: ", alias.name), inner);
+                    let trimmed = self.out.trim_end_matches('\n').to_string();
+                    self.out = format!("{trimmed}{comma}\n");
+                }
+                _ => self.line(&format!("{}{comma}", proj_field_text(f))),
+            }
+        }
+        self.depth -= 1;
+        self.line("}");
+    }
+}
+
+fn stmt_attached(s: &Stmt) -> &Attached {
+    match s {
+        Stmt::Let { at, .. }
+        | Stmt::Assign { at, .. }
+        | Stmt::If { at, .. }
+        | Stmt::For { at, .. }
+        | Stmt::Return { at, .. }
+        | Stmt::Throw { at, .. }
+        | Stmt::Transaction { at, .. }
+        | Stmt::Assert { at, .. }
+        | Stmt::Expr { at, .. } => at,
+    }
+}
+
+fn is_attribute(m: &ColumnModifier) -> bool {
+    matches!(
+        m,
+        ColumnModifier::Private(_)
+            | ColumnModifier::Server(_)
+            | ColumnModifier::Unique { .. }
+            | ColumnModifier::Rule(_)
+    )
+}
+
+fn modifier(m: &ColumnModifier) -> String {
+    match m {
+        ColumnModifier::PrimaryKey(_) => "primary key".into(),
+        ColumnModifier::Identity(_) => "identity".into(),
+        ColumnModifier::Unique { message, .. } => match message {
+            Some(msg) => format!("unique : {}", quote(msg)),
+            None => "unique".into(),
+        },
+        ColumnModifier::Private(_) => "private".into(),
+        ColumnModifier::Server(_) => "server".into(),
+        ColumnModifier::Default(e, _) => format!("default {}", expr(e)),
+        ColumnModifier::OnUpdate(e, _) => format!("on update {}", expr(e)),
+        ColumnModifier::Physical(p, _) => format!("as {}", quote(p)),
+        ColumnModifier::Was(p, _) => format!("was {}", quote(p)),
+        ColumnModifier::Rule(r) => rule_call(r),
+    }
+}
+
+fn rule_call(r: &RuleCall) -> String {
+    if r.args.is_empty() {
+        r.name.name.clone()
+    } else {
+        format!(
+            "{}({})",
+            r.name.name,
+            r.args.iter().map(expr).collect::<Vec<_>>().join(", ")
+        )
+    }
+}
+
+fn index_column(c: &IndexColumn) -> String {
+    let mut s = c.name.name.clone();
+    if c.desc {
+        s.push_str(" desc");
+    }
+    match c.nulls {
+        Some(NullsOrder::First) => s.push_str(" nulls first"),
+        Some(NullsOrder::Last) => s.push_str(" nulls last"),
+        None => {}
+    }
+    s
+}
+
+fn action_text(a: RefAction) -> &'static str {
+    match a {
+        RefAction::Cascade => "cascade",
+        RefAction::Restrict => "restrict",
+        RefAction::NoAction => "no action",
+        RefAction::SetNull => "set null",
+        RefAction::SetDefault => "set default",
+    }
+}
+
+fn names(v: &[Ident]) -> String {
+    v.iter()
+        .map(|i| i.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn params_text(p: &[Param]) -> String {
+    p.iter()
+        .map(|x| {
+            let d = x
+                .default
+                .as_ref()
+                .map(|e| format!(" = {}", expr(e)))
+                .unwrap_or_default();
+            format!("{}: {}{d}", x.name.name, type_ref(&x.ty))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub fn type_ref(t: &TypeRef) -> String {
+    let mut s = match &t.kind {
+        TypeKind::Scalar { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{name}({})",
+                    args.iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
+        TypeKind::Record(fields) => format!(
+            "{{ {} }}",
+            fields
+                .iter()
+                .map(|(n, ty)| format!("{}: {}", n.name, type_ref(ty)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeKind::Named(d) => d.text(),
+    };
+    if t.optional {
+        s.push('?');
+    }
+    for i in 0..t.array_depth as usize {
+        s.push_str("[]");
+        if t.array_optional.get(i).copied().unwrap_or(false) {
+            s.push('?');
+        }
+    }
+    s
+}
+
+fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn raw_quote(s: &str) -> String {
+    format!("r\"{}\"", s.replace('"', "\\\""))
+}
+
+fn join_text(j: &JoinClause) -> String {
+    let kind = match j.kind {
+        JoinKind::Left => "left",
+        JoinKind::Inner => "inner",
+    };
+    let alias = if j.binder.name == j.table.object.name {
+        String::new()
+    } else {
+        format!(" {}", j.binder.name)
+    };
+    let mut s = format!("{kind} join {}{alias} on {}", j.table.text(), expr(&j.on));
+    if let Some(f) = &j.filter {
+        s.push_str(&format!(" where {}", expr(f)));
+    }
+    if let Some(r) = &j.result {
+        match r.cardinality {
+            Cardinality::Group => {
+                s.push_str(" as group");
+                return s;
+            }
+            Cardinality::One => s.push_str(&format!(" as one {}", r.name.name)),
+            Cardinality::Many => s.push_str(&format!(" as many {}", r.name.name)),
+        }
+        if let Some(u) = &r.under {
+            s.push_str(&format!(" under {}", u.name));
+        }
+        if !r.order_by.is_empty() {
+            s.push_str(&format!(" orderby {}", sort_keys(&r.order_by)));
+        }
+        if let Some(l) = &r.limit {
+            s.push_str(&format!(" limit {}", expr(l)));
+        }
+    }
+    s
+}
+
+fn sort_keys(keys: &[SortKey]) -> String {
+    keys.iter()
+        .map(|k| {
+            let mut s = expr(&k.expr);
+            if k.desc {
+                s.push_str(" desc");
+            } else {
+                s.push_str(" asc");
+            }
+            match k.nulls {
+                Some(NullsOrder::First) => s.push_str(" nulls first"),
+                Some(NullsOrder::Last) => s.push_str(" nulls last"),
+                None => {}
+            }
+            s
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn page_text(p: &PageClause) -> String {
+    let mut s = "page".to_string();
+    if let Some(a) = &p.after {
+        s.push_str(&format!(" after {}", expr(a)));
+    }
+    s.push_str(&format!(" size {}", expr(&p.size)));
+    if let Some(m) = &p.max {
+        s.push_str(&format!(" max {}", expr(m)));
+    }
+    s
+}
+
+fn shape_inline_len(s: &ObjectShape) -> usize {
+    s.fields.iter().map(|f| proj_field_text(f).len() + 2).sum()
+}
+
+fn proj_field_text(f: &ProjField) -> String {
+    match f {
+        ProjField::Column(i) => i.name.clone(),
+        ProjField::Expr { alias, value, .. } => format!("{}: {}", alias.name, expr(value)),
+        ProjField::Nested { alias, shape, .. } => format!(
+            "{}: {{ {} }}",
+            alias.name,
+            shape
+                .fields
+                .iter()
+                .map(proj_field_text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn shape_text(s: &ObjectShape) -> String {
+    format!(
+        "{{ {} }}",
+        s.fields
+            .iter()
+            .map(proj_field_text)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn obj_entries_text(entries: &[ObjEntry]) -> String {
+    entries
+        .iter()
+        .map(|e| match e {
+            ObjEntry::Field {
+                key, value, assign, ..
+            } => {
+                let k = if key.name.contains('-') || key.name.contains(' ') {
+                    quote(&key.name)
+                } else {
+                    key.name.clone()
+                };
+                format!("{k}{} {}", if *assign { " =" } else { ":" }, expr(value))
+            }
+            ObjEntry::Spread { source, except, .. } => {
+                if except.is_empty() {
+                    format!("...${}", source.name)
+                } else {
+                    format!("...${} except ({})", source.name, names(except))
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn obj_entry_text_padded(e: &ObjEntry, pad: usize) -> String {
+    match e {
+        ObjEntry::Field {
+            key,
+            value,
+            assign: true,
+            ..
+        } => format!("{:pad$} = {}", key.name, expr(value), pad = pad),
+        other => obj_entries_text(std::slice::from_ref(other)),
+    }
+}
+
+fn set_item_text(i: &SetItem) -> String {
+    set_items_text(std::slice::from_ref(i))
+}
+
+fn set_items_text(items: &[SetItem]) -> String {
+    items
+        .iter()
+        .map(|i| match i {
+            SetItem::Set {
+                column,
+                value,
+                optional,
+                ..
+            } => format!(
+                "{} {} {}",
+                column.name,
+                if *optional { "=?" } else { "=" },
+                expr(value)
+            ),
+            SetItem::Spread { source, except, .. } => {
+                if except.is_empty() {
+                    format!("...${}", source.name)
+                } else {
+                    format!("...${} except ({})", source.name, names(except))
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Precedence for parenthesisation. Higher binds tighter.
+fn prec(e: &ExprKind) -> u8 {
+    match e {
+        ExprKind::Coalesce { .. } => 1,
+        ExprKind::Ternary { .. } => 2,
+        ExprKind::Binary { op: BinOp::Or, .. } => 3,
+        ExprKind::Binary { op: BinOp::And, .. } => 4,
+        ExprKind::Unary {
+            op: UnaryOp::Not, ..
+        } => 5,
+        ExprKind::Binary { op, .. } if is_compare(*op) => 6,
+        ExprKind::In { .. } | ExprKind::Exists { .. } => 6,
+        ExprKind::Binary {
+            op: BinOp::Add | BinOp::Sub,
+            ..
+        } => 7,
+        ExprKind::Binary {
+            op: BinOp::Mul | BinOp::Div | BinOp::Rem,
+            ..
+        } => 8,
+        ExprKind::Unary {
+            op: UnaryOp::Neg, ..
+        } => 9,
+        _ => 10,
+    }
+}
+
+fn is_compare(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Eq
+            | BinOp::Ne
+            | BinOp::EqOpt
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge
+            | BinOp::Like
+            | BinOp::ILike
+    )
+}
+
+fn wrap(e: &Expr, parent: u8) -> String {
+    let s = expr(e);
+    if prec(&e.kind) < parent {
+        format!("({s})")
+    } else {
+        s
+    }
+}
+
+pub fn expr(e: &Expr) -> String {
+    match &*e.kind {
+        ExprKind::Int(n) | ExprKind::Decimal(n) => n.clone(),
+        ExprKind::Str(s) => quote(s),
+        ExprKind::RawStr(s) => raw_quote(s),
+        ExprKind::Bool(b) => b.to_string(),
+        ExprKind::Null => "null".into(),
+        ExprKind::Name(i) => i.name.clone(),
+        ExprKind::Local(i) => format!("${}", i.name),
+        ExprKind::PathParam(i) => format!("@{}", i.name),
+        ExprKind::Field { base, field } => format!("{}.{}", wrap(base, 10), field.name),
+        ExprKind::Index { base, index } => format!("{}[{}]", wrap(base, 10), expr(index)),
+        ExprKind::Call {
+            callee,
+            args,
+            filter,
+        } => {
+            let a = args.iter().map(expr).collect::<Vec<_>>().join(", ");
+            let f = filter
+                .as_ref()
+                .map(|x| format!(" where {}", expr(x)))
+                .unwrap_or_default();
+            format!("{}({a}{f})", wrap(callee, 10))
+        }
+        ExprKind::Unary { op, rhs } => match op {
+            UnaryOp::Not => format!("!{}", wrap(rhs, 5)),
+            UnaryOp::Neg => format!("-{}", wrap(rhs, 9)),
+        },
+        ExprKind::Binary { op, lhs, rhs } => {
+            let p = prec(&e.kind);
+            format!("{} {} {}", wrap(lhs, p), op.as_str(), wrap(rhs, p + 1))
+        }
+        ExprKind::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => format!(
+            "{} ? {} : {}",
+            wrap(cond, 3),
+            wrap(then, 2),
+            wrap(otherwise, 2)
+        ),
+        ExprKind::Coalesce { lhs, rhs } => format!("{} ?? {}", wrap(lhs, 2), wrap(rhs, 2)),
+        ExprKind::In {
+            lhs,
+            items,
+            negated,
+        } => format!(
+            "{} {}in ({})",
+            wrap(lhs, 7),
+            if *negated { "not " } else { "" },
+            items.iter().map(expr).collect::<Vec<_>>().join(", ")
+        ),
+        ExprKind::Exists { query, negated } => format!(
+            "{}exists ({})",
+            if *negated { "not " } else { "" },
+            expr(query)
+        ),
+        ExprKind::Object(entries) => {
+            if entries.is_empty() {
+                "{ }".into()
+            } else {
+                format!("{{ {} }}", obj_entries_text(entries))
+            }
+        }
+        ExprKind::Array(items) => format!(
+            "[{}]",
+            items.iter().map(expr).collect::<Vec<_>>().join(", ")
+        ),
+        ExprKind::Select(s) => select_inline(s),
+        ExprKind::Insert(i) => {
+            let mut out = format!(
+                "insert into {} {{ {} }}",
+                i.table.text(),
+                obj_entries_text(&i.values)
+            );
+            if let Some(c) = &i.conflict {
+                let cols = if c.columns.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", names(&c.columns))
+                };
+                match &c.action {
+                    ConflictAction::DoNothing => {
+                        out.push_str(&format!(" on conflict{cols} do nothing"))
+                    }
+                    ConflictAction::DoUpdate(sets) => out.push_str(&format!(
+                        " on conflict{cols} do update set {}",
+                        set_items_text(sets)
+                    )),
+                }
+            }
+            if let Some(p) = &i.projection {
+                out.push_str(&format!(" as {}", shape_text(p)));
+            }
+            out
+        }
+        ExprKind::Update(u) => {
+            let mut out = format!("update {} set {}", u.table.text(), set_items_text(&u.sets));
+            if let Some(f) = &u.filter {
+                out.push_str(&format!(" where {}", expr(f)));
+            }
+            if let Some(p) = &u.projection {
+                out.push_str(&format!(" as {}", shape_text(p)));
+            }
+            if !u.order_by.is_empty() {
+                out.push_str(&format!(" orderby {}", sort_keys(&u.order_by)));
+            }
+            if u.first {
+                out.push_str(" first");
+            }
+            out
+        }
+        ExprKind::Delete(d) => {
+            let mut out = format!("delete from {}", d.table.text());
+            if let Some(f) = &d.filter {
+                out.push_str(&format!(" where {}", expr(f)));
+            }
+            if let Some(p) = &d.projection {
+                out.push_str(&format!(" as {}", shape_text(p)));
+            }
+            if !d.order_by.is_empty() {
+                out.push_str(&format!(" orderby {}", sort_keys(&d.order_by)));
+            }
+            if d.first {
+                out.push_str(" first");
+            }
+            out
+        }
+        ExprKind::OrThrow { value, error, args } => {
+            let a = args.iter().map(expr).collect::<Vec<_>>().join(", ");
+            if args.is_empty() {
+                format!("{} or throw {}", expr(value), error.name)
+            } else {
+                format!("{} or throw {}({a})", expr(value), error.name)
+            }
+        }
+        ExprKind::CatchPostfix {
+            value,
+            error,
+            binder,
+            body,
+        } => {
+            let mut w = Writer {
+                out: String::new(),
+                depth: 1,
+            };
+            w.block(body);
+            format!(
+                "{} catch {} ({}) {{\n{}}}",
+                expr(value),
+                error.name,
+                binder.name,
+                w.out
+            )
+        }
+        ExprKind::Cast { value, ty } => format!("{} as {}", wrap(value, 10), ty.name),
+        ExprKind::WithHeaders { value, headers } => {
+            format!("{} with {{ {} }}", expr(value), obj_entries_text(headers))
+        }
+        ExprKind::Cookie { value, args } => format!(
+            "{} cookie({})",
+            expr(value),
+            args.iter().map(expr).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+fn select_inline(s: &SelectExpr) -> String {
+    let mut out = format!("select {} from {}", s.binder.name, s.source.text());
+    for j in &s.joins {
+        out.push(' ');
+        out.push_str(&join_text(j));
+    }
+    if let Some(f) = &s.filter {
+        out.push_str(&format!(" where {}", expr(f)));
+    }
+    if !s.group_by.is_empty() {
+        out.push_str(&format!(
+            " group by {}",
+            s.group_by.iter().map(expr).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if let Some(h) = &s.having {
+        out.push_str(&format!(" having {}", expr(h)));
+    }
+    if let Some(p) = &s.projection {
+        out.push_str(&format!(" as {}", shape_text(p)));
+    }
+    if !s.order_by.is_empty() {
+        out.push_str(&format!(" orderby {}", sort_keys(&s.order_by)));
+    }
+    if let Some(p) = &s.page {
+        out.push(' ');
+        out.push_str(&page_text(p));
+    } else if let Some(l) = &s.limit {
+        out.push_str(&format!(" limit {}", expr(l)));
+    }
+    if s.first {
+        out.push_str(" first");
+    }
+    out
 }

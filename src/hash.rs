@@ -25,6 +25,15 @@ pub fn sha256_hex(input: &str) -> String {
     to_hex(&h.finalize())
 }
 
+/// The same over raw bytes. An archive is not text, and going through a
+/// lossy UTF-8 conversion to reuse the string form would hash something
+/// other than what was uploaded.
+pub fn sha256_hex_bytes(input: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(input);
+    to_hex(&h.finalize())
+}
+
 pub fn sha1_hex(input: &str) -> String {
     let mut h = Sha1::new();
     h.update(input.as_bytes());

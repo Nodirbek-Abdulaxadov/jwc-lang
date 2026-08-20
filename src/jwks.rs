@@ -166,8 +166,21 @@ fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// One client for every JWKS fetch: connection reuse matters when the
+/// cache misses on several requests at once, and a fresh client per fetch
+/// re-does TLS each time.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 async fn fetch_jwks(url: &str) -> Result<Vec<RsaJwk>> {
-    let resp = crate::runner::http_client()
+    let resp = http_client()
         .get(url)
         .send()
         .await

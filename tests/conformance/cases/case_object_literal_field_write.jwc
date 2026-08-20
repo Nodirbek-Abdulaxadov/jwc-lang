@@ -1,6 +1,0 @@
-// Conformance: object literal field write end-to-end (Value::Record path).
-function main() {
-    let b = { id: 1, name: "old" };
-    b.name = "new";
-    print(b.name);
-}

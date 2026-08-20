@@ -3,57 +3,178 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — the v1 redesign lands as documentation
+## [0.9.7] — the 1.0 language, implemented — 2026-08-20
 
-No code changes. The language design for 1.0 is now in the repository, and
-`ROADMAP.md` is a different document.
+**BREAKING: every 0.9.x program stops compiling.** v0.25.0 replaced the
+grammar with the one in `docs/spec/v1/` and deleted the old front-end.
+`entity`, `dbcontext`, `with`, `via`, `validate body`, `new … from`,
+`patch`, `group`, `mount` and `dome` are gone; the compiler names the
+replacement rather than accepting them. There is no codemod — the shapes
+do not map one-to-one, which is why the redesign happened. 0.9.x
+documentation is archived under `docs/archive-0.9/`, and a 0.9.6 binary
+still runs 0.9.6 programs.
 
-### Added — `docs/spec/v1/`
+> `SEMVER.md` calls a patch bump "nothing a user-written program can
+> observe a behavioural change from", and this is the opposite of that.
+> The number is the maintainer's call and it is `0.9.7`; the break is
+> written down here so nobody meets it by surprise.
 
-- **`design.md`** — the redesigned vocabulary and semantics. `entity` becomes
-  `table`, `dbcontext` becomes `database`, navigation properties and `with`
-  are replaced by explicit `join ... as one/many` written in the query, and
-  projections (`as { }`) replace both the mapper and the response DTO. `new X
-  from Y`, `patch`, `validate body`, `group`, `mount` and `dome` are gone.
-- **`gaps.md`** — 44 confirmed holes in that design, from 138 candidates put
-  through adversarial triage (93 rejected). 25 are blockers. Among them: the
-  same table cannot be joined twice; `where col == param` with matching names
-  silently drops tenant scoping; a LEFT JOIN with no match has no defined
-  result shape; there is no way to set a response header; `private` is
-  contradicted by the projection syntax; renames are inferred and therefore
-  become DROP + ADD.
-- **`error-model.md`** — the Go-style-errors-versus-exceptions question,
-  worked through and decided. Automatic propagation stays, but error types get
-  a declaration site and a function's raise set is inferred over the call
-  graph, so `throw NotFund("...")` stops being a valid program that returns
-  500. It also found a live bug in the sample: the webhook's select-then-insert
-  race produces a 400, which Stripe reads as "retry", in the one place where
-  "already happened" is a normal outcome.
-- **`sample/`** — a ~1100-line app in the new syntax: 4 schemas, 11 tables,
-  5 views, 4 services, 25 endpoints. It is the design's only full exercise and
-  it is *not* yet spec-conformant; its known defects are listed in its README
-  because the gap analysis was found through them.
+The section this replaces opened with **"No code changes. The language
+design for 1.0 is now in the repository."** That was true when it was
+written and stopped being true eleven releases ago. v0.20.0 through
+v0.29.0 built the language that design describes, and none of it was
+recorded here — a changelog that says "no code changes" over a rewritten
+compiler is worse than no changelog, because it is read and believed.
 
-### Changed
+Releases below in order. `ROADMAP.md` carries the done-criteria each was
+held to and the reasoning behind the calls; this is the summary.
 
-- **`ROADMAP.md` is replaced.** The old phase list (Phase 0–11) and release
-  plan (v0.10.0–v0.14.0) described the old language and are archived at
-  `docs/spec/roadmap-0.9.x.md`. The new roadmap runs v0.20.0 → v1.0.0 in
-  twelve releases, starting with a specification release that writes down 56
-  unanswered semantic questions before any code is written.
-- **`--native` is scheduled to be frozen for 1.0** and to return in 1.1,
-  rewritten. While the semantics are still moving, a second backend doubles
-  every query-compiler change; the interpreter becomes the single reference
-  until the syntax freezes.
-- **README states native platform coverage honestly.** CI runs on
-  `ubuntu-latest` only, so "native works on Windows" means the code path
-  exists and the triple is accepted — not that the produced binary was ever
-  verified. The table says which is which per platform.
-- Stale `v0.9.2` download URLs and `JWC_VERSION` examples corrected to
-  `v0.9.6`.
-- `ROADMAP.md Phase 4` references in `src/native_build.rs`, `src/main.rs` and
-  the README repointed at the archived roadmap, since the new one has no
-  phases.
+### v0.20.0 — the specification
+
+56 unanswered semantic questions, answered or marked `DEFERRED` with what
+1.0 does instead. Seventeen normative documents under `docs/spec/v1/`, a
+~1100-line sample application, and `spec-coverage.json` mapping every
+construct the sample uses to the clause that defines it.
+
+### v0.21.0 — the vocabulary
+
+Lexer, AST, parser and formatter for the new grammar. No reserved words:
+`route`, `key`, `max`, `date` and `int` are all legal identifiers, because
+a reserved-word list would forbid the specification's own examples.
+
+### v0.22.0 — deterministic DDL
+
+Five DDL object classes emitted in a fixed order, with generated constraint
+and index names derived from canonical predicate text — so `a and b` and
+`b and a` produce the same name and therefore no spurious migration.
+
+### v0.23.0 — the type checker
+
+The `Raw` / `Record` lattice, `T?` propagation, flow narrowing, and name
+resolution over a flat declaration space where `import` is checked but does
+not scope.
+
+### v0.24.0 — the runtime
+
+Routing, middleware chains with `after` blocks, the error model with typed
+`throw` and a compile-time raise set, and single-table CRUD.
+
+### v0.25.0 — the query compiler
+
+The largest release: alias and join trees, `as one` / `as many` laterals,
+aggregate modes, view compilation with two-stage pushdown, raw tracking,
+keyset pagination, `exists`, and the `raw(…)` escape hatch. **The 0.9.x
+front-end was deleted at the cutover** — the two lived side by side for
+four releases so the old suite stayed green, and that reason expired the
+moment the new one could run the sample.
+
+### v0.26.0 — migrations
+
+Snapshot, diff, ten-phase emission, declared renames, and the applier:
+`up` / `down` / `status` / `verify`, under an advisory lock. Destructive
+statements emit `-- irreversible` and stop rather than promising a
+reversal that the dropped data makes impossible. A property test runs
+random edit sequences and asserts a migrated database equals a created one.
+
+### v0.27.0 — tooling
+
+`jwc explain` per route or function, `JWC_LOG_SQL`, `debug.dump`,
+`jwc lint --constraints`, `jwc openapi`, and a language server with
+hover-to-SQL.
+
+### v0.28.0 — tests and packages
+
+`test` blocks, each inside its own transaction, rolled back whether it
+passed, failed or faulted — which is the whole of the isolation model and
+what makes the order irrelevant. `jwc login` / `publish` / `add`, with the
+downloaded archive verified against a checksum from a **separate** request,
+and a closed list of what a package may declare: no `table`, because
+installing a dependency must never apply someone else's schema change to
+your database.
+
+### v0.29.0 — hardening
+
+Hash builtins split by purpose, rate-limit keys on both IP and identity,
+the `server { }` block, and a threat model. The finding was a **timing
+oracle in `login`**: an unknown address returned before reaching Argon2id
+at 2.4 ms against 415.8 ms for a known one — 172×, under a code comment
+asserting the two were indistinguishable. Both branches verify now, the
+miss against a decoy hash, at 410.9 ms and 414.8 ms.
+
+---
+
+### After v0.29.0 — the fix pass in this release
+
+Everything below came out of running things that had never been run.
+
+#### Fixed — silent wrong answers
+
+- **`db::run_on` swallowed a column-type error.** `try_get::<_,
+  Option<String>>(0).unwrap_or(None)` turned a projection that was wrong
+  into *no rows*: 404 from `Shape::First`, `[]` from `Shape::Rows`, both
+  indistinguishable from an empty table. A generator bug would have looked
+  like missing data everywhere it touched.
+- **`redis.rate_limit()` returned `true` unconditionally**, and
+  `redis.enabled()` `false`; `get` / `set` / `del` / `incr` / `expire` were
+  not implemented at all, so they typechecked and faulted at request time.
+  A rate limiter written against the documented API admitted every request
+  and nothing said so. The driver in `src/redis_engine.rs` was complete —
+  **nothing ever called `init_from_env`**, so it was dead code. The
+  sample's own `RateLimit` middleware had therefore never limited anything.
+- **The diagnostic printer panicked on the file it was describing.** A
+  non-ASCII character produced a one-byte span landing *inside* it, and
+  `SourceFile::line_col` sliced there — so the compiler crashed while
+  rendering the error it had just produced, mojibake included.
+
+#### Added
+
+- **`/healthz`, `/readyz`, `/metrics`** (config.md §4), at fixed paths, not
+  declarable. v1 had served none of them since the cutover: no liveness
+  probe, no readiness probe, and no way to see the pool —
+  `engine::pool_status()` existed and nothing exposed it, which is why the
+  soak's zero-pool-leaks criterion had never been checked. A declared route
+  still wins.
+- **`server { tls { … } }` and `header_timeout` are enforced** rather than
+  refusing to boot. Both were hidden under `axum::serve`; writing out the
+  accept loop over `hyper-util` got both and cost no new dependency.
+- **`server { bind }`** — the listener address was hardcoded to `0.0.0.0`,
+  so a development machine had no way to stay off its own network.
+- **`E1206`** — an unknown `server { }` key. `init()` has had `E1202` for
+  this since config.md was written; the server block had nothing, and
+  `trusted_proxie` passed `jwc check` clean while leaving `client_ip()`
+  reporting the proxy for every request.
+
+#### Fixed — tests that never ran
+
+Pointed at a real Postgres for the first time, **21 tests across 7 suites
+failed**, none of them in the code under test: three suites composed their
+psql command as `<uri> -d <db>`, which psql reads as a whole new connection
+target and so fell back to the default unix socket; two shared one database
+with no mutex; two more shared a scratch-database pair; and `http_golden`
+asserted a route count written down as 25 against a sample that had grown
+to 26.
+
+Underneath that, **seven suites were named in no CI job at all** —
+`hardening` among them — and four more ran only without the database they
+need. `every_test_suite_is_named_in_ci` and
+`the_spec_coverage_map_is_current` now check both claims against the
+repository; the second found its own instance immediately.
+
+#### Fixed — the soak
+
+Closed once as "cannot run in this environment". The harness had five bugs,
+each of the never-executed kind: `--format=json` without `-p r` is not
+JSON; the readiness probe was `curl --fail` on a path the sample does not
+declare; a port already in use satisfied that probe; `kill -TERM` on an
+exited child ended the run under `set -e`; and absent latency percentiles
+read as 0.00 forever. `analyze.py` also required pandas and never checked
+the pool criterion.
+
+It runs now. Eight cycles with a graceful restart between each, against the
+sample on real Postgres and Redis: **480,051 requests, 480,051 2xx, zero
+lost**, RSS drift 3.2%, pool waiting 0. That is twelve minutes, not
+twenty-four hours, and too short for a slow leak — but the criterion is no
+longer *unmeasured*.
 
 ## [0.9.6] — A harness that can fail both backends at once
 

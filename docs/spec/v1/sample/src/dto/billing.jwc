@@ -2,36 +2,37 @@ namespace dto.billing;
 
 import db.billing;
 
-
 class PlanCreate {
-    code        varchar(40) required, pattern(r"^[a-z0-9_]+$");
-    name        varchar(80) required;
-    price_cents int         required, min(0);
-    currency    varchar(3)? pattern(r"^[A-Z]{3}$");
-    interval    BillingInterval?;
-    features    jsonb?;
+    code     varchar(40) required, pattern(r"^[a-z0-9_]+$");
+    name     varchar(80) required;
+    price    numeric(14, 2) required, min(0);
+    currency varchar(3)? pattern(r"^[A-Z]{3}$");
+    interval BillingInterval?;
+    features jsonb?;
 }
 
 class SubscribeRequest {
-    plan_code varchar(40) required;
+    plan_code  varchar(40) required;
     trial_days int? min(0), max(90);
 }
 
 class InvoiceLineInput {
     description varchar(200) required, minLength(1);
-    quantity    int          required, min(1);
-    unit_cents  int          required, min(0);
+    quantity    int required, min(1);
+    unit_price  numeric(14, 2) required, min(0);
 }
 
 class InvoiceCreate {
     due_at timestamptz?;
-    lines  InvoiceLineInput[] required, minLength(1);
+    lines  InvoiceLineInput[] required, minItems(1), maxItems(200);
 }
 
+--- The provider's payload. `invoice_id` arrives as a JSON string or
+--- number; both are accepted for `bigint` (types.md §2.3).
 class WebhookPayment {
     provider_ref varchar(120) required;
-    invoice_id   bigint       required;
-    amount_cents int          required, min(1);
+    invoice_id   bigint required;
+    amount       numeric(14, 2) required, min(0);
     status       PaymentStatus required;
     failure_code varchar(60)?;
 }

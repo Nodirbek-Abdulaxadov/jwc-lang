@@ -1,64 +1,86 @@
 namespace services.auth;
 
 import app;
+import db.auth;
 import dto.auth;
+import views.org;
 
+--- A real Argon2id encoding of a password nobody has. `login` verifies
+--- against it when the address is unknown, so the miss costs the same as a
+--- hit — a decoy that failed to parse would return immediately and put the
+--- timing signal straight back.
+---
+--- A constant rather than an `env`, because a deployment that forgot to set
+--- one would silently lose the defence and nothing would say so.
+function decoy_password_hash() -> text {
+    return "$argon2id$v=19$m=19456,t=2,p=1$2w2b+Ihc9+eswxNKyuQUfQ$td4KgFPi6UJPiI5wMj2T2NJIHxv14N7qWP5zn5X6Do4";
+}
 
 service AuthService {
-
     function register(req: Register) {
-        let password_hash = hash.password(req.password);
+        let password_hash = hash.password($req.password);
 
         return insert into App.auth.Accounts {
-            ...req,
-            password_hash = password_hash
+            ...$req except (password),
+            password_hash = $password_hash
         } as { id, email, display_name, created_at };
     }
 
-    function login(req: Login) {
-        let account = select Accounts from App.auth.Accounts
-            where Accounts.email == req.email
+    --- 401, not 403: the caller is not authenticated yet (errors.md §1.2).
+    --- The same message for both failures, so the endpoint does not tell an
+    --- attacker which addresses exist.
+    ---
+    --- The same *message* is not enough on its own. An unknown address that
+    --- returned before hashing would answer in microseconds where a known
+    --- one takes an Argon2id verification, and the clock would say what the
+    --- sentence refuses to. So both branches verify: the miss against a
+    --- decoy, and the answer is decided afterwards.
+    function login(req: Login) -> { token: text, expires_in: int } {
+        let found = select A from App.auth.Accounts
+            where email == $req.email
             as { id, password_hash }
             first;
 
-        if (account == null) { throw Forbidden("email yoki parol xato"); }
+        let stored = decoy_password_hash();
 
-        let ok = hash.verify(req.password, account.password_hash);
+        if ($found != null) {
+            $stored = $found.password_hash;
+        }
 
-        if (!ok) { throw Forbidden("email yoki parol xato"); }
+        let ok = hash.verify($req.password, $stored);
 
-        let secret      = env("JWT_SECRET");
+        let account = $found or throw Unauthorized("email yoki parol xato");
+
+        if (!$ok) {
+            throw Unauthorized("email yoki parol xato");
+        }
+
+        let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
         let ttl_minutes = int(env("JWT_TTL_MINUTES") ?? "60");
-        let token       = jwt.sign({ sub: account.id }, secret, ttl_minutes);
+        let subject = string.of($account.id);
+        let token = jwt.sign({ sub: $subject }, $secret, $ttl_minutes);
 
-        return {
-            token:      token,
-            expires_in: ttl_minutes * 60
-        };
+        return { token: $token, expires_in: $ttl_minutes * 60 };
     }
 
-    function profile(account_id) {
-        let account = select Accounts from App.auth.Accounts
-            where Accounts.id == account_id
+    function profile(account_id: bigint) {
+        return select A from App.auth.Accounts
+            where id == $account_id
             as { id, email, display_name, email_verified, created_at }
-            first;
-
-        if (account == null) { throw NotFound("akkaunt topilmadi"); }
-
-        return account;
+            first or throw NotFound("akkaunt topilmadi");
     }
 
-    function update_profile(account_id, req: AccountEdit) {
+    function update_profile(account_id: bigint, req: AccountEdit) {
         return update App.auth.Accounts
-            set ...req
-            where Accounts.id == account_id
+            set ...$req
+            where id == $account_id
             as { id, email, display_name }
-            first;
+            first or throw NotFound("akkaunt topilmadi");
     }
 
-    function orgs_of(account_id) {
-        return select from App.org.MemberAccess
-            where account_id == account_id
+    function orgs_of(account_id: bigint) {
+        return select MA from App.org.MemberAccess
+            where account_id == $account_id
             orderby org.name asc;
     }
 }

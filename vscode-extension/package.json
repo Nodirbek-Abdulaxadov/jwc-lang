@@ -2,7 +2,7 @@
   "name": "jwc-lang",
   "displayName": "JWC Language",
   "description": "JWC (Just Web Code) language support — syntax highlighting, snippets, and LSP-powered diagnostics for the JWC backend language.",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "publisher": "jwc-extension",
   "license": "MIT",
   "author": {
@@ -106,7 +106,7 @@
         "jwc.lspPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the jwc-lsp executable. Leave empty to look up `jwc-lsp` on PATH or under ~/.jwc/bin."
+          "description": "Path to the `jwc` executable, which serves the language server as `jwc lsp`. Leave empty to look up `jwc` on PATH or under ~/.jwc/bin. A path to a standalone `jwc-lsp` is still accepted."
         },
         "jwc.trace.server": {
           "type": "string",

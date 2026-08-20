@@ -1,0 +1,25 @@
+namespace bindings;
+
+-- Duplicate binding names, and an unqualified column that more than one
+-- binding has (names.md §5.4).
+service Bindings {
+    function duplicate_binding(org_id: bigint) {
+        return select Orgs from App.s.Orgs
+            left join App.s.Orgs on Orgs.id == Orgs.id as one other  -- expect: E0212
+            as { id };
+    }
+
+    function self_join_with_an_alias(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Orgs parent on parent.id == O.id as one parent
+            as { id, parent: { id, slug } };
+    }
+
+    function ambiguous_unqualified_column(org_id: bigint) {
+        return select O from App.s.Orgs
+            left join App.s.Notes N on N.org_id == O.id as group
+            where id == $org_id                                     -- expect: E0213
+            group by O.id
+            as { id, n: count(N.id) };
+    }
+}

@@ -1,0 +1,64 @@
+namespace route_returns;
+
+import prelude;
+
+-- routing.md §6.4 and middleware.md §5.2 — what a route may return, and
+-- what a middleware may.
+service Notes {
+    function one(id: bigint) -> { id: bigint, body: text } {
+        return select N from App.s.Notes
+            where id == $id
+            as { id, body }
+            first or throw NotFound("yo'q");
+    }
+}
+
+routes "/notes" {
+    route GET "ok/{id: bigint}" {
+        return json(Notes.one(@id));
+    }
+
+    -- The mistake this catches. The fix is `return json($account);`.
+    route GET "bare/{id: bigint}" {
+        let note = Notes.one(@id);
+
+        return $note;                       -- expect: E0732
+    }
+
+    -- A body that can fall off the end has no answer to send.
+    route GET "silent/{id: bigint}" {         -- expect: E0731
+        let note = Notes.one(@id);
+    }
+
+    -- One arm returns, the other does not.
+    route GET "half/{id: bigint}" {           -- expect: E0731
+        if (@id > 0) {
+            return json(Notes.one(@id));
+        }
+    }
+
+    -- Both arms return, so the body is total.
+    route GET "total/{id: bigint}" {
+        if (@id > 0) {
+            return json(Notes.one(@id));
+        } else {
+            return noContent();
+        }
+    }
+}
+
+-- An error that is returned rather than thrown skips the error handler,
+-- so it answers with a different body than every other error in the
+-- program.
+middleware ReturnsAnError {
+    if (request.header("x-blocked") != null) {
+        return forbidden("no");                -- expect: W0801
+    }
+}
+
+-- A deliberately non-error response is what `return` is for.
+middleware Redirects {
+    if (request.header("x-old") != null) {
+        return redirect(301, "/notes");
+    }
+}

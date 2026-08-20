@@ -464,8 +464,8 @@ mod imp {
         if read_redis_url().is_some() {
             eprintln!(
                 "warning: JWC_REDIS_URL is set but this `jwc` binary was built \
-                 without Redis support (`--features redis`). The redis_* \
-                 built-ins will fail; caching stays per-process."
+                 without Redis support (`--features redis`). The `redis.*` \
+                 package surface will raise on every call except `redis.enabled()`."
             );
         }
         Ok(())

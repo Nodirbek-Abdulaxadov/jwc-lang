@@ -1,0 +1,61 @@
+namespace spread;
+
+-- Spread needs a declared shape, respects `private`/`server`, and every
+-- non-transient field needs a column (types.md §9).
+service Spread {
+    function ok(org_id: bigint, req: NoteInput) {
+        return insert into App.s.Notes { ...$req, org_id = $org_id } as { id };
+    }
+
+    function unknown_field_has_no_column(org_id: bigint, req: WithExtra) {
+        return insert into App.s.Notes {
+            ...$req,                            -- expect: E0305
+            org_id = $org_id,
+            amount = 1.00
+        } as { id };
+    }
+
+    function except_drops_it(org_id: bigint, req: WithExtra) {
+        return insert into App.s.Notes {
+            ...$req except (nickname),
+            org_id = $org_id,
+            amount = 1.00
+        } as { id };
+    }
+
+    function transient_drops_it(org_id: bigint, req: WithTransient) {
+        return insert into App.s.Notes { ...$req, org_id = $org_id, amount = 1.00 }
+            as { id };
+    }
+
+    function except_names_nothing(org_id: bigint, req: NoteInput) {
+        return insert into App.s.Notes {
+            ...$req except (nope),              -- expect: E0341
+            org_id = $org_id
+        } as { id };
+    }
+
+    -- Mass assignment is closed at the language level: `secret` is a
+    -- `private` column and `added_by` is a `server` column, so neither can
+    -- be reached through a spread however the class is shaped
+    -- (types.md §9.4).
+    function private_is_unreachable(org_id: bigint, req: MemberInput) {
+        return insert into App.s.Members {
+            ...$req,                            -- expect: E0342
+            org_id = $org_id,
+            account_id = 1
+        };
+    }
+
+    function server_is_unreachable(org_id: bigint, req: ServerInput) {
+        return insert into App.s.Members {
+            ...$req,                            -- expect: E0342
+            org_id = $org_id,
+            account_id = 1
+        };
+    }
+
+    function missing_required_column(org_id: bigint) {
+        return insert into App.s.Notes { org_id = $org_id } as { id };  -- expect: E0343
+    }
+}

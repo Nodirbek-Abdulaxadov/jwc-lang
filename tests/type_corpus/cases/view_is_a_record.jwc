@@ -1,0 +1,18 @@
+namespace view_is_a_record;
+
+-- A view is a named projection, so selecting from one yields a record even
+-- with no `as { }` (types.md §5.3). This is the clause that made the
+-- sample's own auth gate legal.
+service Views {
+    function ok(org_id: bigint) {
+        let row = select V from App.s.OrgList where id == $org_id first;
+        if ($row == null) { throw NotFound("yo'q"); }
+        return $row.slug;
+    }
+
+    function no_such_field(org_id: bigint) {
+        let row = select V from App.s.OrgList where id == $org_id first;
+        if ($row == null) { throw NotFound("yo'q"); }
+        return $row.region;                     -- expect: E0312
+    }
+}

@@ -1,0 +1,29 @@
+namespace scalars;
+
+database App : Postgres;
+schema s of App;
+
+--- Every scalar in the dictionary (types.md §2.1), so the golden file is
+--- the type-mapping table in executable form.
+table Every of App.s {
+    id     bigint primary key identity;
+    a      smallint;
+    b      int;
+    c      bigint;
+    d      numeric(14, 2);
+    e      numeric;
+    f      boolean;
+    g      varchar(40);
+    h      text;
+    i      timestamptz;
+    j      date;
+    k      time;
+    l      interval;
+    m      uuid;
+    n      jsonb;
+    o      inet;
+    p      bytea;
+    q      text[];
+    nullable_text text?;
+    nullable_arr  text[]?;
+}

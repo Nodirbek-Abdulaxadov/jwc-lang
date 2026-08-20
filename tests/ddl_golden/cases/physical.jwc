@@ -1,0 +1,15 @@
+namespace physical;
+
+database App : Postgres;
+
+--- Physical-name overrides and the touch trigger. `Order` is a Postgres
+--- reserved word, so it must come out quoted (names.md §4.2).
+schema reporting of App as "rpt";
+
+table OrgWithMembers of App.reporting as "tbl_org_members" was "old_org_members" {
+    id         bigint primary key identity;
+    order      int as "order";
+    createdAt  timestamptz as "createdAt" default now();
+    updated_at timestamptz default now() on update now();
+    touched_at timestamptz default now() on update now();
+}

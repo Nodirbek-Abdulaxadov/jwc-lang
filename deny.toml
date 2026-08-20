@@ -16,10 +16,14 @@ yanked = "deny"
 # both sit in Cargo.lock while `cargo tree -i <crate> --target all` prints
 # nothing, meaning no target or feature combination reaches them.
 ignore = [
-    # TODO(security): hickory-proto 0.25.2 advisories — pulled exclusively
-    # through reqwest -> hickory-resolver, which is pinned to 0.25.x upstream.
-    # Cannot bump to 0.26.x without a reqwest release. Drop these ignores once
-    # reqwest publishes a version that adopts hickory-resolver 0.26+.
+    # TODO(security): hickory-proto 0.25.2 advisories — in Cargo.lock but
+    # **not in the shipped binary**: reqwest reaches hickory-resolver only
+    # under its `hickory-dns` feature, which this crate does not enable and
+    # testcontainers (a dev-dependency) does. `cargo tree -e normal --target
+    # all` prints no hickory at all, and
+    # `tests/hardening.rs::no_triaged_advisory_crate_reaches_the_shipped_binary`
+    # is what keeps that true. Drop once reqwest adopts hickory-resolver
+    # 0.26+.
     #   RUSTSEC-2026-0118: NSEC3 unbounded loop (no fix available)
     #   RUSTSEC-2026-0119: O(n^2) name compression in encode path
     "RUSTSEC-2026-0118",

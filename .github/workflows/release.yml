@@ -103,13 +103,12 @@ jobs:
       # webpki roots, and `ring` is already a direct dependency, so musl
       # gains no new C toolchain requirement.
       - name: Build
-        run: cargo build --release --features redis --bin jwc --bin jwc-lsp --target ${{ matrix.target }}
+        run: cargo build --release --features redis --bin jwc --target ${{ matrix.target }}
 
       - name: Strip (linux)
         if: runner.os == 'Linux'
         run: |
           strip target/${{ matrix.target }}/release/jwc
-          strip target/${{ matrix.target }}/release/jwc-lsp
 
       - name: Package (linux)
         if: runner.os == 'Linux'
@@ -117,7 +116,6 @@ jobs:
         run: |
           mkdir -p stage
           cp target/${{ matrix.target }}/release/jwc stage/
-          cp target/${{ matrix.target }}/release/jwc-lsp stage/
           cp README.md ROADMAP.md stage/
           asset="jwc-${{ steps.ver.outputs.label }}-${{ matrix.short }}.tar.gz"
           tar -czf "$asset" -C stage .
@@ -130,7 +128,6 @@ jobs:
         run: |
           $stage = New-Item -ItemType Directory -Path stage -Force
           Copy-Item "target/${{ matrix.target }}/release/jwc.exe"    "$stage/"
-          Copy-Item "target/${{ matrix.target }}/release/jwc-lsp.exe" "$stage/"
           Copy-Item README.md, ROADMAP.md "$stage/"
           $asset = "jwc-${{ steps.ver.outputs.label }}-${{ matrix.short }}.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $asset -Force
