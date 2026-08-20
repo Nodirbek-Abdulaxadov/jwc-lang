@@ -41,9 +41,7 @@ fn multipart_file(body: &[u8], boundary: &str) -> Vec<u8> {
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 async fn upload(
@@ -70,7 +68,10 @@ async fn upload(
     Json(json!({ "name": name, "version": version, "sha256": sha, "size_bytes": len }))
 }
 
-async fn meta(State(state): State<Shared>, AxPath(name): AxPath<String>) -> Json<serde_json::Value> {
+async fn meta(
+    State(state): State<Shared>,
+    AxPath(name): AxPath<String>,
+) -> Json<serde_json::Value> {
     let sha = state
         .lock()
         .expect("lock")
@@ -179,7 +180,10 @@ fn publish_uploads_only_sources_and_add_brings_them_back() {
     );
     assert!(dry.status.success(), "{}", text(&dry));
     let listed = text(&dry);
-    assert!(listed.contains("jwcproj.json") && listed.contains("main.jwc"), "{listed}");
+    assert!(
+        listed.contains("jwcproj.json") && listed.contains("main.jwc"),
+        "{listed}"
+    );
     // A package is source. Shipping whatever is in the directory is how a
     // `.env` reaches a registry.
     assert!(!listed.contains(".env"), "{listed}");
@@ -255,15 +259,22 @@ fn publish_uploads_only_sources_and_add_brings_them_back() {
     assert!(text(&out).contains("added demo 0.2.0"), "{}", text(&out));
 
     let vendored = app.path().join("jwc_packages/demo");
-    assert!(vendored.join("main.jwc").is_file(), "sources were not unpacked");
+    assert!(
+        vendored.join("main.jwc").is_file(),
+        "sources were not unpacked"
+    );
     assert!(vendored.join("jwcproj.json").is_file());
 
     // And the manifest records it, keeping everything else in the file.
-    let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(app.path().join("jwcproj.json")).expect("read"))
-            .expect("json");
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(app.path().join("jwcproj.json")).expect("read"),
+    )
+    .expect("json");
     assert_eq!(manifest["dependencies"]["demo"], "^0.2.0");
-    assert_eq!(manifest["name"], "myapp", "the rest of the manifest was lost");
+    assert_eq!(
+        manifest["name"], "myapp",
+        "the rest of the manifest was lost"
+    );
 }
 
 #[test]
@@ -338,7 +349,12 @@ fn an_archive_that_escapes_its_directory_is_refused() {
     );
     assert!(!out.status.success(), "an escaping archive was unpacked");
     assert!(text(&out).contains("unsafe path"), "{}", text(&out));
-    assert!(!app.path().parent().expect("parent").join("escaped.jwc").exists());
+    assert!(!app
+        .path()
+        .parent()
+        .expect("parent")
+        .join("escaped.jwc")
+        .exists());
 }
 
 #[test]
@@ -347,7 +363,10 @@ fn only_a_package_is_published_and_only_under_a_name_a_program_can_import() {
 
     let app = tempfile::tempdir().expect("tempdir");
     package(app.path(), "myapp", "app");
-    let out = jwc(&["publish", app.path().to_str().expect("utf8")], home.path());
+    let out = jwc(
+        &["publish", app.path().to_str().expect("utf8")],
+        home.path(),
+    );
     assert!(!out.status.success());
     assert!(text(&out).contains("is an application"), "{}", text(&out));
 
@@ -356,7 +375,14 @@ fn only_a_package_is_published_and_only_under_a_name_a_program_can_import() {
     // the refusal has to happen before it is taken.
     let pkg = tempfile::tempdir().expect("tempdir");
     package(pkg.path(), "jwc-redis", "pkg");
-    let out = jwc(&["publish", pkg.path().to_str().expect("utf8")], home.path());
+    let out = jwc(
+        &["publish", pkg.path().to_str().expect("utf8")],
+        home.path(),
+    );
     assert!(!out.status.success());
-    assert!(text(&out).contains("must also be an identifier"), "{}", text(&out));
+    assert!(
+        text(&out).contains("must also be an identifier"),
+        "{}",
+        text(&out)
+    );
 }

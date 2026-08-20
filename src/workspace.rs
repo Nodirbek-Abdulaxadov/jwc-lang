@@ -165,7 +165,11 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// has a louder problem than this pass.
 /// `jwcproj.json`, from `root` or the nearest ancestor holding one.
 fn read_manifest(root: &Path) -> Option<Manifest> {
-    let mut dir = if root.is_file() { root.parent() } else { Some(root) };
+    let mut dir = if root.is_file() {
+        root.parent()
+    } else {
+        Some(root)
+    };
     while let Some(d) = dir {
         let path = d.join("jwcproj.json");
         if path.is_file() {
@@ -195,7 +199,11 @@ fn read_manifest(root: &Path) -> Option<Manifest> {
 }
 
 fn read_packages(root: &Path) -> std::collections::BTreeSet<String> {
-    let mut dir = if root.is_file() { root.parent() } else { Some(root) };
+    let mut dir = if root.is_file() {
+        root.parent()
+    } else {
+        Some(root)
+    };
     while let Some(d) = dir {
         let manifest = d.join("jwcproj.json");
         if manifest.is_file() {

@@ -271,22 +271,14 @@ impl Server {
             Some(f) => f,
             None => {
                 let suffix = format!(".{callee}");
-                let mut hits = a
-                    .sym
-                    .functions
-                    .iter()
-                    .filter(|(k, _)| k.ends_with(&suffix));
+                let mut hits = a.sym.functions.iter().filter(|(k, _)| k.ends_with(&suffix));
                 match (hits.next(), hits.next()) {
                     (Some((_, f)), None) => f,
                     _ => return Value::Null,
                 }
             }
         };
-        let params_text: Vec<String> = f
-            .params
-            .iter()
-            .map(|(n, t)| format!("{n}: {t}"))
-            .collect();
+        let params_text: Vec<String> = f.params.iter().map(|(n, t)| format!("{n}: {t}")).collect();
         let label = format!(
             "{}({}){}",
             f.qualified(),
@@ -331,10 +323,7 @@ pub struct Analysis {
 
 impl Analysis {
     pub fn file_index(&self, path: &Path) -> Option<usize> {
-        self.ws
-            .files
-            .iter()
-            .position(|f| f.source.path == path)
+        self.ws.files.iter().position(|f| f.source.path == path)
     }
 
     /// The generated SQL for the query under `offset`, and its span.
@@ -409,11 +398,7 @@ impl Analysis {
             ));
         }
         if let Some(e) = self.sym.errors.get(name) {
-            let params: Vec<String> = e
-                .params
-                .iter()
-                .map(|(n, t)| format!("{n}: {t}"))
-                .collect();
+            let params: Vec<String> = e.params.iter().map(|(n, t)| format!("{n}: {t}")).collect();
             return Some(format!(
                 "**error** `{}({})` → {}{}",
                 e.declared,
@@ -570,11 +555,7 @@ impl Analysis {
 }
 
 fn function_summary(f: &crate::symbols::FunctionSym) -> String {
-    let params: Vec<String> = f
-        .params
-        .iter()
-        .map(|(n, t)| format!("{n}: {t}"))
-        .collect();
+    let params: Vec<String> = f.params.iter().map(|(n, t)| format!("{n}: {t}")).collect();
     format!(
         "**function** `{}({})`{}{}",
         f.qualified(),

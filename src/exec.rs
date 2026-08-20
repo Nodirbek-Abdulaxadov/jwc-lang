@@ -302,9 +302,9 @@ impl<'a> Vm<'a> {
         // A postfix `catch` unwinds through a synthetic throw so it can
         // return from the *enclosing* function (errors.md §7.2).
         match Box::pin(self.run_block(b)).await {
-            Err(Abort::Thrown(t)) if t.error == "__return" => {
-                Ok(Flow::Return(t.args.into_iter().next().unwrap_or(Value::Null)))
-            }
+            Err(Abort::Thrown(t)) if t.error == "__return" => Ok(Flow::Return(
+                t.args.into_iter().next().unwrap_or(Value::Null),
+            )),
             Err(Abort::Thrown(t)) if t.error == "__return_void" => Ok(Flow::ReturnVoid),
             other => other,
         }
@@ -381,7 +381,9 @@ impl<'a> Vm<'a> {
                 ..
             } => {
                 let c = self.eval(cond).await?;
-                let taken = c.truthy().ok_or_else(|| fault("condition is not boolean"))?;
+                let taken = c
+                    .truthy()
+                    .ok_or_else(|| fault("condition is not boolean"))?;
                 if taken {
                     Box::pin(self.run_block(then)).await
                 } else if let Some(alt) = otherwise {
@@ -452,9 +454,7 @@ impl<'a> Vm<'a> {
                 } => {
                     let want = error.as_ref().map(|e| e.name.as_str()).unwrap_or("");
                     match Box::pin(self.in_savepoint(body)).await {
-                        Ok(_) => Err(fault(format!(
-                            "expected `{want}`, but the block succeeded"
-                        ))),
+                        Ok(_) => Err(fault(format!("expected `{want}`, but the block succeeded"))),
                         Err(Abort::Thrown(t)) if t.error == want => match message {
                             // testing.md §4.3 — compared exactly, and both
                             // strings printed. "Close enough" is how a
@@ -617,9 +617,9 @@ impl<'a> Vm<'a> {
             ExprKind::Unary { op, rhs } => {
                 let v = self.eval(rhs).await?;
                 match op {
-                    UnaryOp::Not => Value::Bool(
-                        !v.truthy().ok_or_else(|| fault("`!` needs a boolean"))?,
-                    ),
+                    UnaryOp::Not => {
+                        Value::Bool(!v.truthy().ok_or_else(|| fault("`!` needs a boolean"))?)
+                    }
                     UnaryOp::Neg => match v {
                         Value::Int(n) => Value::Int(-n),
                         Value::Bigint(n) => Value::Bigint(-n),
@@ -637,7 +637,9 @@ impl<'a> Vm<'a> {
                 otherwise,
             } => {
                 let c = self.eval(cond).await?;
-                if c.truthy().ok_or_else(|| fault("condition is not boolean"))? {
+                if c.truthy()
+                    .ok_or_else(|| fault("condition is not boolean"))?
+                {
                     self.eval(then).await?
                 } else {
                     self.eval(otherwise).await?
@@ -653,7 +655,11 @@ impl<'a> Vm<'a> {
                 }
             }
 
-            ExprKind::In { lhs, items, negated } => {
+            ExprKind::In {
+                lhs,
+                items,
+                negated,
+            } => {
                 let l = self.eval(lhs).await?;
                 let mut found = false;
                 for i in items {
@@ -675,9 +681,7 @@ impl<'a> Vm<'a> {
             }
 
             ExprKind::Exists { .. } => {
-                return Err(fault(
-                    "`exists (...)` needs the query compiler (v0.25.0)",
-                ))
+                return Err(fault("`exists (...)` needs the query compiler (v0.25.0)"))
             }
 
             ExprKind::Object(entries) => {
@@ -744,10 +748,7 @@ impl<'a> Vm<'a> {
                 Ok(v) => v,
                 Err(Abort::Thrown(t)) if t.error == error.name => {
                     self.push();
-                    let payload = Value::Record(vec![(
-                        "message".into(),
-                        Value::Text(t.message()),
-                    )]);
+                    let payload = Value::Record(vec![("message".into(), Value::Text(t.message()))]);
                     self.declare(&binder.name, payload);
                     let r = Box::pin(self.run_stmts(body)).await;
                     self.pop();
@@ -837,13 +838,16 @@ impl<'a> Vm<'a> {
         // Short-circuit before evaluating the right side.
         if matches!(op, BinOp::And | BinOp::Or) {
             let a = self.eval(lhs).await?;
-            let a = a.truthy().ok_or_else(|| fault("`and`/`or` need booleans"))?;
+            let a = a
+                .truthy()
+                .ok_or_else(|| fault("`and`/`or` need booleans"))?;
             if (op == BinOp::And && !a) || (op == BinOp::Or && a) {
                 return Ok(Value::Bool(a));
             }
             let b = self.eval(rhs).await?;
             return Ok(Value::Bool(
-                b.truthy().ok_or_else(|| fault("`and`/`or` need booleans"))?,
+                b.truthy()
+                    .ok_or_else(|| fault("`and`/`or` need booleans"))?,
             ));
         }
 
@@ -861,7 +865,8 @@ impl<'a> Vm<'a> {
                     _ => ord.is_ge(),
                 })
             }
-            BinOp::Add => add(&a, &b).ok_or_else(|| fault(format!("`+` is not defined here: {a:?} + {b:?}")))?,
+            BinOp::Add => add(&a, &b)
+                .ok_or_else(|| fault(format!("`+` is not defined here: {a:?} + {b:?}")))?,
             BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 numeric_op(op, &a, &b).ok_or_else(|| fault("arithmetic is not defined here"))?
             }
@@ -877,8 +882,14 @@ impl<'a> Vm<'a> {
         let Some(sym) = self.program.symbols.classes.get(class) else {
             return Err(fault(format!("unknown class `{class}`")));
         };
-        let parsed: serde_json::Value = serde_json::from_str(&self.request.body)
-            .map_err(|_| validation_error(vec![field_error("", "json", None, "body is not valid JSON")]))?;
+        let parsed: serde_json::Value = serde_json::from_str(&self.request.body).map_err(|_| {
+            validation_error(vec![field_error(
+                "",
+                "json",
+                None,
+                "body is not valid JSON",
+            )])
+        })?;
 
         let mut fields = Vec::new();
         let mut failures = Vec::new();
@@ -978,7 +989,11 @@ fn numeric_op(op: BinOp, a: &Value, b: &Value) -> Option<Value> {
                 _ => None,
             }?;
             let wide = matches!(a, Value::Bigint(_)) || matches!(b, Value::Bigint(_));
-            return Some(if wide { Value::Bigint(r) } else { Value::Int(r) });
+            return Some(if wide {
+                Value::Bigint(r)
+            } else {
+                Value::Int(r)
+            });
         }
     }
     let (x, y) = (numeric_of(a)?, numeric_of(b)?);
@@ -1111,7 +1126,10 @@ impl<'a> Vm<'a> {
                     // an increment, and computing it here would need a read
                     // first — which is the race writes.md §2.3 is about.
                     if self.reads_a_column(&u.table, value) {
-                        sets.push((column.name.clone(), crate::sql::SetValue::Sql(value.clone())));
+                        sets.push((
+                            column.name.clone(),
+                            crate::sql::SetValue::Sql(value.clone()),
+                        ));
                         continue;
                     }
                     let v = self.eval(value).await?;
@@ -1317,7 +1335,10 @@ impl<'a> Vm<'a> {
         // null cannot loop.
         let next = if has_more {
             last_tuple(&keys).map(|t| {
-                Value::Text(crate::cursor::encode(&self.program.server.cursor_secret, &t))
+                Value::Text(crate::cursor::encode(
+                    &self.program.server.cursor_secret,
+                    &t,
+                ))
             })
         } else {
             None
@@ -1365,11 +1386,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    async fn run_sql_with(
-        &mut self,
-        built: crate::sql::Built,
-        values: Vec<Value>,
-    ) -> Exec<Value> {
+    async fn run_sql_with(&mut self, built: crate::sql::Built, values: Vec<Value>) -> Exec<Value> {
         let binds: Vec<Option<String>> = values.iter().map(|v| v.to_bind()).collect();
         if let Some(plan) = &built.page {
             return self.page_envelope(&built, plan, &binds).await;
@@ -1412,7 +1429,11 @@ impl<'a> Vm<'a> {
 /// declared error; a message-less one stays a fault.
 pub(super) fn map_db_error(e: crate::db::DbError) -> Abort {
     match e {
-        crate::db::DbError::Constraint { name, message, kind } => match message {
+        crate::db::DbError::Constraint {
+            name,
+            message,
+            kind,
+        } => match message {
             Some(m) => Abort::Thrown(Thrown {
                 error: match kind {
                     crate::db::ConstraintKind::Unique => "Conflict",
@@ -1445,9 +1466,7 @@ fn reorder(v: Value, order: &[String]) -> Value {
                 })
                 .collect(),
         ),
-        Value::Array(items) => {
-            Value::Array(items.into_iter().map(|i| reorder(i, order)).collect())
-        }
+        Value::Array(items) => Value::Array(items.into_iter().map(|i| reorder(i, order)).collect()),
         other => other,
     }
 }

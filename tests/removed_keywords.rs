@@ -5,7 +5,6 @@
 //! names the replacement: a diagnostic that only says "removed" sends the
 //! reader to a changelog.
 
-
 fn only_diag(src: &str) -> (String, String) {
     let p = jwc::parse_str("<removed>", src);
     let d = p
@@ -41,11 +40,7 @@ removed!(
     "dbcontext AppDb { }",
     "database App : Postgres"
 );
-removed!(
-    dbset_points_at_table,
-    "dbset Accounts;",
-    "table T of App.s"
-);
+removed!(dbset_points_at_table, "dbset Accounts;", "table T of App.s");
 removed!(
     via_points_at_the_on_clause,
     "function f() { return select T from App.s.T via U; }",

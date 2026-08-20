@@ -58,7 +58,8 @@ fn case(name: &str, method: &'static str, path: &str, status: u16) -> Case {
 impl Case {
     fn json(mut self, body: &str) -> Self {
         self.body = body.to_string();
-        self.headers.push(("content-type", "application/json".into()));
+        self.headers
+            .push(("content-type", "application/json".into()));
         self
     }
     fn header(mut self, k: &'static str, v: impl Into<String>) -> Self {
@@ -553,7 +554,11 @@ async fn http_golden() {
             seen.push(it["id"].as_str().expect("id").to_string());
         }
         if !j["has_more"].as_bool().unwrap_or(false) {
-            assert!(j["next"].is_null(), "the last page carries no cursor: {}", page.body);
+            assert!(
+                j["next"].is_null(),
+                "the last page carries no cursor: {}",
+                page.body
+            );
             break;
         }
         cursor = Some(j["next"].as_str().expect("next").to_string());
@@ -562,13 +567,20 @@ async fn http_golden() {
     let mut unique = seen.clone();
     unique.sort();
     unique.dedup();
-    assert_eq!(seen.len(), unique.len(), "a row was visited twice: {seen:?}");
+    assert_eq!(
+        seen.len(),
+        unique.len(),
+        "a row was visited twice: {seen:?}"
+    );
     assert_eq!(seen.len(), 5, "the walk did not see every row: {seen:?}");
     // Newest first, and the ids the sample hands out ascend, so the walk
     // runs down them.
     let mut descending = seen.clone();
     descending.sort_by_key(|id| std::cmp::Reverse(id.parse::<i64>().unwrap()));
-    assert_eq!(seen, descending, "the order did not survive paging: {seen:?}");
+    assert_eq!(
+        seen, descending,
+        "the order did not survive paging: {seen:?}"
+    );
 
     // ---- every route answers (ROADMAP v0.25.0's done criterion).
     //
@@ -621,8 +633,8 @@ async fn http_golden() {
             })
             .collect();
         let key = format!("{} {}", route.method, route.pattern);
-        let mut c = case(&key, method_of(&route.method), &path, 200)
-            .header("authorization", &bearer);
+        let mut c =
+            case(&key, method_of(&route.method), &path, 200).header("authorization", &bearer);
         if let Some(b) = bodies.get(key.as_str()) {
             c = c.json(b);
         }

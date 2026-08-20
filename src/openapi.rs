@@ -81,12 +81,7 @@ pub fn document(input: &Input) -> Value {
         }
 
         let mut responses: Map<String, Value> = Map::new();
-        for resp in input
-            .checked
-            .responses
-            .iter()
-            .filter(|x| x.route == key)
-        {
+        for resp in input.checked.responses.iter().filter(|x| x.route == key) {
             let (body, mut named) = response_body(input.sym, resp);
             used.append(&mut named);
             responses.insert(resp.status.to_string(), body);
@@ -118,9 +113,7 @@ pub fn document(input: &Input) -> Value {
             );
         }
 
-        let entry = paths
-            .entry(r.pattern.clone())
-            .or_insert_with(|| json!({}));
+        let entry = paths.entry(r.pattern.clone()).or_insert_with(|| json!({}));
         if let Some(o) = entry.as_object_mut() {
             o.insert(r.method.to_lowercase(), Value::Object(op));
         }

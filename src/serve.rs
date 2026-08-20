@@ -98,8 +98,7 @@ pub fn load(ws: &Workspace) -> Result<Program> {
                 Decl::Routes(block) => {
                     for r in &block.routes {
                         let pattern = pattern_of(&block.prefix, &r.suffix);
-                        route_bodies
-                            .insert((r.method.name.clone(), pattern), r.body.clone());
+                        route_bodies.insert((r.method.name.clone(), pattern), r.body.clone());
                     }
                 }
                 _ => {}
@@ -332,7 +331,11 @@ fn match_route<'p>(
     method: &str,
     path: &str,
 ) -> Option<(&'p ResolvedRoute, Vec<(String, String)>)> {
-    let parts: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let parts: Vec<&str> = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut best: Option<Candidate<'p>> = None;
 
     for r in &program.routes {
@@ -662,7 +665,6 @@ fn with_cors(program: &Program, origin: Option<&str>, mut r: Response) -> Respon
 }
 
 async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
-
     let Some((route, binds)) = match_route(&program, &incoming.method, &incoming.path) else {
         // Only once nothing declared matched. A program that writes its own
         // `/metrics` keeps it — the source is the authority, and silently
@@ -779,11 +781,12 @@ async fn handle_error(program: &Program, vm: &mut Vm<'_>, abort: Abort) -> Respo
 
     // A declared error carries a default status, which is what makes an
     // `errorHandler` arm optional (errors.md §4.3).
-    let (status, _default_msg, _params) = program
-        .errors
-        .get(&thrown.error)
-        .cloned()
-        .unwrap_or((500, None, vec![]));
+    let (status, _default_msg, _params) =
+        program
+            .errors
+            .get(&thrown.error)
+            .cloned()
+            .unwrap_or((500, None, vec![]));
 
     if let Some(h) = &program.error_handler {
         for arm in &h.arms {
@@ -810,10 +813,9 @@ async fn handle_error(program: &Program, vm: &mut Vm<'_>, abort: Abort) -> Respo
     // types.md §11.3 — validation has one fixed body and user code cannot
     // produce a different one.
     if thrown.error == "BadRequest" && thrown.args.len() == 2 {
-        if let (Some("validation_failed"), Some(Value::Array(fields))) = (
-            thrown.args[0].as_text(),
-            thrown.args.get(1),
-        ) {
+        if let (Some("validation_failed"), Some(Value::Array(fields))) =
+            (thrown.args[0].as_text(), thrown.args.get(1))
+        {
             return Response::json(
                 400,
                 &Value::Record(vec![
@@ -864,7 +866,6 @@ fn rand_id() -> u64 {
     use rand::RngCore;
     rand::thread_rng().next_u64()
 }
-
 
 // ---------------------------------------------------------------- server
 
@@ -950,7 +951,9 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
         let hdrs = headers
             .iter()
             .filter_map(|(k, v)| {
-                v.to_str().ok().map(|s| (k.as_str().to_lowercase(), s.to_string()))
+                v.to_str()
+                    .ok()
+                    .map(|s| (k.as_str().to_lowercase(), s.to_string()))
             })
             .collect();
 
@@ -960,11 +963,11 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
             handle(
                 program,
                 Incoming {
-                method: method.as_str().to_string(),
-                path: uri.path().to_string(),
-                query,
-                headers: hdrs,
-                body: body.to_vec(),
+                    method: method.as_str().to_string(),
+                    path: uri.path().to_string(),
+                    query,
+                    headers: hdrs,
+                    body: body.to_vec(),
                     peer_ip: peer.ip().to_string(),
                 },
             ),
@@ -984,16 +987,16 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
         for (k, v) in &r.headers {
             response = response.header(k.as_str(), v.as_str());
         }
-        response.body(axum::body::Body::from(r.body)).expect("response")
+        response
+            .body(axum::body::Body::from(r.body))
+            .expect("response")
     }
 
     let header_timeout = program.server.header_timeout;
     let tls = program.server.tls.clone();
     let bind = program.server.bind.clone();
 
-    let app = axum::Router::new()
-        .fallback(dispatch)
-        .with_state(program);
+    let app = axum::Router::new().fallback(dispatch).with_state(program);
 
     // Resolved before the socket opens. A certificate that is missing or
     // malformed is a boot failure, not a first-request failure: the
@@ -1149,8 +1152,7 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let term = async {
-        if let Ok(mut s) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         {
             s.recv().await;
         }
@@ -1355,11 +1357,26 @@ mod server_limits {
 
     #[test]
     fn durations_carry_a_unit_or_are_not_read() {
-        assert_eq!(parse_duration("30s"), Some(std::time::Duration::from_secs(30)));
-        assert_eq!(parse_duration("600ms"), Some(std::time::Duration::from_millis(600)));
-        assert_eq!(parse_duration("5m"), Some(std::time::Duration::from_secs(300)));
-        assert_eq!(parse_duration("1h"), Some(std::time::Duration::from_secs(3600)));
-        assert_eq!(parse_duration(" 30s "), Some(std::time::Duration::from_secs(30)));
+        assert_eq!(
+            parse_duration("30s"),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_duration("600ms"),
+            Some(std::time::Duration::from_millis(600))
+        );
+        assert_eq!(
+            parse_duration("5m"),
+            Some(std::time::Duration::from_secs(300))
+        );
+        assert_eq!(
+            parse_duration("1h"),
+            Some(std::time::Duration::from_secs(3600))
+        );
+        assert_eq!(
+            parse_duration(" 30s "),
+            Some(std::time::Duration::from_secs(30))
+        );
         // A bare number is refused, not read as seconds: `= 30` and `= "30s"`
         // would then mean the same thing and `= 30000` would silently mean
         // eight hours.

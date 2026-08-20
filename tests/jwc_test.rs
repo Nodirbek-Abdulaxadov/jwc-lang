@@ -31,10 +31,7 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 macro_rules! db {
     ($name:literal) => {
         match url() {
-            Some(u) => (
-                u,
-                TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
-            ),
+            Some(u) => (u, TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())),
             None => {
                 eprintln!(
                     "SKIPPED {} — set JWC_V1_DATABASE_URL. A SKIPPED line is not a pass.",
@@ -82,10 +79,21 @@ fn install_schema(project: &Path, url: &str) {
         ])
         .output()
         .expect("psql");
-    assert!(drop.status.success(), "{}", String::from_utf8_lossy(&drop.stderr));
+    assert!(
+        drop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&drop.stderr)
+    );
 
     let apply = Command::new("psql")
-        .args([url, "-q", "-v", "ON_ERROR_STOP=1", "-f", sql.to_str().expect("utf8")])
+        .args([
+            url,
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            sql.to_str().expect("utf8"),
+        ])
         .output()
         .expect("psql");
     assert!(
@@ -100,7 +108,10 @@ fn rows(url: &str, sql: &str) -> i64 {
         .args([url, "-tAc", sql])
         .output()
         .expect("psql");
-    String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(-1)
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(-1)
 }
 
 #[test]
@@ -116,7 +127,11 @@ fn the_samples_tests_pass_and_leave_nothing_behind() {
     for run in 1..=3 {
         let out = jwc(&["test", sample.to_str().expect("utf8")], &url);
         assert!(out.status.success(), "run {run}:\n{}", text(&out));
-        assert!(text(&out).contains("4 tests, 0 failed"), "run {run}: {}", text(&out));
+        assert!(
+            text(&out).contains("4 tests, 0 failed"),
+            "run {run}: {}",
+            text(&out)
+        );
     }
     assert_eq!(rows(&url, "select count(*) from org.orgs"), 0);
     assert_eq!(rows(&url, "select count(*) from billing.subscriptions"), 0);
@@ -172,7 +187,10 @@ fn a_wrong_message_fails_and_prints_both() {
     let t = text(&out);
     assert!(t.contains("1 failed"), "{t}");
     assert!(t.contains("want: bu tashkilotda faol obuna bor"), "{t}");
-    assert!(t.contains("got:  bu tashkilotda faol obuna allaqachon bor"), "{t}");
+    assert!(
+        t.contains("got:  bu tashkilotda faol obuna allaqachon bor"),
+        "{t}"
+    );
 }
 
 #[test]
@@ -188,8 +206,11 @@ fn a_wrong_error_type_fails() {
     // A unique with a message is a `Conflict`, never a `BadRequest`
     // (errors.md §6.1). Before v0.28.0 `assert fails` ignored the name
     // entirely, so this passed.
-    std::fs::write(&f, src.replace("assert fails Conflict {", "assert fails BadRequest {"))
-        .expect("write");
+    std::fs::write(
+        &f,
+        src.replace("assert fails Conflict {", "assert fails BadRequest {"),
+    )
+    .expect("write");
 
     let project = dir.path().join("sample");
     let out = jwc(&["test", project.to_str().expect("utf8")], &url);

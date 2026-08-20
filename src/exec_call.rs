@@ -125,8 +125,7 @@ impl<'a> Vm<'a> {
         }
         // Wrapped the same way every other query is, so a `raw` result is
         // the same kind of value as a compiled one.
-        let wrapped =
-            format!("SELECT coalesce(json_agg(q), '[]'::json)::text FROM ({sql}) q");
+        let wrapped = format!("SELECT coalesce(json_agg(q), '[]'::json)::text FROM ({sql}) q");
         let text = crate::db::run(&wrapped, &binds, crate::sql::Shape::Rows)
             .await
             .map_err(crate::exec::map_db_error)?;
@@ -295,7 +294,9 @@ impl<'a> Vm<'a> {
             "string.ends_with" => Value::Bool(s(0).ends_with(&s(1))),
             "string.contains" => Value::Bool(s(0).contains(&s(1))),
             "string.split" => Value::Array(
-                s(0).split(&s(1)).map(|p| Value::Text(p.to_string())).collect(),
+                s(0).split(&s(1))
+                    .map(|p| Value::Text(p.to_string()))
+                    .collect(),
             ),
             "string.split_csv" => Value::Array(
                 s(0).split(',')
@@ -424,9 +425,10 @@ impl<'a> Vm<'a> {
                 let expected = crate::hash::hmac_sha256_hex(&s(2), &s(0));
                 Value::Bool(constant_time_eq(&expected, &s(1)))
             }
-            "crypto.constant_time_eq" => {
-                Value::Bool(crate::cursor::constant_time_eq(s(0).as_bytes(), s(1).as_bytes()))
-            }
+            "crypto.constant_time_eq" => Value::Bool(crate::cursor::constant_time_eq(
+                s(0).as_bytes(),
+                s(1).as_bytes(),
+            )),
             "crypto.token" => {
                 let len = n(0).clamp(1, 128) as usize;
                 let mut bytes = vec![0u8; len];
@@ -563,7 +565,10 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 fn getrandom_fill(buf: &mut [u8]) {

@@ -77,9 +77,7 @@ pub struct ParsedFile {
 
 impl ParsedFile {
     pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> {
-        self.diags
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
+        self.diags.iter().filter(|d| d.severity == Severity::Error)
     }
 
     pub fn has_errors(&self) -> bool {

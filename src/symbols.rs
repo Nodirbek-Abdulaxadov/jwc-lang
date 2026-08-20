@@ -203,7 +203,12 @@ pub fn build(ws: &Workspace, model: &SchemaModel) -> Symbols {
         let paths: Vec<(String, String)> = model
             .tables
             .iter()
-            .map(|t| (format!("{db}.{}.{}", t.schema, t.declared), t.declared.clone()))
+            .map(|t| {
+                (
+                    format!("{db}.{}.{}", t.schema, t.declared),
+                    t.declared.clone(),
+                )
+            })
             .collect();
         for (k, v) in paths {
             s.by_path.insert(k, v);
@@ -341,7 +346,10 @@ fn table_sym(t: &TableObj) -> TableSym {
         .iter()
         .map(|c| {
             let base = sql_to_ty(&c.ty);
-            (c.declared.clone(), if c.nullable { base.opt() } else { base })
+            (
+                c.declared.clone(),
+                if c.nullable { base.opt() } else { base },
+            )
         })
         .collect();
 
@@ -548,7 +556,11 @@ fn view_sym(s: &Symbols, v: &ViewDecl, loc: Loc) -> ViewSym {
                     }
                     shape.push((alias.name.clone(), Ty::Unknown));
                 }
-                ProjField::Nested { alias, shape: inner, .. } => {
+                ProjField::Nested {
+                    alias,
+                    shape: inner,
+                    ..
+                } => {
                     let card = v
                         .body
                         .joins
@@ -558,11 +570,7 @@ fn view_sym(s: &Symbols, v: &ViewDecl, loc: Loc) -> ViewSym {
                         .body
                         .joins
                         .iter()
-                        .find(|j| {
-                            j.result
-                                .as_ref()
-                                .is_some_and(|r| r.name.name == alias.name)
-                        })
+                        .find(|j| j.result.as_ref().is_some_and(|r| r.name.name == alias.name))
                         .map(|j| j.table.object.name.clone());
                     let fields: Fields = inner
                         .fields
@@ -589,9 +597,7 @@ fn view_sym(s: &Symbols, v: &ViewDecl, loc: Loc) -> ViewSym {
                                 .joins
                                 .iter()
                                 .find(|j| {
-                                    j.result
-                                        .as_ref()
-                                        .is_some_and(|x| x.name.name == alias.name)
+                                    j.result.as_ref().is_some_and(|x| x.name.name == alias.name)
                                 })
                                 .map(|j| j.kind == JoinKind::Left)
                                 .unwrap_or(true);

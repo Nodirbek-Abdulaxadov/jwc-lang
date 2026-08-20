@@ -50,17 +50,18 @@ fn a_package_may_not_bring_a_migration() {
     // The same sources as an application are fine. Nothing about the
     // declarations changed; what changed is what the project is.
     let app = project("app", SCHEMA);
-    assert!(!check(app.path()).contains("E1501"), "{}", check(app.path()));
+    assert!(
+        !check(app.path()).contains("E1501"),
+        "{}",
+        check(app.path())
+    );
 }
 
 #[test]
 fn an_of_enum_is_a_type_and_a_bare_enum_is_not() {
     // schema.md §5 — without `of`, an enum is a `varchar` plus a check. It
     // creates nothing, so it crosses no line.
-    let dir = project(
-        "pkg",
-        "namespace demo;\nenum Colour { red, green }\n",
-    );
+    let dir = project("pkg", "namespace demo;\nenum Colour { red, green }\n");
     let out = check(dir.path());
     assert!(!out.contains("E1501"), "{out}");
 
@@ -107,12 +108,20 @@ fn an_exported_function_that_can_raise_says_so() {
         "function boom() -> text raises (Nope) {",
     );
     let dir = project("pkg", &declared);
-    assert!(!check(dir.path()).contains("W1501"), "{}", check(dir.path()));
+    assert!(
+        !check(dir.path()).contains("W1501"),
+        "{}",
+        check(dir.path())
+    );
 
     // In an application `raises` is E1003 and the warning does not apply:
     // there is no boundary to declare across.
     let dir = project("app", src);
-    assert!(!check(dir.path()).contains("W1501"), "{}", check(dir.path()));
+    assert!(
+        !check(dir.path()).contains("W1501"),
+        "{}",
+        check(dir.path())
+    );
 }
 
 #[test]

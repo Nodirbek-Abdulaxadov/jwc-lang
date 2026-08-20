@@ -93,8 +93,10 @@ impl Node {
     /// anywhere is what forces the two-stage pushdown (queries.md §8.3).
     pub fn has_many(&self) -> bool {
         self.children.iter().any(|c| {
-            matches!(c.link.as_ref().map(|l| l.cardinality), Some(Cardinality::Many))
-                || c.has_many()
+            matches!(
+                c.link.as_ref().map(|l| l.cardinality),
+                Some(Cardinality::Many)
+            ) || c.has_many()
         })
     }
 }
@@ -126,16 +128,12 @@ pub fn plan(select: &SelectExpr, sym: &Symbols) -> Plan {
             // "I forgot the projection" and "I meant to aggregate" used to
             // be the same syntax.
             diags.push(
-                Diagnostic::error(
-                    "E0535",
-                    j.span,
-                    "this join does not say what it produces",
-                )
-                .note(
-                    "write `as one <name>`, `as many <name> orderby …`, or `as group` \
+                Diagnostic::error("E0535", j.span, "this join does not say what it produces")
+                    .note(
+                        "write `as one <name>`, `as many <name> orderby …`, or `as group` \
                      when the join exists only to feed aggregates",
-                )
-                .clause("queries.md §4.3"),
+                    )
+                    .clause("queries.md §4.3"),
             );
             continue;
         };
@@ -165,7 +163,7 @@ pub fn plan(select: &SelectExpr, sym: &Symbols) -> Plan {
                     "E0536",
                     result.span,
                     format!("`as many {}` has no `orderby`", result.name.name),
-                    )
+                )
                 .note(
                     "a collection needs a stated order: without one the elements come \
                      back in whatever order the plan produced, and that changes with \

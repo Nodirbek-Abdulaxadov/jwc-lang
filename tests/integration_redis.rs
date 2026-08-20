@@ -285,10 +285,18 @@ async fn the_redis_package_surface_reaches_the_server() {
 
     let r = call(program.clone(), "GET", "/r/kv").await;
     assert_eq!(r.status, 200, "{}", r.body);
-    assert!(r.body.contains("\"on\":true"), "enabled() is stubbed: {}", r.body);
+    assert!(
+        r.body.contains("\"on\":true"),
+        "enabled() is stubbed: {}",
+        r.body
+    );
     assert!(r.body.contains("\"stored\":true"), "{}", r.body);
     assert!(r.body.contains("\"back\":\"v\""), "{}", r.body);
-    assert!(r.body.contains("\"miss\":null"), "a miss must be null: {}", r.body);
+    assert!(
+        r.body.contains("\"miss\":null"),
+        "a miss must be null: {}",
+        r.body
+    );
     assert!(r.body.contains("\"bumped\":\"1\""), "{}", r.body);
 
     // The stub returned `true` forever, so this is the assertion that

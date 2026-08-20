@@ -121,8 +121,12 @@ fn check(path: &Path, golden: &Path) -> Option<String> {
         std::fs::write(golden, &got).expect("write golden");
         return None;
     }
-    let want = std::fs::read_to_string(golden)
-        .unwrap_or_else(|_| panic!("missing golden {} — bless with JWC_V1_BLESS=1", golden.display()));
+    let want = std::fs::read_to_string(golden).unwrap_or_else(|_| {
+        panic!(
+            "missing golden {} — bless with JWC_V1_BLESS=1",
+            golden.display()
+        )
+    });
     if got.trim_end() == want.trim_end() {
         return None;
     }
@@ -153,7 +157,12 @@ fn compilation_is_deterministic() {
     // still produce *correct* SQL — and a prepared-statement cache that
     // never hits.
     for path in cases().into_iter().chain([sample()]) {
-        assert_eq!(render(&path), render(&path), "{} is not deterministic", path.display());
+        assert_eq!(
+            render(&path),
+            render(&path),
+            "{} is not deterministic",
+            path.display()
+        );
     }
 }
 
@@ -180,7 +189,8 @@ fn a_nullable_one_is_a_null_object_not_an_object_of_nulls() {
 fn an_inner_one_carries_no_guard() {
     // An `inner join … as one` cannot miss, so guarding it would be dead
     // SQL that still costs a comparison per row.
-    let ws = Workspace::load(repo_root().join("tests/sql_golden/cases/inner_one.jwc")).expect("load");
+    let ws =
+        Workspace::load(repo_root().join("tests/sql_golden/cases/inner_one.jwc")).expect("load");
     let built = model::build(&ws);
     let sym = symbols::build(&ws, &built.model);
     let file = &ws.files[0];
@@ -191,7 +201,10 @@ fn an_inner_one_carries_no_guard() {
         .expect("compiles")
         .sql;
     assert!(sql.contains("JOIN"), "{sql}");
-    assert!(!sql.contains("CASE WHEN"), "an inner join needs no guard:\n{sql}");
+    assert!(
+        !sql.contains("CASE WHEN"),
+        "an inner join needs no guard:\n{sql}"
+    );
 }
 
 #[test]
@@ -200,7 +213,10 @@ fn a_collection_is_a_lateral_not_an_ordered_json_agg() {
     // and it multiplies the driving row when two collections are projected
     // side by side. The lateral does both correctly (queries.md §4.5).
     let sql = sample_sql();
-    assert!(sql.contains("LEFT JOIN LATERAL"), "expected a lateral:\n{sql}");
+    assert!(
+        sql.contains("LEFT JOIN LATERAL"),
+        "expected a lateral:\n{sql}"
+    );
     // Scoped to the collection's own aggregate — `c` is the lateral's
     // subquery. A page envelope orders `json_agg(q.j ORDER BY q.rn)` over
     // an already-bounded set, which is a different thing and is fine.
@@ -223,14 +239,19 @@ fn a_collection_bounds_the_rows_not_the_page() {
     let sql = sample_sql();
     let mut bounded = 0usize;
     for lateral in sql.split("LEFT JOIN LATERAL").skip(1) {
-        let (inner, rest) = lateral.split_once(") c\n").expect("the lateral's inner select");
+        let (inner, rest) = lateral
+            .split_once(") c\n")
+            .expect("the lateral's inner select");
         let tail = rest.split("ON true").next().unwrap_or("");
         assert!(
             !tail.contains("LIMIT") && !tail.contains("ORDER BY"),
             "a collection's order and bound escaped its subquery:\n{tail}"
         );
         if inner.contains("LIMIT") {
-            assert!(inner.contains("ORDER BY"), "a bound with no order:\n{inner}");
+            assert!(
+                inner.contains("ORDER BY"),
+                "a bound with no order:\n{inner}"
+            );
             bounded += 1;
         }
     }
@@ -263,7 +284,10 @@ fn parameters_are_bound_as_text_and_cast_in_sql() {
     let sql = sample_sql();
     for i in 1..=9 {
         let bad = format!("(${i}::bigint)");
-        assert!(!sql.contains(&bad), "parameter cast the wrong way round: {bad}");
+        assert!(
+            !sql.contains(&bad),
+            "parameter cast the wrong way round: {bad}"
+        );
     }
     assert!(sql.contains("::text)::"));
 }
@@ -275,9 +299,13 @@ fn private_columns_never_reach_a_default_projection() {
     // private column explicitly stays legal: `AuthService.login` reads
     // `password_hash` into a local and the taint rule stops it at the
     // response builder, not here.
-    let golden = std::fs::read_to_string(repo_root().join("tests/sql_golden/cases/default_projection.sql"))
-        .expect("golden");
-    assert!(golden.contains("'email'"), "the default projection is not empty:\n{golden}");
+    let golden =
+        std::fs::read_to_string(repo_root().join("tests/sql_golden/cases/default_projection.sql"))
+            .expect("golden");
+    assert!(
+        golden.contains("'email'"),
+        "the default projection is not empty:\n{golden}"
+    );
     assert!(
         !golden.contains("password_hash"),
         "private column in a default projection:\n{golden}"
@@ -309,7 +337,11 @@ fn pg() -> Option<String> {
 
 /// Create a database, apply a project's schema to it, and hand back its name.
 fn seeded(conn: &str, db: &str, project: &Path, seed: &str) -> String {
-    run_psql(conn, "postgres", &["-c", &format!("DROP DATABASE IF EXISTS {db}")]);
+    run_psql(
+        conn,
+        "postgres",
+        &["-c", &format!("DROP DATABASE IF EXISTS {db}")],
+    );
     run_psql(conn, "postgres", &["-c", &format!("CREATE DATABASE {db}")]);
     let sql = ddl_for(project);
     let file = std::env::temp_dir().join(format!("{db}.sql"));
@@ -317,7 +349,13 @@ fn seeded(conn: &str, db: &str, project: &Path, seed: &str) -> String {
     let out = run_psql(
         conn,
         db,
-        &["-q", "-v", "ON_ERROR_STOP=1", "-f", &file.display().to_string()],
+        &[
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            &file.display().to_string(),
+        ],
     );
     assert!(out.trim().is_empty(), "schema did not apply:\n{out}");
     if !seed.is_empty() {
@@ -345,7 +383,11 @@ fn execute(conn: &str, db: &str, sql: &str, args: &[&str]) -> String {
     let batch = format!("PREPARE q{decl} AS {sql}; {call};");
     // `-q` keeps the PREPARE command tag out of the way, so the only line
     // left is the one column the query produces.
-    let out = run_psql(conn, db, &["-At", "-q", "-v", "ON_ERROR_STOP=1", "-c", &batch]);
+    let out = run_psql(
+        conn,
+        db,
+        &["-At", "-q", "-v", "ON_ERROR_STOP=1", "-c", &batch],
+    );
     assert!(
         out.trim_start().starts_with('[') || out.trim_start().starts_with('{'),
         "query did not run:\n{batch}\n{out}"
@@ -362,7 +404,11 @@ fn statements(path: &Path) -> Vec<(String, String, usize)> {
     for file in &ws.files {
         for site in query_sql::sites(&file.program) {
             let plan = query::plan(site.select, &sym);
-            if plan.diags.iter().any(|d| d.severity == jwc::diag::Severity::Error) {
+            if plan
+                .diags
+                .iter()
+                .any(|d| d.severity == jwc::diag::Severity::Error)
+            {
                 continue;
             }
             let mut c = query_sql::Compiler::new(&built.model);
@@ -413,7 +459,10 @@ fn every_golden_prepares_on_postgres() {
     }
 
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-    assert!(prepared >= 20, "expected every golden's queries, prepared {prepared}");
+    assert!(
+        prepared >= 20,
+        "expected every golden's queries, prepared {prepared}"
+    );
 }
 
 #[test]
@@ -455,9 +504,13 @@ fn a_missing_one_is_json_null_and_an_empty_many_is_an_empty_array() {
         "INSERT INTO s.accounts (id, email, manager_id) VALUES (1, 'boss@x', NULL);
          INSERT INTO s.accounts (id, email, manager_id) VALUES (2, 'ic@x', 1);",
     );
-    let managers: serde_json::Value =
-        serde_json::from_str(&execute(&conn, &db, &statement(&project, "view AccountManager"), &[]))
-            .expect("json");
+    let managers: serde_json::Value = serde_json::from_str(&execute(
+        &conn,
+        &db,
+        &statement(&project, "view AccountManager"),
+        &[],
+    ))
+    .expect("json");
     let reports: serde_json::Value = serde_json::from_str(&execute(
         &conn,
         &db,
@@ -467,14 +520,41 @@ fn a_missing_one_is_json_null_and_an_empty_many_is_an_empty_array() {
     .expect("json");
     run_psql(&conn, "postgres", &["-c", &format!("DROP DATABASE {db}")]);
 
-    let boss = managers.as_array().unwrap().iter().find(|r| r["id"] == "1").unwrap();
-    let ic = managers.as_array().unwrap().iter().find(|r| r["id"] == "2").unwrap();
-    assert!(boss["manager"].is_null(), "a missing `one` must be null: {boss}");
+    let boss = managers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "1")
+        .unwrap();
+    let ic = managers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "2")
+        .unwrap();
+    assert!(
+        boss["manager"].is_null(),
+        "a missing `one` must be null: {boss}"
+    );
     assert_eq!(ic["manager"]["email"], "boss@x", "{ic}");
 
-    let boss = reports.as_array().unwrap().iter().find(|r| r["id"] == "1").unwrap();
-    let ic = reports.as_array().unwrap().iter().find(|r| r["id"] == "2").unwrap();
-    assert_eq!(boss["reports"].as_array().map(|a| a.len()), Some(1), "{boss}");
+    let boss = reports
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "1")
+        .unwrap();
+    let ic = reports
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "2")
+        .unwrap();
+    assert_eq!(
+        boss["reports"].as_array().map(|a| a.len()),
+        Some(1),
+        "{boss}"
+    );
     assert_eq!(
         ic["reports"].as_array().map(|a| a.len()),
         Some(0),
@@ -501,9 +581,21 @@ fn a_collections_limit_bounds_the_collection() {
 
     let rows: serde_json::Value = serde_json::from_str(&json).expect("json");
     let rows = rows.as_array().expect("an array");
-    assert_eq!(rows.len(), 2, "the bound is the collection's, not the page's: {json}");
-    assert_eq!(rows[0]["notes"].as_array().map(|a| a.len()), Some(2), "{json}");
-    assert_eq!(rows[1]["notes"].as_array().map(|a| a.len()), Some(1), "{json}");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the bound is the collection's, not the page's: {json}"
+    );
+    assert_eq!(
+        rows[0]["notes"].as_array().map(|a| a.len()),
+        Some(2),
+        "{json}"
+    );
+    assert_eq!(
+        rows[1]["notes"].as_array().map(|a| a.len()),
+        Some(1),
+        "{json}"
+    );
 }
 
 #[test]
@@ -520,7 +612,12 @@ fn a_join_level_where_narrows_the_collection_not_the_driving_rows() {
          INSERT INTO s.members (org_id, role, removed) VALUES
              (1, 'admin', NULL), (1, 'member', now()), (2, 'admin', now());",
     );
-    let json = execute(&conn, &db, &statement(&project, "Orgs.active_admins"), &["10"]);
+    let json = execute(
+        &conn,
+        &db,
+        &statement(&project, "Orgs.active_admins"),
+        &["10"],
+    );
     run_psql(&conn, "postgres", &["-c", &format!("DROP DATABASE {db}")]);
 
     let rows: serde_json::Value = serde_json::from_str(&json).expect("json");
@@ -528,7 +625,11 @@ fn a_join_level_where_narrows_the_collection_not_the_driving_rows() {
     assert_eq!(rows.len(), 2, "both orgs still have a region: {json}");
     let acme = rows.iter().find(|r| r["name"] == "acme").unwrap();
     let globex = rows.iter().find(|r| r["name"] == "globex").unwrap();
-    assert_eq!(acme["admins"].as_array().map(|a| a.len()), Some(1), "{acme}");
+    assert_eq!(
+        acme["admins"].as_array().map(|a| a.len()),
+        Some(1),
+        "{acme}"
+    );
     assert_eq!(
         globex["admins"].as_array().map(|a| a.len()),
         Some(0),
@@ -568,7 +669,10 @@ fn aggregates_count_group_and_widen_on_real_rows() {
     let quiet = rows.iter().find(|r| r["name"] == "quiet").unwrap();
 
     assert_eq!(acme["order_count"], 3, "{acme}");
-    assert_eq!(acme["paid_count"], 2, "the FILTER narrows only this one: {acme}");
+    assert_eq!(
+        acme["paid_count"], 2,
+        "the FILTER narrows only this one: {acme}"
+    );
     // `sum : numeric?` — a string on the wire, like every numeric
     // (types.md §2.3). 10.00 + 5.50, not 114.50.
     assert_eq!(acme["paid_total"], "15.50", "{acme}");
@@ -603,13 +707,27 @@ fn having_filters_groups_and_count_distinct_survives_fan_out() {
              (2, 'open', 1.00, 1);
          INSERT INTO s.notes (customer_id, body) VALUES (1, 'a'), (1, 'b');",
     );
-    let busy = execute(&conn, &db, &statement(&project, "view BusyCustomers"), &["2"]);
-    let activity = execute(&conn, &db, &statement(&project, "view CustomerActivity"), &[]);
+    let busy = execute(
+        &conn,
+        &db,
+        &statement(&project, "view BusyCustomers"),
+        &["2"],
+    );
+    let activity = execute(
+        &conn,
+        &db,
+        &statement(&project, "view CustomerActivity"),
+        &[],
+    );
     run_psql(&conn, "postgres", &["-c", &format!("DROP DATABASE {db}")]);
 
     let busy: serde_json::Value = serde_json::from_str(&busy).expect("json");
     let busy = busy.as_array().expect("an array");
-    assert_eq!(busy.len(), 1, "only acme has more than two orders: {busy:?}");
+    assert_eq!(
+        busy.len(),
+        1,
+        "only acme has more than two orders: {busy:?}"
+    );
     assert_eq!(busy[0]["order_count"], 3);
 
     let activity: serde_json::Value = serde_json::from_str(&activity).expect("json");
@@ -720,7 +838,10 @@ fn a_bounded_page_takes_the_keys_first() {
     let rows = rows.as_array().expect("an array");
     assert_eq!(rows.len(), 5, "{json}");
     assert_eq!(rows[0]["number"], "A-1", "by number: {json}");
-    assert_eq!(rows[4]["number"], "A-102", "200 numbers sort as text: {json}");
+    assert_eq!(
+        rows[4]["number"], "A-102",
+        "200 numbers sort as text: {json}"
+    );
     for r in rows {
         assert_eq!(r["lines"].as_array().map(|a| a.len()), Some(3), "{r}");
     }
@@ -785,5 +906,3 @@ fn field(line: &str, name: &str) -> Option<i64> {
         .unwrap_or(rest.len());
     rest[..end].split('.').next()?.parse().ok()
 }
-
-

@@ -138,9 +138,7 @@ fn corpus_matches_exactly() {
         }
         for (line, code) in extra {
             let src = text.lines().nth(line - 1).unwrap_or("").trim();
-            failures.push_str(&format!(
-                "  unexpected {code} on line {line}: {src}\n"
-            ));
+            failures.push_str(&format!("  unexpected {code} on line {line}: {src}\n"));
         }
         failures.push_str(&format!("--- all diagnostics ---\n{rendered}"));
     }
@@ -185,7 +183,12 @@ fn the_sample_wires_clean() {
         .expect("PATCH /api/v1/orgs/{org_id}");
     assert_eq!(
         patch.chain,
-        vec!["RequireAuth", "RequireOrgMember", "Audit", "RequireOrgAdmin"],
+        vec![
+            "RequireAuth",
+            "RequireOrgMember",
+            "Audit",
+            "RequireOrgAdmin"
+        ],
         "block list in written order, then the route list (middleware.md §4.1)"
     );
     assert_eq!(

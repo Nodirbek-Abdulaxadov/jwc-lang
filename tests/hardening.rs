@@ -113,8 +113,14 @@ async fn a_preflight_is_answered_and_an_unlisted_origin_is_not() {
         header(&pre, "access-control-allow-origin"),
         Some("https://app.example.com")
     );
-    assert_eq!(header(&pre, "access-control-allow-credentials"), Some("true"));
-    assert_eq!(header(&pre, "access-control-allow-methods"), Some("GET, POST"));
+    assert_eq!(
+        header(&pre, "access-control-allow-credentials"),
+        Some("true")
+    );
+    assert_eq!(
+        header(&pre, "access-control-allow-methods"),
+        Some("GET, POST")
+    );
     assert_eq!(header(&pre, "access-control-max-age"), Some("600"));
     // Any cache in front of this has to key on the origin, or one caller's
     // answer is served to another's.
@@ -211,10 +217,24 @@ async fn the_two_failure_branches_of_login_cost_the_same() {
             "-c",
             "DROP SCHEMA IF EXISTS audit, auth, billing, org CASCADE",
         ],
-        vec![url.as_str(), "-q", "-v", "ON_ERROR_STOP=1", "-f", file.to_str().expect("utf8")],
+        vec![
+            url.as_str(),
+            "-q",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-f",
+            file.to_str().expect("utf8"),
+        ],
     ] {
-        let out = std::process::Command::new("psql").args(&args).output().expect("psql");
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let out = std::process::Command::new("psql")
+            .args(&args)
+            .output()
+            .expect("psql");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     // One account whose password we know, so the "wrong password" branch is
@@ -229,7 +249,11 @@ async fn the_two_failure_branches_of_login_cost_the_same() {
         .args([url.as_str(), "-q", "-v", "ON_ERROR_STOP=1", "-c", &insert])
         .output()
         .expect("psql");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     std::env::set_var("DATABASE_URL", &url);
     std::env::set_var("JWT_SECRET", "test-secret-abcdefghijklmnop");
@@ -251,9 +275,7 @@ async fn the_two_failure_branches_of_login_cost_the_same() {
     let attempt = |email: &'static str| {
         let p = program.clone();
         async move {
-            let body = format!(
-                r#"{{"email":"{email}","password":"definitely not the password"}}"#
-            );
+            let body = format!(r#"{{"email":"{email}","password":"definitely not the password"}}"#);
             let started = std::time::Instant::now();
             let r = call(p, "POST", "/api/v1/auth/login", &[], &body).await;
             (r.status, started.elapsed())
@@ -343,7 +365,10 @@ fn no_triaged_advisory_crate_reaches_the_shipped_binary() {
     // `deny.toml` as reached only through `testcontainers` -> `bollard`,
     // which is a dev-dependency.
     for (crate_name, why) in [
-        ("hickory-proto", "reqwest's DNS resolver, only under testcontainers' feature set"),
+        (
+            "hickory-proto",
+            "reqwest's DNS resolver, only under testcontainers' feature set",
+        ),
         ("rkyv", "bollard"),
         ("rustls-pemfile", "bollard"),
     ] {
@@ -394,8 +419,7 @@ fn split_version(v: &str) -> (u32, u32, u32) {
 #[test]
 fn every_test_suite_is_named_in_ci() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
-        .expect("ci.yml");
+    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
 
     let mut missing = Vec::new();
     for entry in std::fs::read_dir(root.join("tests")).expect("tests/") {
@@ -440,7 +464,11 @@ async fn the_operational_endpoints_answer_and_do_not_shadow_a_declared_route() {
     // point release and show up as a dashboard that went blank.
     let r = call(p.clone(), "GET", "/healthz", &[], "").await;
     assert_eq!(r.status, 200);
-    assert!(r.body.contains("\"mine\":true"), "built-in shadowed it: {}", r.body);
+    assert!(
+        r.body.contains("\"mine\":true"),
+        "built-in shadowed it: {}",
+        r.body
+    );
 
     // Undeclared: the built-in answers.
     let bare = program("namespace h;\nroutes \"/x\" { route GET \"\" { return json(1); } }\n");

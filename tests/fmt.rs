@@ -87,14 +87,24 @@ fn formatted_output_reparses_to_the_same_shape() {
                 f.display()
             );
             if let (Decl::Table(x), Decl::Table(y)) = (a, b) {
-                assert_eq!(x.columns.len(), y.columns.len(), "columns of {}", x.name.name);
+                assert_eq!(
+                    x.columns.len(),
+                    y.columns.len(),
+                    "columns of {}",
+                    x.name.name
+                );
                 assert_eq!(
                     x.constraints.len(),
                     y.constraints.len(),
                     "constraints of {}",
                     x.name.name
                 );
-                assert_eq!(x.indexes.len(), y.indexes.len(), "indexes of {}", x.name.name);
+                assert_eq!(
+                    x.indexes.len(),
+                    y.indexes.len(),
+                    "indexes of {}",
+                    x.name.name
+                );
             }
         }
     }
@@ -110,8 +120,14 @@ table Orgs of App.org {
 }
 ";
     let once = fmt("<docs>", src);
-    assert!(once.contains("--- Tenant table."), "table doc lost:\n{once}");
-    assert!(once.contains("--- URL-safe handle."), "column doc lost:\n{once}");
+    assert!(
+        once.contains("--- Tenant table."),
+        "table doc lost:\n{once}"
+    );
+    assert!(
+        once.contains("--- URL-safe handle."),
+        "column doc lost:\n{once}"
+    );
     assert_eq!(once, fmt("<docs2>", &once));
 }
 
@@ -125,7 +141,10 @@ function f() {
 }
 ";
     let once = fmt("<comments>", src);
-    assert!(once.contains("-- why this exists"), "decl comment lost:\n{once}");
+    assert!(
+        once.contains("-- why this exists"),
+        "decl comment lost:\n{once}"
+    );
     assert!(once.contains("-- and this"), "stmt comment lost:\n{once}");
     assert_eq!(once, fmt("<comments2>", &once));
 }
@@ -191,7 +210,10 @@ fn corpus_snippets_are_fixed_points() {
     for (name, src) in cases {
         let once = fmt(name, src);
         let twice = fmt(name, &once);
-        assert_eq!(once, twice, "{name} is not a fixed point:\n{once}\n---\n{twice}");
+        assert_eq!(
+            once, twice,
+            "{name} is not a fixed point:\n{once}\n---\n{twice}"
+        );
     }
 }
 
@@ -206,7 +228,12 @@ fn the_sample_is_checked_in_formatted() {
     for f in sample_files() {
         let src = std::fs::read_to_string(&f).expect("read");
         let parsed = jwc::parse_str(f.display().to_string(), &src);
-        assert!(!parsed.has_errors(), "{}\n{}", f.display(), parsed.render_all());
+        assert!(
+            !parsed.has_errors(),
+            "{}\n{}",
+            f.display(),
+            parsed.render_all()
+        );
         let printed = jwc::fmt::format_program(&parsed.program);
         if printed != src {
             unformatted.push(f.display().to_string());

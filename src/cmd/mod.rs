@@ -167,7 +167,11 @@ pub fn fmt(path: PathBuf, check_only: bool) -> Result<()> {
         println!("formatted {}", display_relative(c));
     }
     if changed.is_empty() {
-        println!("ok — {} file{} already formatted", files.len(), plural(files.len()));
+        println!(
+            "ok — {} file{} already formatted",
+            files.len(),
+            plural(files.len())
+        );
     }
     Ok(())
 }
@@ -207,8 +211,13 @@ pub fn gen_sql(path: PathBuf, explain: bool, out: Option<PathBuf>) -> Result<()>
     let sql = crate::ddl::render(&ws, &statements, explain);
     match out {
         Some(p) => {
-            std::fs::write(&p, format!("{sql}
-"))?;
+            std::fs::write(
+                &p,
+                format!(
+                    "{sql}
+"
+                ),
+            )?;
             println!("wrote {} ({} statements)", p.display(), statements.len());
         }
         None => println!("{sql}"),
@@ -468,8 +477,10 @@ fn analyze_statements(statements: &[String]) -> Result<()> {
             println!("\x1b[1mEXPLAIN\x1b[0m");
             let n = highest_parameter(sql);
             let params: Vec<Option<String>> = vec![None; n];
-            let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-                params.iter().map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+            let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
+                .iter()
+                .map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync))
+                .collect();
             match client.query(&format!("EXPLAIN {sql}"), &refs).await {
                 Ok(rows) => {
                     for row in rows {
@@ -542,7 +553,13 @@ pub fn routes(path: PathBuf) -> Result<()> {
             width = width
         );
         if !r.after.is_empty() {
-            println!("{:<7} {:<width$}  after: {}", "", "", r.after.join(" → "), width = width);
+            println!(
+                "{:<7} {:<width$}  after: {}",
+                "",
+                "",
+                r.after.join(" → "),
+                width = width
+            );
         }
     }
     println!("\n{} route{}", rows.len(), plural(rows.len()));
@@ -915,8 +932,7 @@ pub fn openapi(path: PathBuf, out: Option<PathBuf>, title: Option<String>) -> Re
     // actually produces. One pass cannot know the type of a function it has
     // not reached yet, and reordering would only move the problem.
     let first = crate::check::check(&ws, &symbols, &built.model);
-    let checked =
-        crate::check::check_with(&ws, &symbols, &built.model, &first.function_returns);
+    let checked = crate::check::check_with(&ws, &symbols, &built.model, &first.function_returns);
     let wired = crate::wiring::wire(&ws, &symbols);
 
     let errors = built
@@ -958,10 +974,9 @@ pub fn openapi(path: PathBuf, out: Option<PathBuf>, title: Option<String>) -> Re
                     rt.method.name.to_uppercase(),
                     crate::wiring::route_pattern(&r.prefix, &rt.suffix)
                 );
-                let mut set: Vec<String> =
-                    crate::wiring::raises_from(&symbols, &bodies, &rt.body)
-                        .into_iter()
-                        .collect();
+                let mut set: Vec<String> = crate::wiring::raises_from(&symbols, &bodies, &rt.body)
+                    .into_iter()
+                    .collect();
                 // Middleware runs before the handler and can answer on its
                 // own, so what it raises the route can produce.
                 for m in &rt.uses {
@@ -1220,7 +1235,10 @@ fn constraint_rows(
                 out.push(row(
                     &f.name,
                     "400",
-                    format!("{}.{} still references this row", other.schema, other.declared),
+                    format!(
+                        "{}.{} still references this row",
+                        other.schema, other.declared
+                    ),
                 ));
             }
         }

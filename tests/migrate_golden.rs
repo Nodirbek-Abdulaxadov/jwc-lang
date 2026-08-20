@@ -191,10 +191,7 @@ fn every_migration_applies_and_reverses() {
 
     for case in cases() {
         let prev_model = before(&case);
-        let prev = prev_model
-            .as_ref()
-            .map(snapshot::of)
-            .unwrap_or_default();
+        let prev = prev_model.as_ref().map(snapshot::of).unwrap_or_default();
         let current = after(&case);
         let plan = migrate::plan(&prev, &current, 1, &case);
         if plan.has_errors() || plan.is_empty() {
@@ -246,5 +243,9 @@ fn every_migration_applies_and_reverses() {
         }
     }
 
-    let (_, _) = psql(&["-c", &format!("drop database if exists {db}")], &conn, None);
+    let (_, _) = psql(
+        &["-c", &format!("drop database if exists {db}")],
+        &conn,
+        None,
+    );
 }

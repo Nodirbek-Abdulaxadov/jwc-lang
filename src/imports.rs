@@ -400,7 +400,11 @@ fn expr(e: &Expr, out: &mut Vec<(String, Span)>) {
             out.push((ty.name.clone(), ty.span));
             expr(value, out);
         }
-        ExprKind::Call { callee, args, filter } => {
+        ExprKind::Call {
+            callee,
+            args,
+            filter,
+        } => {
             // A bare call is a free function.
             if let ExprKind::Name(n) = &*callee.kind {
                 out.push((n.name.clone(), n.span));
@@ -445,10 +449,7 @@ fn expr(e: &Expr, out: &mut Vec<(String, Span)>) {
             }
         }
         ExprKind::CatchPostfix {
-            value,
-            error,
-            body,
-            ..
+            value, error, body, ..
         } => {
             expr(value, out);
             out.push((error.name.clone(), error.span));

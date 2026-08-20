@@ -105,9 +105,7 @@ fn e0403_default_now_on_a_non_temporal_column() {
 #[test]
 fn e0420_two_primary_keys() {
     expect(
-        &with(
-            "table T of App.s { id bigint primary key identity; b int; primary key (id, b); }",
-        ),
+        &with("table T of App.s { id bigint primary key identity; b int; primary key (id, b); }"),
         "E0420",
         "column-level `primary key` or the table-level form",
     );
@@ -183,9 +181,7 @@ fn e0423_set_null_on_a_not_null_column() {
 #[test]
 fn e0430_on_update_other_than_now() {
     expect(
-        &with(
-            "table T of App.s { id bigint primary key identity; a timestamptz on update 1; }",
-        ),
+        &with("table T of App.s { id bigint primary key identity; a timestamptz on update 1; }"),
         "E0430",
         "only `now()`",
     );
@@ -307,7 +303,10 @@ fn w0401_table_without_a_primary_key() {
         .expect("W0401 for a table with no primary key");
     assert!(hit.1.contains("has no primary key"));
     // A warning, not an error: log tables legitimately have none.
-    let errors: Vec<_> = diags.iter().filter(|(c, _, _)| c.starts_with('E')).collect();
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|(c, _, _)| c.starts_with('E'))
+        .collect();
     assert!(errors.is_empty(), "{errors:#?}");
 }
 
@@ -343,7 +342,10 @@ fn editing_a_constraint_message_changes_no_ddl() {
     );
 
     let sql = |src: &str| {
-        let dir = std::env::temp_dir().join(format!("jwc_v1_msg_{}", src.len() + src.as_bytes()[src.len() - 3] as usize));
+        let dir = std::env::temp_dir().join(format!(
+            "jwc_v1_msg_{}",
+            src.len() + src.as_bytes()[src.len() - 3] as usize
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.jwc"), src).unwrap();
@@ -388,8 +390,10 @@ fn e0424_a_function_a_check_may_not_call() {
     // on every write, so it may only call what is portable enough to live
     // there.
     expect(
-        &with("table T of App.s { id bigint primary key identity; a text;\n\
-               check (md5(a) != \"\") : \"nope\"; }"),
+        &with(
+            "table T of App.s { id bigint primary key identity; a text;\n\
+               check (md5(a) != \"\") : \"nope\"; }",
+        ),
         "E0424",
         "char_length",
     );

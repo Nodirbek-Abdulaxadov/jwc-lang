@@ -109,9 +109,19 @@ impl Constraint {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommentTarget {
-    Table { schema: String, name: String },
-    Column { schema: String, table: String, name: String },
-    View { schema: String, name: String },
+    Table {
+        schema: String,
+        name: String,
+    },
+    Column {
+        schema: String,
+        table: String,
+        name: String,
+    },
+    View {
+        schema: String,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -564,7 +574,8 @@ impl Source {
             let key = format!("{}.{}", t.schema_physical, t.physical);
             src.locs.insert(key.clone(), t.loc);
             if let Some(old) = &t.was {
-                src.table_was.insert(key.clone(), crate::naming::physical(old));
+                src.table_was
+                    .insert(key.clone(), crate::naming::physical(old));
             }
             for c in &t.columns {
                 let ckey = format!("{key}.{}", c.physical);
@@ -699,7 +710,13 @@ impl Builder<'_> {
         ));
     }
 
-    fn warn(&mut self, loc: Option<Loc>, code: &'static str, message: String, clause: &'static str) {
+    fn warn(
+        &mut self,
+        loc: Option<Loc>,
+        code: &'static str,
+        message: String,
+        clause: &'static str,
+    ) {
         let Some(loc) = loc else { return };
         self.diags.push((
             loc,
@@ -721,7 +738,10 @@ impl Builder<'_> {
                     self.warn(
                         loc,
                         "W1101",
-                        format!("`was \"{old}\"` on table `{}` has already been applied", t.declared),
+                        format!(
+                            "`was \"{old}\"` on table `{}` has already been applied",
+                            t.declared
+                        ),
                         "migrations.md §6.4",
                     );
                 } else if let Some(p) = self
@@ -744,9 +764,7 @@ impl Builder<'_> {
                     self.err(
                         loc,
                         "E1103",
-                        format!(
-                            "`was \"{old}\"` names no table in the previous snapshot"
-                        ),
+                        format!("`was \"{old}\"` names no table in the previous snapshot"),
                         "migrations.md §6.3",
                     );
                 }
@@ -1242,7 +1260,11 @@ impl Builder<'_> {
         let mut adds: Vec<Constraint> = Vec::new();
 
         for c in &now {
-            match was.iter().enumerate().position(|(i, w)| !used[i] && w.body() == c.body()) {
+            match was
+                .iter()
+                .enumerate()
+                .position(|(i, w)| !used[i] && w.body() == c.body())
+            {
                 Some(i) => {
                     used[i] = true;
                     if was[i].name() == c.name() {
@@ -1419,7 +1441,9 @@ impl Builder<'_> {
             );
         }
         for c in &t.columns {
-            let was = p.and_then(|p| p.column(&c.name)).and_then(|x| x.comment.clone());
+            let was = p
+                .and_then(|p| p.column(&c.name))
+                .and_then(|x| x.comment.clone());
             // A column this migration adds carries no comment yet, so a
             // `None` previous value and a `Some` new one is a real change —
             // which the equality below already says.
@@ -1618,10 +1642,7 @@ impl Builder<'_> {
                 let now = self.next.view(&p.schema, &p.name);
                 let gone = now.is_none();
                 let changed = now.is_some_and(|n| n.body != p.body);
-                let reads_touched = p
-                    .reads
-                    .iter()
-                    .any(|r| self.touched.iter().any(|t| t == r));
+                let reads_touched = p.reads.iter().any(|r| self.touched.iter().any(|t| t == r));
                 if !gone && !changed && !reads_touched {
                     continue;
                 }

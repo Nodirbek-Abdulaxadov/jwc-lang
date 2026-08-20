@@ -163,10 +163,7 @@ impl<'a> Lexer<'a> {
                     Diagnostic::error(
                         "E0106",
                         Span::new(start, self.i),
-                        format!(
-                            "`{}` must be followed immediately by a name",
-                            sigil as char
-                        ),
+                        format!("`{}` must be followed immediately by a name", sigil as char),
                     )
                     .clause("names.md §2.5"),
                 );
@@ -323,7 +320,11 @@ impl<'a> Lexer<'a> {
                     self.diags.push(
                         Diagnostic::error("E0103", Span::new(open, self.i), message)
                             .note(help)
-                            .clause(if raw { "names.md §2.4" } else { "names.md §2.3" }),
+                            .clause(if raw {
+                                "names.md §2.4"
+                            } else {
+                                "names.md §2.3"
+                            }),
                     );
                     return None;
                 }
@@ -399,9 +400,7 @@ impl<'a> Lexer<'a> {
                 }
                 _ => {
                     let start = self.i;
-                    while self.i < self.src.len()
-                        && !matches!(self.peek(), b'"' | b'\\' | b'\n')
-                    {
+                    while self.i < self.src.len() && !matches!(self.peek(), b'"' | b'\\' | b'\n') {
                         self.i += 1;
                     }
                     out.push_str(&self.text[start..self.i]);
@@ -550,7 +549,11 @@ mod tests {
     fn decimal_literals() {
         assert_eq!(
             toks("10.00 42"),
-            vec![Tok::Decimal("10.00".into()), Tok::Int("42".into()), Tok::Eof]
+            vec![
+                Tok::Decimal("10.00".into()),
+                Tok::Int("42".into()),
+                Tok::Eof
+            ]
         );
     }
 

@@ -33,8 +33,7 @@ fn the_sample_snapshot_is_frozen() {
     }
     let want = std::fs::read_to_string(&golden).unwrap_or_default();
     assert_eq!(
-        text,
-        want,
+        text, want,
         "the sample's snapshot changed. Review the diff, then re-bless with \
          JWC_BLESS=1 cargo test --test snapshot_sample"
     );

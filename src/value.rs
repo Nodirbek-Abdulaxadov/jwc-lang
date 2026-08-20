@@ -116,9 +116,7 @@ impl Value {
                 J::Object(m)
             }
             Value::Array(items) => J::Array(items.iter().map(|v| v.to_json()).collect()),
-            Value::Response { body, .. } => {
-                serde_json::from_str(body).unwrap_or(J::Null)
-            }
+            Value::Response { body, .. } => serde_json::from_str(body).unwrap_or(J::Null),
         }
     }
 
@@ -205,13 +203,19 @@ mod tests {
 
     #[test]
     fn bigint_is_a_string_and_int_is_a_number() {
-        assert_eq!(Value::Bigint(9007199254740993).to_json().to_string(), "\"9007199254740993\"");
+        assert_eq!(
+            Value::Bigint(9007199254740993).to_json().to_string(),
+            "\"9007199254740993\""
+        );
         assert_eq!(Value::Int(42).to_json().to_string(), "42");
     }
 
     #[test]
     fn money_never_touches_a_float() {
-        assert_eq!(Value::Numeric("10.00".into()).to_json().to_string(), "\"10.00\"");
+        assert_eq!(
+            Value::Numeric("10.00".into()).to_json().to_string(),
+            "\"10.00\""
+        );
     }
 
     #[test]
@@ -232,6 +236,9 @@ mod tests {
         let mut out = String::new();
         v.write_json(&mut out);
         assert_eq!(out, "\"9007199254740993\"");
-        assert_eq!(out.trim_matches('"').parse::<i64>().ok(), Some(9007199254740993));
+        assert_eq!(
+            out.trim_matches('"').parse::<i64>().ok(),
+            Some(9007199254740993)
+        );
     }
 }

@@ -107,9 +107,7 @@ impl Gen {
     }
 
     fn source(&self) -> String {
-        let mut s = String::from(
-            "namespace r;\ndatabase App : Postgres;\nschema org of App;\n\n",
-        );
+        let mut s = String::from("namespace r;\ndatabase App : Postgres;\nschema org of App;\n\n");
         let members: Vec<String> = ["free".to_string(), "pro".to_string()]
             .into_iter()
             .chain(self.enum_extra.iter().cloned())
@@ -130,10 +128,7 @@ impl Gen {
                 .as_ref()
                 .map(|w| format!(" was \"{w}\""))
                 .unwrap_or_default();
-            s.push_str(&format!(
-                "    {} varchar({})?{was};\n",
-                c.name, c.width
-            ));
+            s.push_str(&format!("    {} varchar({})?{was};\n", c.name, c.width));
         }
         if let Some(p) = self.unique_pred {
             s.push_str(&format!(
@@ -472,8 +467,7 @@ async fn one_sequence(
             std::fs::write(dir.join(format!("{}.up.sql", f.stem)), &f.up).expect("write");
             std::fs::write(dir.join(format!("{}.down.sql", f.stem)), &f.down).expect("write");
             if let Some(s) = &f.snapshot {
-                std::fs::write(dir.join(format!("{}.snapshot.json", f.stem)), s)
-                    .expect("write");
+                std::fs::write(dir.join(format!("{}.snapshot.json", f.stem)), s).expect("write");
                 prev = snapshot::Snapshot::from_json(s).expect("re-read");
             }
         }
@@ -500,7 +494,11 @@ async fn one_sequence(
             "seed {seed}: a migrated database is not the database `gen-sql` builds\n\
              {}\n\nsource:\n{last_source}",
             if diff.is_empty() {
-                format!("(different lengths: {} vs {})", x.lines().count(), y.lines().count())
+                format!(
+                    "(different lengths: {} vs {})",
+                    x.lines().count(),
+                    y.lines().count()
+                )
             } else {
                 diff.join("\n")
             }

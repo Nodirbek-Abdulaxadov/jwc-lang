@@ -168,7 +168,13 @@ struct Checker<'a> {
 impl<'a> Checker<'a> {
     // ------------------------------------------------------------ plumbing
 
-    fn err(&mut self, span: Span, code: &'static str, msg: impl Into<String>, clause: &'static str) {
+    fn err(
+        &mut self,
+        span: Span,
+        code: &'static str,
+        msg: impl Into<String>,
+        clause: &'static str,
+    ) {
         self.diags.push((
             Loc {
                 file: self.file,
@@ -363,7 +369,9 @@ impl<'a> Checker<'a> {
     /// callers. An annotation wins; otherwise the returns agree by §10.2, so
     /// the first of them is the answer.
     fn record_return_type(&mut self) {
-        let Some(key) = self.fn_key.clone() else { return };
+        let Some(key) = self.fn_key.clone() else {
+            return;
+        };
         let ty = match self.sym.functions.get(&key).and_then(|f| f.returns.clone()) {
             Some(t) => t,
             None => match self.returns.first() {
@@ -403,9 +411,7 @@ impl<'a> Checker<'a> {
                 self.err_note(
                     *span,
                     "E0351",
-                    format!(
-                        "this returns `{ty}` but an earlier return produces `{first}`"
-                    ),
+                    format!("this returns `{ty}` but an earlier return produces `{first}`"),
                     "when returns disagree the signature must say which one wins: \
                      add `-> <type>`",
                     "types.md §10.2",
@@ -453,7 +459,10 @@ impl<'a> Checker<'a> {
                 .into_iter()
                 .chain(untyped_path_params(&route.suffix))
                 .collect();
-            for (name, ty) in prefix_params.iter().chain(path_params(&route.suffix).iter()) {
+            for (name, ty) in prefix_params
+                .iter()
+                .chain(path_params(&route.suffix).iter())
+            {
                 self.params.insert(name.clone(), ty.clone());
             }
             self.push_scope();
@@ -794,7 +803,9 @@ impl<'a> Checker<'a> {
                     self.returns.push((ty, v.span));
                 }
             }
-            Stmt::Throw { error, args, span, .. } => {
+            Stmt::Throw {
+                error, args, span, ..
+            } => {
                 let Some(sym) = self.sym.errors.get(&error.name).cloned() else {
                     self.err_note(
                         error.span,
@@ -987,7 +998,10 @@ impl<'a> Checker<'a> {
             },
 
             ExprKind::PathParam(i) => {
-                if !matches!(self.body, BodyKind::Route | BodyKind::Middleware | BodyKind::After) {
+                if !matches!(
+                    self.body,
+                    BodyKind::Route | BodyKind::Middleware | BodyKind::After
+                ) {
                     self.err_note(
                         i.span,
                         "E0220",
@@ -1254,7 +1268,10 @@ impl<'a> Checker<'a> {
                 let t = self.expr(value);
                 let mut seen: HashSet<String> = HashSet::new();
                 for h in headers {
-                    if let ObjEntry::Field { key, value, span, .. } = h {
+                    if let ObjEntry::Field {
+                        key, value, span, ..
+                    } = h
+                    {
                         if !seen.insert(key.name.to_lowercase()) {
                             self.err_note(
                                 *span,
@@ -1782,13 +1799,7 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ calls
 
-    fn call(
-        &mut self,
-        callee: &Expr,
-        args: &[Expr],
-        filter: Option<&Expr>,
-        span: Span,
-    ) -> Ty {
+    fn call(&mut self, callee: &Expr, args: &[Expr], filter: Option<&Expr>, span: Span) -> Ty {
         // Aggregates: `count(x)`, `sum(x where pred)`.
         if let ExprKind::Name(n) = &*callee.kind {
             if is_aggregate(&n.name) {
@@ -1928,13 +1939,7 @@ impl<'a> Checker<'a> {
         f.returns.clone().unwrap_or(Ty::Unknown)
     }
 
-    fn aggregate(
-        &mut self,
-        name: &str,
-        args: &[Expr],
-        filter: Option<&Expr>,
-        span: Span,
-    ) -> Ty {
+    fn aggregate(&mut self, name: &str, args: &[Expr], filter: Option<&Expr>, span: Span) -> Ty {
         if !self.in_query() {
             self.err_note(
                 span,
@@ -2481,9 +2486,10 @@ impl<'a> Checker<'a> {
             bindings.push(Binding {
                 name: j.binder.name.clone(),
                 object: obj,
-                one_field: j.result.as_ref().and_then(|r| {
-                    (r.cardinality == Cardinality::One).then(|| r.name.name.clone())
-                }),
+                one_field: j
+                    .result
+                    .as_ref()
+                    .and_then(|r| (r.cardinality == Cardinality::One).then(|| r.name.name.clone())),
             });
         }
 
@@ -2683,11 +2689,10 @@ impl<'a> Checker<'a> {
                     out.push((alias.name.clone(), ty));
                 }
                 ProjField::Nested { alias, shape, span } => {
-                    let join = s.joins.iter().find(|j| {
-                        j.result
-                            .as_ref()
-                            .is_some_and(|r| r.name.name == alias.name)
-                    });
+                    let join = s
+                        .joins
+                        .iter()
+                        .find(|j| j.result.as_ref().is_some_and(|r| r.name.name == alias.name));
                     let Some(join) = join else {
                         self.err_note(
                             *span,
@@ -2883,7 +2888,13 @@ impl<'a> Checker<'a> {
         if c.gap_code() != Some("E0542") {
             return;
         }
-        self.err_note(span, "E0542", c.gap().to_string(), "queries.md §8.3", "queries.md §8.3");
+        self.err_note(
+            span,
+            "E0542",
+            c.gap().to_string(),
+            "queries.md §8.3",
+            "queries.md §8.3",
+        );
     }
 
     /// writes.md §6 — the one unchecked boundary, and the rules that keep
@@ -2983,9 +2994,7 @@ impl<'a> Checker<'a> {
                 self.warn(
                     span,
                     "W0502",
-                    format!(
-                        "`count` under {bare} bare joins counts the other join's rows too"
-                    ),
+                    format!("`count` under {bare} bare joins counts the other join's rows too"),
                     "queries.md §6.2",
                 );
             }
@@ -3199,9 +3208,7 @@ impl<'a> Checker<'a> {
     /// comparison, if there is one.
     fn untyped_operand(&self, lhs: &Expr, rhs: &Expr) -> Option<String> {
         [lhs, rhs].into_iter().find_map(|e| match &*e.kind {
-            ExprKind::PathParam(n) if self.untyped_params.contains(&n.name) => {
-                Some(n.name.clone())
-            }
+            ExprKind::PathParam(n) if self.untyped_params.contains(&n.name) => Some(n.name.clone()),
             _ => None,
         })
     }
@@ -3253,9 +3260,8 @@ impl<'a> Checker<'a> {
             return;
         }
         let want: Vec<String> = c.columns.iter().map(|i| i.name.clone()).collect();
-        let matches = |set: &Vec<String>| {
-            set.len() == want.len() && set.iter().all(|c| want.contains(c))
-        };
+        let matches =
+            |set: &Vec<String>| set.len() == want.len() && set.iter().all(|c| want.contains(c));
         if t.unique_sets.iter().any(matches)
             || t.partial_uniques.iter().any(|(cols, _)| matches(cols))
         {
@@ -3264,7 +3270,10 @@ impl<'a> Checker<'a> {
         self.err_note(
             c.span,
             "E0603",
-            format!("`({})` is not a unique constraint on `{object}`", want.join(", ")),
+            format!(
+                "`({})` is not a unique constraint on `{object}`",
+                want.join(", ")
+            ),
             "`on conflict` needs an index to match against: declare \
              `unique (…)` on exactly these columns",
             "writes.md §2.4",
@@ -3582,7 +3591,14 @@ impl<'a> Checker<'a> {
                 self.err_note(
                     span,
                     "E0342",
-                    format!("`{name}` is a `{}` column", if table.is_private(name) { "private" } else { "server" }),
+                    format!(
+                        "`{name}` is a `{}` column",
+                        if table.is_private(name) {
+                            "private"
+                        } else {
+                            "server"
+                        }
+                    ),
                     "mass assignment is closed at the language level: name it \
                      explicitly, or drop it with `except (…)`",
                     "types.md §9.4",
@@ -3686,8 +3702,19 @@ fn base_of(t: &Ty) -> Ty {
 fn is_namespace(name: &str) -> bool {
     matches!(
         name,
-        "date" | "string" | "array" | "hash" | "jwt" | "crypto" | "request" | "response"
-            | "context" | "redis" | "mail" | "count" | "App"
+        "date"
+            | "string"
+            | "array"
+            | "hash"
+            | "jwt"
+            | "crypto"
+            | "request"
+            | "response"
+            | "context"
+            | "redis"
+            | "mail"
+            | "count"
+            | "App"
     )
 }
 
@@ -3709,7 +3736,12 @@ fn plain_counts(e: &Expr) -> Vec<Span> {
 }
 
 fn walk_counts(e: &Expr, out: &mut Vec<Span>) {
-    if let ExprKind::Call { callee, args, filter } = &*e.kind {
+    if let ExprKind::Call {
+        callee,
+        args,
+        filter,
+    } = &*e.kind
+    {
         if matches!(&*callee.kind, ExprKind::Name(n) if n.name == "count") {
             out.push(e.span);
         }
@@ -3727,7 +3759,11 @@ fn walk_counts(e: &Expr, out: &mut Vec<Span>) {
             walk_counts(rhs, out);
         }
         ExprKind::Unary { rhs, .. } => walk_counts(rhs, out),
-        ExprKind::Ternary { cond, then, otherwise } => {
+        ExprKind::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => {
             walk_counts(cond, out);
             walk_counts(then, out);
             walk_counts(otherwise, out);
@@ -3883,7 +3919,9 @@ fn diverges(b: &Block) -> bool {
         Stmt::Return { .. } | Stmt::Throw { .. } => true,
         Stmt::If {
             then, otherwise, ..
-        } => otherwise.as_ref().is_some_and(|alt| diverges(then) && diverges(alt)),
+        } => otherwise
+            .as_ref()
+            .is_some_and(|alt| diverges(then) && diverges(alt)),
         Stmt::Transaction { body, .. } => diverges(body),
         _ => false,
     })
@@ -3931,7 +3969,9 @@ fn path_params(path: &str) -> Vec<(String, Ty)> {
         let (name, ty) = match inner.split_once(':') {
             Some((n, t)) => (
                 n.trim().to_string(),
-                Scalar::from_name(t.trim()).map(Ty::Scalar).unwrap_or(Ty::text()),
+                Scalar::from_name(t.trim())
+                    .map(Ty::Scalar)
+                    .unwrap_or(Ty::text()),
             ),
             // routing.md §3.1 — an untyped parameter defaults to text.
             None => (inner.trim().to_string(), Ty::text()),

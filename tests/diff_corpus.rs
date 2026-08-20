@@ -47,7 +47,11 @@ fn cases() -> Vec<(String, PathBuf)> {
         .flatten()
         .map(|e| e.path())
         .filter_map(|p| {
-            let name = p.file_name()?.to_str()?.strip_suffix(".after.jwc")?.to_string();
+            let name = p
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".after.jwc")?
+                .to_string();
             Some((name, p))
         })
         .collect();
@@ -118,8 +122,12 @@ fn every_case_produces_exactly_its_annotated_operations() {
         if got != want {
             failures.push(format!(
                 "{name}: operations differ\n  want:\n{}\n  got:\n{}",
-                want.iter().map(|l| format!("    -- ops: {l}\n")).collect::<String>(),
-                got.iter().map(|l| format!("    -- ops: {l}\n")).collect::<String>(),
+                want.iter()
+                    .map(|l| format!("    -- ops: {l}\n"))
+                    .collect::<String>(),
+                got.iter()
+                    .map(|l| format!("    -- ops: {l}\n"))
+                    .collect::<String>(),
             ));
         }
 
@@ -129,9 +137,7 @@ fn every_case_produces_exactly_its_annotated_operations() {
         if std::env::var("JWC_BLESS").is_ok() {
             let body: String = after_text
                 .lines()
-                .skip_while(|l| {
-                    l.trim().starts_with("-- ops:") || l.trim().starts_with("-- diag:")
-                })
+                .skip_while(|l| l.trim().starts_with("-- ops:") || l.trim().starts_with("-- diag:"))
                 .collect::<Vec<_>>()
                 .join("\n");
             let head: String = got
@@ -144,8 +150,11 @@ fn every_case_produces_exactly_its_annotated_operations() {
             } else {
                 format!("{head}\n")
             };
-            std::fs::write(&after_path, format!("{head}{}\n", body.trim_start_matches('\n')))
-                .expect("bless");
+            std::fs::write(
+                &after_path,
+                format!("{head}{}\n", body.trim_start_matches('\n')),
+            )
+            .expect("bless");
             continue;
         }
         if got_diags != want_diags {

@@ -180,7 +180,10 @@ fn the_server_answers_over_its_own_protocol() {
     let (line, col) = find(&text, "InvoiceCreate");
     let hover = c.at(&billing, "textDocument/hover", line, col);
     let v = hover["contents"]["value"].as_str().unwrap_or_default();
-    assert!(v.contains("**class**") && v.contains("InvoiceCreate"), "{hover}");
+    assert!(
+        v.contains("**class**") && v.contains("InvoiceCreate"),
+        "{hover}"
+    );
 
     // Go to definition lands on the declaration, in whichever file it is.
     let def = c.at(&billing, "textDocument/definition", line, col);

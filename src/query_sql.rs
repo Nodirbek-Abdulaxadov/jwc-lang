@@ -142,7 +142,9 @@ impl<'a> Compiler<'a> {
 
     /// The reason the last `compile` returned `None`.
     pub fn gap(&self) -> &str {
-        self.gap.as_deref().unwrap_or("this query is not expressible yet")
+        self.gap
+            .as_deref()
+            .unwrap_or("this query is not expressible yet")
     }
 
     /// The diagnostic code, when the gap is a rejected program rather than
@@ -244,8 +246,7 @@ impl<'a> Compiler<'a> {
         // collection aggregates every candidate row and then throws all but
         // `limit` of them away. The keys are cheap; the collections are
         // not, so the keys go first.
-        let collection = plan.root.has_many()
-            || matches!(root_table, Rel::View(v) if v.has_many);
+        let collection = plan.root.has_many() || matches!(root_table, Rel::View(v) if v.has_many);
         let bounded = select.limit.is_some()
             || select.page.is_some()
             || (select.first && !select.order_by.is_empty());
@@ -311,7 +312,10 @@ impl<'a> Compiler<'a> {
             sql.push_str(&format!("\n  GROUP BY {}", cols.join(", ")));
         }
         if let Some(h) = &select.having {
-            sql.push_str(&format!("\n  HAVING {}", self.predicate(h, &plan.root.alias)?));
+            sql.push_str(&format!(
+                "\n  HAVING {}",
+                self.predicate(h, &plan.root.alias)?
+            ));
         }
         if !select.order_by.is_empty() {
             sql.push_str(&format!(
@@ -572,9 +576,8 @@ impl<'a> Compiler<'a> {
                     return self.cannot_push("the view's base table is not in the model");
                 };
                 let Some(bkey) = base.key() else {
-                    return self.cannot_push(
-                        "the view's base table has no single-column primary key",
-                    );
+                    return self
+                        .cannot_push("the view's base table has no single-column primary key");
                 };
                 // The view has to expose the key, or there is nothing to
                 // join the page back on.
@@ -600,9 +603,7 @@ impl<'a> Compiler<'a> {
             if map.is_empty() {
                 return Some(name.to_string());
             }
-            map.iter()
-                .find(|(v, _)| v == name)
-                .map(|(_, b)| b.clone())
+            map.iter().find(|(v, _)| v == name).map(|(_, b)| b.clone())
         };
         for name in referenced(select, &plan.root.alias) {
             match to_base(&name).and_then(|b| base.column(&b).map(|_| ())) {
@@ -622,7 +623,9 @@ impl<'a> Compiler<'a> {
         // code needs no second implementation.
         let base_alias = format!("p{}", self.next);
         self.next += 1;
-        let saved_alias = self.aliases.insert(plan.root.alias.clone(), base_alias.clone());
+        let saved_alias = self
+            .aliases
+            .insert(plan.root.alias.clone(), base_alias.clone());
         let saved_object = match base {
             Rel::Table(t) => self
                 .binding_objects
@@ -712,7 +715,12 @@ impl<'a> Compiler<'a> {
     /// compare a number to a string. The wire cast belongs to the
     /// outermost projection, which is the query that selects *from* here.
     /// Nested fields are the exception: they are already final JSON.
-    pub fn compile_view(&mut self, select: &SelectExpr, plan: &Plan, view: &ViewObj) -> Option<String> {
+    pub fn compile_view(
+        &mut self,
+        select: &SelectExpr,
+        plan: &Plan,
+        view: &ViewObj,
+    ) -> Option<String> {
         self.literals = true;
         let projection = select.projection.as_ref()?;
         let mut all = Vec::new();
@@ -742,14 +750,18 @@ impl<'a> Compiler<'a> {
                         quote_ident(&naming::physical(&i.name))
                     ));
                 }
-                ProjField::Expr { alias: a, value, .. } => {
+                ProjField::Expr {
+                    alias: a, value, ..
+                } => {
                     let sql = self.bare_value(value, &plan.root.alias)?;
                     columns.push(format!(
                         "{sql} AS {}",
                         quote_ident(&naming::physical(&a.name))
                     ));
                 }
-                ProjField::Nested { alias: a, shape, .. } => {
+                ProjField::Nested {
+                    alias: a, shape, ..
+                } => {
                     let child = plan
                         .root
                         .children
@@ -764,13 +776,19 @@ impl<'a> Compiler<'a> {
                     // The flattened columns, in the order views.rs put
                     // them in — the two lists are one list, split across
                     // two files, and a mismatch is a wrong column name.
-                    if child.link.as_ref().is_some_and(|l| l.cardinality == Cardinality::One) {
+                    if child
+                        .link
+                        .as_ref()
+                        .is_some_and(|l| l.cardinality == Cardinality::One)
+                    {
                         let calias = self.sql_alias(&child.alias);
                         let crel = self.table(&child.object)?;
                         for nested in &shape.fields {
                             let (name, col) = match nested {
                                 ProjField::Column(i) => (i.name.clone(), i.name.clone()),
-                                ProjField::Expr { alias: na, value, .. } => match &*value.kind {
+                                ProjField::Expr {
+                                    alias: na, value, ..
+                                } => match &*value.kind {
                                     ExprKind::Name(n) => (na.name.clone(), n.name.clone()),
                                     _ => continue,
                                 },
@@ -802,7 +820,10 @@ impl<'a> Compiler<'a> {
             sql.push_str(&format!("\n  GROUP BY {}", cols.join(", ")));
         }
         if let Some(h) = &select.having {
-            sql.push_str(&format!("\n  HAVING {}", self.predicate(h, &plan.root.alias)?));
+            sql.push_str(&format!(
+                "\n  HAVING {}",
+                self.predicate(h, &plan.root.alias)?
+            ));
         }
         if self.gap.is_some() {
             return None;
@@ -852,11 +873,7 @@ impl<'a> Compiler<'a> {
     /// One recursive pass: the node's JSON object, and the FROM clauses its
     /// children contribute. A `many` child's lateral needs that child's own
     /// JSON, so building both together is what keeps it single-pass.
-    fn emit(
-        &mut self,
-        node: &Node,
-        projection: Option<&ObjectShape>,
-    ) -> Option<(String, String)> {
+    fn emit(&mut self, node: &Node, projection: Option<&ObjectShape>) -> Option<(String, String)> {
         let alias = self.sql_alias(&node.alias);
         let table = self.table(&node.object)?;
         let mut entries: Vec<String> = Vec::new();
@@ -870,11 +887,15 @@ impl<'a> Compiler<'a> {
                             let c = table.column(&i.name)?;
                             entries.push(json_entry(&i.name, &alias, c));
                         }
-                        ProjField::Expr { alias: a, value, .. } => {
+                        ProjField::Expr {
+                            alias: a, value, ..
+                        } => {
                             let sql = self.value_expr(value, &node.alias)?;
                             entries.push(format!("'{}', {sql}", escape(&a.name)));
                         }
-                        ProjField::Nested { alias: a, shape, .. } => {
+                        ProjField::Nested {
+                            alias: a, shape, ..
+                        } => {
                             let child = node
                                 .children
                                 .iter()
@@ -894,10 +915,7 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        Some((
-            format!("json_build_object({})", entries.join(", ")),
-            joins,
-        ))
+        Some((format!("json_build_object({})", entries.join(", ")), joins))
     }
 
     /// A nested projection field: its value expression and the FROM it needs.
@@ -914,8 +932,7 @@ impl<'a> Compiler<'a> {
                     JoinKind::Left => "LEFT JOIN",
                     JoinKind::Inner => "JOIN",
                 };
-                let mut from =
-                    format!("\n  {kind} {} {alias} ON {on}", table.qualified());
+                let mut from = format!("\n  {kind} {} {alias} ON {on}", table.qualified());
                 if let Some(f) = &link.filter {
                     from.push_str(&format!(" AND {}", self.predicate(f, &child.alias)?));
                 }
@@ -967,9 +984,9 @@ impl<'a> Compiler<'a> {
                 );
                 Some((format!("coalesce({agg}.data, '[]'::json)"), from))
             }
-            Cardinality::Group => self.unsupported(
-                "`as group` is an aggregate join; aggregates arrive in v0.25.c",
-            ),
+            Cardinality::Group => {
+                self.unsupported("`as group` is an aggregate join; aggregates arrive in v0.25.c")
+            }
         }
     }
 
@@ -1075,7 +1092,11 @@ impl<'a> Compiler<'a> {
                 BinOp::And | BinOp::Or => {
                     let a = self.predicate(lhs, scope)?;
                     let b = self.predicate(rhs, scope)?;
-                    let sep = if matches!(op, BinOp::And) { "AND" } else { "OR" };
+                    let sep = if matches!(op, BinOp::And) {
+                        "AND"
+                    } else {
+                        "OR"
+                    };
                     format!("({a}) {sep} ({b})")
                 }
                 BinOp::EqOpt => {
@@ -1397,10 +1418,16 @@ pub fn sites(program: &Program) -> Vec<Site<'_>> {
             }),
             Decl::Service(s) => {
                 for f in &s.functions {
-                    collect_block(&f.body, &format!("{}.{}", s.name.name, f.name.name), &mut out);
+                    collect_block(
+                        &f.body,
+                        &format!("{}.{}", s.name.name, f.name.name),
+                        &mut out,
+                    );
                 }
             }
-            Decl::Function(f) => collect_block(&f.body, &format!("function {}", f.name.name), &mut out),
+            Decl::Function(f) => {
+                collect_block(&f.body, &format!("function {}", f.name.name), &mut out)
+            }
             Decl::Middleware(m) => {
                 collect_block(&m.body, &format!("middleware {}", m.name.name), &mut out);
                 if let Some(a) = &m.after {
@@ -1517,7 +1544,11 @@ fn collect_expr<'a>(e: &'a Expr, label: &str, out: &mut Vec<Site<'a>>) {
             collect_expr(base, label, out);
             collect_expr(index, label, out);
         }
-        ExprKind::Call { callee, args, filter } => {
+        ExprKind::Call {
+            callee,
+            args,
+            filter,
+        } => {
             collect_expr(callee, label, out);
             for a in args {
                 collect_expr(a, label, out);

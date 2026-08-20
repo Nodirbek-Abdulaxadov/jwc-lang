@@ -185,7 +185,11 @@ fn build_one(model: &SchemaModel, v: &ViewDecl, loc: Loc, sym: &Symbols) -> Opti
     let plan = query::plan(&v.body, sym);
     // A view whose plan is broken has no columns to speak of; the checker
     // reports the plan's own diagnostics against the source.
-    if plan.diags.iter().any(|d| d.severity == crate::diag::Severity::Error) {
+    if plan
+        .diags
+        .iter()
+        .any(|d| d.severity == crate::diag::Severity::Error)
+    {
         return None;
     }
     // The root is a table, or a view that has already been resolved.

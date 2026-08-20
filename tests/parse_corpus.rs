@@ -43,7 +43,11 @@ fn sample_parses_with_zero_errors() {
     for f in &files {
         let parsed = jwc::parse_file(f).expect("read sample file");
         if parsed.has_errors() {
-            failures.push_str(&format!("\n=== {} ===\n{}", f.display(), parsed.render_all()));
+            failures.push_str(&format!(
+                "\n=== {} ===\n{}",
+                f.display(),
+                parsed.render_all()
+            ));
         }
     }
     assert!(

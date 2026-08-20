@@ -23,7 +23,6 @@
 
 use std::path::{Path, PathBuf};
 
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }

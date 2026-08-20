@@ -562,8 +562,8 @@ pub fn previous(dir: &Path) -> Result<Snapshot, String> {
         if !path.exists() {
             continue;
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         return Snapshot::from_json(&text).map_err(|e| format!("{}: {e}", path.display()));
     }
     Ok(Snapshot::default())
@@ -577,7 +577,10 @@ pub fn next_ordinal(dir: &Path) -> u32 {
 /// `0007_add_region` — four digits, so an alphabetical listing is also a
 /// chronological one until the ten-thousandth migration.
 pub fn stem(ordinal: u32, name: &str) -> String {
-    format!("{ordinal:04}_{}", naming::physical(name).replace(['-', ' '], "_"))
+    format!(
+        "{ordinal:04}_{}",
+        naming::physical(name).replace(['-', ' '], "_")
+    )
 }
 
 #[cfg(test)]
@@ -605,7 +608,11 @@ mod tests {
             .filter(|(_, d)| d.severity == crate::diag::Severity::Error)
             .map(|(loc, d)| ws.render(*loc, d))
             .collect();
-        assert!(errors.is_empty(), "fixture has errors:\n{}", errors.join(""));
+        assert!(
+            errors.is_empty(),
+            "fixture has errors:\n{}",
+            errors.join("")
+        );
         of(&built.model)
     }
 
@@ -638,7 +645,10 @@ table Orgs of App.org {
         let text = a.to_json();
         let b = Snapshot::from_json(&text).expect("re-read");
         assert_eq!(a, b, "snapshot changed across a JSON round trip");
-        assert!(text.ends_with('\n'), "snapshot file needs a trailing newline");
+        assert!(
+            text.ends_with('\n'),
+            "snapshot file needs a trailing newline"
+        );
     }
 
     #[test]
@@ -688,7 +698,10 @@ table Orgs of App.org {
             .find(|u| u.predicate.is_some())
             .expect("partial unique");
         assert!(
-            partial.predicate.as_deref().is_some_and(|p| p.contains("IS NULL")),
+            partial
+                .predicate
+                .as_deref()
+                .is_some_and(|p| p.contains("IS NULL")),
             "predicate should be canonical SQL, got {:?}",
             partial.predicate
         );

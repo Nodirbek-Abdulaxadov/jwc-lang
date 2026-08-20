@@ -104,10 +104,8 @@ pub fn plan(prev: &Snapshot, model: &SchemaModel, ordinal: u32, name: &str) -> P
     // §5.2 — `ALTER TYPE … ADD VALUE` cannot share a transaction with
     // anything, so it becomes its own file. It goes *first*: a default or a
     // backfill in the ordinary file may name the value it adds.
-    let (loose, boxed): (Vec<&Change>, Vec<&Change>) = d
-        .changes
-        .iter()
-        .partition(|c| c.op.needs_no_transaction());
+    let (loose, boxed): (Vec<&Change>, Vec<&Change>) =
+        d.changes.iter().partition(|c| c.op.needs_no_transaction());
 
     let down_source = inverse_source(&src, prev);
     let markers_of = |cs: &[&Change]| -> Vec<String> {
@@ -221,19 +219,14 @@ fn why(op: &Op) -> String {
             schema,
             table,
             column,
-        } => format!(
-            "dropping {schema}.{table}.{} loses data",
-            column.name
-        ),
+        } => format!("dropping {schema}.{table}.{} loses data", column.name),
         Op::DropTable(t) => format!("dropping {}.{} loses data", t.schema, t.name),
         Op::AddEnumValue {
             schema,
             name,
             value,
             ..
-        } => format!(
-            "Postgres cannot remove enum value '{value}' from {schema}.{name}"
-        ),
+        } => format!("Postgres cannot remove enum value '{value}' from {schema}.{name}"),
         other => format!("{} cannot be undone", other.kind()),
     }
 }
@@ -571,7 +564,11 @@ pub fn check_no_transaction(text: &str) -> Result<(), String> {
         let upper = stmt.to_uppercase();
         let ok = upper.starts_with("ALTER TYPE") && upper.contains("ADD VALUE");
         if !ok {
-            let first: String = stmt.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+            let first: String = stmt
+                .split_whitespace()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" ");
             return Err(format!(
                 "a `{NO_TRANSACTION}` file may contain only `ALTER TYPE … ADD VALUE`, \
                  found `{first}`"

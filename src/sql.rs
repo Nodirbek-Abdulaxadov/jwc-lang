@@ -190,7 +190,9 @@ impl<'a> Builder<'a> {
                         let c = t.column(&i.name)?;
                         Some(self.json_entry(&i.name, c, alias))
                     }
-                    ProjField::Expr { alias: a, value, .. } => {
+                    ProjField::Expr {
+                        alias: a, value, ..
+                    } => {
                         // Only a bare column alias is expressible without the
                         // query compiler; anything else waits for v0.25.0.
                         if let ExprKind::Name(n) = &*value.kind {
@@ -260,7 +262,11 @@ impl<'a> Builder<'a> {
                 BinOp::And | BinOp::Or => {
                     let a = self.predicate(t, lhs, alias)?;
                     let b = self.predicate(t, rhs, alias)?;
-                    let sep = if matches!(op, BinOp::And) { "AND" } else { "OR" };
+                    let sep = if matches!(op, BinOp::And) {
+                        "AND"
+                    } else {
+                        "OR"
+                    };
                     format!("({a}) {sep} ({b})")
                 }
                 BinOp::EqOpt => {

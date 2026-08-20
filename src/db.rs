@@ -42,10 +42,7 @@ pub fn install_messages(model: &SchemaModel) {
     let mut map = HashMap::new();
     for t in &model.tables {
         for u in &t.uniques {
-            map.insert(
-                u.name.clone(),
-                (u.message.clone(), ConstraintKind::Unique),
-            );
+            map.insert(u.name.clone(), (u.message.clone(), ConstraintKind::Unique));
         }
         for c in &t.checks {
             map.insert(c.name.clone(), (c.message.clone(), ConstraintKind::Check));
@@ -81,10 +78,7 @@ async fn run_on(
     binds: &[Option<String>],
     shape: Shape,
 ) -> Result<Option<String>, DbError> {
-    let params: Vec<&(dyn ToSql + Sync)> = binds
-        .iter()
-        .map(|b| b as &(dyn ToSql + Sync))
-        .collect();
+    let params: Vec<&(dyn ToSql + Sync)> = binds.iter().map(|b| b as &(dyn ToSql + Sync)).collect();
 
     let started = std::time::Instant::now();
     match shape {
@@ -106,13 +100,11 @@ async fn run_on(
                 // query matched nothing: `Shape::First` answers 404 and
                 // `Shape::Rows` answers `[]`, both indistinguishable from
                 // an empty table.
-                Some(r) => r
-                    .try_get::<_, Option<String>>(0)
-                    .map_err(|e| {
-                        DbError::Other(anyhow!(
-                            "statement projected a first column that is not text: {e}"
-                        ))
-                    })?,
+                Some(r) => r.try_get::<_, Option<String>>(0).map_err(|e| {
+                    DbError::Other(anyhow!(
+                        "statement projected a first column that is not text: {e}"
+                    ))
+                })?,
             };
             if log_enabled() {
                 let n = match shape {
@@ -228,10 +220,7 @@ async fn page_on(
     sql: &str,
     binds: &[Option<String>],
 ) -> Result<(String, String, bool), DbError> {
-    let params: Vec<&(dyn ToSql + Sync)> = binds
-        .iter()
-        .map(|b| b as &(dyn ToSql + Sync))
-        .collect();
+    let params: Vec<&(dyn ToSql + Sync)> = binds.iter().map(|b| b as &(dyn ToSql + Sync)).collect();
     let started = std::time::Instant::now();
     let rows = conn.query(sql, &params).await.map_err(classify)?;
     let Some(r) = rows.first() else {
@@ -248,8 +237,12 @@ async fn page_on(
     let _ = &items;
     Ok((
         items,
-        r.try_get::<_, Option<String>>(1).unwrap_or(None).unwrap_or_else(|| "[]".into()),
-        r.try_get::<_, Option<bool>>(2).unwrap_or(None).unwrap_or(false),
+        r.try_get::<_, Option<String>>(1)
+            .unwrap_or(None)
+            .unwrap_or_else(|| "[]".into()),
+        r.try_get::<_, Option<bool>>(2)
+            .unwrap_or(None)
+            .unwrap_or(false),
     ))
 }
 

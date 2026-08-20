@@ -55,7 +55,11 @@ impl EnumObj {
 
     /// Width of the widest member, for the varchar form.
     pub fn varchar_width(&self) -> u32 {
-        self.members.iter().map(|m| m.chars().count()).max().unwrap_or(1) as u32
+        self.members
+            .iter()
+            .map(|m| m.chars().count())
+            .max()
+            .unwrap_or(1) as u32
     }
 }
 
@@ -115,9 +119,15 @@ pub enum SqlType {
     /// `numeric(14, 2)`).
     Scalar(String),
     /// A declared `enum ... of ...` — rendered as its qualified type name.
-    Enum { qualified: String, declared: String },
+    Enum {
+        qualified: String,
+        declared: String,
+    },
     /// An `enum` with no `of` clause: varchar plus a CHECK.
-    EnumInline { width: u32, declared: String },
+    EnumInline {
+        width: u32,
+        declared: String,
+    },
     Array(Box<SqlType>),
 }
 
@@ -325,9 +335,9 @@ impl<'a> Builder<'a> {
         self.model
             .schemas
             .sort_by(|a, b| a.physical.cmp(&b.physical));
-        self.model
-            .tables
-            .sort_by(|a, b| (&a.schema_physical, &a.physical).cmp(&(&b.schema_physical, &b.physical)));
+        self.model.tables.sort_by(|a, b| {
+            (&a.schema_physical, &a.physical).cmp(&(&b.schema_physical, &b.physical))
+        });
 
         self.check_foreign_key_targets();
         self.check_physical_collisions();
@@ -458,7 +468,10 @@ impl<'a> Builder<'a> {
                     ColumnModifier::Identity(sp) => {
                         if !col.ty.is_integer() {
                             self.err_note(
-                                Loc { file: loc.file, span: *sp },
+                                Loc {
+                                    file: loc.file,
+                                    span: *sp,
+                                },
                                 "E0401",
                                 format!(
                                     "`identity` on `{}`, which is `{}`",
@@ -479,7 +492,10 @@ impl<'a> Builder<'a> {
                         match self.const_default(e, &col.ty) {
                             Some(sql) => col.default = Some(sql),
                             None => self.err_note(
-                                Loc { file: loc.file, span: *sp },
+                                Loc {
+                                    file: loc.file,
+                                    span: *sp,
+                                },
                                 "E0402",
                                 format!("`default` on `{}` is not a constant", col.declared),
                                 "a default is a literal, an enum member, `now()` or \
@@ -489,7 +505,10 @@ impl<'a> Builder<'a> {
                         }
                         if is_now_call(e) && !col.ty.is_temporal() {
                             self.err(
-                                Loc { file: loc.file, span: *sp },
+                                Loc {
+                                    file: loc.file,
+                                    span: *sp,
+                                },
                                 "E0403",
                                 format!(
                                     "`default now()` on `{}`, which is `{}`",
@@ -503,7 +522,10 @@ impl<'a> Builder<'a> {
                     ColumnModifier::OnUpdate(e, sp) => {
                         if !is_now_call(e) {
                             self.err_note(
-                                Loc { file: loc.file, span: *sp },
+                                Loc {
+                                    file: loc.file,
+                                    span: *sp,
+                                },
                                 "E0430",
                                 "`on update` accepts only `now()`",
                                 "a general expression here would be a stored procedure language",
@@ -519,7 +541,10 @@ impl<'a> Builder<'a> {
                             columns: vec![col.physical.clone()],
                             predicate: None,
                             message: message.clone(),
-                            loc: Loc { file: loc.file, span: *span },
+                            loc: Loc {
+                                file: loc.file,
+                                span: *span,
+                            },
                         });
                     }
                     ColumnModifier::Rule(r) => {
@@ -567,8 +592,14 @@ impl<'a> Builder<'a> {
 
         for c in &t.constraints {
             match c {
-                TableConstraint::PrimaryKey { columns: cols, span } => {
-                    let cloc = Loc { file: loc.file, span: *span };
+                TableConstraint::PrimaryKey {
+                    columns: cols,
+                    span,
+                } => {
+                    let cloc = Loc {
+                        file: loc.file,
+                        span: *span,
+                    };
                     if primary_key.is_some() {
                         self.err_note(
                             cloc,
@@ -594,7 +625,10 @@ impl<'a> Builder<'a> {
                     on_update,
                     span,
                 } => {
-                    let cloc = Loc { file: loc.file, span: *span };
+                    let cloc = Loc {
+                        file: loc.file,
+                        span: *span,
+                    };
                     if cols.len() != target_columns.len() {
                         self.err_note(
                             cloc,
@@ -652,7 +686,10 @@ impl<'a> Builder<'a> {
                     message,
                     span,
                 } => {
-                    let cloc = Loc { file: loc.file, span: *span };
+                    let cloc = Loc {
+                        file: loc.file,
+                        span: *span,
+                    };
                     let phys = self.resolve_columns(&columns, cols, cloc);
                     let pred = predicate
                         .as_ref()
@@ -674,7 +711,10 @@ impl<'a> Builder<'a> {
                     message,
                     span,
                 } => {
-                    let cloc = Loc { file: loc.file, span: *span };
+                    let cloc = Loc {
+                        file: loc.file,
+                        span: *span,
+                    };
                     self.check_functions(expr, cloc);
                     let sql = self.canonical_predicate(expr, &columns);
                     let mentioned = mentioned_columns(expr, &columns);
@@ -696,7 +736,10 @@ impl<'a> Builder<'a> {
         }
 
         for ix in &t.indexes {
-            let iloc = Loc { file: loc.file, span: ix.span };
+            let iloc = Loc {
+                file: loc.file,
+                span: ix.span,
+            };
             let cols: Vec<IndexColumnObj> = ix
                 .columns
                 .iter()
@@ -902,7 +945,11 @@ impl<'a> Builder<'a> {
             "pattern" => Some(format!("{c} ~ {}", arg(0)?)),
             "oneOf" => Some(format!(
                 "{c} IN ({})",
-                r.args.iter().map(literal_sql).collect::<Vec<_>>().join(", ")
+                r.args
+                    .iter()
+                    .map(literal_sql)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
             // `required` is meaningful on a class field, not on a column:
             // a column is NOT NULL unless it says `?`.
@@ -1051,15 +1098,13 @@ impl<'a> Builder<'a> {
             ExprKind::Bool(b) => Some(b.to_string()),
             ExprKind::Null => Some("NULL".into()),
             ExprKind::Array(items) if items.is_empty() => Some("'{}'".into()),
-            ExprKind::Call { callee, args, .. } if args.is_empty() => {
-                match &*callee.kind {
-                    ExprKind::Name(n) if n.name == "now" => Some("now()".into()),
-                    ExprKind::Name(n) if n.name == "gen_random_uuid" => {
-                        Some("gen_random_uuid()".into())
-                    }
-                    _ => None,
+            ExprKind::Call { callee, args, .. } if args.is_empty() => match &*callee.kind {
+                ExprKind::Name(n) if n.name == "now" => Some("now()".into()),
+                ExprKind::Name(n) if n.name == "gen_random_uuid" => {
+                    Some("gen_random_uuid()".into())
                 }
-            }
+                _ => None,
+            },
             // `MemberRole.member` — an enum member.
             ExprKind::Field { base, field } => match &*base.kind {
                 ExprKind::Name(n) => {
@@ -1088,9 +1133,9 @@ impl<'a> Builder<'a> {
         let mut problems: Vec<(Loc, &'static str, String, String)> = Vec::new();
         for t in &tables {
             for fk in &t.foreign_keys {
-                let target = tables
-                    .iter()
-                    .find(|x| x.schema_physical == fk.target_schema && x.physical == fk.target_table);
+                let target = tables.iter().find(|x| {
+                    x.schema_physical == fk.target_schema && x.physical == fk.target_table
+                });
                 let Some(target) = target else {
                     problems.push((
                         fk.loc,
@@ -1275,7 +1320,11 @@ pub fn canonical_expr(
                         canonical_expr(rhs, columns, enums),
                     ];
                     parts.sort();
-                    let sep = if matches!(op, BinOp::And) { "AND" } else { "OR" };
+                    let sep = if matches!(op, BinOp::And) {
+                        "AND"
+                    } else {
+                        "OR"
+                    };
                     return parts
                         .iter()
                         .map(|p| format!("({p})"))
@@ -1329,7 +1378,11 @@ pub fn canonical_expr(
         ExprKind::Str(s) | ExprKind::RawStr(s) => sql_string(s),
         ExprKind::Bool(b) => b.to_string().to_uppercase(),
         ExprKind::Null => "NULL".into(),
-        ExprKind::In { lhs, items, negated } => format!(
+        ExprKind::In {
+            lhs,
+            items,
+            negated,
+        } => format!(
             "{} {}IN ({})",
             canonical_expr(lhs, columns, enums),
             if *negated { "NOT " } else { "" },

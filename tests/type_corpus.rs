@@ -87,12 +87,7 @@ fn observed(case: &Path) -> (BTreeSet<(usize, String)>, String) {
 
     let mut out = BTreeSet::new();
     let mut rendered = String::new();
-    for (loc, d) in built
-        .diags
-        .iter()
-        .chain(&syms.diags)
-        .chain(&checked.diags)
-    {
+    for (loc, d) in built.diags.iter().chain(&syms.diags).chain(&checked.diags) {
         rendered.push_str(&ws.render(*loc, d));
         if loc.file != case_index {
             // A diagnostic on the prelude means the shared schema is wrong.
@@ -131,9 +126,7 @@ fn corpus_matches_exactly() {
         }
         for (line, code) in extra {
             let src = text.lines().nth(line - 1).unwrap_or("").trim();
-            failures.push_str(&format!(
-                "  unexpected {code} on line {line}: {src}\n"
-            ));
+            failures.push_str(&format!("  unexpected {code} on line {line}: {src}\n"));
         }
         failures.push_str(&format!("--- all diagnostics ---\n{rendered}"));
     }

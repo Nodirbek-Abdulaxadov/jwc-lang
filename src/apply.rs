@@ -148,8 +148,8 @@ async fn up_locked(client: &Client, dir: &Path, to: Option<u32>) -> Result<Vec<S
         if done.contains(&m.stem) {
             continue;
         }
-        let text = std::fs::read_to_string(m.up())
-            .with_context(|| format!("{}", m.up().display()))?;
+        let text =
+            std::fs::read_to_string(m.up()).with_context(|| format!("{}", m.up().display()))?;
         let sum = checksum(&text);
 
         if text.starts_with(NO_TRANSACTION) {
@@ -209,8 +209,8 @@ async fn down_locked(client: &Client, dir: &Path, count: usize) -> Result<Vec<St
                 r.name
             );
         };
-        let text = std::fs::read_to_string(m.down())
-            .with_context(|| format!("{}", m.down().display()))?;
+        let text =
+            std::fs::read_to_string(m.down()).with_context(|| format!("{}", m.down().display()))?;
         if let Some(line) = text.lines().find(|l| l.starts_with(IRREVERSIBLE)) {
             // §9.2. Refusing here is the whole point of the marker: the file
             // says what it cannot undo, and stopping is the honest outcome.

@@ -171,8 +171,7 @@ impl<'a> Wiring<'a> {
         for (fi, file) in self.ws.files.iter().enumerate() {
             for d in &file.program.decls {
                 let Decl::Routes(block) = d else { continue };
-                let block_uses: Vec<String> =
-                    block.uses.iter().map(|i| i.name.clone()).collect();
+                let block_uses: Vec<String> = block.uses.iter().map(|i| i.name.clone()).collect();
                 for r in &block.routes {
                     let raw = join_path(&block.prefix, &r.suffix);
                     let segments = parse_path(&raw);
@@ -193,12 +192,7 @@ impl<'a> Wiring<'a> {
                     let after = chain
                         .iter()
                         .rev()
-                        .filter(|m| {
-                            self.sym
-                                .middleware
-                                .get(*m)
-                                .is_some_and(|s| s.has_after)
-                        })
+                        .filter(|m| self.sym.middleware.get(*m).is_some_and(|s| s.has_after))
                         .cloned()
                         .collect();
                     self.routes.push(ResolvedRoute {
@@ -489,7 +483,10 @@ impl<'a> Wiring<'a> {
                     }
                     problems.push((
                         Loc { file: fi, span },
-                        format!("`{}` reads `context.{key}` without declaring a dependency", m.name.name),
+                        format!(
+                            "`{}` reads `context.{key}` without declaring a dependency",
+                            m.name.name
+                        ),
                         format!(
                             "add `requires <Middleware>` naming the one that declares \
                              `provides {key}: <type>` — an undeclared dependency is \
@@ -503,7 +500,10 @@ impl<'a> Wiring<'a> {
                     if !own.contains(key.as_str()) {
                         problems.push((
                             Loc { file: fi, span },
-                            format!("`{}` sets `context.{key}` without declaring it", m.name.name),
+                            format!(
+                                "`{}` sets `context.{key}` without declaring it",
+                                m.name.name
+                            ),
                             format!("add `provides {key}: <type>` to the declaration"),
                         ));
                     }
@@ -608,10 +608,7 @@ impl<'a> Wiring<'a> {
             for d in &file.program.decls {
                 let Decl::Middleware(m) = d else { continue };
                 let Some(after) = &m.after else { continue };
-                let after_span = after
-                    .first()
-                    .map(stmt_span)
-                    .unwrap_or(m.span);
+                let after_span = after.first().map(stmt_span).unwrap_or(m.span);
                 let mut raises = self.direct_raises(after);
                 for c in callees(after) {
                     if let Some(inner) = sets.get(&c) {
@@ -685,8 +682,7 @@ impl<'a> Wiring<'a> {
                     let declared: BTreeSet<String> =
                         f.raises.iter().map(|i| i.name.clone()).collect();
                     let inferred = sets.get(&key).cloned().unwrap_or_default();
-                    let missing: Vec<String> =
-                        inferred.difference(&declared).cloned().collect();
+                    let missing: Vec<String> = inferred.difference(&declared).cloned().collect();
                     if !missing.is_empty() {
                         self.err(
                             Loc {
@@ -776,8 +772,7 @@ impl<'a> Wiring<'a> {
                             loc,
                             "E1011",
                             "this `errorHandler` arm does not return a response".into(),
-                            "every path through an arm must end in `return <response>;`"
-                                .into(),
+                            "every path through an arm must end in `return <response>;`".into(),
                             "errors.md §4.6",
                         ));
                     }
@@ -827,7 +822,10 @@ impl<'a> Wiring<'a> {
                             for c in callees(body) {
                                 if transactional.contains(&c) {
                                     problems.push((
-                                        Loc { file: fi, span: *span },
+                                        Loc {
+                                            file: fi,
+                                            span: *span,
+                                        },
                                         "E0620",
                                         format!("`{c}` opens a transaction of its own"),
                                         "nested transactions are detected over the call \
@@ -1087,7 +1085,11 @@ fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
             walk_expr(base, f);
             walk_expr(index, f);
         }
-        ExprKind::Call { callee, args, filter } => {
+        ExprKind::Call {
+            callee,
+            args,
+            filter,
+        } => {
             walk_expr(callee, f);
             for a in args {
                 walk_expr(a, f);
@@ -1149,12 +1151,10 @@ fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
 
 fn each_expr(b: &Block, f: &mut impl FnMut(&Expr)) {
     walk_block(b, &mut |s| match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::Expr { expr: value, .. } => walk_expr(value, f),
-        Stmt::Return {
-            value: Some(v), ..
-        } => walk_expr(v, f),
+        Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Expr { expr: value, .. } => {
+            walk_expr(value, f)
+        }
+        Stmt::Return { value: Some(v), .. } => walk_expr(v, f),
         Stmt::If { cond, .. } => walk_expr(cond, f),
         Stmt::For { iterable, .. } => walk_expr(iterable, f),
         Stmt::Throw { args, .. } => {
@@ -1213,7 +1213,9 @@ fn promote(
     let Some(name) = sym.by_path.get(&table.text()) else {
         return;
     };
-    let Some(t) = sym.tables.get(name) else { return };
+    let Some(t) = sym.tables.get(name) else {
+        return;
+    };
     if !suppress_unique && t.has_messaged_unique {
         out.insert("Conflict".to_string());
     }

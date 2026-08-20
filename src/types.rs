@@ -347,7 +347,10 @@ pub fn arith(op: crate::ast::BinOp, lhs: &Ty, rhs: &Ty) -> Option<Ty> {
 /// `smallint op smallint` widens to `int` rather than staying `smallint`:
 /// the sum of two small values is routinely not small (types.md §12.3).
 fn widen(a: Scalar, b: Scalar) -> Scalar {
-    let rank = a.numeric_rank().unwrap_or(1).max(b.numeric_rank().unwrap_or(1));
+    let rank = a
+        .numeric_rank()
+        .unwrap_or(1)
+        .max(b.numeric_rank().unwrap_or(1));
     match rank {
         0 | 1 => Scalar::Int,
         2 => Scalar::Bigint,
@@ -448,7 +451,11 @@ mod tests {
         use crate::ast::BinOp::Mul;
         assert_eq!(arith(Mul, &Ty::int(), &Ty::int()), Some(Ty::int()));
         assert_eq!(
-            arith(Mul, &Ty::Scalar(Scalar::Smallint), &Ty::Scalar(Scalar::Smallint)),
+            arith(
+                Mul,
+                &Ty::Scalar(Scalar::Smallint),
+                &Ty::Scalar(Scalar::Smallint)
+            ),
             Some(Ty::int())
         );
         assert_eq!(arith(Mul, &Ty::int(), &Ty::numeric()), Some(Ty::numeric()));

@@ -260,7 +260,9 @@ impl Writer {
                 s.push(';');
                 self.line(&s);
             }
-            TableConstraint::Check { expr: e, message, .. } => {
+            TableConstraint::Check {
+                expr: e, message, ..
+            } => {
                 let mut s = format!("check ({})", expr(e));
                 if let Some(m) = message {
                     s.push_str(&format!(" : {}", quote(m)));
@@ -308,7 +310,12 @@ impl Writer {
     fn class(&mut self, n: &ClassDecl) {
         self.line(&format!("class {} {{", n.name.name));
         self.depth += 1;
-        let pad = n.fields.iter().map(|f| f.name.name.len()).max().unwrap_or(0);
+        let pad = n
+            .fields
+            .iter()
+            .map(|f| f.name.name.len())
+            .max()
+            .unwrap_or(0);
         for f in &n.fields {
             self.attached(&f.at);
             let mut s = format!("{:pad$} {}", f.name.name, type_ref(&f.ty), pad = pad);
@@ -560,7 +567,9 @@ impl Writer {
     fn stmt(&mut self, s: &Stmt) {
         self.attached(stmt_attached(s));
         match s {
-            Stmt::Let { name, ty, value, .. } => {
+            Stmt::Let {
+                name, ty, value, ..
+            } => {
                 let t = ty
                     .as_ref()
                     .map(|t| format!(": {}", type_ref(t)))
@@ -749,7 +758,9 @@ impl Writer {
             .values
             .iter()
             .filter_map(|e| match e {
-                ObjEntry::Field { key, assign: true, .. } => Some(key.name.len()),
+                ObjEntry::Field {
+                    key, assign: true, ..
+                } => Some(key.name.len()),
                 _ => None,
             })
             .max()
@@ -935,7 +946,10 @@ impl Writer {
     }
 
     fn shape(&mut self, prefix: &str, shape: &ObjectShape) {
-        if shape.fields.iter().all(|f| matches!(f, ProjField::Column(_)))
+        if shape
+            .fields
+            .iter()
+            .all(|f| matches!(f, ProjField::Column(_)))
             && shape_inline_len(shape) <= 72
         {
             let inner = shape
@@ -952,7 +966,11 @@ impl Writer {
         for (i, f) in shape.fields.iter().enumerate() {
             let comma = if i + 1 < shape.fields.len() { "," } else { "" };
             match f {
-                ProjField::Nested { alias, shape: inner, .. } => {
+                ProjField::Nested {
+                    alias,
+                    shape: inner,
+                    ..
+                } => {
                     self.shape(&format!("{}: ", alias.name), inner);
                     let trimmed = self.out.trim_end_matches('\n').to_string();
                     self.out = format!("{trimmed}{comma}\n");
@@ -1131,11 +1149,7 @@ fn join_text(j: &JoinClause) -> String {
     } else {
         format!(" {}", j.binder.name)
     };
-    let mut s = format!(
-        "{kind} join {}{alias} on {}",
-        j.table.text(),
-        expr(&j.on)
-    );
+    let mut s = format!("{kind} join {}{alias} on {}", j.table.text(), expr(&j.on));
     if let Some(f) = &j.filter {
         s.push_str(&format!(" where {}", expr(f)));
     }
@@ -1301,7 +1315,9 @@ fn prec(e: &ExprKind) -> u8 {
         ExprKind::Ternary { .. } => 2,
         ExprKind::Binary { op: BinOp::Or, .. } => 3,
         ExprKind::Binary { op: BinOp::And, .. } => 4,
-        ExprKind::Unary { op: UnaryOp::Not, .. } => 5,
+        ExprKind::Unary {
+            op: UnaryOp::Not, ..
+        } => 5,
         ExprKind::Binary { op, .. } if is_compare(*op) => 6,
         ExprKind::In { .. } | ExprKind::Exists { .. } => 6,
         ExprKind::Binary {
@@ -1312,7 +1328,9 @@ fn prec(e: &ExprKind) -> u8 {
             op: BinOp::Mul | BinOp::Div | BinOp::Rem,
             ..
         } => 8,
-        ExprKind::Unary { op: UnaryOp::Neg, .. } => 9,
+        ExprKind::Unary {
+            op: UnaryOp::Neg, ..
+        } => 9,
         _ => 10,
     }
 }
@@ -1412,7 +1430,11 @@ pub fn expr(e: &Expr) -> String {
         ),
         ExprKind::Select(s) => select_inline(s),
         ExprKind::Insert(i) => {
-            let mut out = format!("insert into {} {{ {} }}", i.table.text(), obj_entries_text(&i.values));
+            let mut out = format!(
+                "insert into {} {{ {} }}",
+                i.table.text(),
+                obj_entries_text(&i.values)
+            );
             if let Some(c) = &i.conflict {
                 let cols = if c.columns.is_empty() {
                     String::new()
@@ -1435,11 +1457,7 @@ pub fn expr(e: &Expr) -> String {
             out
         }
         ExprKind::Update(u) => {
-            let mut out = format!(
-                "update {} set {}",
-                u.table.text(),
-                set_items_text(&u.sets)
-            );
+            let mut out = format!("update {} set {}", u.table.text(), set_items_text(&u.sets));
             if let Some(f) = &u.filter {
                 out.push_str(&format!(" where {}", expr(f)));
             }

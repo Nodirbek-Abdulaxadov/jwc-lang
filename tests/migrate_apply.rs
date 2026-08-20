@@ -234,7 +234,13 @@ async fn down_rolls_back_and_refuses_what_it_cannot_undo() {
     let err = apply::down(&client, &dir, 1)
         .await
         .expect_err("should refuse");
-    let text = format!("{err}\n{}", err.chain().map(|c| c.to_string()).collect::<Vec<_>>().join("\n"));
+    let text = format!(
+        "{err}\n{}",
+        err.chain()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     assert!(text.contains("cannot be rolled back"), "{text}");
     assert!(text.contains("enum value"), "{text}");
 }
@@ -306,7 +312,11 @@ async fn an_edited_migration_is_drift_not_silence() {
 
     let st = apply::status(&client, &dir).await.expect("status");
     assert_eq!(st.drift.len(), 1, "{:?}", st.drift);
-    assert!(st.drift[0].contains("edited after it was applied"), "{:?}", st.drift);
+    assert!(
+        st.drift[0].contains("edited after it was applied"),
+        "{:?}",
+        st.drift
+    );
 }
 
 #[tokio::test]
@@ -344,7 +354,9 @@ async fn verify_and_the_boot_check_name_what_is_missing() {
         .batch_execute("DROP VIEW org.org_summary; ALTER TABLE org.orgs DROP COLUMN name;")
         .await
         .expect("drop column");
-    let missing = apply::check_live_schema(&client, &snap).await.expect("check");
+    let missing = apply::check_live_schema(&client, &snap)
+        .await
+        .expect("check");
     assert!(
         missing.iter().any(|m| m.contains("org.orgs.name")),
         "{missing:?}"
@@ -371,7 +383,9 @@ async fn a_hand_edited_no_transaction_file_is_refused() {
         ),
     )
     .expect("write");
-    let err = apply::up(&client, &dir, None).await.expect_err("should refuse");
+    let err = apply::up(&client, &dir, None)
+        .await
+        .expect_err("should refuse");
     let text = format!("{err}");
     assert!(text.contains("E1101"), "{text}");
 
@@ -395,10 +409,7 @@ async fn the_advisory_lock_is_held_while_a_migration_runs() {
 
     // A second session can see it — and, more to the point, cannot take it.
     let row = b
-        .query_one(
-            "SELECT pg_try_advisory_lock($1)",
-            &[&apply::LOCK_KEY],
-        )
+        .query_one("SELECT pg_try_advisory_lock($1)", &[&apply::LOCK_KEY])
         .await
         .expect("try lock");
     assert!(

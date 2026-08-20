@@ -112,7 +112,12 @@ pub fn check_table(table: &str, columns: &[String], ordinal: usize) -> String {
 
 /// Column rule (`minLength(2)`, `pattern(...)`, `min(0)`, …).
 pub fn check_column(table: &str, column: &str, rule: &str) -> String {
-    assemble("ck", table, std::slice::from_ref(&column.to_string()), Some(rule))
+    assemble(
+        "ck",
+        table,
+        std::slice::from_ref(&column.to_string()),
+        Some(rule),
+    )
 }
 
 /// `method` distinguishes two indexes on the same columns — a btree and a
@@ -161,7 +166,10 @@ pub fn touch_function(table: &str) -> String {
 /// be anything.
 pub fn quote_ident(name: &str) -> String {
     let plain = !name.is_empty()
-        && name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
@@ -178,17 +186,83 @@ pub fn quote_ident(name: &str) -> String {
 fn is_reserved_sql(name: &str) -> bool {
     matches!(
         name,
-        "all" | "analyse" | "analyze" | "and" | "any" | "array" | "as" | "asc" | "authorization"
-            | "between" | "both" | "case" | "cast" | "check" | "collate" | "column" | "constraint"
-            | "create" | "current_date" | "current_role" | "current_time" | "current_timestamp"
-            | "current_user" | "default" | "deferrable" | "desc" | "distinct" | "do" | "else"
-            | "end" | "except" | "false" | "for" | "foreign" | "from" | "grant" | "group"
-            | "having" | "in" | "initially" | "intersect" | "into" | "leading" | "limit"
-            | "localtime" | "localtimestamp" | "new" | "not" | "null" | "off" | "offset" | "old"
-            | "on" | "only" | "or" | "order" | "placing" | "primary" | "references" | "returning"
-            | "select" | "session_user" | "some" | "symmetric" | "table" | "then" | "to"
-            | "trailing" | "true" | "union" | "unique" | "user" | "using" | "when" | "where"
-            | "window" | "with"
+        "all"
+            | "analyse"
+            | "analyze"
+            | "and"
+            | "any"
+            | "array"
+            | "as"
+            | "asc"
+            | "authorization"
+            | "between"
+            | "both"
+            | "case"
+            | "cast"
+            | "check"
+            | "collate"
+            | "column"
+            | "constraint"
+            | "create"
+            | "current_date"
+            | "current_role"
+            | "current_time"
+            | "current_timestamp"
+            | "current_user"
+            | "default"
+            | "deferrable"
+            | "desc"
+            | "distinct"
+            | "do"
+            | "else"
+            | "end"
+            | "except"
+            | "false"
+            | "for"
+            | "foreign"
+            | "from"
+            | "grant"
+            | "group"
+            | "having"
+            | "in"
+            | "initially"
+            | "intersect"
+            | "into"
+            | "leading"
+            | "limit"
+            | "localtime"
+            | "localtimestamp"
+            | "new"
+            | "not"
+            | "null"
+            | "off"
+            | "offset"
+            | "old"
+            | "on"
+            | "only"
+            | "or"
+            | "order"
+            | "placing"
+            | "primary"
+            | "references"
+            | "returning"
+            | "select"
+            | "session_user"
+            | "some"
+            | "symmetric"
+            | "table"
+            | "then"
+            | "to"
+            | "trailing"
+            | "true"
+            | "union"
+            | "unique"
+            | "user"
+            | "using"
+            | "when"
+            | "where"
+            | "window"
+            | "with"
     )
 }
 
@@ -223,9 +297,18 @@ mod tests {
     fn constraint_names_are_deterministic() {
         let cols = vec!["org_id".to_string(), "account_id".to_string()];
         assert_eq!(primary_key("members"), "pk_members");
-        assert_eq!(unique_constraint("invites", &cols), "uq_invites__org_id_account_id");
-        assert_eq!(foreign_key("members", &cols), "fk_members__org_id_account_id");
-        assert_eq!(index("members", &cols, None), "ix_members__org_id_account_id");
+        assert_eq!(
+            unique_constraint("invites", &cols),
+            "uq_invites__org_id_account_id"
+        );
+        assert_eq!(
+            foreign_key("members", &cols),
+            "fk_members__org_id_account_id"
+        );
+        assert_eq!(
+            index("members", &cols, None),
+            "ix_members__org_id_account_id"
+        );
     }
 
     #[test]
@@ -267,8 +350,14 @@ mod tests {
         // objects; a shared name makes the second CREATE INDEX fail.
         let cols = vec!["label".to_string()];
         assert_eq!(index("children", &cols, None), "ix_children__label");
-        assert_eq!(index("children", &cols, Some("btree")), "ix_children__label");
-        assert_eq!(index("children", &cols, Some("gin")), "ix_children__label__gin");
+        assert_eq!(
+            index("children", &cols, Some("btree")),
+            "ix_children__label"
+        );
+        assert_eq!(
+            index("children", &cols, Some("gin")),
+            "ix_children__label__gin"
+        );
         assert_ne!(
             index("children", &cols, None),
             index("children", &cols, Some("gin"))

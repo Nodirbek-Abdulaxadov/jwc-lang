@@ -511,14 +511,18 @@ impl Parser {
             }
             let member_at = self.attached();
             let mspan = self.span();
-            let r = if self.at_word("primary") && self.word_at(1, "key") && self.peek_at(2).is(&Tok::LParen) {
+            let r = if self.at_word("primary")
+                && self.word_at(1, "key")
+                && self.peek_at(2).is(&Tok::LParen)
+            {
                 self.parse_pk_constraint(mspan).map(|c| constraints.push(c))
             } else if self.at_word("foreign") {
                 self.parse_fk_constraint(mspan).map(|c| constraints.push(c))
             } else if self.at_word("unique") && self.peek_at(1).is(&Tok::LParen) {
                 self.parse_uq_constraint(mspan).map(|c| constraints.push(c))
             } else if self.at_word("check") && self.peek_at(1).is(&Tok::LParen) {
-                self.parse_check_constraint(mspan).map(|c| constraints.push(c))
+                self.parse_check_constraint(mspan)
+                    .map(|c| constraints.push(c))
             } else if self.at_word("index") && self.word_at(1, "on") {
                 self.parse_index(member_at.clone(), mspan)
                     .map(|ix| indexes.push(ix))
@@ -1737,7 +1741,14 @@ impl Parser {
                 self.expect(Tok::RParen)?;
             }
             let span = e.span;
-            e = Expr::new(ExprKind::OrThrow { value: e, error, args }, span);
+            e = Expr::new(
+                ExprKind::OrThrow {
+                    value: e,
+                    error,
+                    args,
+                },
+                span,
+            );
         }
 
         // `<expr> catch E (err) { … }` — errors.md §7.
@@ -1767,10 +1778,7 @@ impl Parser {
             let span = e.span.to(end);
             e = Expr::new(ExprKind::WithHeaders { value: e, headers }, span);
         }
-        while self.query_depth == 0
-            && self.at_word("cookie")
-            && self.peek_at(1).is(&Tok::LParen)
-        {
+        while self.query_depth == 0 && self.at_word("cookie") && self.peek_at(1).is(&Tok::LParen) {
             self.bump();
             self.expect(Tok::LParen)?;
             let mut args = Vec::new();
@@ -2015,7 +2023,13 @@ impl Parser {
                     span = span.to(q);
                     name = Ident::new(format!("{}?", name.name), name.span);
                 }
-                e = Expr::new(ExprKind::Field { base: e, field: name }, span);
+                e = Expr::new(
+                    ExprKind::Field {
+                        base: e,
+                        field: name,
+                    },
+                    span,
+                );
                 continue;
             }
             if self.at(&Tok::LParen) {
@@ -2094,12 +2108,7 @@ impl Parser {
                     }
                 };
                 let except = self.parse_except_list()?;
-                let span = start.to(
-                    except
-                        .last()
-                        .map(|i| i.span)
-                        .unwrap_or(source.span),
-                );
+                let span = start.to(except.last().map(|i| i.span).unwrap_or(source.span));
                 out.push(ObjEntry::Spread {
                     source,
                     except,
@@ -2173,7 +2182,11 @@ impl Parser {
                 Ok(Ident::new(s, span))
             }
             other => {
-                self.err("E0013", span, format!("expected an object key, found {other}"));
+                self.err(
+                    "E0013",
+                    span,
+                    format!("expected an object key, found {other}"),
+                );
                 Err(())
             }
         }
@@ -2273,7 +2286,11 @@ impl Parser {
                 }
             },
             other => {
-                self.err("E0014", span, format!("expected an expression, found {other}"));
+                self.err(
+                    "E0014",
+                    span,
+                    format!("expected an expression, found {other}"),
+                );
                 Err(())
             }
         }

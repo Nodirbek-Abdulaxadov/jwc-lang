@@ -32,7 +32,11 @@ fn explain_route_selects_only_what_that_route_reaches() {
     let path = sample();
     let path = path.to_str().expect("utf8");
     let all = jwc(&["explain", path, "--sql"]);
-    assert!(all.status.success(), "{}", String::from_utf8_lossy(&all.stderr));
+    assert!(
+        all.status.success(),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
 
     let one = jwc(&[
         "explain",
@@ -41,11 +45,18 @@ fn explain_route_selects_only_what_that_route_reaches() {
         "--route",
         "GET /api/v1/orgs/{org_id}/invoices",
     ]);
-    assert!(one.status.success(), "{}", String::from_utf8_lossy(&one.stderr));
+    assert!(
+        one.status.success(),
+        "{}",
+        String::from_utf8_lossy(&one.stderr)
+    );
 
     let all_n = count(&stdout(&all));
     let one_n = count(&stdout(&one));
-    assert!(one_n >= 2, "the route's own query and the view it reads: {one_n}");
+    assert!(
+        one_n >= 2,
+        "the route's own query and the view it reads: {one_n}"
+    );
     assert!(
         one_n < all_n,
         "--route did not narrow anything: {one_n} of {all_n}"
@@ -65,7 +76,11 @@ fn explain_function_follows_the_call_graph() {
     let path = sample();
     let path = path.to_str().expect("utf8");
     let out = jwc(&["explain", path, "--sql", "--function", "AuthService.login"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
     assert!(text.contains("AuthService.login"), "{text}");
     assert!(text.contains("auth.accounts"), "{text}");
@@ -145,18 +160,27 @@ fn lint_constraints_reports_the_status_each_violation_produces() {
     let path = sample();
     let path = path.to_str().expect("utf8");
     let out = jwc(&["lint", path, "--constraints"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = stdout(&out);
 
     // errors.md §6.1 — a unique carrying a message is a Conflict, a check
     // is a BadRequest, and a message-less one is a fault.
     assert!(
-        text.contains("uq_accounts__email               409  \"bu email allaqachon ro'yxatdan o'tgan\""),
+        text.contains(
+            "uq_accounts__email               409  \"bu email allaqachon ro'yxatdan o'tgan\""
+        ),
         "{text}"
     );
     assert!(text.contains("500  (no message — a fault)"), "{text}");
     // errors.md §6.3 — an FK is always 400, with a fixed message.
-    assert!(text.contains("400  referenced row does not exist"), "{text}");
+    assert!(
+        text.contains("400  referenced row does not exist"),
+        "{text}"
+    );
 
     // A `delete` can violate nothing on the row it removes. What it can
     // trip is a foreign key pointing *at* that row, and only where the
@@ -194,7 +218,8 @@ fn a_message_less_constraint_a_route_can_reach_is_a_warning() {
         "the sample's one reachable message-less unique: {err}"
     );
     assert_eq!(
-        err.matches("uq_invites__token_hash` carries no message").count(),
+        err.matches("uq_invites__token_hash` carries no message")
+            .count(),
         1,
         "reported per route instead of per constraint"
     );
@@ -216,7 +241,11 @@ fn explain_and_the_sql_golden_are_the_same_compiler() {
     // one of them grows a private path, this fails.
     let path = sample();
     let out = jwc(&["explain", path.to_str().expect("utf8"), "--sql"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let printed = stdout(&out);
 
     let golden = std::fs::read_to_string(repo_root().join("tests/sql_golden/sample.sql"))
@@ -251,14 +280,21 @@ fn openapi_describes_every_route_and_validates() {
     let path = sample();
     let path = path.to_str().expect("utf8");
     let out = jwc(&["openapi", path]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
 
     assert_eq!(doc["openapi"], "3.1.0");
     let paths = doc["paths"].as_object().expect("paths");
     // 26 endpoints over 19 distinct patterns.
     assert_eq!(paths.len(), 19, "{:?}", paths.keys().collect::<Vec<_>>());
-    let operations: usize = paths.values().map(|p| p.as_object().map_or(0, |o| o.len())).sum();
+    let operations: usize = paths
+        .values()
+        .map(|p| p.as_object().map_or(0, |o| o.len()))
+        .sum();
     assert_eq!(operations, 26);
 
     let invoices = &paths["/api/v1/orgs/{org_id}/invoices"]["get"];
@@ -337,11 +373,7 @@ fn openapi_passes_a_real_validator() {
         ])
         .output()
         .expect("python3");
-    assert!(
-        v.status.success(),
-        "{}",
-        String::from_utf8_lossy(&v.stderr)
-    );
+    assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
 }
 
 /// Every `$ref` target name in a document.
@@ -375,14 +407,20 @@ fn section<'a>(text: &'a str, route: &str) -> &'a str {
         None => return "",
     };
     let rest = &text[start..];
-    let end = rest[1..].find("\u{1b}[1m").map(|i| i + 1).unwrap_or(rest.len());
+    let end = rest[1..]
+        .find("\u{1b}[1m")
+        .map(|i| i + 1)
+        .unwrap_or(rest.len());
     &rest[..end]
 }
 
 /// `jwc explain` ends with `N queries`.
 fn count(text: &str) -> usize {
     text.lines()
-        .find_map(|l| l.strip_suffix(" queries").or_else(|| l.strip_suffix(" query")))
+        .find_map(|l| {
+            l.strip_suffix(" queries")
+                .or_else(|| l.strip_suffix(" query"))
+        })
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or(0)
 }

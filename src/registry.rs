@@ -66,7 +66,10 @@ pub fn login(token: String, registry: String) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(&creds)?))?;
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string_pretty(&creds)?),
+    )?;
     // The file holds a bearer token. 0600 on anything that has modes.
     #[cfg(unix)]
     {

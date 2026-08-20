@@ -87,7 +87,8 @@ fn a_dribbled_header_is_cut_off_and_a_whole_one_is_answered() {
     // cannot cover this — its clock starts in `handle`, which a request
     // stuck in its own headers never reaches.
     let mut slow = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-    slow.write_all(b"GET /x HTTP/1.1\r\nHost: t\r\n").expect("write");
+    slow.write_all(b"GET /x HTTP/1.1\r\nHost: t\r\n")
+        .expect("write");
     slow.set_read_timeout(Some(Duration::from_secs(10))).ok();
     let started = Instant::now();
     let mut buf = [0u8; 256];
@@ -265,9 +266,5 @@ fn self_signed() -> Option<(String, String, tempfile::TempDir)> {
     if !out.status.success() {
         return None;
     }
-    Some((
-        cert.to_str()?.to_string(),
-        key.to_str()?.to_string(),
-        dir,
-    ))
+    Some((cert.to_str()?.to_string(), key.to_str()?.to_string(), dir))
 }

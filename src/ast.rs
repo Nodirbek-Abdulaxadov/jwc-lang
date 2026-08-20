@@ -493,10 +493,7 @@ pub struct TypeRef {
 #[derive(Clone, Debug)]
 pub enum TypeKind {
     /// `bigint`, `varchar(255)`, `numeric(14, 2)`, …
-    Scalar {
-        name: String,
-        args: Vec<u32>,
-    },
+    Scalar { name: String, args: Vec<u32> },
     /// `{ status: text }` — types.md §1.
     Record(Vec<(Ident, TypeRef)>),
     /// A declared name: enum, class, view.
