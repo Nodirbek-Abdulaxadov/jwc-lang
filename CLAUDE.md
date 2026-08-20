@@ -195,7 +195,7 @@ source is debt; the audit is `comm -23` over the two lists.
 ## The specification
 
 `docs/spec/v1/` is normative — thirteen documents plus `sample/`, a complete
-application (13 tables, 5 views, 25 endpoints). Before changing behaviour,
+application (13 tables, 5 views, 26 endpoints). Before changing behaviour,
 read the clause. If the implementation and the spec disagree, one of them is
 wrong and the commit says which.
 

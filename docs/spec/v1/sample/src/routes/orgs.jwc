@@ -56,6 +56,18 @@ routes "/api/v1/orgs/{org_id: bigint}/members" use RequireAuth, RequireOrgMember
     }
 }
 
+--- Accepting an invitation is not scoped to an org: the token *is* the
+--- authority for which org, and the invitee is by definition not a member
+--- yet, so `RequireOrgMember` could never pass.
+routes "/api/v1/invites/accept" use RequireAuth, Audit {
+    route POST "" {
+        let req = request.body() as InviteAccept;
+        let invite = OrgService.accept_invite($req, context.account_id);
+
+        return created(json($invite));
+    }
+}
+
 routes "/api/v1/orgs/{org_id: bigint}/invites" use RequireAuth, RequireOrgMember, RequireOrgAdmin, Audit {
     route GET "" {
         let invites = OrgService.invites(@org_id);

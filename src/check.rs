@@ -2254,6 +2254,14 @@ impl<'a> Checker<'a> {
                 arity(self, 2);
                 Ty::text()
             }
+            // The comparison that does not leak how far it got. Two
+            // hex digests are not secret, but a hand-written `==` on a
+            // *token* is, and having the name here means the safe form is
+            // reachable without importing anything.
+            "crypto.constant_time_eq" => {
+                arity(self, 2);
+                Ty::boolean()
+            }
             "crypto.token" => {
                 arity(self, 1);
                 Ty::text()

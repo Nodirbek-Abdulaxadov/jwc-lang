@@ -137,7 +137,7 @@ error model, migrations, builtins and configuration. Where this README and
 the spec disagree, the spec is right.
 
 [`docs/spec/v1/sample/`](docs/spec/v1/sample/) is a complete application in
-the language: 13 tables, 5 views, 25 endpoints, authentication, billing and
+the language: 13 tables, 5 views, 26 endpoints, authentication, billing and
 a webhook. It is what the compiler is tested against.
 
 ---

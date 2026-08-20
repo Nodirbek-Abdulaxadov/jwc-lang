@@ -256,10 +256,10 @@ fn openapi_describes_every_route_and_validates() {
 
     assert_eq!(doc["openapi"], "3.1.0");
     let paths = doc["paths"].as_object().expect("paths");
-    // 25 endpoints over 18 distinct patterns.
-    assert_eq!(paths.len(), 18, "{:?}", paths.keys().collect::<Vec<_>>());
+    // 26 endpoints over 19 distinct patterns.
+    assert_eq!(paths.len(), 19, "{:?}", paths.keys().collect::<Vec<_>>());
     let operations: usize = paths.values().map(|p| p.as_object().map_or(0, |o| o.len())).sum();
-    assert_eq!(operations, 25);
+    assert_eq!(operations, 26);
 
     let invoices = &paths["/api/v1/orgs/{org_id}/invoices"]["get"];
     // routing.md §3.1 — a typed path parameter, in its wire form: `bigint`

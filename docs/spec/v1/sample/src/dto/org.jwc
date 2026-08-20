@@ -16,6 +16,10 @@ class InviteCreate {
     role  MemberRole?;
 }
 
+class InviteAccept {
+    token varchar(64) required, minLength(16);
+}
+
 class MemberEdit {
     role MemberRole required;
 }

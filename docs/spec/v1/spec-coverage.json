@@ -243,7 +243,7 @@
     {
       "construct": "doc_comment",
       "clause": "schema \u00a77",
-      "uses": 15,
+      "uses": 16,
       "first_use": "src/app.jwc:35"
     },
     {
@@ -741,7 +741,7 @@
     {
       "construct": "update",
       "clause": "writes \u00a73",
-      "uses": 2,
+      "uses": 3,
       "first_use": "src/services/billing.jwc:12"
     },
     {

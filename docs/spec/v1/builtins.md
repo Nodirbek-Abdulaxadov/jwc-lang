@@ -136,6 +136,7 @@ Anything these do not cover is written as `for` plus an accumulator.
 | `hash.hmac_sha256(payload, secret)` | `text` | lowercase hex |
 | `hash.hmac_verify(payload, sig, secret)` | `boolean` | constant time |
 | `crypto.token(n)` | `text` | `n` bytes from the CSPRNG, base64url |
+| `crypto.constant_time_eq(a, b)` | `boolean` | no early exit on the first differing byte |
 | `jwt.sign(claims, secret, ttl_minutes)` | `text` | HS256 |
 | `jwt.verify(token, secret)` | `Record{sub: text, exp: bigint, iat: bigint}?` | null on invalid/expired |
 

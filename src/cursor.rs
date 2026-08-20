@@ -49,7 +49,7 @@ pub fn decode(secret: &str, cursor: &str) -> Option<Vec<Option<String>>> {
 /// Comparison that does not stop at the first differing byte. The MAC is
 /// the only thing standing between a caller and an arbitrary predicate, so
 /// how long the check takes must not depend on how much of it was right.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

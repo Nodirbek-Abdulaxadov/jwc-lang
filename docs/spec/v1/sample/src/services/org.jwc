@@ -113,6 +113,35 @@ service OrgService {
         return $invite;
     }
 
+    --- The other half of `invite`, and the reason `Invites.token_hash`
+    --- carries a `unique` at all: the invitee sends the token back, the
+    --- server hashes it the same deterministic way, and the row is found by
+    --- **equality**. `hash.password` could not do this — it salts, so every
+    --- call answers differently and no lookup could ever match
+    --- (builtins.md §6).
+    function accept_invite(req: InviteAccept, account_id: bigint) {
+        transaction {
+            let token_hash = hash.sha256($req.token);
+
+            let invite = select I from App.org.Invites
+                where token_hash == $token_hash and accepted_at == null and expires_at > date.now()
+                as { id, org_id, role }
+                first or throw NotFound("taklifnoma topilmadi yoki muddati o'tgan");
+
+            insert into App.org.Members {
+                org_id     = $invite.org_id,
+                account_id = $account_id,
+                role       = $invite.role
+            };
+
+            update App.org.Invites
+                set accepted_at = date.now()
+                where id == $invite.id;
+
+            return $invite;
+        }
+    }
+
     function revoke_invite(org_id: bigint, invite_id: bigint) {
         delete from App.org.Invites
             where id == $invite_id and org_id == $org_id

@@ -124,6 +124,14 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
   WHERE (t0.org_id = ($1::text)::bigint) AND (t0.accepted_at IS NULL)
   ORDER BY t0.created_at DESC) q
 
+-- ── OrgService.accept_invite ──
+-- $1 = $token_hash :: varchar(64)
+-- $2 = date.now() :: timestamptz
+SELECT q.j::text FROM (SELECT json_build_object('id', t0.id::text, 'org_id', t0.org_id::text, 'role', t0.role) AS j
+  FROM org.invites t0
+  WHERE ((t0.token_hash = ($1::text)::varchar(64)) AND (t0.accepted_at IS NULL)) AND (t0.expires_at > ($2::text)::timestamptz)
+  LIMIT 1) q
+
 -- ── view SubscriptionDetail ──
 SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'org_id', t0.org_id::text, 'status', t0.status, 'current_period_start', t0.current_period_start, 'current_period_end', t0.current_period_end, 'cancel_at', t0.cancel_at, 'plan', CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, 'code', t1.code, 'name', t1.name, 'price', t1.price::text, 'currency', t1.currency, 'interval', t1.interval) END, 'org', CASE WHEN t2.id IS NULL THEN NULL ELSE json_build_object('id', t2.id::text, 'slug', t2.slug, 'name', t2.name) END) AS j
   FROM billing.subscriptions t0

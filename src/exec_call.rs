@@ -343,6 +343,9 @@ impl<'a> Vm<'a> {
                 let expected = crate::hash::hmac_sha256_hex(&s(2), &s(0));
                 Value::Bool(constant_time_eq(&expected, &s(1)))
             }
+            "crypto.constant_time_eq" => {
+                Value::Bool(crate::cursor::constant_time_eq(s(0).as_bytes(), s(1).as_bytes()))
+            }
             "crypto.token" => {
                 let len = n(0).clamp(1, 128) as usize;
                 let mut bytes = vec![0u8; len];
