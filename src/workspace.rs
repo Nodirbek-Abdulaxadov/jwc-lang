@@ -23,6 +23,26 @@ pub struct Workspace {
     /// `jwcproj.json`'s `dependencies` keys. An import resolves to a
     /// namespace or to one of these (names.md §6.2.1).
     pub packages: std::collections::BTreeSet<String>,
+    /// `jwcproj.json` itself, when there is one (packages.md §1).
+    pub manifest: Option<Manifest>,
+}
+
+/// The project's own identity, as distinct from its dependencies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Manifest {
+    pub name: String,
+    pub version: String,
+    /// `"app"` (deployed) or `"pkg"` (imported). Anything else is read as
+    /// an app: the content model only *restricts*, so an unknown value
+    /// must not silently unlock declarations a package may not have.
+    pub kind: Kind,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    App,
+    Package,
 }
 
 impl Workspace {
@@ -66,10 +86,12 @@ impl Workspace {
             }
         }
         let packages = read_packages(&root);
+        let manifest = read_manifest(&root);
         Ok(Workspace {
             root,
             files,
             packages,
+            manifest,
         })
     }
 
@@ -141,6 +163,37 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// manifest that does not parse is the same as none — the message the
 /// reader needs is about the import, and `jwc check` on a broken manifest
 /// has a louder problem than this pass.
+/// `jwcproj.json`, from `root` or the nearest ancestor holding one.
+fn read_manifest(root: &Path) -> Option<Manifest> {
+    let mut dir = if root.is_file() { root.parent() } else { Some(root) };
+    while let Some(d) = dir {
+        let path = d.join("jwcproj.json");
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path).ok()?;
+            let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+            return Some(Manifest {
+                name: json
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                version: json
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                kind: match json.get("type").and_then(|v| v.as_str()) {
+                    Some("pkg") => Kind::Package,
+                    _ => Kind::App,
+                },
+                path,
+            });
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 fn read_packages(root: &Path) -> std::collections::BTreeSet<String> {
     let mut dir = if root.is_file() { root.parent() } else { Some(root) };
     while let Some(d) = dir {

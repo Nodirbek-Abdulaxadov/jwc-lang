@@ -323,6 +323,7 @@ fn full_script(m: &model::SchemaModel) -> String {
         root: PathBuf::new(),
         files: Vec::new(),
         packages: Default::default(),
+        manifest: None,
     };
     ddl::render(&ws, &ddl::emit(m), false)
 }

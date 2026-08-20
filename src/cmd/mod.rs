@@ -75,6 +75,7 @@ pub fn check(path: PathBuf, quiet: bool, parse_only: bool, deny_warnings: bool) 
         let wired = crate::wiring::wire(&ws, &symbols);
         let mut imports = crate::imports::check(&ws, &ws.packages);
         imports.extend(crate::imports::case_convention(&ws));
+        imports.extend(crate::packages::check(&ws, &symbols));
         for (loc, d) in built
             .diags
             .iter()

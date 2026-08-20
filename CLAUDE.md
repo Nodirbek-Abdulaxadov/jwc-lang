@@ -96,6 +96,7 @@ What each suite is for:
 | `tooling` | the CLI contract: which flag selects what, and what a wrong name prints |
 | `lsp` | a scripted session against the real stdio protocol |
 | `jwc_test` | `jwc test` itself: isolation, order, and what `assert fails` refuses |
+| `packages` | what a package may declare, and its `raises` boundary |
 
 `tests/tooling.rs` validates the emitted OpenAPI against
 `openapi-spec-validator` when it is importable, and prints SKIPPED when it is
@@ -151,6 +152,9 @@ the surrounding style. CI runs `clippy --all-targets -- -D warnings`.
   advisory lock. The bookkeeping row goes in the **same transaction** as the
   statements, which is why the applier strips the file's own
   `BEGIN`/`COMMIT` rather than running it as written.
+- **`packages.rs`** — the content model: a package declares no `table`,
+  `schema` or `routes`, because the line between an app and a package is
+  whether importing it applies DDL to your database.
 - **`check.rs`** — the type pass. `Raw` vs `Record`, `T?` and narrowing,
   class validation, aggregates.
 - **`wiring.rs`** — whole-program checks: the route table, middleware

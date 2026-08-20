@@ -35,6 +35,7 @@ pub mod migrate;
 pub mod model;
 pub mod naming;
 pub mod openapi;
+pub mod packages;
 pub mod parser;
 pub mod query;
 pub mod query_sql;

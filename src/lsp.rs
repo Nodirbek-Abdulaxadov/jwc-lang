@@ -151,6 +151,7 @@ impl Server {
         let wired = crate::wiring::wire(&ws, &sym);
         let mut imports = crate::imports::check(&ws, &ws.packages);
         imports.extend(crate::imports::case_convention(&ws));
+        imports.extend(crate::packages::check(&ws, &sym));
         Some(Analysis {
             diags: built
                 .diags
