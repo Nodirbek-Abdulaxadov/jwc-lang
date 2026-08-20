@@ -34,6 +34,7 @@ pub mod parser;
 pub mod query;
 pub mod query_sql;
 pub mod serve;
+pub mod snapshot;
 pub mod sql;
 pub mod symbols;
 pub mod token;

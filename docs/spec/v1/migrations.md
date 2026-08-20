@@ -28,7 +28,7 @@ recording applied names in `_jwc_migrations`. The applier is unchanged from
 ## 2. The snapshot
 
 The snapshot is the authoritative previous state. It is JSON, checked in,
-and covers **six** object classes — all of them, because anything not
+and covers **seven** object classes — all of them, because anything not
 snapshotted silently never drifts:
 
 1. schemas

@@ -70,6 +70,7 @@ What each suite is for:
 | `sql_golden` | emitted SQL, byte for byte, and that it runs |
 | `http_golden` | request/response pairs through the real pipeline |
 | `docs_parse` | every ```jwc block in the README and the spec |
+| `snapshot_sample` | the sample's migration snapshot, field by field |
 
 The corpora are **exact in both directions**: a missing diagnostic and an
 unannotated one both fail. That is what makes them a specification rather
