@@ -741,6 +741,30 @@ ishga tushiradi va tartibdan qat'i nazar takrorlanadi (shuffle testi);
 `assert fails ... with` noto'g'ri xabarda yiqiladi (negativ test);
 `raises` narrowing urinishi kompilyatsiya xatosi beradi.
 
+**Bajarildi.** Uch bosqich: `jwc test` + izolyatsiya + `assert fails … with`
+(`docs/spec/v1/testing.md`), paket kontent modeli (`packages.md`, N8), va
+registry klienti. Namunada 3 emas **4 ta** test bor va to'rttasi ham yashil;
+teskari tartibda ham. Barcha uch mezon testda.
+
+`seed.*` bu relizga kirmadi va kirmaydi: `DEFERRED-11` uni hali v0.20.0 da
+hal qilgan — umumiy fixture modeli aynan N9 ko'rsatgan narsa, va namunaning
+testlari o'z ma'lumotini o'zi quradigan qilib qayta yozilgan. Ro'yxatdagi
+band o'sha qarordan oldin yozilgan.
+
+Yo'l-yo'lakay topilganlar:
+
+- **`transaction { }` tranzaksiya emas edi.** `exec::transaction` pool'dan
+  ulanish olib unda `BEGIN` qilardi, ichidagi har bir statement esa
+  `db.rs` orqali *boshqa* ulanishga tushardi. writes §7.1 v0.24.0 dan beri
+  atomarlikni va'da qilib, uni bermay kelgan. 0.9.x engine'da shu uchun
+  `TX_CONN` bor edi; v1 `db.rs` uni hech qachon o'qimagan. Endi o'qiydi, va
+  test izolyatsiyasi ham xuddi shu mexanizm.
+- **`assert fails` deyarli hech narsani tekshirmasdi** — berilgan xato
+  tipini e'tiborsiz qoldirib, *nimadir* yiqilsa o'tib ketardi.
+- **Namunaning o'zida ikki nuqson**: `Invoices` da qarama-qarshi yo'nalishli
+  check yozilgan edi (test boshqa qoidani tekshirardi), va test
+  `ConstraintViolation` kutardi — uni hech narsa ko'tarmaydi (errors §6.1).
+
 ---
 
 ### v0.29.0 — **Hardening**
