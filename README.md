@@ -55,7 +55,8 @@ routes "/notes" {
 ```
 
 `jwc gen-sql` turns the `table` into `CREATE TABLE`. `jwc explain` shows the
-SQL each query compiles to. `jwc serve` runs it.
+SQL each query compiles to. `jwc migrate new` writes the migration from one
+schema to the next. `jwc serve` runs it.
 
 ---
 
@@ -80,9 +81,10 @@ What works today, against a real Postgres:
 | **Views** | real `CREATE VIEW`; a bounded page over one takes its keys first |
 | **Routes** | path/query parameters, middleware chains, typed `context`, an error model checked at compile time |
 | **Runtime** | an interpreter on axum + tokio; every value is a bind parameter |
+| **Migrations** | snapshot, diff, ten-phase emission, declared renames, `up` / `down` / `status` / `verify` |
 
-Not yet: migrations (v0.26.0), the LSP and `jwc openapi` (v0.27.0), the test
-framework and packages (v0.28.0). See [`ROADMAP.md`](ROADMAP.md) — it is the
+Not yet: the LSP and `jwc openapi` (v0.27.0), the test framework and
+packages (v0.28.0). See [`ROADMAP.md`](ROADMAP.md) — it is the
 source of truth for what counts as done, partial, and **non-goal**.
 
 ---
@@ -107,6 +109,11 @@ cargo build --release
 | `jwc gen-sql [path] [--explain]` | the schema as Postgres DDL, deterministic and offline |
 | `jwc explain [path]` | every query the program issues, with its SQL |
 | `jwc routes [path]` | the resolved route table: method, path, middleware chain |
+| `jwc migrate new <name> [path]` | diff the sources against the last snapshot and write the next migration — offline |
+| `jwc migrate up [path]` | apply every pending migration, in order, under an advisory lock |
+| `jwc migrate down [path]` | roll back, newest first; refuses what it cannot undo |
+| `jwc migrate status [path]` | applied, pending, and drift |
+| `jwc migrate verify [path]` | every constraint and index present under the name the binary expects |
 | `jwc serve [path] --port N` | run it |
 | `jwc ast [path]` | the parsed AST — a debugging aid, not a stable format |
 

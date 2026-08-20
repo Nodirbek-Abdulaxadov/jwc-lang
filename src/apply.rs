@@ -30,6 +30,12 @@ pub const LOCK_KEY: i64 = 0x006a77632d6d6967;
 
 pub const TABLE: &str = "public._jwc_migrations";
 
+/// migrations.md §11. Unlike every other code in the language this one is
+/// not a `Diagnostic`: it names a fault in a checked-in SQL file, which has
+/// no source span to point a caret at. It surfaces as an apply-time error
+/// with the file named instead.
+pub const E1101: &str = "E1101";
+
 const CREATE_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS public._jwc_migrations (
     name       text PRIMARY KEY,
@@ -151,7 +157,7 @@ async fn up_locked(client: &Client, dir: &Path, to: Option<u32>) -> Result<Vec<S
             // because the files are checked in and editable, and this one
             // has no transaction to roll a stray statement back.
             migrate::check_no_transaction(&text)
-                .map_err(|e| anyhow::anyhow!("E1101: {}: {e}", m.up().display()))?;
+                .map_err(|e| anyhow::anyhow!("{E1101}: {}: {e}", m.up().display()))?;
             for stmt in migrate::statements(&text) {
                 client
                     .batch_execute(&format!("{stmt};"))

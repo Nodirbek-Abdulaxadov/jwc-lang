@@ -330,6 +330,8 @@ header.
 | `E1001` | unknown error type in `throw` / `catch` |
 | `E1002` | `raises` is not a superset of the inferred set |
 | `E1003` | `raises` in application code |
+| `E1004` | wrong number of arguments to an error constructor |
+| `E1005` | error constructor argument is not assignable to the declared type |
 | `E1010` | more than one `errorHandler` |
 | `E1011` | `errorHandler` arm does not return a response |
 | `E1020` | postfix `catch` block does not diverge |

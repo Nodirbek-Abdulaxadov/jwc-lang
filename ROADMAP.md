@@ -271,9 +271,7 @@ Yangi qoida — `E0431`: `using gin` skalyar `varchar`/`text` ustida rad
 etiladi (`gin_trgm_ops` kerak, JWC extension o'rnatmaydi).
 
 **Ochiq qolgani:**
-- **`E0440`** (`NOT NULL ADD COLUMN`) — bu `migrate new` qoidasi, `gen-sql`
-  har doim jadvalni noldan yaratadi. schema §10 normativ, kod v0.26.0 da
-  differ bilan keladi.
+- ~~**`E0440`**~~ (`NOT NULL ADD COLUMN`) — v0.26.0 da differ bilan keldi.
 - **DBA protokoli** — tashqi muhandis. v0.20.0 dagi "3 kishi o'qidi" bilan
   bir xil sababdan ochiq.
 - **`view` DDL** — ataylab bu relizda emas (query compiler'ga bog'liq).
@@ -629,6 +627,33 @@ yangi `gen-sql` ni bo'sh bazaga qo'llash bilan **bir xil** (`pg_dump
 --schema-only` normallashtirilgan solishtiruv). 200 ta tasodifiy ketma-ketlik
 o'tadi; `varchar(20)→varchar(40)` on `Invoices.number` (view ostidagi ustun)
 xatosiz qo'llanadi.
+
+**Bajarildi.** Besh bosqich, har biri alohida commit: snapshot modeli
+(`src/snapshot.rs`), differ (`src/diff.rs`, 29 ta operatsiya, 28 ta korpus
+keysi), fazali emissiya va `down` (`src/migrate.rs`), applier
+(`src/apply.rs` — `up`/`down`/`status`/`verify` + advisory lock), va
+qabul testi. 200 ta ketma-ketlik ×8 tahrir Postgres 16.13 da 43 soniyada
+o'tdi; 18 ta operatsiya sinfining hammasi haqiqatan ham chiqqani
+tekshiriladi.
+
+Yo'l-yo'lakay topilgan uchta narsa:
+
+- **View ustida view umuman emissiya bo'lmasdi.** `views::attach` ustunlarni
+  e'lon tartibida, `model.views` hali bo'sh holatda hisoblardi — tashqi view
+  hech qanday diagnostika bermasdan yo'qolib ketardi, holbuki
+  `ddl.rs::ordered_views` shu holat uchun butun boshli funksiya tutib
+  turardi. Endi u ham qo'zg'almas nuqta.
+- **`ddl.rs` endi snapshot tiplari ustidan yozadi.** `gen-sql` va
+  `jwc migrate` bitta renderer'dan chiqadi, ya'ni bir xil obyekt uchun
+  boshqacha DDL chiqarishi *konstruksiya bo'yicha* mumkin emas.
+- Spetsifikatsiyada uchta qarama-qarshilik: §2 "olti sinf" deb yozib yetti
+  tasini sanagan; §5.3 enum reorder'ni ikki abzats oralig'ida ham rad
+  etgan ham "operatsiya bermaydi" degan; §4 view kommentini 7-fazaga
+  qo'ygan, holbuki view 8-fazada yaratiladi. Uchalasi ham tuzatildi.
+
+**Ochiq qolgani:**
+- **`E0910`** — `--native` rad etish kodi. `jwc build` bu daraxtda yo'q
+  (DEFERRED-2), shuning uchun rad etadigan narsa ham yo'q.
 
 ---
 
