@@ -1,0 +1,15 @@
+-- ops: 2 add_column org.orgs.region
+
+namespace c;
+database App : Postgres;
+schema org of App;
+
+enum Plan of App.org { free, pro }
+
+table Orgs of App.org {
+    id   bigint primary key identity;
+    slug varchar(40) unique;
+    plan Plan;
+    name varchar(80)?;
+    region varchar(20) default "us";
+}

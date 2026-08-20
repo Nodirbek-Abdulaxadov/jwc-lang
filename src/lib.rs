@@ -23,6 +23,7 @@ pub mod cursor;
 pub mod db;
 pub mod ddl;
 pub mod diag;
+pub mod diff;
 pub mod exec;
 mod exec_call;
 pub mod fmt;

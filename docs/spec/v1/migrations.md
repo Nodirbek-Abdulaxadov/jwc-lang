@@ -56,12 +56,24 @@ location, and lowers them to SQL in the phase order of §4. Operations:
 
 `create_schema`, `create_enum`, `add_enum_value`, `create_table`,
 `add_column`, `alter_column_type`, `set_not_null`, `drop_not_null`,
-`set_default`, `drop_default`, `rename_column`, `rename_table`,
-`add_constraint`, `drop_constraint`, `create_index`, `drop_index`,
+`set_default`, `drop_default`, `set_identity`, `drop_identity`,
+`rename_column`, `rename_table`, `add_constraint`, `drop_constraint`,
+`rename_constraint`, `create_index`, `drop_index`, `rename_index`,
 `create_function`, `drop_function`, `create_trigger`, `drop_trigger`,
 `comment_on`, `create_view`, `drop_view`, `drop_column`, `drop_table`.
 
 `jwc migrate new --explain` prints each with the declaration that caused it.
+A drop has no declaration — its cause is an absence — and prints without one
+rather than borrowing a line number from somewhere else.
+
+The three rename operations exist because constraint and index names are
+*generated* from table + columns + canonical predicate (schema §8). Matching
+them by name would turn renaming a column into a drop and rebuild of every
+constraint on it — a long lock on a large table for a cosmetic change — so
+the diff matches them on their **bodies** and renames when only the name
+moved. The same match is what lets §2's scheme version mean something: when
+the snapshot was written under an older scheme, the match still succeeds and
+the rename is suppressed, so adopting a `v2` scheme renames nothing live.
 
 ---
 
@@ -78,14 +90,32 @@ A migration file emits in this order, and each phase is internally sorted:
 | 4 | constraints: `ADD CONSTRAINT` for PK, unique, check, **then all FKs** |
 | 5 | indexes |
 | 6 | functions and triggers |
-| 7 | comments |
-| 8 | `CREATE VIEW` for everything dropped in phase 0, in dependency order |
+| 7 | comments on tables and columns |
+| 8 | `CREATE VIEW` for everything dropped in phase 0, in dependency order, each followed by its own `COMMENT ON VIEW` |
 | 9 | destructive: `DROP CONSTRAINT`, `DROP INDEX`, `DROP COLUMN`, `DROP TABLE` |
 
 Phase 0/8 is the answer to #24: views are real objects that block ordinary
 `ALTER`s, so they are dropped and rebuilt around the change rather than
 making the change unrunnable. Phase 4's separate FK pass is the same
 mechanism that resolves cross-schema cycles in `gen-sql` (schema §9).
+
+A view's comment travels with the view rather than sitting in phase 7:
+`DROP VIEW` takes the comment with it, and a `COMMENT ON VIEW` in phase 7
+would name an object phase 8 has not created yet.
+
+The drop set is a **fixed point**, not one pass. A view that reads an
+altered relation comes down; that makes the view itself an alteration, so
+anything reading *it* comes down too — and `DROP VIEW` without `CASCADE`
+refuses while a dependent still stands. Declaration order is not dependency
+order, so a single sweep leaves the outer view in place and the migration
+fails to apply.
+
+Two of the ten phases contain drops that are not destructive. An object can
+share a name with the one replacing it — a table `check` is numbered by
+ordinal, so editing its expression keeps the name, and so does an index
+whose `nulls` order changed. A drop that exists only to make room for an add
+travels **with** the add, in phase 4 or 5; only a drop with nothing
+replacing it waits for phase 9.
 
 Phase 9 is last so that a failure anywhere earlier leaves data intact.
 
@@ -107,8 +137,8 @@ The applier honours the marker and runs that file outside a transaction. A
 `no-transaction` file may contain nothing else (`E1101`), so a partial
 failure cannot leave half a schema change applied.
 
-5.3 Reordering members, or removing one, is **refused** (`E1102`) with the
-manual recipe printed:
+5.3 Removing a member is **refused** (`E1102`) with the manual recipe
+printed:
 
 ```
 E1102: enum App.billing.InvoiceStatus removes value 'void'
@@ -130,7 +160,13 @@ cross-schema column map does. `DEFERRED-3`.
 
 Member **order** in an `of` enum is not semantically significant to JWC
 (types §3.5 forbids ordering comparisons), so reordering the declaration
-produces no operation at all.
+produces no operation at all. Postgres cannot move a member, so the snapshot
+records the order the *database* will have — otherwise the next
+`migrate new` would diff the same permutation again, forever.
+
+A value written into the middle of the declaration is a different matter: it
+is new, so `ADD VALUE … BEFORE` puts it where the source says, and `\dT+`
+shows what was written.
 
 ---
 
@@ -157,7 +193,9 @@ which produces `ALTER TABLE … RENAME COLUMN full_name TO display_name`.
 that used it, which would otherwise be silent.
 
 6.4 `was` is removed from the source in the migration **after** the one that
-applied it. `jwc lint` reports stale `was` markers as `W1101`.
+applied it. `jwc migrate new` reports stale `was` markers as `W1101` — not
+`jwc check`, which has no snapshot to judge staleness against. A marker is
+stale exactly when the new name is already in the previous snapshot.
 
 6.5 Rename plus type change in one migration is refused (`E1104`): the two
 are separable and the combined failure mode is not diagnosable from the

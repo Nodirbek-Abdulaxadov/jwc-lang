@@ -82,17 +82,39 @@ pub(super) fn attach(model: &mut SchemaModel, ws: &Workspace) {
     // is exact here — which is what lets views be resolved during the model
     // pass, before symbols exist.
     let sym = Symbols::default();
-    let mut views: Vec<ViewObj> = Vec::new();
+    let mut decls: Vec<(&ViewDecl, Loc)> = Vec::new();
     for (i, file) in ws.files.iter().enumerate() {
         for d in &file.program.decls {
             let Decl::View(v) = d else { continue };
-            let loc = Loc {
-                file: i,
-                span: v.span,
-            };
-            if let Some(obj) = build_one(model, v, loc, &sym) {
+            decls.push((
+                v,
+                Loc {
+                    file: i,
+                    span: v.span,
+                },
+            ));
+        }
+    }
+
+    // A view may select from a view, so its columns are not knowable until
+    // that one's are. Resolve to a fixed point rather than in declaration
+    // order: the outer view can be written first, and a single pass would
+    // silently drop it — which is how a stacked view used to vanish from
+    // `gen-sql` with no diagnostic at all.
+    let mut views: Vec<ViewObj> = Vec::new();
+    loop {
+        let before = views.len();
+        model.views = views.clone();
+        for (v, loc) in &decls {
+            if views.iter().any(|o| o.declared == v.name.name) {
+                continue;
+            }
+            if let Some(obj) = build_one(model, v, *loc, &sym) {
                 views.push(obj);
             }
+        }
+        if views.len() == before {
+            break;
         }
     }
     views.sort_by(|a, b| (&a.schema_physical, &a.physical).cmp(&(&b.schema_physical, &b.physical)));
@@ -129,6 +151,35 @@ fn find_decl<'a>(ws: &'a Workspace, declared: &str) -> Option<&'a ViewDecl> {
     })
 }
 
+/// The relation a view drives off: a table, or another view.
+struct Root<'a> {
+    declared: &'a str,
+    schema_physical: &'a str,
+    columns: &'a [ColumnObj],
+}
+
+impl<'a> Root<'a> {
+    fn find(model: &'a SchemaModel, object: &str) -> Option<Root<'a>> {
+        if let Some(t) = model.tables.iter().find(|t| t.declared == object) {
+            return Some(Root {
+                declared: &t.declared,
+                schema_physical: &t.schema_physical,
+                columns: &t.columns,
+            });
+        }
+        let v = model.views.iter().find(|v| v.declared == object)?;
+        Some(Root {
+            declared: &v.declared,
+            schema_physical: &v.schema_physical,
+            columns: &v.columns,
+        })
+    }
+
+    fn column(&self, declared: &str) -> Option<&ColumnObj> {
+        self.columns.iter().find(|c| c.declared == declared)
+    }
+}
+
 fn build_one(model: &SchemaModel, v: &ViewDecl, loc: Loc, sym: &Symbols) -> Option<ViewObj> {
     let projection = v.body.projection.as_ref()?;
     let plan = query::plan(&v.body, sym);
@@ -137,8 +188,9 @@ fn build_one(model: &SchemaModel, v: &ViewDecl, loc: Loc, sym: &Symbols) -> Opti
     if plan.diags.iter().any(|d| d.severity == crate::diag::Severity::Error) {
         return None;
     }
-    let root = model.tables.iter().find(|t| t.declared == plan.root.object)?;
-    let schema_physical = root.schema_physical.clone();
+    // The root is a table, or a view that has already been resolved.
+    let root = Root::find(model, &plan.root.object)?;
+    let schema_physical = root.schema_physical.to_string();
 
     let mut columns = Vec::new();
     for f in &projection.fields {
@@ -208,7 +260,7 @@ fn build_one(model: &SchemaModel, v: &ViewDecl, loc: Loc, sym: &Symbols) -> Opti
         has_many: plan.root.has_many(),
         body: None,
         gap: None,
-        base: Some(root.declared.clone()),
+        base: Some(root.declared.to_string()),
         base_columns,
         reads: {
             let mut all = Vec::new();

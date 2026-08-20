@@ -71,6 +71,7 @@ What each suite is for:
 | `http_golden` | request/response pairs through the real pipeline |
 | `docs_parse` | every ```jwc block in the README and the spec |
 | `snapshot_sample` | the sample's migration snapshot, field by field |
+| `diff_corpus` | two schemas in, the migration's operations and phases out |
 
 The corpora are **exact in both directions**: a missing diagnostic and an
 unannotated one both fail. That is what makes them a specification rather
