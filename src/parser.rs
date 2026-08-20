@@ -1622,12 +1622,43 @@ impl Parser {
                     Some(self.expect_ident()?)
                 };
                 let (body, mut end) = self.parse_block()?;
+                let mut message = None;
+                let mut message_span = None;
+                if self.at_word("with") {
+                    let w = self.bump().span;
+                    match self.peek().tok.clone() {
+                        Tok::Str(s) => {
+                            let t = self.bump();
+                            message = Some(s);
+                            message_span = Some(t.span);
+                            end = t.span;
+                        }
+                        _ => {
+                            // The message is compared exactly, so it has to
+                            // be a literal — a computed one has nothing for
+                            // a reader to compare against (testing.md §4.2).
+                            self.err_note(
+                                "E1402",
+                                w,
+                                "`with` takes a string literal",
+                                "the message is compared exactly, so it has to be \
+                                 written out",
+                                "testing.md §4.2",
+                            );
+                        }
+                    }
+                }
                 if self.at(&Tok::Semi) {
                     end = self.bump().span;
                 }
                 return Ok(Stmt::Assert {
                     at,
-                    kind: AssertKind::Fails { error, body },
+                    kind: AssertKind::Fails {
+                        error,
+                        body,
+                        message,
+                        message_span,
+                    },
                     span: start.to(end),
                 });
             }

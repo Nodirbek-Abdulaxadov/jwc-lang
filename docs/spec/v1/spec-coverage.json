@@ -328,7 +328,7 @@
       "construct": "index.desc",
       "clause": "schema \u00a74.3",
       "uses": 1,
-      "first_use": "src/db/billing.jwc:77"
+      "first_use": "src/db/billing.jwc:78"
     },
     {
       "construct": "index.partial",
@@ -688,7 +688,7 @@
       "construct": "test.assert_fails",
       "clause": "DEFERRED-11",
       "uses": 1,
-      "first_use": "tests/billing_test.jwc:60"
+      "first_use": "tests/billing_test.jwc:62"
     },
     {
       "construct": "throw",

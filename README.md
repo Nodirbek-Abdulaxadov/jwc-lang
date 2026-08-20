@@ -108,6 +108,7 @@ cargo build --release
 | `jwc fmt [path] [--check]` | rewrite in canonical form; `--check` is the CI shape |
 | `jwc gen-sql [path] [--explain]` | the schema as Postgres DDL, deterministic and offline |
 | `jwc explain [path]` | every query the program issues, with its SQL |
+| `jwc test [path]` | run every `test` block — each in its own transaction, rolled back |
 | `jwc lsp` | the language server, over stdio: diagnostics, hover-to-SQL, go-to-definition, completion, signature help |
 | `jwc openapi [path] [--out f]` | an OpenAPI 3.1 document, derived from the route table and the typed signatures |
 | `jwc lint [path] [--constraints]` | `check`, plus every constraint each route can reach and the status its violation produces |

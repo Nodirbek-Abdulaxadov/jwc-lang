@@ -376,7 +376,7 @@ fn block(b: &Block, out: &mut Vec<(String, Span)>) {
             Stmt::Transaction { body, .. } => block(body, out),
             Stmt::Assert { kind, .. } => match kind {
                 AssertKind::Expr(e) => expr(e, out),
-                AssertKind::Fails { error, body } => {
+                AssertKind::Fails { error, body, .. } => {
                     for e in error.iter() {
                         out.push((e.name.clone(), e.span));
                     }

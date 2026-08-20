@@ -251,6 +251,17 @@ fn engine() -> Result<&'static JwcEngine> {
         .ok_or_else(|| anyhow!("DB engine initialization failed"))
 }
 
+/// The connection this task is pinned to, when it is inside a
+/// `transaction { }` (or a test's rollback scope).
+///
+/// `db.rs` reads it so that statements issued inside a transaction land on
+/// the connection the `BEGIN` was issued on. Without it the block begins a
+/// transaction on one pooled connection and runs its statements on
+/// whichever others the pool hands out — which is not a transaction at all.
+pub fn pinned_connection() -> Option<Arc<Mutex<Option<PgConn>>>> {
+    TX_CONN.try_with(|cell| cell.clone()).ok()
+}
+
 pub async fn get_connection() -> Result<PgConn> {
     let pool = &engine()?.pool;
     pool.get()

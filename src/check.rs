@@ -857,21 +857,35 @@ impl<'a> Checker<'a> {
                 }
                 self.block(body);
             }
-            Stmt::Assert { kind, .. } => match kind {
+            Stmt::Assert { kind, span, .. } => match kind {
                 AssertKind::Expr(e) => {
                     let t = self.expr(e);
                     self.require_boolean(&t, e.span);
                 }
-                AssertKind::Fails { error, body } => {
-                    if let Some(name) = error {
-                        if !self.sym.errors.contains_key(&name.name) {
-                            self.err(
-                                name.span,
-                                "E1001",
-                                format!("unknown error type `{}`", name.name),
-                                "errors.md §1.3",
-                            );
+                AssertKind::Fails { error, body, .. } => {
+                    match error {
+                        Some(name) => {
+                            if !self.sym.errors.contains_key(&name.name) {
+                                self.err(
+                                    name.span,
+                                    "E1001",
+                                    format!("unknown error type `{}`", name.name),
+                                    "errors.md §1.3",
+                                );
+                            }
                         }
+                        // testing.md §4.1 — an untyped `assert fails` passes
+                        // when a typo makes the block raise something
+                        // unrelated, which is the assertion testing itself
+                        // rather than the program.
+                        None => self.err_note(
+                            *span,
+                            "E1401",
+                            "`assert fails` needs the error type it expects",
+                            "write `assert fails Conflict { … }`; the predeclared \
+                             types are in errors.md §1.2",
+                            "testing.md §4.1",
+                        ),
                     }
                     self.block(body);
                 }

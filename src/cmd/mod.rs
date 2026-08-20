@@ -796,6 +796,92 @@ pub fn migrate_verify(path: PathBuf) -> Result<()> {
     bail!("{} problem{}", problems.len(), plural(problems.len()))
 }
 
+/// `jwc test [path]` — run every `test` block (testing.md §1.3).
+///
+/// Each test runs inside its own transaction, rolled back when it ends, so
+/// the order is irrelevant and nothing a test writes outlives it (§2.1).
+pub fn test(path: PathBuf, filter: Option<String>, no_rollback: bool) -> Result<()> {
+    let ws = crate::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
+        bail!("no .jwc files under {}", path.display());
+    }
+    let program = std::sync::Arc::new(crate::serve::load(&ws)?);
+
+    // Declaration order, which is also file order — `Workspace::load`
+    // sorts, so two runs report the same sequence.
+    let mut tests: Vec<(String, crate::ast::Block)> = Vec::new();
+    for file in &ws.files {
+        for d in &file.program.decls {
+            if let crate::ast::Decl::Test(t) = d {
+                if filter.as_ref().is_none_or(|f| t.name.contains(f.as_str())) {
+                    tests.push((t.name.clone(), t.body.clone()));
+                }
+            }
+        }
+    }
+    if tests.is_empty() {
+        println!("no tests");
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        crate::engine::init_engine_from_env()?;
+        if no_rollback {
+            eprintln!(
+                "warning: --no-rollback — every test commits. {} will hold \
+                 whatever they write.",
+                crate::engine::scrub_database_url(
+                    &crate::engine::database_url_from_env().unwrap_or_default()
+                )
+            );
+        }
+
+        let request = std::sync::Arc::new(crate::exec::Request {
+            method: "TEST".into(),
+            path: "/".into(),
+            route: "/".into(),
+            headers: Default::default(),
+            query: Vec::new(),
+            body: String::new(),
+            peer_ip: "127.0.0.1".into(),
+            client_ip: "127.0.0.1".into(),
+            id: "test".into(),
+        });
+
+        let mut failed = 0usize;
+        for (name, body) in &tests {
+            let mut vm = crate::exec::Vm::new(&program, request.clone());
+            match vm.in_scoped_transaction(body, !no_rollback).await {
+                Ok(_) => println!("\x1b[32mok\x1b[0m    {name}"),
+                Err(e) => {
+                    failed += 1;
+                    println!("\x1b[31mFAILED\x1b[0m {name}");
+                    for line in describe_abort(&e).lines() {
+                        println!("        {line}");
+                    }
+                }
+            }
+        }
+        println!(
+            "\n{} test{}, {failed} failed",
+            tests.len(),
+            plural(tests.len())
+        );
+        if failed > 0 {
+            bail!("{failed} test{} failed", plural(failed));
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+fn describe_abort(a: &crate::exec::Abort) -> String {
+    match a {
+        crate::exec::Abort::Thrown(t) => format!("{}: {}", t.error, t.message()),
+        crate::exec::Abort::Fault(e) => format!("{e}"),
+    }
+}
+
 /// `jwc openapi [path] [--out f]` — an OpenAPI 3.1 document, derived from
 /// the route table, the typed signatures and the raise sets (tooling.md §5).
 ///

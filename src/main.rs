@@ -77,6 +77,20 @@ enum Command {
         #[arg(long)]
         analyze: bool,
     },
+    /// Run every `test` block.
+    ///
+    /// Each test runs in its own transaction and is rolled back, so the
+    /// order is irrelevant.
+    Test {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Only tests whose name contains this.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Commit instead of rolling back. Leaves data behind.
+        #[arg(long)]
+        no_rollback: bool,
+    },
     /// Run the language server, speaking LSP over stdio.
     Lsp,
     /// Emit an OpenAPI 3.1 document for the route table.
@@ -214,6 +228,11 @@ fn main() -> Result<()> {
             route,
             analyze,
         } => cmd::explain(path, sql, function, route, analyze),
+        Command::Test {
+            path,
+            filter,
+            no_rollback,
+        } => cmd::test(path, filter, no_rollback),
         Command::Lsp => jwc::lsp::run(),
         Command::Openapi { path, out, title } => cmd::openapi(path, out, title),
         Command::Lint {

@@ -674,6 +674,10 @@
         {
           "name": "ck_invoices__status_paid_at__1",
           "expr": "(paid_at IS NULL) OR (status = 'paid')"
+        },
+        {
+          "name": "ck_invoices__status_paid_at__2",
+          "expr": "(paid_at IS NOT NULL) OR (status <> 'paid')"
         }
       ],
       "foreign_keys": [

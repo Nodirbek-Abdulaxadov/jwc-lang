@@ -199,8 +199,17 @@ A constraint carrying `: "message"` raises a declared error when violated:
 | `unique` / partial unique | `Conflict` | 409 |
 | `check` | `BadRequest` | 400 |
 
-The message is the declared string; `err.constraint` carries the generated
-constraint name (schema §8).
+The message is the declared string. The generated constraint name
+(schema §8) is **not** carried on the raised error: `Conflict` and
+`BadRequest` take a message and nothing else, and widening them so that one
+raise path can pass a second argument would put a schema identifier one
+`err.constraint` away from a response body — which §6.2 refuses for exactly
+that reason.
+
+`ConstraintViolation(message, constraint)` is therefore a name an **author**
+throws, with a constraint name they chose to expose. Nothing in the runtime
+raises it. `jwc test` made that visible: the sample had a test asserting
+`assert fails ConstraintViolation`, which nothing could ever satisfy.
 
 409 for unique is a change from design.md's "constraint violations become
 400": a duplicate is a conflict with existing state, and the sample's own

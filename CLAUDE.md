@@ -36,6 +36,7 @@ cargo run -- serve docs/spec/v1/sample --port 8080
 cargo run -- lint docs/spec/v1/sample --constraints
 cargo run -- openapi docs/spec/v1/sample --out openapi.json
 cargo run -- migrate new add_region docs/spec/v1/sample --explain
+DATABASE_URL=postgres://…  cargo run -- test docs/spec/v1/sample
 ```
 
 `install-from-source.{sh,ps1}` install to the user profile. Never run them
@@ -65,6 +66,9 @@ JWC_V1_PG='-h 127.0.0.1 -p 5432 -U postgres' cargo test --test migrate_golden
 # up / down / status / verify. Serial: they share one database.
 JWC_V1_DATABASE_URL=postgres://…  cargo test --test migrate_apply -- --test-threads=1
 
+# `jwc test`: isolation, order-independence, and the `assert fails` negatives.
+JWC_V1_DATABASE_URL=postgres://…  cargo test --test jwc_test -- --test-threads=1
+
 # v0.26.0's acceptance test. 20 random walks by default, 200 for the full run.
 JWC_V1_DATABASE_URL=postgres://…  JWC_ROUNDTRIP_SEQUENCES=200 \
   cargo test --test migrate_roundtrip -- --test-threads=1
@@ -91,6 +95,7 @@ What each suite is for:
 | `migrate_roundtrip` | a migrated database *is* a created database |
 | `tooling` | the CLI contract: which flag selects what, and what a wrong name prints |
 | `lsp` | a scripted session against the real stdio protocol |
+| `jwc_test` | `jwc test` itself: isolation, order, and what `assert fails` refuses |
 
 `tests/tooling.rs` validates the emitted OpenAPI against
 `openapi-spec-validator` when it is importable, and prints SKIPPED when it is

@@ -72,6 +72,7 @@ table Invoices of App.billing {
     foreign key (org_id) references App.org.Orgs (id);
     foreign key (subscription_id) references App.billing.Subscriptions (id) on delete set null;
     check (status == InvoiceStatus.paid or paid_at == null) : "paid_at faqat to'langan hisobda";
+    check (status != InvoiceStatus.paid or paid_at != null) : "to'langan hisobda paid_at bo'lishi shart";
 
     index on (org_id, status);
     index on (org_id, issued_at desc, id desc);

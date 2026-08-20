@@ -108,7 +108,8 @@ CREATE TABLE billing.invoices (
     CONSTRAINT pk_invoices PRIMARY KEY (id),
     CONSTRAINT uq_invoices__number UNIQUE (number),
     CONSTRAINT ck_invoices__amount__min CHECK (amount >= 0),
-    CONSTRAINT ck_invoices__status_paid_at__1 CHECK ((paid_at IS NULL) OR (status = 'paid'))
+    CONSTRAINT ck_invoices__status_paid_at__1 CHECK ((paid_at IS NULL) OR (status = 'paid')),
+    CONSTRAINT ck_invoices__status_paid_at__2 CHECK ((paid_at IS NOT NULL) OR (status <> 'paid'))
 );
 
 CREATE TABLE billing.payments (

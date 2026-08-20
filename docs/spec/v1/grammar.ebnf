@@ -153,7 +153,8 @@ server_entry    = assignment ";" | ident "{" { assignment ";" } "}" ;
 (* ---------- tests ---------- *)
 
 test_decl       = "test" string block ;
-assert_stmt     = "assert" ( expr ";" | "fails" [ ident ] block ";" ) ;
+assert_stmt     = "assert" ( expr ";"
+                | "fails" ident block [ "with" string ] ";" ) ;
 
 (* ---------- types ---------- *)
 

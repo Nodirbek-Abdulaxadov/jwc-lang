@@ -371,10 +371,35 @@ impl<'a> Vm<'a> {
                         Err(fault("assertion failed"))
                     }
                 }
-                AssertKind::Fails { body, .. } => {
-                    match Box::pin(self.run_block(body)).await {
-                        Err(_) => Ok(Flow::Normal),
-                        Ok(_) => Err(fault("expected a failure, none happened")),
+                AssertKind::Fails {
+                    error,
+                    body,
+                    message,
+                    ..
+                } => {
+                    let want = error.as_ref().map(|e| e.name.as_str()).unwrap_or("");
+                    match Box::pin(self.in_savepoint(body)).await {
+                        Ok(_) => Err(fault(format!(
+                            "expected `{want}`, but the block succeeded"
+                        ))),
+                        Err(Abort::Thrown(t)) if t.error == want => match message {
+                            // testing.md §4.3 — compared exactly, and both
+                            // strings printed. "Close enough" is how a
+                            // message drifts.
+                            Some(m) if &t.message() != m => Err(fault(format!(
+                                "expected `{want}` with message\n  want: {m}\n  got:  {}",
+                                t.message()
+                            ))),
+                            _ => Ok(Flow::Normal),
+                        },
+                        Err(Abort::Thrown(t)) => Err(fault(format!(
+                            "expected `{want}`, got `{}`: {}",
+                            t.error,
+                            t.message()
+                        ))),
+                        Err(Abort::Fault(e)) => {
+                            Err(fault(format!("expected `{want}`, got a fault: {e}")))
+                        }
                     }
                 }
             },
@@ -389,20 +414,79 @@ impl<'a> Vm<'a> {
     /// throw or a fault (writes.md §7.1). The errorHandler runs *outside*,
     /// after the rollback (§7.2), which is the caller's job.
     async fn transaction(&mut self, body: &Block) -> Exec<Flow> {
+        self.in_scoped_transaction(body, false).await
+    }
+
+    /// `BEGIN`, run, then `COMMIT` (or `ROLLBACK` on failure, or always
+    /// when `rollback_always` — which is how a test is isolated,
+    /// testing.md §2.1).
+    ///
+    /// The connection is **pinned** for the duration. Every statement the
+    /// block issues goes through `db.rs`, which reads the pin: without it
+    /// the `BEGIN` lands on one pooled connection and the statements on
+    /// whichever others the pool hands out, so the block commits nothing
+    /// and rolls back nothing.
+    pub async fn in_scoped_transaction(
+        &mut self,
+        body: &Block,
+        rollback_always: bool,
+    ) -> Exec<Flow> {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
         let conn = crate::engine::get_connection()
             .await
             .map_err(Abort::Fault)?;
-        conn.batch_execute("BEGIN").await.map_err(|e| fault(e.to_string()))?;
-        let r = Box::pin(self.run_block(body)).await;
-        match &r {
-            Ok(_) => {
+        conn.batch_execute("BEGIN")
+            .await
+            .map_err(|e| fault(e.to_string()))?;
+        let cell = Arc::new(Mutex::new(Some(conn)));
+
+        let r = crate::engine::TX_CONN
+            .scope(cell.clone(), Box::pin(self.run_block(body)))
+            .await;
+
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.take() {
+            if r.is_ok() && !rollback_always {
                 conn.batch_execute("COMMIT")
                     .await
                     .map_err(|e| fault(e.to_string()))?;
-            }
-            Err(_) => {
+            } else {
                 let _ = conn.batch_execute("ROLLBACK").await;
             }
+        }
+        r
+    }
+
+    /// The body of an `assert fails`, inside a savepoint (testing.md §4.4).
+    ///
+    /// Postgres refuses every statement in a transaction that has seen an
+    /// error (`25P02`), so without the savepoint a test that asserts a
+    /// failure could not do anything afterwards — including the rollback
+    /// that isolates it.
+    async fn in_savepoint(&mut self, body: &Block) -> Exec<Flow> {
+        let Some(cell) = crate::engine::pinned_connection() else {
+            // Outside a transaction there is nothing to protect.
+            return Box::pin(self.run_block(body)).await;
+        };
+        const NAME: &str = "jwc_assert_fails";
+        {
+            let mut held = cell.lock().await;
+            if let Some(conn) = held.as_mut() {
+                conn.batch_execute(&format!("SAVEPOINT {NAME}"))
+                    .await
+                    .map_err(|e| fault(e.to_string()))?;
+            }
+        }
+        let r = Box::pin(self.run_block(body)).await;
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.as_mut() {
+            let sql = match &r {
+                Ok(_) => format!("RELEASE SAVEPOINT {NAME}"),
+                Err(_) => format!("ROLLBACK TO SAVEPOINT {NAME}; RELEASE SAVEPOINT {NAME}"),
+            };
+            let _ = conn.batch_execute(&sql).await;
         }
         r
     }

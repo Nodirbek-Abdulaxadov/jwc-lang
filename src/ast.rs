@@ -575,7 +575,16 @@ pub enum AssignTarget {
 #[derive(Clone, Debug)]
 pub enum AssertKind {
     Expr(Expr),
-    Fails { error: Option<Ident>, body: Block },
+    Fails {
+        /// Mandatory since v0.28.0: an untyped `assert fails` passes when a
+        /// typo makes the block raise something unrelated (testing.md §4.1).
+        error: Option<Ident>,
+        body: Block,
+        /// `with "…"` — the raised error's message, compared exactly
+        /// (testing.md §4.2).
+        message: Option<String>,
+        message_span: Option<Span>,
+    },
 }
 
 // ---------------------------------------------------------------- expressions

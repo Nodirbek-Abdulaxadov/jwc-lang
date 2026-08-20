@@ -631,7 +631,12 @@ impl Writer {
             }
             Stmt::Assert { kind, .. } => match kind {
                 AssertKind::Expr(e) => self.line(&format!("assert {};", expr(e))),
-                AssertKind::Fails { error, body } => {
+                AssertKind::Fails {
+                    error,
+                    body,
+                    message,
+                    ..
+                } => {
                     let t = error
                         .as_ref()
                         .map(|e| format!("{} ", e.name))
@@ -640,7 +645,10 @@ impl Writer {
                     self.depth += 1;
                     self.block(body);
                     self.depth -= 1;
-                    self.line("};");
+                    match message {
+                        Some(m) => self.line(&format!("}} with {};", quote(m))),
+                        None => self.line("};"),
+                    }
                 }
             },
             Stmt::Expr { expr: e, .. } => self.assigned("", e, ";"),

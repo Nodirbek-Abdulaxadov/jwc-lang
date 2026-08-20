@@ -56,7 +56,9 @@ test "bitta tashkilotda ikkita faol obuna bo'lolmaydi" {
     };
 
     -- The partial unique index carries a message, so the violation is a
-    -- declared `Conflict`, not a fault (errors.md §6.1).
+    -- declared `Conflict`, not a fault (errors.md §6.1). `with` checks the
+    -- sentence a caller would see, which is the only artefact tying the
+    -- schema declaration to the response (testing.md §4.2).
     assert fails Conflict {
         insert into App.billing.Subscriptions {
             org_id               = $org.id,
@@ -65,13 +67,16 @@ test "bitta tashkilotda ikkita faol obuna bo'lolmaydi" {
             current_period_start = $starts,
             current_period_end   = $ends
         };
-    };
+    } with "bu tashkilotda faol obuna allaqachon bor";
 }
 
 test "to'langan hisobda paid_at bo'lishi shart" {
     let org = fixture_org("t-paid");
 
-    assert fails ConstraintViolation {
+    -- A `check` carrying a message is a `BadRequest`, not a
+    -- `ConstraintViolation` — nothing in the runtime raises that one
+    -- (errors.md §6.1).
+    assert fails BadRequest {
         insert into App.billing.Invoices {
             org_id  = $org.id,
             number  = "INV-TEST-0001",
@@ -79,7 +84,7 @@ test "to'langan hisobda paid_at bo'lishi shart" {
             status  = InvoiceStatus.paid,
             paid_at = null
         };
-    };
+    } with "to'langan hisobda paid_at bo'lishi shart";
 }
 
 test "bekor qilingan obunadan keyin yangisini ochish mumkin" {

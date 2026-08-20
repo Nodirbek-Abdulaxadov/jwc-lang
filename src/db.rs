@@ -59,10 +59,28 @@ pub async fn run(
     binds: &[Option<String>],
     shape: Shape,
 ) -> Result<Option<String>, DbError> {
+    // Inside a `transaction { }` the task is pinned to the connection the
+    // `BEGIN` was issued on. Taking a fresh one from the pool here would
+    // run the statement outside the transaction it is supposed to be part
+    // of — the block would commit nothing and roll back nothing.
+    if let Some(cell) = crate::engine::pinned_connection() {
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.as_mut() {
+            return run_on(conn, sql, binds, shape).await;
+        }
+    }
     let conn = crate::engine::get_connection()
         .await
         .map_err(DbError::Other)?;
+    run_on(&conn, sql, binds, shape).await
+}
 
+async fn run_on(
+    conn: &tokio_postgres::Client,
+    sql: &str,
+    binds: &[Option<String>],
+    shape: Shape,
+) -> Result<Option<String>, DbError> {
     let params: Vec<&(dyn ToSql + Sync)> = binds
         .iter()
         .map(|b| b as &(dyn ToSql + Sync))
@@ -178,9 +196,23 @@ pub async fn run_page(
     sql: &str,
     binds: &[Option<String>],
 ) -> Result<(String, String, bool), DbError> {
+    if let Some(cell) = crate::engine::pinned_connection() {
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.as_mut() {
+            return page_on(conn, sql, binds).await;
+        }
+    }
     let conn = crate::engine::get_connection()
         .await
         .map_err(DbError::Other)?;
+    page_on(&conn, sql, binds).await
+}
+
+async fn page_on(
+    conn: &tokio_postgres::Client,
+    sql: &str,
+    binds: &[Option<String>],
+) -> Result<(String, String, bool), DbError> {
     let params: Vec<&(dyn ToSql + Sync)> = binds
         .iter()
         .map(|b| b as &(dyn ToSql + Sync))
