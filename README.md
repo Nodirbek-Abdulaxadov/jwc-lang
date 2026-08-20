@@ -108,6 +108,9 @@ cargo build --release
 | `jwc fmt [path] [--check]` | rewrite in canonical form; `--check` is the CI shape |
 | `jwc gen-sql [path] [--explain]` | the schema as Postgres DDL, deterministic and offline |
 | `jwc explain [path]` | every query the program issues, with its SQL |
+| `jwc login --token jwc_…` | store a registry key in `~/.jwc/credentials.json` |
+| `jwc publish [path]` | upload this package's manifest and sources to the registry |
+| `jwc add <name>[@version]` | download a package, verify it, and record the dependency |
 | `jwc test [path]` | run every `test` block — each in its own transaction, rolled back |
 | `jwc lsp` | the language server, over stdio: diagnostics, hover-to-SQL, go-to-definition, completion, signature help |
 | `jwc openapi [path] [--out f]` | an OpenAPI 3.1 document, derived from the route table and the typed signatures |

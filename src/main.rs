@@ -77,6 +77,33 @@ enum Command {
         #[arg(long)]
         analyze: bool,
     },
+    /// Store a registry API key in `~/.jwc/credentials.json`.
+    Login {
+        /// A `jwc_…` key, from the registry's web UI.
+        #[arg(long)]
+        token: String,
+        #[arg(long, default_value_t = jwc::registry::registry_url())]
+        registry: String,
+    },
+    /// Upload this package to the registry.
+    Publish {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = jwc::registry::registry_url())]
+        registry: String,
+        /// Print what would be uploaded and stop.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Download a package and record it as a dependency.
+    Add {
+        /// `redis`, or `redis@0.1.0`.
+        spec: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = jwc::registry::registry_url())]
+        registry: String,
+    },
     /// Run every `test` block.
     ///
     /// Each test runs in its own transaction and is rolled back, so the
@@ -228,6 +255,17 @@ fn main() -> Result<()> {
             route,
             analyze,
         } => cmd::explain(path, sql, function, route, analyze),
+        Command::Login { token, registry } => jwc::registry::login(token, registry),
+        Command::Publish {
+            path,
+            registry,
+            dry_run,
+        } => jwc::registry::publish(path, registry, dry_run),
+        Command::Add {
+            spec,
+            path,
+            registry,
+        } => jwc::registry::add(spec, path, registry),
         Command::Test {
             path,
             filter,

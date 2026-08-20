@@ -39,6 +39,7 @@ pub mod packages;
 pub mod parser;
 pub mod query;
 pub mod query_sql;
+pub mod registry;
 pub mod serve;
 pub mod snapshot;
 pub mod sql;

@@ -96,6 +96,40 @@ always be resolvable without knowing which packages are installed.
 
 ---
 
+## 4a. `jwc publish` and `jwc add`
+
+4a.1 `jwc login --token jwc_…` stores a registry key in
+`~/.jwc/credentials.json`, keyed by registry URL so a private registry and
+the public one can both be logged in at once. The file is `0600`: it holds a
+bearer token.
+
+4a.2 `jwc publish` uploads **the manifest and the `.jwc` sources**, and
+nothing else. A package is source; shipping whatever happens to sit in the
+directory is how a `.env` reaches a registry. `--dry-run` prints the list.
+
+4a.3 The archive is deterministic — sorted paths, and no timestamps,
+ownership or modes from the filesystem — so the same tree published twice
+has the same sha256.
+
+4a.4 `jwc publish` refuses a name that is not also an identifier (§1.2). A
+registry name is permanent and first-publisher-wins, so this is the last
+point at which the mistake is cheap.
+
+4a.5 `jwc add <name>[@version]` downloads into `jwc_packages/<name>/` and
+records the dependency in `jwcproj.json`, preserving the rest of the file.
+With no version it takes the newest the registry lists.
+
+4a.6 The archive is verified against the sha256 from
+`GET /api/v1/pkg/{name}`, which is a **separate request** — not against a
+checksum carried by the download response, which would be the same party
+supplying both the bytes and the value they are checked against.
+
+4a.7 An entry whose path is absolute or contains `..` is refused. The
+registry does not produce one; a registry is not the only thing that can
+serve a `.tar.gz` over a URL.
+
+---
+
 ## 5. Diagnostics introduced here
 
 | Code | Meaning |
