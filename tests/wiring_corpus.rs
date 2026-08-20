@@ -199,6 +199,91 @@ fn the_sample_wires_clean() {
     );
 }
 
+/// config.md §3.2 — a misspelled `server { }` key is otherwise silent, and
+/// two of them are worse than a wrong number.
+///
+/// `trusted_proxie` leaves the proxy list empty, so `client_ip()` reports
+/// the proxy's own address for every request and a rate limiter keyed on
+/// it collapses into one shared bucket — the failure the key exists to
+/// prevent. `max_body_byte` leaves the limit at 1 MB after someone
+/// deliberately narrowed it. Both used to pass `jwc check` clean.
+#[test]
+fn e1206_a_misspelled_server_key_is_not_silent() {
+    let diags = wire_source(concat!(
+        "database App : Postgres;\n",
+        "server {\n",
+        "    max_body_byte  = 16;\n",
+        "    trusted_proxie = [\"10.0.0.0/8\"];\n",
+        "    cors { origin = [\"https://a.example\"]; }\n",
+        "    tls { certificate = \"/c\"; key = \"/k\"; }\n",
+        "}\n",
+    ));
+    let codes: Vec<&str> = diags.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(
+        codes,
+        vec!["E1206"; 4],
+        "one per misspelling, and nothing else: {diags:#?}"
+    );
+    let text = diags
+        .iter()
+        .map(|(_, m)| m.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    for typo in ["max_body_byte", "trusted_proxie", "origin", "certificate"] {
+        assert!(text.contains(typo), "`{typo}` is not named: {text}");
+    }
+}
+
+/// The other half: a whitelist is only as good as its coverage, and a key
+/// this rejects is one config.md promises and a program cannot write.
+#[test]
+fn every_documented_server_key_is_accepted() {
+    let diags = wire_source(concat!(
+        "database App : Postgres;\n",
+        "server {\n",
+        "    max_body_bytes  = 1048576;\n",
+        "    request_timeout = \"30s\";\n",
+        "    header_timeout  = \"10s\";\n",
+        "    max_page_size   = 200;\n",
+        "    strict_slash    = true;\n",
+        "    cursor_secret   = \"s\";\n",
+        "    trusted_proxies = [\"10.0.0.0/8\"];\n",
+        "    shutdown_grace  = \"20s\";\n",
+        "    bind            = \"127.0.0.1\";\n",
+        "    cors {\n",
+        "        origins = [\"https://a.example\"]; methods = [\"GET\"];\n",
+        "        headers = [\"authorization\"]; credentials = true;\n",
+        "        max_age = \"600s\";\n",
+        "    }\n",
+        "    tls { cert = \"/c\"; key = \"/k\"; }\n",
+        "}\n",
+    ));
+    assert!(diags.is_empty(), "{diags:#?}");
+}
+
+/// Wire one source file and return its `(code, message)` diagnostics.
+fn wire_source(src: &str) -> Vec<(String, String)> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    src.hash(&mut h);
+    let dir = std::env::temp_dir().join(format!("jwc_v1_wire_{}", h.finish()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tmp");
+    std::fs::write(dir.join("a.jwc"), src).expect("write");
+    let ws = Workspace::load(&dir).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = model::build(&ws);
+    let syms = symbols::build(&ws, &built.model);
+    let out = wiring::wire(&ws, &syms)
+        .diags
+        .iter()
+        .map(|(_, d)| (d.code.to_string(), d.message.clone()))
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
 /// routing.md §4.2 — a literal segment beats a parameter segment, and that
 /// is fixed precedence rather than registration order. Two such routes are
 /// not a conflict.

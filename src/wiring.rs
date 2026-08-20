@@ -100,6 +100,71 @@ impl<'a> Wiring<'a> {
         ));
     }
 
+    /// config.md §3.2 — an unknown `server { }` key.
+    ///
+    /// This exists for the same reason `E1202` does on `init()`: a
+    /// misspelled key is otherwise **silent**. The setting keeps its
+    /// default and the deployment runs with a value nobody chose. Two of
+    /// them are worse than a wrong number — `trusted_proxie` leaves the
+    /// proxy list empty, so `client_ip()` quietly reports the proxy's
+    /// address for every request and a rate limiter keyed on it becomes
+    /// one shared bucket; `max_body_byte` leaves the limit at 1 MB after
+    /// someone deliberately narrowed it.
+    fn check_server_keys(&mut self, sv: &crate::ast::ServerDecl, fi: usize) {
+        use crate::ast::ServerEntry;
+        const KEYS: [&str; 9] = [
+            "max_body_bytes",
+            "request_timeout",
+            "header_timeout",
+            "max_page_size",
+            "strict_slash",
+            "cursor_secret",
+            "trusted_proxies",
+            "shutdown_grace",
+            "bind",
+        ];
+        const GROUPS: [&str; 2] = ["cors", "tls"];
+        const CORS: [&str; 5] = ["origins", "methods", "headers", "credentials", "max_age"];
+        const TLS: [&str; 2] = ["cert", "key"];
+
+        let unknown = |this: &mut Self, name: &str, span, what: &str, known: &[&str]| {
+            this.err(
+                Loc { file: fi, span },
+                "E1206",
+                format!("unknown {what} `{name}`"),
+                format!("the keys are: {}", known.join(", ")),
+                "config.md §3.2",
+            );
+        };
+
+        for e in &sv.entries {
+            match e {
+                ServerEntry::Set(a) => {
+                    if !KEYS.contains(&a.key.name.as_str()) {
+                        unknown(self, &a.key.name, a.key.span, "`server { }` key", &KEYS);
+                    }
+                }
+                ServerEntry::Group {
+                    name,
+                    entries,
+                    span,
+                } => {
+                    if !GROUPS.contains(&name.name.as_str()) {
+                        unknown(self, &name.name, *span, "`server { }` block", &GROUPS);
+                        continue;
+                    }
+                    let known: &[&str] = if name.name == "cors" { &CORS } else { &TLS };
+                    let what = format!("`{}` key", name.name);
+                    for a in entries {
+                        if !known.contains(&a.key.name.as_str()) {
+                            unknown(self, &a.key.name, a.key.span, &what, known);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------ routes
 
     fn collect_routes(&mut self) {
@@ -676,6 +741,13 @@ impl<'a> Wiring<'a> {
                  the files happened to load in",
                 "config.md §3",
             );
+        }
+        for (fi, file) in self.ws.files.iter().enumerate() {
+            for d in &file.program.decls {
+                if let Decl::Server(sv) = d {
+                    self.check_server_keys(sv, fi);
+                }
+            }
         }
 
         for loc in handlers.iter().skip(1) {
