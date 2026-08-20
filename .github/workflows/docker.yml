@@ -82,9 +82,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image.name }}
+          # No `org.opencontainers.image.licenses` label. It used to say MIT,
+          # which the repository does not back: there is no LICENSE file, and
+          # Cargo.toml and deny.toml both record the crate as
+          # workspace-private "until a license decision lands". An image
+          # asserting a licence its source does not grant is worse than one
+          # asserting nothing, because tooling reads the label and believes
+          # it. Put the label back in the same change that adds the LICENSE.
           labels: |
             org.opencontainers.image.description=${{ matrix.image.description }}
-            org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
 
       # `push-by-digest` publishes the layers and returns a digest without
