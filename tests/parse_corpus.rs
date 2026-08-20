@@ -90,7 +90,7 @@ fn sample_declaration_counts_match_the_spec() {
     assert_eq!(tables, 13, "tables");
     assert_eq!(views, 5, "views");
     assert_eq!(enums, 5, "enums");
-    assert_eq!(classes, 13, "classes");
+    assert_eq!(classes, 14, "classes");
     assert_eq!(services, 4, "services");
     assert_eq!(middlewares, 7, "middleware");
     assert!(routes_blocks >= 9, "routes blocks: {routes_blocks}");

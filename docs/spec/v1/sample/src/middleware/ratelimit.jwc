@@ -1,5 +1,6 @@
 namespace middleware.ratelimit;
 
+import dto.auth;
 import redis;
 
 --- Keyed on the declared route pattern, not the concrete path: one bucket
@@ -16,13 +17,25 @@ middleware RateLimit {
     }
 }
 
+--- Credential endpoints, keyed on **both** the source and the account
+--- (#39). One address spraying many accounts is stopped by the first
+--- bucket; many addresses targeting one account by the second. Keying on
+--- either alone leaves the other attack completely untouched.
+---
+--- The email is hashed into the key. A Redis key space that reads
+--- `rl:auth:id:…:someone@example.com` tells anyone who can list keys which
+--- accounts exist, which is the enumeration the endpoint refuses to do.
 middleware StrictRateLimit {
     let ip = request.client_ip();
-    let key = "rl:strict:" + string.of($ip);
+    let route = request.route();
+    let who = request.body() as Identified;
 
-    let allowed = redis.rate_limit($key, 5, 300);
+    -- Both are evaluated before either is read. Short-circuiting would let
+    -- a caller learn which bucket tripped from how long the answer took.
+    let by_ip = redis.rate_limit("rl:auth:ip:" + $route + ":" + string.of($ip), 20, 300);
+    let by_identity = redis.rate_limit("rl:auth:id:" + $route + ":" + hash.sha256($who.email), 5, 300);
 
-    if (!$allowed) {
+    if (!$by_ip or !$by_identity) {
         throw TooManyRequests("juda ko'p urinish, keyinroq qayting");
     }
 }

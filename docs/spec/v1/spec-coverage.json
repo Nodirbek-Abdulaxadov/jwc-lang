@@ -58,7 +58,7 @@
       "construct": "builtin.hash",
       "clause": "builtins \u00a76",
       "uses": 3,
-      "first_use": "src/middleware/ratelimit.jwc:39"
+      "first_use": "src/middleware/ratelimit.jwc:36"
     },
     {
       "construct": "builtin.jwt",
@@ -70,7 +70,7 @@
       "construct": "builtin.package",
       "clause": "builtins \u00a78",
       "uses": 2,
-      "first_use": "src/middleware/ratelimit.jwc:12"
+      "first_use": "src/middleware/ratelimit.jwc:13"
     },
     {
       "construct": "builtin.serve",
@@ -243,7 +243,7 @@
     {
       "construct": "doc_comment",
       "clause": "schema \u00a77",
-      "uses": 16,
+      "uses": 17,
       "first_use": "src/app.jwc:35"
     },
     {
@@ -309,14 +309,14 @@
     {
       "construct": "import.namespace",
       "clause": "names \u00a76.2",
-      "uses": 18,
+      "uses": 19,
       "first_use": "src/db/audit.jwc:3"
     },
     {
       "construct": "import.package",
       "clause": "names \u00a76.2.3",
       "uses": 2,
-      "first_use": "src/middleware/ratelimit.jwc:3"
+      "first_use": "src/middleware/ratelimit.jwc:4"
     },
     {
       "construct": "index",
@@ -453,7 +453,7 @@
     {
       "construct": "path_param.ref",
       "clause": "names \u00a75.2",
-      "uses": 3,
+      "uses": 4,
       "first_use": "src/middleware/auth.jwc:20"
     },
     {
@@ -496,7 +496,7 @@
       "construct": "request.raw_body",
       "clause": "routing \u00a75.1",
       "uses": 1,
-      "first_use": "src/middleware/ratelimit.jwc:36"
+      "first_use": "src/middleware/ratelimit.jwc:49"
     },
     {
       "construct": "request.route",

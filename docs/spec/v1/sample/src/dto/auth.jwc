@@ -11,6 +11,14 @@ class Login {
     password varchar(200) required;
 }
 
+--- The identity a credential attempt names, and nothing else. A `class`
+--- is a whitelist and extra keys are dropped (types.md §4), so this
+--- validates the body of both `register` and `login` — the rate limiter
+--- needs the email and has no business seeing the password.
+class Identified {
+    email varchar(255) required;
+}
+
 class AccountEdit {
     display_name varchar(80)? minLength(2);
 }

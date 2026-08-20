@@ -740,3 +740,104 @@ mod route_matching {
         assert!(match_route(&p, "PUT", "/orgs").is_none());
     }
 }
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::*;
+    use crate::exec::ServerConfig;
+
+    fn headers(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_lowercase(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn with_no_trusted_proxies_the_header_is_ignored_entirely() {
+        // config.md §3.3 — this is what makes a rate limiter keyed on
+        // `client_ip()` unspoofable by default. A caller who can set a
+        // header could otherwise mint a fresh bucket per request and the
+        // limit would never bind.
+        let cfg = ServerConfig::default();
+        assert!(cfg.trusted_proxies.is_empty());
+        for spoof in [
+            "1.2.3.4",
+            "9.9.9.9, 8.8.8.8",
+            "  10.0.0.1  ",
+            "not-an-address",
+            "",
+        ] {
+            assert_eq!(
+                client_ip(&cfg, "203.0.113.7", &headers(&[("X-Forwarded-For", spoof)])),
+                "203.0.113.7",
+                "`X-Forwarded-For: {spoof}` changed the answer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trusted_proxy_is_peeled_and_an_untrusted_hop_stops_the_walk() {
+        let cfg = ServerConfig {
+            trusted_proxies: vec!["10.0.0.0/8".into()],
+            ..Default::default()
+        };
+        // The peer is the proxy, and the header names the real client.
+        assert_eq!(
+            client_ip(
+                &cfg,
+                "10.0.0.1",
+                &headers(&[("X-Forwarded-For", "203.0.113.7")])
+            ),
+            "203.0.113.7"
+        );
+        // Two trusted hops: keep peeling.
+        assert_eq!(
+            client_ip(
+                &cfg,
+                "10.0.0.1",
+                &headers(&[("X-Forwarded-For", "203.0.113.7, 10.0.0.2")])
+            ),
+            "203.0.113.7"
+        );
+        // A client that prepends its own hops does not get to choose which
+        // one is read: the walk stops at the first address the configured
+        // proxies do not vouch for, which is the rightmost untrusted one.
+        assert_eq!(
+            client_ip(
+                &cfg,
+                "10.0.0.1",
+                &headers(&[("X-Forwarded-For", "1.1.1.1, 203.0.113.7")])
+            ),
+            "203.0.113.7"
+        );
+        // And a peer that is not itself trusted is the answer, header or no
+        // header.
+        assert_eq!(
+            client_ip(
+                &cfg,
+                "198.51.100.9",
+                &headers(&[("X-Forwarded-For", "1.1.1.1")])
+            ),
+            "198.51.100.9"
+        );
+    }
+
+    #[test]
+    fn a_header_by_any_other_name_is_still_ignored() {
+        // `X-Real-IP` and friends are not read at all. One header, one
+        // rule: a second source of truth is a second thing to get wrong.
+        let cfg = ServerConfig {
+            trusted_proxies: vec!["10.0.0.0/8".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            client_ip(
+                &cfg,
+                "10.0.0.1",
+                &headers(&[("X-Real-IP", "1.2.3.4"), ("Forwarded", "for=1.2.3.4")])
+            ),
+            "10.0.0.1"
+        );
+    }
+}
