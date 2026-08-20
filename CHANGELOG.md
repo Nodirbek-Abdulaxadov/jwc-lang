@@ -3,7 +3,21 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — the 1.0 language, implemented
+## [0.9.7] — the 1.0 language, implemented — 2026-08-20
+
+**BREAKING: every 0.9.x program stops compiling.** v0.25.0 replaced the
+grammar with the one in `docs/spec/v1/` and deleted the old front-end.
+`entity`, `dbcontext`, `with`, `via`, `validate body`, `new … from`,
+`patch`, `group`, `mount` and `dome` are gone; the compiler names the
+replacement rather than accepting them. There is no codemod — the shapes
+do not map one-to-one, which is why the redesign happened. 0.9.x
+documentation is archived under `docs/archive-0.9/`, and a 0.9.6 binary
+still runs 0.9.6 programs.
+
+> `SEMVER.md` calls a patch bump "nothing a user-written program can
+> observe a behavioural change from", and this is the opposite of that.
+> The number is the maintainer's call and it is `0.9.7`; the break is
+> written down here so nobody meets it by surprise.
 
 The section this replaces opened with **"No code changes. The language
 design for 1.0 is now in the repository."** That was true when it was
@@ -89,7 +103,7 @@ miss against a decoy hash, at 410.9 ms and 414.8 ms.
 
 ---
 
-### After v0.29.0 — the fix pass
+### After v0.29.0 — the fix pass in this release
 
 Everything below came out of running things that had never been run.
 
