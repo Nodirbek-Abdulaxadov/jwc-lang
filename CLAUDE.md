@@ -97,6 +97,7 @@ What each suite is for:
 | `lsp` | a scripted session against the real stdio protocol |
 | `jwc_test` | `jwc test` itself: isolation, order, and what `assert fails` refuses |
 | `packages` | what a package may declare, and its `raises` boundary |
+| `hardening` | the `server { }` limits, before any handler runs |
 | `registry` | `login`/`publish`/`add` against a stub registry, including what they refuse |
 
 `tests/tooling.rs` validates the emitted OpenAPI against

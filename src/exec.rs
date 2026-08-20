@@ -97,6 +97,12 @@ pub struct Program {
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub max_body_bytes: usize,
+    /// Whole-request ceiling (config.md §3.2). Past it the answer is 504
+    /// and the handler's task is dropped — a request that has already lost
+    /// its client is a connection and a pool slot nobody is waiting on.
+    pub request_timeout: std::time::Duration,
+    /// Drain window on SIGTERM.
+    pub shutdown_grace: std::time::Duration,
     pub max_page_size: i64,
     /// HMAC key for keyset cursors (config.md §3). A `page` query with no
     /// secret configured is `E1205`, so the runtime never has to decide
@@ -104,16 +110,59 @@ pub struct ServerConfig {
     pub cursor_secret: String,
     pub strict_slash: bool,
     pub trusted_proxies: Vec<String>,
+    /// config.md §3.4 — when present, `OPTIONS` is answered for every
+    /// declared route and the headers go on every response. When absent, no
+    /// CORS header is emitted at all.
+    pub cors: Option<CorsConfig>,
+    /// A `tls { }` block was written. The listener is HTTP-only, so `serve`
+    /// refuses rather than serving plain text under a name that says
+    /// otherwise.
+    pub tls_declared: bool,
+    /// Likewise `header_timeout`: reading the request line and headers is
+    /// hyper's business and `axum::serve` does not expose the knob.
+    pub header_timeout_declared: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CorsConfig {
+    pub origins: Vec<String>,
+    pub methods: Vec<String>,
+    pub headers: Vec<String>,
+    pub credentials: bool,
+    pub max_age: Option<std::time::Duration>,
+}
+
+impl CorsConfig {
+    /// The `Access-Control-Allow-Origin` for a request, or `None` when the
+    /// origin is not allowed.
+    ///
+    /// The origin is echoed rather than answered with `*`, because `*` and
+    /// `credentials` are mutually exclusive in the fetch spec and echoing
+    /// keeps one code path for both. `["*"]` still means "any origin", and
+    /// with credentials on it echoes — which is the only way that
+    /// combination can work at all, and the reason `*` with credentials is
+    /// worth thinking about before writing.
+    pub fn allow(&self, origin: &str) -> Option<String> {
+        if self.origins.iter().any(|o| o == "*") || self.origins.iter().any(|o| o == origin) {
+            return Some(origin.to_string());
+        }
+        None
+    }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             max_body_bytes: 1_048_576,
+            request_timeout: std::time::Duration::from_secs(30),
+            shutdown_grace: std::time::Duration::from_secs(20),
             max_page_size: 100,
             cursor_secret: String::new(),
             strict_slash: true,
             trusted_proxies: Vec::new(),
+            cors: None,
+            tls_declared: false,
+            header_timeout_declared: false,
         }
     }
 }

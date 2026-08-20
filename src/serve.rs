@@ -132,7 +132,22 @@ fn pattern_of(prefix: &str, suffix: &str) -> String {
 fn read_server_config(s: &ServerDecl) -> ServerConfig {
     let mut c = ServerConfig::default();
     for e in &s.entries {
-        let ServerEntry::Set(a) = e else { continue };
+        let a = match e {
+            ServerEntry::Set(a) => a,
+            ServerEntry::Group { name, entries, .. } => {
+                match name.name.as_str() {
+                    "cors" => c.cors = Some(read_cors(entries)),
+                    // config.md §3.5. Serving plain HTTP under a declared
+                    // `tls { }` is the one misconfiguration an operator
+                    // cannot see: the listener answers, and every byte is
+                    // in the clear. Refusing at boot is the only honest
+                    // outcome while the listener is HTTP-only.
+                    "tls" => c.tls_declared = true,
+                    _ => {}
+                }
+                continue;
+            }
+        };
         match a.key.name.as_str() {
             "max_body_bytes" => {
                 if let ExprKind::Int(n) = &*a.value.kind {
@@ -154,6 +169,21 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
                     c.strict_slash = *b;
                 }
             }
+            "request_timeout" => {
+                if let Some(d) = config_duration(&a.value) {
+                    c.request_timeout = d;
+                }
+            }
+            "shutdown_grace" => {
+                if let Some(d) = config_duration(&a.value) {
+                    c.shutdown_grace = d;
+                }
+            }
+            "header_timeout" => {
+                // Read and remembered so `serve` can refuse rather than
+                // silently not enforce it — see `tls` above, same reasoning.
+                c.header_timeout_declared = config_duration(&a.value).is_some();
+            }
             "trusted_proxies" => {
                 if let ExprKind::Array(items) = &*a.value.kind {
                     c.trusted_proxies = items
@@ -169,6 +199,64 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
         }
     }
     c
+}
+
+fn read_cors(entries: &[crate::ast::Assignment]) -> crate::exec::CorsConfig {
+    let mut cors = crate::exec::CorsConfig::default();
+    for a in entries {
+        match a.key.name.as_str() {
+            "origins" => cors.origins = string_array(&a.value),
+            "methods" => cors.methods = string_array(&a.value),
+            "headers" => cors.headers = string_array(&a.value),
+            "credentials" => {
+                if let ExprKind::Bool(b) = &*a.value.kind {
+                    cors.credentials = *b;
+                }
+            }
+            "max_age" => cors.max_age = config_duration(&a.value),
+            _ => {}
+        }
+    }
+    cors
+}
+
+fn string_array(e: &Expr) -> Vec<String> {
+    match &*e.kind {
+        ExprKind::Array(items) => items
+            .iter()
+            .filter_map(|i| match &*i.kind {
+                ExprKind::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `"30s"`, `"600ms"`, `"5m"`, `"1h"` (config.md §3.2).
+///
+/// A bare number is refused rather than read as seconds: `request_timeout =
+/// 30` and `= "30s"` would then mean the same thing and `= 30000` would
+/// silently mean eight hours.
+pub fn parse_duration(text: &str) -> Option<std::time::Duration> {
+    let t = text.trim();
+    let (value, unit) = match t.find(|c: char| c.is_ascii_alphabetic()) {
+        Some(i) => (&t[..i], &t[i..]),
+        None => return None,
+    };
+    let n: u64 = value.parse().ok()?;
+    let d = match unit {
+        "ms" => std::time::Duration::from_millis(n),
+        "s" => std::time::Duration::from_secs(n),
+        "m" => std::time::Duration::from_secs(n * 60),
+        "h" => std::time::Duration::from_secs(n * 3600),
+        _ => return None,
+    };
+    Some(d)
+}
+
+fn config_duration(e: &Expr) -> Option<std::time::Duration> {
+    config_string(e).as_deref().and_then(parse_duration)
 }
 
 /// A `server { }` value that is a string: a literal, or `env("NAME")`.
@@ -346,10 +434,73 @@ fn trusts(cidr: &str, addr: &str) -> bool {
 
 pub async fn handle(program: Arc<Program>, incoming: Incoming) -> Response {
     // §5.1 — the body is read once into a bounded buffer, before middleware.
-    // A webhook signature check therefore never sees a truncated body.
+    // A webhook signature check therefore never sees a truncated body, and
+    // an oversized one is refused **here**, ahead of the chain: middleware
+    // that has already run a rate-limit or a signature check on a body the
+    // server was going to reject anyway is work an attacker chose.
+    let origin = incoming.headers.get("origin").cloned();
     if incoming.body.len() > program.server.max_body_bytes {
-        return Response::message(413, "request body too large");
+        return with_cors(
+            &program,
+            origin.as_deref(),
+            Response::message(413, "request body too large"),
+        );
     }
+
+    // config.md §3.4 — a preflight is answered before routing, because
+    // `OPTIONS` reaches no handler and the browser is asking about the
+    // route, not calling it.
+    if incoming.method.eq_ignore_ascii_case("OPTIONS") && program.server.cors.is_some() {
+        return with_cors(&program, origin.as_deref(), Response::empty(204));
+    }
+    let answer = handle_inner(program.clone(), incoming).await;
+    with_cors(&program, origin.as_deref(), answer)
+}
+
+/// The CORS headers for a request, when a `cors { }` block is declared.
+///
+/// Absent, nothing is added at all: a browser refusing a cross-origin call
+/// is the correct default, and a header emitted "just in case" is a policy
+/// nobody wrote.
+fn with_cors(program: &Program, origin: Option<&str>, mut r: Response) -> Response {
+    let Some(cors) = &program.server.cors else {
+        return r;
+    };
+    let Some(origin) = origin else {
+        return r;
+    };
+    let Some(allow) = cors.allow(origin) else {
+        return r;
+    };
+    r.headers
+        .push(("access-control-allow-origin".into(), allow));
+    // Any cache in front of this has to key on the origin, or one caller's
+    // answer is served to another's.
+    r.headers.push(("vary".into(), "Origin".into()));
+    if cors.credentials {
+        r.headers
+            .push(("access-control-allow-credentials".into(), "true".into()));
+    }
+    if !cors.methods.is_empty() {
+        r.headers.push((
+            "access-control-allow-methods".into(),
+            cors.methods.join(", "),
+        ));
+    }
+    if !cors.headers.is_empty() {
+        r.headers.push((
+            "access-control-allow-headers".into(),
+            cors.headers.join(", "),
+        ));
+    }
+    if let Some(age) = cors.max_age {
+        r.headers
+            .push(("access-control-max-age".into(), age.as_secs().to_string()));
+    }
+    r
+}
+
+async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
 
     let Some((route, binds)) = match_route(&program, &incoming.method, &incoming.path) else {
         return Response::message(404, "not found");
@@ -599,6 +750,26 @@ fn percent_decode(s: &str) -> String {
 /// buffer, middleware, the error model and the after chain all live in
 /// `handle`, which is what the golden tests drive directly.
 pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
+    // Refuse rather than silently not enforce. Both of these are settings
+    // an operator writes down and then believes; serving plain HTTP under a
+    // declared `tls { }`, or accepting a slow header dribble under a
+    // declared `header_timeout`, is worse than not offering the key.
+    if program.server.tls_declared {
+        bail!(
+            "`server {{ tls {{ … }} }}` is declared, and this build serves plain HTTP. \
+             Terminate TLS at a proxy and remove the block, or the listener would be \
+             in the clear under a name that says otherwise."
+        );
+    }
+    if program.server.header_timeout_declared {
+        bail!(
+            "`server {{ header_timeout }}` is declared and this build does not enforce \
+             it — reading the request line and headers is the HTTP server's, and \
+             `axum::serve` does not expose the knob. Set it on the proxy in front, or \
+             remove the key rather than believing it."
+        );
+    }
+    let grace_period = program.server.shutdown_grace;
     use axum::body::Bytes;
     use axum::extract::{ConnectInfo, State};
     use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -622,18 +793,30 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
             })
             .collect();
 
-        let r = handle(
-            program,
-            Incoming {
+        let limit = program.server.request_timeout;
+        let r = match tokio::time::timeout(
+            limit,
+            handle(
+                program,
+                Incoming {
                 method: method.as_str().to_string(),
                 path: uri.path().to_string(),
                 query,
                 headers: hdrs,
                 body: body.to_vec(),
-                peer_ip: peer.ip().to_string(),
-            },
+                    peer_ip: peer.ip().to_string(),
+                },
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(r) => r,
+            // config.md §3.2 — the handler's task is dropped here, which
+            // releases whatever it was holding. A request that has already
+            // lost its client is a connection and a pool slot nobody is
+            // waiting on.
+            Err(_) => Response::message(504, "request timed out"),
+        };
 
         let mut response = axum::response::Response::builder()
             .status(StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
@@ -650,12 +833,41 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("listening on http://{addr}");
+    let grace = grace_period;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        println!("draining for {}s", grace.as_secs());
+    })
     .await?;
     Ok(())
+}
+
+/// SIGTERM, or Ctrl-C. A deploy sends the first and a developer the second,
+/// and a server that only handles one of them drops in-flight requests on
+/// whichever it missed.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
 }
 
 #[cfg(test)]
@@ -839,5 +1051,104 @@ mod client_ip_tests {
             ),
             "10.0.0.1"
         );
+    }
+}
+
+#[cfg(test)]
+mod server_limits {
+    use super::*;
+    use crate::exec::CorsConfig;
+
+    #[test]
+    fn durations_carry_a_unit_or_are_not_read() {
+        assert_eq!(parse_duration("30s"), Some(std::time::Duration::from_secs(30)));
+        assert_eq!(parse_duration("600ms"), Some(std::time::Duration::from_millis(600)));
+        assert_eq!(parse_duration("5m"), Some(std::time::Duration::from_secs(300)));
+        assert_eq!(parse_duration("1h"), Some(std::time::Duration::from_secs(3600)));
+        assert_eq!(parse_duration(" 30s "), Some(std::time::Duration::from_secs(30)));
+        // A bare number is refused, not read as seconds: `= 30` and `= "30s"`
+        // would then mean the same thing and `= 30000` would silently mean
+        // eight hours.
+        assert_eq!(parse_duration("30"), None);
+        assert_eq!(parse_duration("s"), None);
+        assert_eq!(parse_duration("30 seconds"), None);
+    }
+
+    #[test]
+    fn an_origin_is_echoed_and_an_unlisted_one_gets_nothing() {
+        let cors = CorsConfig {
+            origins: vec!["https://app.example.com".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            cors.allow("https://app.example.com").as_deref(),
+            Some("https://app.example.com")
+        );
+        assert_eq!(cors.allow("https://evil.example.com"), None);
+        // Echoed rather than answered with `*`, because `*` and
+        // `credentials` are mutually exclusive in the fetch spec and
+        // echoing keeps one code path for both.
+        let any = CorsConfig {
+            origins: vec!["*".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            any.allow("https://anything.example").as_deref(),
+            Some("https://anything.example")
+        );
+    }
+
+    #[test]
+    fn a_declared_tls_or_header_timeout_refuses_to_boot() {
+        // Serving plain HTTP under a declared `tls { }` is the one
+        // misconfiguration an operator cannot see: the listener answers,
+        // and every byte is in the clear.
+        let src = "namespace s;\nserver { tls { cert = \"/c\"; key = \"/k\"; } }\n";
+        let parsed = crate::parse_str("<t>", src);
+        let decl = parsed.program.decls.iter().find_map(|d| match d {
+            Decl::Server(s) => Some(s),
+            _ => None,
+        });
+        let cfg = read_server_config(decl.expect("server block"));
+        assert!(cfg.tls_declared);
+
+        let src = "namespace s;\nserver { header_timeout = \"10s\"; }\n";
+        let parsed = crate::parse_str("<t>", src);
+        let decl = parsed.program.decls.iter().find_map(|d| match d {
+            Decl::Server(s) => Some(s),
+            _ => None,
+        });
+        let cfg = read_server_config(decl.expect("server block"));
+        assert!(cfg.header_timeout_declared);
+    }
+
+    #[test]
+    fn the_cors_block_is_read_whole() {
+        let src = "namespace s;\n\
+                   server {\n\
+                   \x20   request_timeout = \"45s\";\n\
+                   \x20   shutdown_grace  = \"5s\";\n\
+                   \x20   cors {\n\
+                   \x20       origins     = [\"https://a.example\"];\n\
+                   \x20       methods     = [\"GET\", \"POST\"];\n\
+                   \x20       headers     = [\"authorization\"];\n\
+                   \x20       credentials = true;\n\
+                   \x20       max_age     = \"600s\";\n\
+                   \x20   }\n\
+                   }\n";
+        let parsed = crate::parse_str("<t>", src);
+        assert!(!parsed.has_errors(), "{}", parsed.render_all());
+        let decl = parsed.program.decls.iter().find_map(|d| match d {
+            Decl::Server(s) => Some(s),
+            _ => None,
+        });
+        let cfg = read_server_config(decl.expect("server block"));
+        assert_eq!(cfg.request_timeout, std::time::Duration::from_secs(45));
+        assert_eq!(cfg.shutdown_grace, std::time::Duration::from_secs(5));
+        let cors = cfg.cors.expect("cors");
+        assert_eq!(cors.origins, vec!["https://a.example".to_string()]);
+        assert_eq!(cors.methods, vec!["GET".to_string(), "POST".to_string()]);
+        assert!(cors.credentials);
+        assert_eq!(cors.max_age, Some(std::time::Duration::from_secs(600)));
     }
 }

@@ -118,6 +118,27 @@ declared route. When absent, no CORS headers are emitted at all.
 3.5 `tls` — when present the listener is HTTPS. Absent means plain HTTP,
 which is correct behind a terminating proxy.
 
+**Not implemented.** The listener is HTTP-only, and a declared `tls { }`
+makes `jwc serve` **refuse to boot** rather than serve plain text under a
+name that says otherwise. That is the one misconfiguration an operator
+cannot see for themselves: the listener answers, and every byte is in the
+clear. Terminate at a proxy and leave the block out.
+
+3.6 `header_timeout` is likewise **not enforced**, and a declared one
+refuses to boot for the same reason: reading the request line and headers
+belongs to the HTTP server, and `axum::serve` does not expose the knob. Set
+it on the proxy in front. The default in the table is what the runtime would
+use if it could, not a promise it keeps.
+
+3.7 `request_timeout` **is** enforced, around the whole of `handle`. Past it
+the answer is 504 and the handler's task is dropped, which releases whatever
+it held: a request that has already lost its client is a connection and a
+pool slot nobody is waiting on.
+
+3.8 `shutdown_grace` is the drain window on SIGTERM *and* on Ctrl-C. A
+server that handles only one of them drops in-flight requests on whichever
+it missed.
+
 ---
 
 ## 4. Environment variables read by the runtime
