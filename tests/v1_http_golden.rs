@@ -535,6 +535,90 @@ async fn http_golden() {
     descending.sort_by_key(|id| std::cmp::Reverse(id.parse::<i64>().unwrap()));
     assert_eq!(seen, descending, "the order did not survive paging: {seen:?}");
 
+    // ---- every route answers (ROADMAP v0.25.0's done criterion).
+    //
+    // Not that every route answers *correctly* — the cases above do that
+    // for the ones worth pinning. This rules out the failure the query
+    // compiler could still produce: a route that reaches the database and
+    // faults, which is a 500 and looks like nothing else.
+    let ids: HashMap<&str, &str> = [
+        ("org_id", org.as_str()),
+        ("invoice_id", "1"),
+        ("invite_id", "1"),
+        ("account_id", "1"),
+    ]
+    .into_iter()
+    .collect();
+    let bodies: HashMap<&str, &str> = [
+        ("POST /api/v1/orgs", r#"{"slug":"smoke","name":"Smoke"}"#),
+        ("PATCH /api/v1/orgs/{org_id}", r#"{"name":"Renamed"}"#),
+        (
+            "POST /api/v1/orgs/{org_id}/invites",
+            r#"{"email":"i@example.com","role":"member"}"#,
+        ),
+        (
+            "PATCH /api/v1/orgs/{org_id}/members/{account_id}",
+            r#"{"role":"admin"}"#,
+        ),
+        (
+            "POST /api/v1/orgs/{org_id}/invoices",
+            r#"{"lines":[{"description":"smoke","quantity":1,"unit_price":"1.00"}]}"#,
+        ),
+        (
+            "POST /api/v1/orgs/{org_id}/subscription",
+            r#"{"plan_code":"pro"}"#,
+        ),
+    ]
+    .into_iter()
+    .collect();
+
+    let mut faulted = Vec::new();
+    let mut answered = 0usize;
+    for route in &program.routes {
+        let path: String = route
+            .segments
+            .iter()
+            .map(|seg| match seg {
+                jwc::v1::wiring::Segment::Literal(l) => format!("/{l}"),
+                jwc::v1::wiring::Segment::Param { name, .. } => {
+                    format!("/{}", ids.get(name.as_str()).copied().unwrap_or("1"))
+                }
+            })
+            .collect();
+        let key = format!("{} {}", route.method, route.pattern);
+        let mut c = case(&key, method_of(&route.method), &path, 200)
+            .header("authorization", &bearer);
+        if let Some(b) = bodies.get(key.as_str()) {
+            c = c.json(b);
+        }
+        if route.pattern.contains("/webhooks/") {
+            c = c.json(PAY_OK).header("x-signature", hook(PAY_OK));
+        }
+        let r = run(&program, &c).await;
+        answered += 1;
+        if r.status >= 500 {
+            faulted.push(format!("{key} -> {} {}", r.status, r.body));
+        }
+    }
+    assert_eq!(answered, 25, "the sample has 25 routes");
+    assert!(
+        faulted.is_empty(),
+        "routes that faulted:\n{}",
+        faulted.join("\n")
+    );
+
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     assert!(ran >= 25, "expected the golden set, ran {ran}");
+}
+
+/// `Case::method` is `&'static str`; the route table's is owned.
+fn method_of(m: &str) -> &'static str {
+    match m {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PATCH" => "PATCH",
+        "PUT" => "PUT",
+        "DELETE" => "DELETE",
+        other => panic!("unknown method {other}"),
+    }
 }

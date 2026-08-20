@@ -27,3 +27,57 @@ view AccountReports of App.s {
             as many reports orderby email asc limit 100
         as { id, email, reports: { id, email } }
 }
+
+--- Two self-joins in one query: an invite's inviter and its acceptor are
+--- the same table twice more. Nothing here can lean on the table name.
+table Invites of App.s {
+    id          bigint primary key identity;
+    email       varchar(255);
+    invited_by  bigint;
+    accepted_by bigint?;
+
+    foreign key (invited_by)  references App.s.Accounts (id);
+    foreign key (accepted_by) references App.s.Accounts (id);
+}
+
+view InviteParties of App.s {
+    select I from App.s.Invites
+        left join App.s.Accounts B on B.id == I.invited_by as one inviter
+        left join App.s.Accounts C on C.id == I.accepted_by as one acceptor
+        as {
+            id,
+            email,
+            inviter:  { id, email },
+            acceptor: { id, email },
+        }
+}
+
+service Chains {
+    --- A chain: an account, its manager, and the manager's manager. The
+    --- second hop attaches to the first because its `on` names it.
+    function grandmanager() {
+        return select A from App.s.Accounts
+            left join App.s.Accounts M on M.id == A.manager_id as one manager
+            left join App.s.Accounts G on G.id == M.manager_id as one manager under manager
+            as { id, email, manager: { id, email, manager: { id, email } } }
+            orderby A.id asc;
+    }
+
+    --- A filtered self-collection: direct reports who have a manager set,
+    --- which every report does — the point is that the join-level `where`
+    --- reaches the joined binding and not the driving one.
+    function reports_with_email(pattern: text) {
+        return select A from App.s.Accounts
+            left join App.s.Accounts R on R.manager_id == A.id
+                where R.email like $pattern
+                as many reports orderby email asc limit 100
+            as { id, email, reports: { id, email } }
+            orderby A.id asc;
+    }
+
+    --- Selecting from a view that is itself a self-join.
+    function parties() {
+        return select IP from App.s.InviteParties
+            orderby id asc;
+    }
+}

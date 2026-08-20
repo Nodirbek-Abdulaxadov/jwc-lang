@@ -17,3 +17,36 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
         ORDER BY t1.email
         LIMIT ($1::text)::int) c
   ) t1_agg ON true) q
+
+-- ── view InviteParties ──
+SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'email', t0.email, 'inviter', CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, 'email', t1.email) END, 'acceptor', CASE WHEN t2.id IS NULL THEN NULL ELSE json_build_object('id', t2.id::text, 'email', t2.email) END) AS j
+  FROM s.invites t0
+  LEFT JOIN s.accounts t1 ON t1.id = t0.invited_by
+  LEFT JOIN s.accounts t2 ON t2.id = t0.accepted_by) q
+
+-- ── Chains.grandmanager ──
+SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'email', t0.email, 'manager', CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, 'email', t1.email, 'manager', CASE WHEN t2.id IS NULL THEN NULL ELSE json_build_object('id', t2.id::text, 'email', t2.email) END) END) AS j
+  FROM s.accounts t0
+  LEFT JOIN s.accounts t1 ON t1.id = t0.manager_id
+  LEFT JOIN s.accounts t2 ON t2.id = t1.manager_id
+  ORDER BY t0.id) q
+
+-- ── Chains.reports_with_email ──
+-- $1 = $pattern :: varchar(255)
+-- $2 = 100 :: int
+SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'email', t0.email, 'reports', coalesce(t1_agg.data, '[]'::json)) AS j
+  FROM s.accounts t0
+  LEFT JOIN LATERAL (
+      SELECT coalesce(json_agg(c.j), '[]'::json) AS data
+        FROM (SELECT json_build_object('id', t1.id::text, 'email', t1.email) AS j
+        FROM s.accounts t1
+        WHERE t1.manager_id = t0.id AND t1.email LIKE ($1::text)::varchar(255)
+        ORDER BY t1.email
+        LIMIT ($2::text)::int) c
+  ) t1_agg ON true
+  ORDER BY t0.id) q
+
+-- ── Chains.parties ──
+SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'email', t0.email, 'inviter', t0.inviter, 'acceptor', t0.acceptor) AS j
+  FROM s.invite_parties t0
+  ORDER BY t0.id) q

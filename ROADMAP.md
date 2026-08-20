@@ -443,12 +443,8 @@ Bittasi validatsiyada: `min`/`max` o'nlik son ustida jimgina o'tib ketardi
 va chegara ham o'nlik bo'lishi mumkin.
 
 **Ochiq qolgani:**
-- **`/api/v1/me/orgs`** — `MemberAccess` view'idan o'qiydi, view esa query
-  compiler'ga bog'liq (v0.25.0). Qolgan uchta guruh ishlaydi. Umuman
-  olganda namunaning **join/view ishlatadigan har bir endpoint'i** shu
-  sababdan v0.25.0 ni kutadi va aniq runtime xatosi beradi, taxminiy
-  natija emas.
-- **`page` / keyset pagination** — xuddi shu sabab.
+- ~~**`/api/v1/me/orgs`**~~ va ~~**`page`**~~ — ikkalasi ham v0.25.0 da
+  yopildi. Namunaning **25 ta endpoint'ining hammasi** javob beradi.
 - `E1`–`E14` ning `E3` (exhaustiveness) qismi amalda har doim qanoatlanadi,
   chunki 1.0 grammatikasida har bir e'lon qilingan xatoning default status'i
   bor (errors §4.3). Bu — dizayn, kamchilik emas.
@@ -526,6 +522,61 @@ merge qilinadi.
 (plan assertioni); self-join corpus'i (6 holat) kompilyatsiya bo'ladi;
 raw-tracking diagnostikasi namunadagi har bir query uchun to'g'ri
 `preserved`/`lost` beradi.
+
+**Holat: yopildi.** Besh bosqich, beshta alohida commit.
+`src/v1/{query,query_sql,views,cursor}.rs` + `ddl.rs`, `check.rs`,
+`exec.rs`, `sql.rs`.
+
+**25.a** — join daraxti. Biriktirish endi ochiq: join natijasi `on` bandi
+nomlagan (qo'shilayotgandan boshqa) binding'ga osiladi; ikki nomzod —
+`E0510`, yechimi `under <nom>`. `under` alias'ni ham, join chiqaradigan
+maydon nomini ham qabul qiladi. `as group` kalit so'zi qo'shildi: ilgari
+`as` siz join "agregat uchun" degani edi, ya'ni "men agregat qilmoqchi
+edim" bilan "proyeksiyani unutdim" bir xil matn edi (`E0535`). Join ustida
+`where` — bola kolleksiyasini filtrlaydi, haydovchi qatorni emas.
+
+**25.b** — emissiya. `as one` + `left join` → bola PK'si bo'yicha
+`CASE WHEN … IS NULL THEN NULL` (null obyekt, null'lardan iborat obyekt
+emas); `inner join` da guard yo'q. `as many` → `LEFT JOIN LATERAL`,
+`where`/`orderby`/`limit` lateral ichida — `json_agg(… ORDER BY …)` emas:
+u tartiblaydi, lekin chegaralay olmaydi, va yonma-yon ikki kolleksiya
+bir-birining qatorlarini ko'paytiradi. `sql.rs::select` o'chirildi: bitta
+yo'l qoldi. `tests/sql_golden/` — namunaning har bir query'si + fokusli
+holatlar, SQL va bind parametrlari bilan muzlatilgan; jonli Postgres'da
+esa golden ko'rmaydigan narsalar tekshiriladi (3 nota + 2 tag → 3 va 2,
+6 va 6 emas).
+
+**25.c** — agregatlar. `count`/`sum`/`min`/`max`/`avg`, `count.distinct`,
+`FILTER (WHERE …)`, `having`. **`sum` kengayadi** (`int → bigint`,
+`bigint`/`numeric` → `numeric`) va `avg` — `numeric?`: operand kengligini
+saqlagan `sum` aynan sumni ma'noli qiladigan ma'lumotda toshib ketadi.
+`W0502` — ikki bare join fan-out beradi, `count` ikkinchisining qatorlarini
+ham sanaydi; yechimi `count.distinct`.
+
+**25.d** — view'lar. `CREATE VIEW` chiqadi, view — haqiqiy DB obyekti.
+Ustunlari — proyeksiyasi; skalyarlar Postgres tipini saqlaydi (aks holda
+`where org_id == @org_id` sonni matn bilan solishtirardi), nested `one`
+qo'shimcha `x__<maydon>` ustunlarini beradi — `orderby org.name` shularga
+tushadi, JSON path'ga emas (N6). **Ikki bosqichli pushdown** (#44):
+kolleksiyali relation ustidan chegaralangan sahifa avval kalitlarni oladi
+(`WITH page AS MATERIALIZED`, **base jadval** ustidan — view ustidan
+kalit olish uning lateral'larini baribir bajaradi). Isbotlanmasa —
+`E0542`, jimgina O(table) plan emas. `EXPLAIN ANALYZE` bilan tasdiqlandi
+va test o'z kontrolini olib yuradi: indekssiz tartibda rewrite'siz shakl
+kolleksiyani 200 marta quradi, rewrite bilan 5 marta.
+
+**25.e** — pagination va valve. Keyset kursor imzolanadi (`E1205` —
+`cursor_secret` siz `page` yo'q): kursor — mijoz beradigan predikat, imzosiz
+u hech kim tekshirmagan ikkinchi filtr bo'lardi. Konvert uch ustun bilan
+qaytadi, chunki `items` Postgres bergan matn bo'lib yetib borishi kerak.
+`exists` / `not exists`, `in (…)` va `in ($massiv)`. `raw()` — SQL literal
+bo'lishi shart (`E0610`), `view` ichida taqiqlangan (`E0611`),
+`jwc v1 explain` hammasini sanab beradi. `W0501` — chegarasiz kolleksiya.
+
+Yo'l-yo'lakay ikkita runtime kamchiligi topildi: `set value = value + 1`
+jarayonda hisoblanardi (endi SQL'da — aks holda avval o'qish kerak, ikki
+chaqiruvchi esa bir xil sonni o'qiydi), va `==?` dagi yalang'och
+`$2 IS NULL` Postgres'ga tip bermasdi.
 
 ---
 
