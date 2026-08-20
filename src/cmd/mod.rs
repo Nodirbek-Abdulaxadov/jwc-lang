@@ -369,6 +369,104 @@ pub fn ast(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// `jwc migrate new <name> [path]` — write the next migration.
+///
+/// Offline (migrations.md §1): the previous state comes from the last
+/// `.snapshot.json` under `migrations/`, never from a database.
+pub fn migrate_new(
+    path: PathBuf,
+    name: String,
+    dir: Option<PathBuf>,
+    explain: bool,
+    dry_run: bool,
+) -> Result<()> {
+    use crate::diag::Severity;
+
+    let ws = crate::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
+        bail!("no .jwc files under {}", path.display());
+    }
+    if ws.has_parse_errors() {
+        eprint!("{}", ws.parse_errors().join(""));
+        bail!("{} did not parse", path.display());
+    }
+
+    let built = crate::model::build(&ws);
+    let schema_errors = built
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == Severity::Error)
+        .count();
+    for (loc, d) in &built.diags {
+        eprint!("{}", ws.render(*loc, d));
+    }
+    if schema_errors > 0 {
+        bail!("{schema_errors} schema error{}", plural(schema_errors));
+    }
+
+    let dir = dir.unwrap_or_else(|| {
+        let root = if path.is_file() {
+            path.parent().unwrap_or(&path).to_path_buf()
+        } else {
+            path.clone()
+        };
+        root.join("migrations")
+    });
+    let prev = crate::snapshot::previous(&dir).map_err(anyhow::Error::msg)?;
+    let ordinal = crate::snapshot::next_ordinal(&dir);
+    let plan = crate::migrate::plan(&prev, &built.model, ordinal, &name);
+
+    if explain {
+        for e in &plan.explain {
+            let where_ = match e.loc {
+                Some(l) => ws.file_line(l),
+                // A drop has no declaration; its cause is an absence.
+                None => "(removed)".to_string(),
+            };
+            println!("{:>2}  {:<60}  {where_}", e.phase as u8, e.text);
+        }
+    }
+
+    let mut errors = 0usize;
+    for (loc, d) in &plan.diags {
+        if d.severity == Severity::Error {
+            errors += 1;
+        }
+        eprint!("{}", ws.render(*loc, d));
+    }
+    if errors > 0 {
+        bail!("{errors} error{} — no migration written", plural(errors));
+    }
+
+    if plan.is_empty() {
+        println!("no schema changes");
+        return Ok(());
+    }
+
+    if dry_run {
+        for f in &plan.files {
+            println!("── {}.up.sql\n{}", f.stem, f.up);
+            println!("── {}.down.sql\n{}", f.stem, f.down);
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dir)?;
+    for f in &plan.files {
+        let up = dir.join(format!("{}.up.sql", f.stem));
+        if up.exists() {
+            bail!("{} already exists", display_relative(&up));
+        }
+        std::fs::write(&up, &f.up)?;
+        std::fs::write(dir.join(format!("{}.down.sql", f.stem)), &f.down)?;
+        if let Some(snap) = &f.snapshot {
+            std::fs::write(dir.join(format!("{}.snapshot.json", f.stem)), snap)?;
+        }
+        println!("{}", display_relative(&up));
+    }
+    Ok(())
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""

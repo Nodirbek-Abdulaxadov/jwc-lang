@@ -13,8 +13,11 @@
 
 use crate::model::{ColumnObj, SchemaModel, SqlType, TableObj};
 use crate::naming::quote_ident;
+use crate::snapshot::{
+    self, ColumnSnapshot, EnumSnapshot, ForeignKeySnapshot, FunctionSnapshot, IndexSnapshot,
+    SchemaSnapshot, TableSnapshot, TriggerSnapshot,
+};
 use crate::workspace::{Loc, Workspace};
-use crate::ast::RefAction;
 
 /// One emitted statement plus where it came from.
 pub struct Statement {
@@ -40,10 +43,18 @@ pub enum Phase {
 pub fn emit(model: &SchemaModel) -> Vec<Statement> {
     let mut out = Vec::new();
 
-    // 1 — schemas
+    // Every statement below is rendered from the *snapshot* form of the
+    // object, never from the model directly. `jwc migrate` emits from a
+    // snapshot too, so one renderer serves both and the DDL a migration
+    // applies cannot drift from the DDL `gen-sql` prints. The model is
+    // still what is walked, because it is the only side carrying source
+    // locations.
     for s in &model.schemas {
         out.push(Statement {
-            sql: format!("CREATE SCHEMA IF NOT EXISTS {};", quote_ident(&s.physical)),
+            sql: create_schema(&SchemaSnapshot {
+                name: s.physical.clone(),
+                declared: s.declared.clone(),
+            }),
             loc: s.loc,
             phase: Phase::Schema,
         });
@@ -52,18 +63,13 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
     // 2 — enum types (only the `of` form creates one; schema.md §5)
     for e in &model.enums {
         let Some(schema) = &e.schema else { continue };
-        let members = e
-            .members
-            .iter()
-            .map(|m| sql_string(m))
-            .collect::<Vec<_>>()
-            .join(", ");
         out.push(Statement {
-            sql: format!(
-                "CREATE TYPE {}.{} AS ENUM ({members});",
-                quote_ident(schema),
-                quote_ident(&e.physical)
-            ),
+            sql: create_type(&EnumSnapshot {
+                schema: schema.clone(),
+                name: e.physical.clone(),
+                declared: e.declared.clone(),
+                values: e.members.clone(),
+            }),
             loc: e.loc,
             phase: Phase::EnumType,
         });
@@ -71,35 +77,20 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
 
     // 3 — tables: columns, primary key, checks, and non-partial uniques.
     //     Foreign keys deliberately excluded (phase 4).
-    for t in &model.tables {
+    let snaps: Vec<TableSnapshot> = model.tables.iter().map(snapshot::table_of).collect();
+    for (t, st) in model.tables.iter().zip(&snaps) {
         out.push(Statement {
-            sql: create_table(t),
+            sql: create_table(st),
             loc: t.loc,
             phase: Phase::Table,
         });
     }
 
     // 4 — every foreign key, after every table exists.
-    for t in &model.tables {
-        for fk in &t.foreign_keys {
-            let mut sql = format!(
-                "ALTER TABLE {} ADD CONSTRAINT {}\n    FOREIGN KEY ({}) REFERENCES {}.{} ({})",
-                t.qualified(),
-                quote_ident(&fk.name),
-                idents(&fk.columns),
-                quote_ident(&fk.target_schema),
-                quote_ident(&fk.target_table),
-                idents(&fk.target_columns),
-            );
-            if let Some(a) = fk.on_delete {
-                sql.push_str(&format!("\n    ON DELETE {}", action_sql(a)));
-            }
-            if let Some(a) = fk.on_update {
-                sql.push_str(&format!("\n    ON UPDATE {}", action_sql(a)));
-            }
-            sql.push(';');
+    for (t, st) in model.tables.iter().zip(&snaps) {
+        for (fk, sfk) in t.foreign_keys.iter().zip(&st.foreign_keys) {
             out.push(Statement {
-                sql,
+                sql: add_foreign_key(&st.qualified(), sfk),
                 loc: fk.loc,
                 phase: Phase::ForeignKey,
             });
@@ -107,55 +98,21 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
     }
 
     // 5 — indexes. A partial unique is an index, not a table constraint
-    //     (schema.md §4.3).
-    for t in &model.tables {
-        for u in &t.uniques {
-            let Some(pred) = &u.predicate else { continue };
+    //     (schema.md §4.3), and comes out ahead of the ordinary ones.
+    for (t, st) in model.tables.iter().zip(&snaps) {
+        for (u, su) in t.uniques.iter().zip(&st.uniques) {
+            if su.predicate.is_none() {
+                continue;
+            }
             out.push(Statement {
-                sql: format!(
-                    "CREATE UNIQUE INDEX {}\n    ON {} ({})\n    WHERE {pred};",
-                    quote_ident(&u.name),
-                    t.qualified(),
-                    idents(&u.columns)
-                ),
+                sql: create_index(&st.qualified(), &unique_as_index(su)),
                 loc: u.loc,
                 phase: Phase::Index,
             });
         }
-        for ix in &t.indexes {
-            let cols = ix
-                .columns
-                .iter()
-                .map(|c| {
-                    let mut s = quote_ident(&c.physical);
-                    if c.desc {
-                        s.push_str(" DESC");
-                    }
-                    match c.nulls {
-                        Some(crate::ast::NullsOrder::First) => s.push_str(" NULLS FIRST"),
-                        Some(crate::ast::NullsOrder::Last) => s.push_str(" NULLS LAST"),
-                        None => {}
-                    }
-                    s
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let using = ix
-                .method
-                .as_ref()
-                .map(|m| format!(" USING {m}"))
-                .unwrap_or_default();
-            let mut sql = format!(
-                "CREATE INDEX {}\n    ON {}{using} ({cols})",
-                quote_ident(&ix.name),
-                t.qualified()
-            );
-            if let Some(p) = &ix.predicate {
-                sql.push_str(&format!("\n    WHERE {p}"));
-            }
-            sql.push(';');
+        for (ix, six) in t.indexes.iter().zip(&st.indexes) {
             out.push(Statement {
-                sql,
+                sql: create_index(&st.qualified(), six),
                 loc: ix.loc,
                 phase: Phase::Index,
             });
@@ -169,29 +126,25 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
             continue;
         }
         let fname = crate::naming::touch_function(&t.physical);
-        let assigns = t
-            .touch_columns
-            .iter()
-            .map(|c| format!("  NEW.{} := now();", quote_ident(c)))
-            .collect::<Vec<_>>()
-            .join("\n");
         out.push(Statement {
-            sql: format!(
-                "CREATE OR REPLACE FUNCTION {}.{}()\nRETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n{assigns}\n  RETURN NEW;\nEND $$;",
-                quote_ident(&t.schema_physical),
-                quote_ident(&fname)
-            ),
+            sql: create_function(&FunctionSnapshot {
+                schema: t.schema_physical.clone(),
+                name: fname.clone(),
+                table: t.physical.clone(),
+                sets_now: t.touch_columns.clone(),
+            }),
             loc: t.loc,
             phase: Phase::Trigger,
         });
         out.push(Statement {
-            sql: format!(
-                "CREATE TRIGGER {}\n    BEFORE UPDATE ON {}\n    FOR EACH ROW EXECUTE FUNCTION {}.{}();",
-                quote_ident(&fname),
-                t.qualified(),
-                quote_ident(&t.schema_physical),
-                quote_ident(&fname)
-            ),
+            sql: create_trigger(&TriggerSnapshot {
+                name: fname.clone(),
+                schema: t.schema_physical.clone(),
+                table: t.physical.clone(),
+                function: fname,
+                timing: "BEFORE".into(),
+                event: "UPDATE".into(),
+            }),
             loc: t.loc,
             phase: Phase::Trigger,
         });
@@ -202,35 +155,28 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
     for v in ordered_views(model) {
         let Some(body) = &v.body else { continue };
         out.push(Statement {
-            sql: format!("CREATE VIEW {} AS\n{body};", v.qualified()),
+            sql: create_view(&v.qualified(), body),
             loc: v.loc,
             phase: Phase::View,
         });
     }
 
     // 8 — comments (schema.md §7)
-    for t in &model.tables {
-        if !t.docs.is_empty() {
+    for (t, st) in model.tables.iter().zip(&snaps) {
+        if let Some(text) = &st.comment {
             out.push(Statement {
-                sql: format!(
-                    "COMMENT ON TABLE {} IS {};",
-                    t.qualified(),
-                    sql_string(&t.docs.join("\n"))
-                ),
+                sql: comment_on("TABLE", &st.qualified(), Some(text)),
                 loc: t.loc,
                 phase: Phase::Comment,
             });
         }
-        for c in &t.columns {
-            if c.docs.is_empty() {
-                continue;
-            }
+        for (c, sc) in t.columns.iter().zip(&st.columns) {
+            let Some(text) = &sc.comment else { continue };
             out.push(Statement {
-                sql: format!(
-                    "COMMENT ON COLUMN {}.{} IS {};",
-                    t.qualified(),
-                    quote_ident(&c.physical),
-                    sql_string(&c.docs.join("\n"))
+                sql: comment_on(
+                    "COLUMN",
+                    &format!("{}.{}", st.qualified(), quote_ident(&sc.name)),
+                    Some(text),
                 ),
                 loc: c.loc,
                 phase: Phase::Comment,
@@ -242,11 +188,7 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
             continue;
         }
         out.push(Statement {
-            sql: format!(
-                "COMMENT ON VIEW {} IS {};",
-                v.qualified(),
-                sql_string(&v.docs.join("\n"))
-            ),
+            sql: comment_on("VIEW", &v.qualified(), Some(&v.docs.join("\n"))),
             loc: v.loc,
             phase: Phase::Comment,
         });
@@ -255,37 +197,48 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
     out
 }
 
-/// Views in dependency order: one that reads another comes after it.
-///
-/// `CREATE VIEW` resolves its source at creation time, so the order is not
-/// cosmetic — the wrong one fails to apply. The list is already sorted, so
-/// ties keep that order and the output stays byte-stable.
-fn ordered_views(model: &SchemaModel) -> Vec<&crate::views::ViewObj> {
-    let mut done: Vec<&crate::views::ViewObj> = Vec::new();
-    let mut left: Vec<&crate::views::ViewObj> = model.views.iter().collect();
-    while !left.is_empty() {
-        let before = left.len();
-        left.retain(|v| {
-            let ready = v.reads.iter().all(|dep| {
-                !model.views.iter().any(|o| &o.declared == dep)
-                    || done.iter().any(|d| &d.declared == dep)
-            });
-            if ready {
-                done.push(v);
-            }
-            !ready
-        });
-        if left.len() == before {
-            // A cycle between views is not emittable; the remaining ones go
-            // out in declaration order so the failure is Postgres's, with
-            // the offending statement named, rather than a silent drop.
-            done.append(&mut left);
-        }
-    }
-    done
+// ── the renderers ──────────────────────────────────────────────────────
+//
+// Everything below takes snapshot types, so `gen-sql` and `jwc migrate`
+// produce the same bytes for the same object by construction rather than
+// by test.
+
+pub fn create_schema(s: &SchemaSnapshot) -> String {
+    format!("CREATE SCHEMA IF NOT EXISTS {};", quote_ident(&s.name))
 }
 
-fn create_table(t: &TableObj) -> String {
+pub fn create_type(e: &EnumSnapshot) -> String {
+    let members = e
+        .values
+        .iter()
+        .map(|m| sql_string(m))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("CREATE TYPE {} AS ENUM ({members});", e.qualified())
+}
+
+/// A predicated `unique` has no table-constraint form; it is a unique index
+/// (schema.md §4.3). Both paths go through the same lowering so the diff
+/// and the DDL agree on what the object is.
+pub fn unique_as_index(u: &crate::snapshot::UniqueSnapshot) -> IndexSnapshot {
+    IndexSnapshot {
+        name: u.name.clone(),
+        columns: u
+            .columns
+            .iter()
+            .map(|c| crate::snapshot::IndexColumnSnapshot {
+                name: c.clone(),
+                desc: false,
+                nulls: None,
+            })
+            .collect(),
+        predicate: u.predicate.clone(),
+        unique: true,
+        method: None,
+    }
+}
+
+pub fn create_table(t: &TableSnapshot) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     for c in &t.columns {
@@ -324,8 +277,140 @@ fn create_table(t: &TableObj) -> String {
     )
 }
 
-fn column_sql(c: &ColumnObj) -> String {
-    let mut s = format!("{} {}", quote_ident(&c.physical), c.ty.render());
+/// `ALTER TABLE … ADD COLUMN`, rendered from the same column writer that
+/// `CREATE TABLE` uses — so a column added later is spelled exactly as one
+/// created with the table.
+pub fn add_column(qualified: &str, c: &ColumnSnapshot) -> String {
+    format!("ALTER TABLE {qualified} ADD COLUMN {};", column_sql(c))
+}
+
+pub fn add_foreign_key(qualified: &str, fk: &ForeignKeySnapshot) -> String {
+    let mut sql = format!(
+        "ALTER TABLE {qualified} ADD CONSTRAINT {}\n    FOREIGN KEY ({}) REFERENCES {}.{} ({})",
+        quote_ident(&fk.name),
+        idents(&fk.columns),
+        quote_ident(&fk.target_schema),
+        quote_ident(&fk.target_table),
+        idents(&fk.target_columns),
+    );
+    if let Some(a) = &fk.on_delete {
+        sql.push_str(&format!("\n    ON DELETE {a}"));
+    }
+    if let Some(a) = &fk.on_update {
+        sql.push_str(&format!("\n    ON UPDATE {a}"));
+    }
+    sql.push(';');
+    sql
+}
+
+pub fn create_index(qualified: &str, ix: &IndexSnapshot) -> String {
+    let cols = ix
+        .columns
+        .iter()
+        .map(|c| {
+            let mut s = quote_ident(&c.name);
+            if c.desc {
+                s.push_str(" DESC");
+            }
+            match c.nulls.as_deref() {
+                Some("FIRST") => s.push_str(" NULLS FIRST"),
+                Some("LAST") => s.push_str(" NULLS LAST"),
+                _ => {}
+            }
+            s
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let using = ix
+        .method
+        .as_ref()
+        .map(|m| format!(" USING {m}"))
+        .unwrap_or_default();
+    let unique = if ix.unique { "UNIQUE " } else { "" };
+    let mut sql = format!(
+        "CREATE {unique}INDEX {}\n    ON {qualified}{using} ({cols})",
+        quote_ident(&ix.name)
+    );
+    if let Some(p) = &ix.predicate {
+        sql.push_str(&format!("\n    WHERE {p}"));
+    }
+    sql.push(';');
+    sql
+}
+
+pub fn create_function(f: &FunctionSnapshot) -> String {
+    let assigns = f
+        .sets_now
+        .iter()
+        .map(|c| format!("  NEW.{} := now();", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "CREATE OR REPLACE FUNCTION {}.{}()\nRETURNS trigger LANGUAGE plpgsql AS $$\nBEGIN\n{assigns}\n  RETURN NEW;\nEND $$;",
+        quote_ident(&f.schema),
+        quote_ident(&f.name)
+    )
+}
+
+pub fn create_trigger(t: &TriggerSnapshot) -> String {
+    format!(
+        "CREATE TRIGGER {}\n    {} {} ON {}.{}\n    FOR EACH ROW EXECUTE FUNCTION {}.{}();",
+        quote_ident(&t.name),
+        t.timing,
+        t.event,
+        quote_ident(&t.schema),
+        quote_ident(&t.table),
+        quote_ident(&t.schema),
+        quote_ident(&t.function)
+    )
+}
+
+pub fn create_view(qualified: &str, body: &str) -> String {
+    format!("CREATE VIEW {qualified} AS\n{body};")
+}
+
+/// `COMMENT ON <kind> <object> IS …`. `None` removes the comment, which is
+/// what an edited-away doc comment has to lower to — dropping the statement
+/// instead would leave the old text on a live database forever.
+pub fn comment_on(kind: &str, object: &str, text: Option<&str>) -> String {
+    match text {
+        Some(t) => format!("COMMENT ON {kind} {object} IS {};", sql_string(t)),
+        None => format!("COMMENT ON {kind} {object} IS NULL;"),
+    }
+}
+
+/// Views in dependency order: one that reads another comes after it.
+///
+/// `CREATE VIEW` resolves its source at creation time, so the order is not
+/// cosmetic — the wrong one fails to apply. The list is already sorted, so
+/// ties keep that order and the output stays byte-stable.
+fn ordered_views(model: &SchemaModel) -> Vec<&crate::views::ViewObj> {
+    let mut done: Vec<&crate::views::ViewObj> = Vec::new();
+    let mut left: Vec<&crate::views::ViewObj> = model.views.iter().collect();
+    while !left.is_empty() {
+        let before = left.len();
+        left.retain(|v| {
+            let ready = v.reads.iter().all(|dep| {
+                !model.views.iter().any(|o| &o.declared == dep)
+                    || done.iter().any(|d| &d.declared == dep)
+            });
+            if ready {
+                done.push(v);
+            }
+            !ready
+        });
+        if left.len() == before {
+            // A cycle between views is not emittable; the remaining ones go
+            // out in declaration order so the failure is Postgres's, with
+            // the offending statement named, rather than a silent drop.
+            done.append(&mut left);
+        }
+    }
+    done
+}
+
+fn column_sql(c: &ColumnSnapshot) -> String {
+    let mut s = format!("{} {}", quote_ident(&c.name), c.ty);
     if c.identity {
         // GENERATED BY DEFAULT, not bigserial: the sequence is owned by the
         // column, and explicit inserts still work for seeding and backfills
@@ -346,10 +431,6 @@ fn idents(cols: &[String]) -> String {
         .map(|c| quote_ident(c))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn action_sql(a: RefAction) -> &'static str {
-    a.as_sql()
 }
 
 fn sql_string(s: &str) -> String {

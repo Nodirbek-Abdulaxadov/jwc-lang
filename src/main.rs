@@ -76,10 +76,38 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Generate and apply schema migrations.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
+    },
     /// Print the parsed AST. A debugging aid, not a stable format.
     Ast {
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Write the next migration: diff the sources against the last
+    /// snapshot and emit an up/down pair plus a new snapshot.
+    ///
+    /// Offline: never connects to a database.
+    New {
+        /// Short name, e.g. `add_region`.
+        name: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Migrations directory. Defaults to `<path>/migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Print each operation with the declaration that caused it.
+        #[arg(long)]
+        explain: bool,
+        /// Print the files instead of writing them.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -96,6 +124,15 @@ fn main() -> Result<()> {
         Command::Explain { path, sql } => cmd::explain(path, sql),
         Command::Routes { path } => cmd::routes(path),
         Command::Serve { path, port } => cmd::serve(path, port),
+        Command::Migrate { command } => match command {
+            MigrateCommand::New {
+                name,
+                path,
+                dir,
+                explain,
+                dry_run,
+            } => cmd::migrate_new(path, name, dir, explain, dry_run),
+        },
         Command::Ast { path } => cmd::ast(path),
     }
 }

@@ -29,6 +29,7 @@ mod exec_call;
 pub mod fmt;
 pub mod imports;
 pub mod lexer;
+pub mod migrate;
 pub mod model;
 pub mod naming;
 pub mod parser;

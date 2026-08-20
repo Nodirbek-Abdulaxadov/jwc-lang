@@ -32,6 +32,7 @@ cargo run -- check docs/spec/v1/sample
 cargo run -- explain docs/spec/v1/sample     # every query, with its SQL
 cargo run -- gen-sql docs/spec/v1/sample     # the schema as DDL
 cargo run -- serve docs/spec/v1/sample --port 8080
+cargo run -- migrate new add_region docs/spec/v1/sample --explain
 ```
 
 `install-from-source.{sh,ps1}` install to the user profile. Never run them
@@ -54,6 +55,9 @@ JWC_V1_PG='-h 127.0.0.1 -p 5432 -U postgres' cargo test --test ddl_golden
 # A database the suite may drop and recreate schemas in.
 JWC_V1_DATABASE_URL=postgres://…  CURSOR_SECRET=x cargo test --test http_golden
 JWC_V1_DATABASE_URL=postgres://…  cargo test --test raw_hatch
+
+# Applies each generated migration on top of the schema it migrates from.
+JWC_V1_PG='-h 127.0.0.1 -p 5432 -U postgres' cargo test --test migrate_golden
 ```
 
 What each suite is for:
@@ -72,6 +76,7 @@ What each suite is for:
 | `docs_parse` | every ```jwc block in the README and the spec |
 | `snapshot_sample` | the sample's migration snapshot, field by field |
 | `diff_corpus` | two schemas in, the migration's operations and phases out |
+| `migrate_golden` | emitted migrations, byte for byte, and that they apply |
 
 The corpora are **exact in both directions**: a missing diagnostic and an
 unannotated one both fail. That is what makes them a specification rather
@@ -105,7 +110,20 @@ the surrounding style. CI runs `clippy --all-targets -- -D warnings`.
   view is a real `CREATE VIEW`, not a macro.
 - **`ddl.rs`** — seven-phase emission (schema, enum type, table, **every FK
   in its own pass**, index, trigger, view, comment). The separate FK pass is
-  what makes cross-schema cycles emittable.
+  what makes cross-schema cycles emittable. Every statement is rendered from
+  the *snapshot* form of its object, so `gen-sql` and `jwc migrate` cannot
+  emit different DDL for the same thing.
+- **`snapshot.rs`** — the schema as a database holds it, as checked-in JSON.
+  What it leaves out is deliberate: `private`, a constraint's message and
+  `was` are all absent, which is the statement "editing this produces no
+  migration".
+- **`diff.rs`** — two snapshots in, typed operations out, in the ten phases
+  of migrations.md §4. Constraints and indexes match on their *bodies*, not
+  their names, so renaming a column renames its constraints instead of
+  rebuilding them.
+- **`migrate.rs`** — the operations, lowered to files. `down` is generated
+  by diffing the other way, and refused outright when the migration is
+  irreversible.
 - **`check.rs`** — the type pass. `Raw` vs `Record`, `T?` and narrowing,
   class validation, aggregates.
 - **`wiring.rs`** — whole-program checks: the route table, middleware

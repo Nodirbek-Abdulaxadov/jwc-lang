@@ -320,6 +320,13 @@ pub fn of(model: &SchemaModel) -> Snapshot {
     snap
 }
 
+/// One table, for callers that hold a model object and need the snapshot
+/// form of it — `ddl::emit` walks the model for its source locations but
+/// renders through the snapshot, so the two paths cannot drift.
+pub fn table_of(t: &TableObj) -> TableSnapshot {
+    table(t)
+}
+
 fn table(t: &TableObj) -> TableSnapshot {
     TableSnapshot {
         schema: t.schema_physical.clone(),
