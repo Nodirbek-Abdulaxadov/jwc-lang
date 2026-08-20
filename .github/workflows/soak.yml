@@ -21,7 +21,7 @@ on:
       project:
         description: "JWC project the soak runs against (path relative to repo root)."
         required: true
-        default: "examples/testapp"
+        default: "docs/spec/v1/sample"
 
 jobs:
   soak:

@@ -94,12 +94,21 @@ v0.25.0 gacha namunani ishga tushira olmaydi, ya'ni eski kodni v0.21.0 da
 o'chirish to'rt reliz davomida hech narsa qilmaydigan kompilyator qoldiradi
 va mavjud test to'plamini butunlay qizil qiladi.
 
-Shuning uchun yangi til **`src/v1/`** daraxtida quriladi va `jwc v1 …`
-buyruqlari orqali ochiladi. Eski front-end o'z joyida qoladi, `cargo test`
-yashil qoladi, va **kesish nuqtasi v0.25.0** — yangi daraxt namunani
-haqiqatan bajara oladigan reliz. O'sha relizda eski `parser/`, `runner/`,
-`sql.rs`, `typecheck.rs` va ularning testlari o'chiriladi va `src/v1/`
-yuqoriga ko'chiriladi.
+Shuning uchun yangi til **`src/v1/`** daraxtida qurildi va `jwc v1 …`
+buyruqlari orqali ochildi. Eski front-end o'z joyida qoldi, `cargo test`
+yashil qoldi, va **kesish nuqtasi v0.25.0** bo'ldi.
+
+**Bajarildi.** v0.25.0 da eski `parser/`, `runner/`, `sql.rs`,
+`typecheck.rs`, `native_build.rs`, `server.rs`, `project.rs`,
+`schema_diff.rs`, `migrate.rs`, paket menejeri va LSP o'chirildi;
+`src/v1/` yuqoriga ko'chdi va `jwc v1 …` prefiksi yo'qoldi. Eski hujjatlar
+— `docs/docs/`, `docs/spec/` ning v1 dan tashqari qismi va eski README —
+`docs/archive-0.9/` ga arxivlandi: ular joylashtirilgan 0.9.x binarlari
+nimani bajarishini tasvirlaydi, bu kompilyatorni emas.
+
+O'chgan narsalardan qaytadiganlari: migratsiyalar — v0.26.0, LSP va
+`jwc openapi` — v0.27.0, test freymvorki va paketlar — v0.28.0. Native AOT
+`DEFERRED-2` bo'yicha 1.1 ga qoldirilgan.
 
 Bu — joylashuv haqidagi qaror, semantika haqida emas: `src/v1/` eski
 grammatikaning bironta konstruksiyasini qabul qilmaydi.

@@ -1,5 +1,0 @@
-3
-6
-jwc
-true
-jwc-v6

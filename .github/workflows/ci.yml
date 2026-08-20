@@ -25,9 +25,8 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # `--features redis` is a second compilation of a large chunk of the
-      # tree (redis_engine, the runner arms, the AOT prelude), and none of
-      # it was reachable from the default build — so a clippy failure or a
+      # `--features redis` is a second compilation of `redis_engine`, none
+      # of it reachable from the default build — so a clippy failure or a
       # `#[cfg]`-only type error in that code shipped green.
       - name: Cargo clippy (redis feature)
         run: cargo clippy --workspace --all-targets --features redis -- -D warnings
@@ -35,27 +34,23 @@ jobs:
       - name: Cargo build
         run: cargo build --workspace --all-targets
 
-      # `conformance` and `native_parity` are the two suites that pin
-      # language semantics and interpreter/AOT agreement, and neither was
-      # in this list — so a case could rot for a release without anything
-      # going red. Both are no-DB and finish in well under a second.
+      # Everything that does not need a database. Named rather than a bare
+      # `cargo test` so a suite added without a CI line reads as an
+      # omission here rather than passing silently.
       - name: Cargo test (no DB)
-        run: cargo test --lib --test typed_catch --test imports --test native_emit --test examples_parse --test fmt_idempotency --test conformance --test native_parity --test builtins_doc_sync
+        run: >
+          cargo test --lib
+          --test parse_corpus --test fmt --test removed_keywords
+          --test schema_diagnostics --test type_corpus --test wiring_corpus
+          --test ddl_golden --test sql_golden --test docs_parse
 
-      # Both configurations matter: the redis_* built-ins are always in
-      # BUILTIN_DEFS, and the code behind them is either the real driver or
-      # a set of stubs depending on the feature. Only the default build was
-      # ever tested, so the stub half was the only half covered.
       - name: Cargo test (redis feature, no server)
-        run: cargo test --features redis --lib --test native_emit --test builtins_doc_sync
+        run: cargo test --features redis --lib
 
-      # First-release rollout: `jwc fmt --check` against the bundled fixture
-      # roots. `continue-on-error` keeps drift from blocking unrelated PRs
-      # while we settle the canonical output; flip to required once the
-      # corpus is fully reformatted.
-      - name: jwc fmt --check examples templates
-        continue-on-error: true
-        run: cargo run --bin jwc -- fmt --check examples templates
+      # The sample is the artefact the spec is read against, so its
+      # formatting is required rather than advisory.
+      - name: jwc fmt --check the sample
+        run: cargo run --bin jwc -- fmt --check docs/spec/v1/sample
 
   # The query layer gets its own job with a real database. `check` above runs
   # only the no-DB suites, which is why a `where` clause that dropped half its
@@ -65,8 +60,8 @@ jobs:
   # A service container rather than testcontainers — the runner exposes it on
   # localhost, so the suite takes it straight from JWC_TEST_DATABASE_URL and
   # there is no Docker-in-Docker to fail.
-  query-differential:
-    name: query layer vs hand-written SQL
+  postgres:
+    name: against a real Postgres
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -91,26 +86,32 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Query differential suite
-        env:
-          JWC_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
-        run: cargo test --test query_differential -- --nocapture
-
-      # Now takes the service container through `JWC_TEST_DATABASE_URL`, same
-      # as the suite above, so it actually runs here — and is required.
+      # The SQL goldens freeze the text; these run it. Every compiled
+      # statement is PREPAREd, the join shapes are checked against real
+      # rows, and the two-stage page rewrite is checked against an EXPLAIN
+      # plan on 100k rows — none of which a golden file can see.
       #
-      # It never ran anywhere before. `testcontainers`' `SyncRunner::start`
-      # calls `block_on`, and every test is a `#[tokio::test]`, so a host with
-      # no Docker got "Cannot start a runtime from within a runtime" — a
-      # panic, not the `Err` the graceful-skip path was written against. Six
-      # tests failed on every machine without a daemon, `continue-on-error`
-      # hid it, and two of the fixtures had rotted in the meantime.
-      - name: Postgres integration suite
+      # The suites print SKIPPED without these variables and pass. That is
+      # exactly why they are set here: a SKIPPED line is not a pass.
+      - name: SQL goldens against Postgres
         env:
-          JWC_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
-        run: cargo test --test integration_db -- --nocapture
+          JWC_V1_PG: "-h 127.0.0.1 -p 5432 -U postgres"
+          PGPASSWORD: postgres
+        run: cargo test --test sql_golden -- --nocapture
 
-  # Same reasoning as `query-differential` above: the no-server jobs only
+      - name: HTTP goldens and the raw valve
+        env:
+          JWC_V1_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+          CURSOR_SECRET: ci-cursor-secret
+        run: cargo test --test http_golden --test raw_hatch -- --nocapture
+
+      - name: DDL applies
+        env:
+          JWC_V1_PG: "-h 127.0.0.1 -p 5432 -U postgres"
+          PGPASSWORD: postgres
+        run: cargo test --test ddl_golden -- --nocapture
+
+  # Same reasoning as `postgres` above: the no-server jobs only
   # prove the code compiles and the stubs behave. Every command this driver
   # sends — TTL semantics, nil-vs-empty-string, EVAL's KEYS/ARGV framing —
   # is a claim about what a real server does, and nothing verified any of

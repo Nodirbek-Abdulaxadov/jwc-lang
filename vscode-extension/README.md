@@ -4,6 +4,14 @@
 
 # JWC Language for VS Code
 
+> **v0.25.0 note.** The language changed: `entity`, `dbcontext`, `with`,
+> `via`, `validate body`, `new … from`, `patch`, `group`, `mount` and `dome`
+> were removed in favour of the grammar in `docs/spec/v1/`. Syntax
+> highlighting here follows the new keywords. The language server is not
+> built at the moment — it was written against the old parser and returns,
+> rewritten, in v0.27.0. Until then the extension gives highlighting and
+> snippets, and `jwc check` gives diagnostics.
+
 Syntax highlighting, snippets, and LSP-powered diagnostics for [JWC (Just Web Code)](https://jwc.1kb.uz).
 
 ## Features

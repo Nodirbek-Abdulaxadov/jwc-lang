@@ -89,8 +89,10 @@ chmod +x "$exe_dst"
 
 echo "Installed: $exe_dst"
 
-# Install jwc-lsp alongside if it was built next to jwc — the VS Code
-# extension expects it on PATH or in $HOME/.local/bin / $LOCALAPPDATA/jwc/bin.
+# Install jwc-lsp alongside if it was built next to jwc. It is not built at
+# the moment — it was written against the pre-1.0 parser, which v0.25.0
+# removed, and it returns rewritten in v0.27.0 — so this is a no-op on a
+# current checkout and stays for the ones that still have it.
 src_dir="$(dirname -- "$exe_src")"
 lsp_src="$src_dir/jwc-lsp"
 if [[ -f "$lsp_src" ]]; then
@@ -99,7 +101,7 @@ if [[ -f "$lsp_src" ]]; then
     chmod +x "$lsp_dst"
     echo "Installed: $lsp_dst"
 else
-    echo "(jwc-lsp not found at $lsp_src — skipping LSP install)"
+    echo "(no jwc-lsp to install — the language server returns in v0.27.0)"
 fi
 
 if [[ ":${PATH}:" != *":${install_dir}:"* ]]; then

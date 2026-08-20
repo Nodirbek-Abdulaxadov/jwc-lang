@@ -1,9 +1,0 @@
-function main() {
-    print("Hello, world from JWC!");
-
-    serve(5000);
-}
-
-route GET "" {
-    return "Hello, world from JWC!";
-}

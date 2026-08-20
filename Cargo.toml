@@ -42,10 +42,6 @@ path = "src/lib.rs"
 name = "jwc"
 path = "src/main.rs"
 
-[[bin]]
-name = "jwc-lsp"
-path = "src/bin/jwc_lsp.rs"
-
 [dependencies]
 jwc-runtime = { path = "crates/jwc-runtime" }
 anyhow = "1"

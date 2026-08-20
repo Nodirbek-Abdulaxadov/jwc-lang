@@ -51,10 +51,12 @@ async function startClient(context: ExtensionContext): Promise<void> {
   const serverPath = await resolveServerPath();
   if (!serverPath) {
     output?.appendLine(
-      "jwc-lsp not found. Set `jwc.lspPath` in settings or install jwc-lsp on PATH."
+      "jwc-lsp not found — the language server returns in v0.27.0. " +
+        "Syntax highlighting works without it."
     );
     window.showWarningMessage(
-      "JWC: jwc-lsp not found. Diagnostics disabled. Set `jwc.lspPath` or install jwc-lsp."
+      "JWC: no language server. Diagnostics come from `jwc check` until " +
+        "v0.27.0 ships one; syntax highlighting is unaffected."
     );
     return;
   }

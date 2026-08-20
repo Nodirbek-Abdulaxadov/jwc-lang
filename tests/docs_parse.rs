@@ -1,34 +1,28 @@
-//! Every ```jwc block in the README and `docs/` must be real JWC.
+//! Every ```jwc block in the README and `docs/spec/v1/` must be real JWC.
 //!
-//! Nothing checked the documentation against the compiler, so it drifted: the
-//! README's headline example, the getting-started page and the `dbcontext`
-//! reference page all showed a `dbcontext AppDb { ... }` block form and
-//! colon-separated entity fields that the parser has never accepted. A reader
-//! copying the first example on the front page got a syntax error.
+//! Nothing checked the documentation against the compiler, so it drifted:
+//! the README's headline example and three reference pages showed forms the
+//! parser had never accepted. A reader copying the first example on the
+//! front page got a syntax error.
 //!
-//! Only `parse_program` is asserted, never `validate_program`: documentation
-//! deliberately references entities and classes it doesn't define.
+//! Only parsing is asserted, never checking: documentation deliberately
+//! references tables and classes it does not define.
 //!
-//! ## Two languages
-//!
-//! `docs/spec/v1/` describes the redesigned 1.0 language, which is a
-//! different grammar (ROADMAP §0). Blocks under that directory are checked
-//! with the **v1** front-end (`jwc::v1`); everything else with the 0.9.x
-//! parser. Routing by path rather than by fence keeps the marker out of the
-//! author's way, and it means the specification's examples are checked
-//! against the parser that has to accept them.
+//! `docs/archive-0.9/` is **not** checked. It documents the language that
+//! the v0.25.0 cutover removed, and checking it against this compiler would
+//! assert that a dead grammar still parses.
 //!
 //! ## Illustrative blocks
 //!
-//! Some blocks are prose, not programs — operator tables, `{ ... }` elisions,
-//! bare expression lists with trailing comments. Only a **bare** ```` ```jwc ````
-//! fence is compiled, so mark those with ```` ```jwc no-compile ````. The
-//! marker sits in the fence's info string, which the docs site ignores, so it
-//! costs the reader nothing while keeping the exemption explicit in source.
+//! Some blocks are prose, not programs — operator tables, `{ ... }`
+//! elisions, bare expression lists with trailing comments. Only a **bare**
+//! ```` ```jwc ```` fence is compiled, so mark those with
+//! ```` ```jwc no-compile ````. The marker sits in the fence's info string,
+//! which the docs site ignores, so it costs the reader nothing while
+//! keeping the exemption explicit in source.
 
 use std::path::{Path, PathBuf};
 
-use jwc::parser::parse_program;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -47,7 +41,13 @@ fn markdown_files() -> Vec<PathBuf> {
             if p.is_dir() {
                 // Vendored site build output, not authored docs.
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if matches!(name, "node_modules" | "build" | ".docusaurus") {
+                // `archive-0.9` documents the language the cutover
+                // removed; checking it here would assert that a dead
+                // grammar still parses.
+                if matches!(
+                    name,
+                    "node_modules" | "build" | ".docusaurus" | "archive-0.9"
+                ) {
                     continue;
                 }
                 stack.push(p);
@@ -86,7 +86,7 @@ fn jwc_blocks(text: &str) -> Vec<(usize, String)> {
 /// v1 spec blocks, checked with the v1 front-end. Same excerpt problem:
 /// a clause shown on its own is not a program, so try the positions an
 /// excerpt can legally occupy.
-fn parses_somewhere_v1(body: &str) -> bool {
+fn parses_somewhere(body: &str) -> bool {
     const HEADER: &str = concat!(
         "database App : Postgres;\n",
         "schema s of App;\n",
@@ -105,25 +105,7 @@ fn parses_somewhere_v1(body: &str) -> bool {
     ];
     contexts
         .iter()
-        .any(|src| !jwc::v1::parse_str("<doc>", src).has_errors())
-}
-
-/// Blocks are written as excerpts, so try the positions an excerpt can
-/// legally occupy before calling it broken.
-fn parses_somewhere(body: &str) -> bool {
-    const HEADER: &str = concat!(
-        "dbcontext AppDb: Postgres;\n",
-        "entity Item of AppDb { id int pk autoincrement; name varchar(50); }\n",
-    );
-    let contexts = [
-        // `namespace` / `mount` have to precede every other declaration.
-        body.to_string(),
-        format!("{HEADER}{body}\n"),
-        format!("{HEADER}function f() {{\n{body}\n}}\n"),
-        format!("{HEADER}route GET \"/x\" {{\n{body}\n}}\n"),
-        format!("{HEADER}dome S {{\n  function f() {{\n{body}\n  }}\n}}\n"),
-    ];
-    contexts.iter().any(|src| parse_program(src).is_ok())
+        .any(|src| !jwc::parse_str("<doc>", src).has_errors())
 }
 
 #[test]
@@ -141,12 +123,7 @@ fn every_documented_jwc_example_parses() {
                 continue;
             }
             checked += 1;
-            let is_v1_spec = file.starts_with(root.join("docs/spec/v1"));
-            let ok = if is_v1_spec {
-                parses_somewhere_v1(&body)
-            } else {
-                parses_somewhere(&body)
-            };
+            let ok = parses_somewhere(&body);
             if !ok {
                 let rel: &Path = file.strip_prefix(&root).unwrap_or(&file);
                 broken.push(format!("{}:{line}", rel.display()));
@@ -154,8 +131,11 @@ fn every_documented_jwc_example_parses() {
         }
     }
 
+    // A floor, not a target: it exists so a broken block-scanner reads as
+    // a failure rather than as "nothing to check". It dropped when the
+    // 0.9.x docs were archived and the spec became the corpus.
     assert!(
-        checked > 50,
+        checked > 20,
         "expected to find the documented examples, saw {checked}"
     );
     assert!(

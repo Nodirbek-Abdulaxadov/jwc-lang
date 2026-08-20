@@ -1,73 +1,103 @@
-//! JWC language library — exposes the lexer, parser, runtime, engine, and
-//! migration helpers as a reusable crate so integration tests in `tests/`
-//! can exercise them against a real Postgres instance.
+//! JWC — a backend language with first-class HTTP routes, tables, views
+//! and generated SQL.
 //!
-//! `main.rs` is the thin CLI wrapper that imports from here.
+//! The language is the one specified in `docs/spec/v1/`. The pre-1.0
+//! grammar it replaced was removed at the v0.25.0 cutover
+//! (ROADMAP §2, "Implementatsiya joylashuvi"): the two front-ends lived
+//! side by side for four releases so the old test suite stayed green while
+//! the new one could not yet run the sample, and that reason expired the
+//! moment it could.
+//!
+//! `main.rs` is the thin CLI wrapper over this crate.
 
-// `await_holding_lock` is acknowledged tech debt: the WebSocket bridge
-// (`runner::WS_STREAM`) and the engine TLS-init path hold short critical
-// sections across awaits. Tracked under a dedicated clippy-cleanup sprint;
-// silenced crate-wide so CI can enforce `-D warnings` on the rest.
-#![allow(clippy::await_holding_lock)]
-// The unwrap budget is met and now enforced. `cargo clippy --lib` reports
-// zero production `.unwrap()` calls, so this costs nothing today and stops
-// the next one from arriving unnoticed.
-//
-// `not(test)` is what makes it usable: unit tests under `#[cfg(test)] mod
-// tests` unwrap freely — that's the point of a test — while every path that
-// ships is denied. Integration tests in `tests/` are separate crates and are
-// unaffected. `expect_used` deliberately stays allowed; see Cargo.toml.
+// The unwrap budget is met and enforced: `cargo clippy --lib` reports zero
+// production `.unwrap()` calls, so this costs nothing today and stops the
+// next one from arriving unnoticed. `not(test)` is what makes it usable —
+// unit tests unwrap freely, which is the point of a test.
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
-// Clippy 1.96+ added several pedantic-style lints that the codebase doesn't
-// yet pass (needless_range_loop, unnecessary_map_or, manual_range_patterns,
-// print_literal, uninlined_format_args). These are stylistic, not bugs.
-// Silenced crate-wide so CI can enforce `-D warnings` on the rest until a
-// dedicated clippy-cleanup sprint sweeps them.
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::unnecessary_map_or)]
-#![allow(clippy::manual_range_patterns)]
-#![allow(clippy::print_literal)]
-#![allow(clippy::uninlined_format_args)]
 
+// ---- the language
 pub mod ast;
-pub mod builtins;
-pub mod cache;
+pub mod check;
+pub mod cursor;
+pub mod db;
+pub mod ddl;
+pub mod diag;
+pub mod exec;
+mod exec_call;
+pub mod fmt;
+pub mod imports;
+pub mod lexer;
+pub mod model;
+pub mod naming;
+pub mod parser;
+pub mod query;
+pub mod query_sql;
+pub mod serve;
+pub mod sql;
+pub mod symbols;
+pub mod token;
+pub mod types;
+pub mod validate;
+pub mod value;
+pub mod views;
+pub mod wiring;
+pub mod workspace;
+
+// ---- infrastructure the language stands on
 pub mod cmd;
 pub mod config;
-pub mod cors;
-pub mod diag;
-pub mod email;
 pub mod engine;
-pub mod error_codes;
-pub mod error_report;
-pub mod fmt;
 pub mod hash;
-pub mod http_error;
 pub mod jwks;
 pub mod jwt;
-pub mod lexer;
-pub mod lint;
-pub mod lockfile;
 pub mod locks;
-pub mod log_writer;
-pub mod migrate;
-pub mod native_build;
-pub mod native_ir;
 pub mod observability;
-pub mod parser;
 pub mod password;
-pub mod pkg_cache;
-pub mod project;
-pub mod queue;
 pub mod redis_engine;
-pub mod registry;
-pub mod resolver;
-pub mod runner;
-pub mod schema_diff;
-pub mod sema;
-pub mod server;
-pub mod sql;
-pub mod swagger;
-pub mod templates;
-pub mod typecheck;
-pub mod v1;
+
+use diag::{Diagnostic, Severity, SourceFile};
+use std::path::Path;
+
+/// One parsed file plus the source it came from, so diagnostics can be
+/// rendered with a caret.
+pub struct ParsedFile {
+    pub source: SourceFile,
+    pub program: ast::Program,
+    pub diags: Vec<Diagnostic>,
+}
+
+impl ParsedFile {
+    pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> {
+        self.diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+    }
+
+    pub fn has_errors(&self) -> bool {
+        self.errors().next().is_some()
+    }
+
+    pub fn render_all(&self) -> String {
+        self.diags
+            .iter()
+            .map(|d| self.source.render(d))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+pub fn parse_str(path: impl AsRef<Path>, text: &str) -> ParsedFile {
+    let (program, diags) = parser::parse(text);
+    ParsedFile {
+        source: SourceFile::new(path, text),
+        program,
+        diags,
+    }
+}
+
+pub fn parse_file(path: impl AsRef<Path>) -> std::io::Result<ParsedFile> {
+    let path = path.as_ref();
+    let text = std::fs::read_to_string(path)?;
+    Ok(parse_str(path, &text))
+}

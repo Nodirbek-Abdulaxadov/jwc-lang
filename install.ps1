@@ -116,11 +116,18 @@ try {
     Expand-Archive -Path $archive -DestinationPath $tmp -Force
 
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item -Force (Join-Path $tmp 'jwc.exe')     (Join-Path $InstallDir 'jwc.exe')
-    Copy-Item -Force (Join-Path $tmp 'jwc-lsp.exe') (Join-Path $InstallDir 'jwc-lsp.exe')
-
+    Copy-Item -Force (Join-Path $tmp 'jwc.exe') (Join-Path $InstallDir 'jwc.exe')
     Write-Host "Installed: $InstallDir\jwc.exe"
-    Write-Host "Installed: $InstallDir\jwc-lsp.exe"
+
+    # `jwc-lsp` is not built at the moment: it was written against the
+    # pre-1.0 parser, which v0.25.0 removed, and it returns rewritten in
+    # v0.27.0. Older release archives still carry it, so install it when
+    # the archive has one rather than failing on its absence.
+    $lsp = Join-Path $tmp 'jwc-lsp.exe'
+    if (Test-Path $lsp) {
+        Copy-Item -Force $lsp (Join-Path $InstallDir 'jwc-lsp.exe')
+        Write-Host "Installed: $InstallDir\jwc-lsp.exe"
+    }
 
     # User-scope PATH update — survives shell restarts. Does not require admin.
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

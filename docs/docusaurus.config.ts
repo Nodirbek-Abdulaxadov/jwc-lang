@@ -36,6 +36,11 @@ const config: Config = {
       'classic',
       {
         docs: {
+          // The 0.9.x documentation, archived at the v0.25.0 cutover. It
+          // describes the language deployed 0.9.x binaries implement, not
+          // this compiler; the site is rewritten from `spec/v1/` in
+          // v1.0.0-rc.1 (ROADMAP).
+          path: 'archive-0.9',
           sidebarPath: './sidebars.ts',
           routeBasePath: '/',          // serve docs at site root, no /docs/ prefix
           editUrl:

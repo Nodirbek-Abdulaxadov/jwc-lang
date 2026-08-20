@@ -987,6 +987,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard is held across the awaited retry loop on purpose: it
+    // serialises the process-wide environment these tests mutate, and
+    // dropping it early is exactly the race it exists to prevent. Single
+    // test thread, no contention, no deadlock to have.
+    #[allow(clippy::await_holding_lock)]
     async fn retry_honours_max_attempts_env() {
         // Force the loop to give up after 2 attempts so the test stays
         // fast — and use a 0 ms backoff so we don't sleep at all.

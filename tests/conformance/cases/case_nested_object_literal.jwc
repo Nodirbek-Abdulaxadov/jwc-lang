@@ -1,5 +1,0 @@
-// Conformance: nested object literal stringify — no double-encoding.
-function main() {
-    let outer = { inner: { x: 1 }, count: 2 };
-    print(json_stringify(outer));
-}

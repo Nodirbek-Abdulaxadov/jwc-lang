@@ -1,223 +1,158 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working
+with code in this repository.
 
 ## What this repo is
 
 JWC is a backend-focused programming language with first-class HTTP routes,
-entities, SQL generation, and Postgres execution. The repository ships the
-Rust compiler/interpreter (`jwc`), the language server (`jwc-lsp`), a VS Code
-extension, and example projects under `examples/`.
+tables, views, generated SQL and Postgres execution. The repository ships
+the Rust compiler and interpreter (`jwc`), the normative specification under
+`docs/spec/v1/`, and a VS Code extension.
 
-`.jwc` source is read end-to-end at process start (no separate IR file); the
-default runtime is an interpreter. `jwc build` (alias `jwc bundle`) without
-flags still does launcher + runtime bundling. `jwc build --native` is the
-real AOT path: `src/native_build.rs` emits Rust source from the AST, shells
-out to `cargo` and produces a standalone tokio binary. **LLVM IR backend
-and cross-target native build matrix are declared Non-goals** (see
-`ROADMAP.md` Non-goals). `--native` is the Rust codegen path on Linux
-x86_64 (+ musl) only; that's intentional, not a deferral.
+**The language changed at v0.25.0.** The pre-1.0 grammar — `entity`,
+`dbcontext`, `with`, `via`, `validate body`, `new … from`, `patch`, `group`,
+`mount`, `dome` — was removed along with its front-end, its runtime, the
+native AOT backend, the package manager and the language server. What used
+to live under `src/v1/` is now the whole of `src/`. The old documentation is
+archived under `docs/archive-0.9/`; it describes what deployed 0.9.x
+binaries implement, not this compiler.
 
-## Build / run commands
+`ROADMAP.md` is the source of truth for what counts as done, partial, and
+**non-goal**. The Non-goals block is policy: LLVM IR, a cross-target native
+matrix, WASM, self-hosting, a multi-database driver, SSE v2, OTLP-as-core,
+job-priority/DLQ ML and rich-domain object graphs will not ship pre-1.0.
+
+## Build / run
 
 ```bash
-cargo build                          # debug build of jwc + jwc-lsp
+cargo build                       # debug
 cargo build --release
-cargo build --bin jwc-lsp            # LSP only (used by editors)
-
-# fast iteration: don't shell out to the installed binary, run via cargo
-cargo run -- check examples/testapp/main.jwc
-cargo run -- run examples/testapp
-cargo run -- serve examples/testapp --port 8080 --watch
-cargo run -- lint                    # validate + dead-code warnings
-cargo run -- gen-sql examples/testapp/src/data/AppDbContext.jwc
+cargo run -- check docs/spec/v1/sample
+cargo run -- explain docs/spec/v1/sample     # every query, with its SQL
+cargo run -- gen-sql docs/spec/v1/sample     # the schema as DDL
+cargo run -- serve docs/spec/v1/sample --port 8080
 ```
 
-`build.ps1` / `build.sh` / `build.cmd` are convenience wrappers around
-`cargo build` for end-user installs — prefer `cargo` directly during dev.
-
-`install-from-source.{sh,ps1}` install the compiled binary to the user
-profile (`~/.jwc/bin` or `%LOCALAPPDATA%\jwc\bin`). Never run these to test
-local changes; they overwrite the user's installed `jwc`.
+`install-from-source.{sh,ps1}` install to the user profile. Never run them
+to test local changes; they overwrite the user's installed `jwc`.
 
 ## Tests
 
 ```bash
-cargo test                           # unit tests
-cargo test --test integration_db     # Postgres integration suite
-cargo test --test integration_db -- some_test_name   # single test
-cargo test -- --nocapture            # show eprintln! output (skips, etc.)
+cargo test                        # everything that needs no database
 ```
+
+Three suites need Postgres and **print SKIPPED without it**. A SKIPPED line
+is not a pass — the variables below are how you actually run them:
 
 ```bash
-JWC_DIFFERENTIAL=1 cargo test --test differential   # both backends, compiled + run
+# psql connection string. Drops and creates databases.
+JWC_V1_PG='-h 127.0.0.1 -p 5432 -U postgres' cargo test --test sql_golden
+JWC_V1_PG='-h 127.0.0.1 -p 5432 -U postgres' cargo test --test ddl_golden
+
+# A database the suite may drop and recreate schemas in.
+JWC_V1_DATABASE_URL=postgres://…  CURSOR_SECRET=x cargo test --test http_golden
+JWC_V1_DATABASE_URL=postgres://…  cargo test --test raw_hatch
 ```
 
-`tests/differential.rs` is the only suite that actually **cargo-builds the
-emitted crate, runs the binary, and drives HTTP at both backends**. Every
-other parity test string-matches generated source, and `native_parity.rs`
-treats interpreter stdout as the golden value — so neither can see a bug
-where the call shape is right and the behaviour is wrong, or where the
-interpreter is the side that's wrong. Cases compare against expectations
-declared in `tests/differential/cases/*.expect.json`; neither backend votes.
-It is opt-in because each case shells out to cargo. **A SKIPPED line is not
-a pass** — set the variable before claiming parity work is done.
+What each suite is for:
 
-`tests/integration_db.rs` boots a Postgres container via `testcontainers` and
-serialises tests behind a global `Mutex` because `jwc::engine::ENGINE` is a
-process-wide `OnceLock`. Tests print `SKIPPED` via `eprintln!` and return
-`Ok(())` when Docker is unreachable — do **not** treat skipped output as a
-pass when verifying a change. Run the suite on a machine with Docker before
-claiming DB-touching work is done.
+| Suite | Pins |
+|---|---|
+| `parse_corpus` | the grammar, snippet by snippet |
+| `fmt` | canonical printing, and that it is a fixed point |
+| `removed_keywords` | every removed keyword names its replacement |
+| `schema_diagnostics` | one case per schema rule, message included |
+| `type_corpus` | the type layer, `-- expect:` annotated, exact both ways |
+| `wiring_corpus` | routes, middleware, `context`, the error model, imports |
+| `ddl_golden` | emitted DDL, byte for byte, and that it applies |
+| `sql_golden` | emitted SQL, byte for byte, and that it runs |
+| `http_golden` | request/response pairs through the real pipeline |
+| `docs_parse` | every ```jwc block in the README and the spec |
 
-There is no `cargo fmt` config and no clippy lint config beyond defaults;
-match the surrounding style.
+The corpora are **exact in both directions**: a missing diagnostic and an
+unannotated one both fail. That is what makes them a specification rather
+than a smoke test.
 
-## CLI surface (defined in `src/main.rs`)
-
-The Clap subcommands map 1:1 to functions in the library crate:
-
-| Subcommand                   | Library entry point                           |
-|------------------------------|-----------------------------------------------|
-| `new <name>`                 | `project::create_new_project`                 |
-| `check <file>`               | `parser::parse_program` + `validate_program`  |
-| `gen-sql <file>`             | `sql::generate_postgres_schema`               |
-| `run [path]`                 | `project::load` → `runner::run_main` → `server::serve` |
-| `serve [path] --watch`       | same as `run`, but always starts the server   |
-| `test` / `lint`              | `project::load` + `lint::lint_program`        |
-| `build [--release]`          | runtime bundler in `main.rs`                  |
-| `migrate new/up/down`        | `migrate::*`                                  |
-
-When extending the CLI, add the subcommand in `main.rs` and the implementation
-behind a function in the matching `src/*.rs` module — keep `main.rs` thin.
+There is no `cargo fmt` config and no clippy config beyond defaults; match
+the surrounding style. CI runs `clippy --all-targets -- -D warnings`.
 
 ## Architecture
 
-### Compilation pipeline (always in this order)
+### The pipeline, always in this order
 
-`lexer.rs` → `parser.rs::parse_program` → `parser.rs::validate_program` →
-optionally `lint::lint_program` → `runner::run_main` (or `sql::generate_*`
-for `gen-sql`).
+`lexer` → `parser` → `model` (schema) → `symbols` → `check` (types) →
+`wiring` (routes, middleware, errors) + `imports` → `query`/`query_sql` →
+`exec`.
 
-- `lexer.rs` — hand-written tokeniser. Adds a token type? Update `Token`,
-  `TokenKind`, and the keyword table.
-- `parser.rs` — recursive-descent, builds nodes from `ast.rs`. The same file
-  also hosts `validate_program`, which is **not** a separate pass — it
-  re-walks the AST to enforce dbcontext/entity/column compile-time checks.
-  Many invariants (e.g. column existence on `where Entity.col`) are enforced
-  here, not in the runtime.
-- `ast.rs` — all AST node definitions live here. Every new syntactic form
-  needs an enum variant plus parser support plus runner support.
-- `lint.rs` — pure AST walk; only emits warnings (unused functions, unused
-  middleware). Never produces hard errors.
-- `runner/` — the interpreter `Vm`, split across `mod.rs`, `eval.rs`,
-  `builtins.rs`, `dispatch.rs`, `exec.rs`, `sql.rs`, `types.rs`, `util.rs`,
-  `validation.rs`. Everything user code can do (built-ins, control flow,
-  route dispatch glue, validation, JSON coercion) lives here. There is **no
-  `call_builtin` function**: builtin dispatch is a chain of
-  `if name.eq_ignore_ascii_case(...)` in the `Expr::Call` arm of
-  `Vm::eval_expr` (`eval.rs`), and the bodies are `eval_*_call` methods in
-  `builtins.rs`. The arity/native table is `src/builtins.rs::BUILTIN_DEFS`.
-  The Vm is **async**: the recursive evaluator methods carry
-  `#[async_recursion]`, so `eval_expr` / `exec_block` / `call_function` are
-  all `async fn` and must be `.await`-ed.
-- `engine.rs` — the singleton DB layer (`ENGINE: OnceLock<JwcEngine>`).
-  Wraps a `deadpool-postgres` async pool backed by `tokio-postgres` (TLS via
-  `tokio-postgres-rustls` when `JWC_DB_TLS` is set), a prepared statement
-  cache, and an optional TTL result cache. Same `OnceLock<JwcEngine>`
-  singleton — tests reset the `public` schema between runs but **do not**
-  reset `ENGINE`; design new DB code so it tolerates being called against a
-  fresh schema on the same pool.
+- **`token.rs` / `lexer.rs`** — hand-written. `KEYWORDS` is the keyword
+  table; `REMOVED_KEYWORDS` is what makes a 0.9.x file say what to write
+  instead. Keywords are **contextual**: there are no reserved words, because
+  the sample uses `route`, `max`, `check`, `key`, `text` and `date` as
+  ordinary identifiers.
+- **`parser.rs`** — recursive descent with per-declaration recovery, so one
+  bad declaration does not swallow the file.
+- **`ast.rs`** — every node. A new syntactic form needs a variant here, a
+  parser arm, a `fmt.rs` arm, and a `check.rs` arm.
+- **`fmt.rs`** — the canonical printer. Formatting is a fixed point by
+  construction, and `tests/fmt.rs` asserts it.
+- **`model.rs`** — the resolved schema: physical names, types, constraints.
+  DDL reads this, never the AST.
+- **`views.rs`** — views as *relations*, with their columns worked out. A
+  view is a real `CREATE VIEW`, not a macro.
+- **`ddl.rs`** — seven-phase emission (schema, enum type, table, **every FK
+  in its own pass**, index, trigger, view, comment). The separate FK pass is
+  what makes cross-schema cycles emittable.
+- **`check.rs`** — the type pass. `Raw` vs `Record`, `T?` and narrowing,
+  class validation, aggregates.
+- **`wiring.rs`** — whole-program checks: the route table, middleware
+  chains, typed `context`, raise sets over the static call graph.
+- **`query.rs`** — the join *tree*: which join attaches to which binding.
+- **`query_sql.rs`** — the join tree as SQL. This is where the shapes that
+  matter live; see below.
+- **`exec.rs` / `exec_call.rs` / `serve.rs`** — the interpreter and the axum
+  server. `serve::handle` is a plain async function over an owned request,
+  so tests drive the real pipeline and only the socket is unexercised.
 
-### Async stack: Vm, server, DB, native AOT
+### Four things in the emitter that are easy to get wrong
 
-This is the single most important architectural fact:
+1. **`as one` under `left join`** emits `CASE WHEN <child pk> IS NULL THEN
+   NULL ELSE json_build_object(…) END`. Without the guard an unmatched row
+   projects an object of nulls instead of null.
+2. **`as many`** is a `LEFT JOIN LATERAL`, never `json_agg(… ORDER BY …)`.
+   That form can order a collection but cannot bound one, and two
+   collections side by side multiply each other's rows.
+3. **A bounded page over a collection** takes its keys first
+   (`WITH page AS MATERIALIZED`), scanning the **base table** — selecting
+   keys from a view still evaluates its laterals. If the pushdown cannot be
+   proven it is `E0542`, never a silent O(table) plan.
+4. **Every value is a bind parameter, bound as text and cast in SQL**:
+   `($1::text)::bigint`, never `$1::bigint`, which makes Postgres infer the
+   column's type for the parameter and refuse the text the runtime sends.
 
-- `runner/` is fully async (`#[async_recursion]` on the recursive
-  evaluator methods). `Vm::eval_expr` is an `async fn`; SQL calls await on
-  the `deadpool-postgres` pool.
-- `server.rs` is built on axum + tokio. Every request is a `tokio::spawn`'d
-  task — no more `spawn_blocking`. WebSocket frame I/O is direct async I/O
-  via `tokio::io::{AsyncReadExt, AsyncWriteExt}` against a
-  `tokio::task_local!` `Arc<Mutex<TcpStream>>` (no mpsc bridge thread).
-- `async function` / `await` are real now (Phase 9). Suspending across an
-  `.await` yields to the scheduler — concurrent requests no longer
-  serialise on a worker thread.
-- When adding a new async builtin (HTTP, filesystem, anything that
-  suspends), put the impl in `runner/builtins.rs`, wire the dispatch arm in
-  `runner/eval.rs`, and add the `BuiltinDef` row in `src/builtins.rs` with
-  `native: true` — that flag **is** the AOT whitelist, via
-  `native_builtin_names()`. There is no separate BUILTINS list in
-  `native_build.rs` any more.
-- **The one that bites:** an async builtin must ALSO be named in the
-  `is_async_builtin` `matches!` in `src/native_build.rs`. That list is not
-  derived from anything. Miss it and codegen emits the call without
-  `.await`, so the *generated* crate fails to compile. `conformance.rs` and
-  `native_parity.rs` will not tell you — they string-match emitted source
-  and never invoke cargo on it. `tests/differential.rs` does compile it, so
-  add a case there covering the new builtin (or run a real
-  `jwc build --native`); the await-guard in `tests/native_emit.rs` is the
-  cheap backstop.
-- One built-in must never be split across two `BuiltinDef` rows. Two rows
-  means two `native` flags, and the pair drifts: `setConnectionString`
-  compiled while `set_connection_string` did not, and `length` compiled
-  while `len` — dispatched to the identical interpreter body — was rejected
-  as an unknown function. Use `aliases: &[...]` on one row and add a shim in
-  `native_prelude.rs.in` (`fn jwc_b_len(v: V) -> V { jwc_b_length(v) }`),
-  since codegen mangles each spelling to its own symbol.
+`json`, not `jsonb`: `jsonb` sorts object keys, and the projection order
+**is** the JSON key order.
 
-### Migrations
+### Diagnostics
 
-`src/migrate.rs` owns both the file generator (`jwc migrate new`) and the
-applier (`up`/`down`). Apply uses a Postgres session-level advisory lock
-(`pg_advisory_lock` keyed by `MIGRATION_LOCK_KEY` = ASCII `"jwc-mig"`) so
-concurrent processes serialise without deadlocking. The CLI honours
-`DATABASE_URL` / `JWC_DATABASE_URL` and the same `JWC_DB_TLS*` flags as the
-runtime pool — keep that contract when extending the migrate command.
+Every diagnostic carries a code, a message, a `= help:` note naming the fix,
+and a `= spec:` clause. A code that appears in a spec table and not in the
+source is debt; the audit is `comm -23` over the two lists.
 
-`schema_diff.rs` is wired into `migrate new`: `create_migration` reads the
-latest `.up.sql` snapshot from `migrations/`, parses it back into entity
-snapshots, diffs it against the current program's entities, and emits only
-the resulting `ALTER` / `CREATE TABLE` statements (or `-- no schema changes`
-if the diff is empty). Don't re-emit the full schema from a generator —
-extend `schema_diff::compute_diff` / `diff_to_sql` instead.
+## The specification
 
-### Project layout
+`docs/spec/v1/` is normative — thirteen documents plus `sample/`, a complete
+application (13 tables, 5 views, 25 endpoints). Before changing behaviour,
+read the clause. If the implementation and the spec disagree, one of them is
+wrong and the commit says which.
 
-A JWC project is `jwcproj.json` + one or more `.jwc` files (the loader walks
-upward from `cwd` to find the manifest). `project::load` discovers source
-files, parses each, and merges them into a single `Program`. There is no
-module/import system — every `.jwc` file in the project contributes to one
-flat namespace, so a parse error in any file fails the whole load.
-
-`examples/testapp` is the canonical end-to-end test project; `microblog` is
-a second working example. When prototyping a language change, run both
-against it (`cargo run -- lint --manifest-path examples/testapp/jwcproj.json`
-equivalent: `cd examples/testapp && cargo run --manifest-path ../../Cargo.toml -- lint`).
+`check_sample.py` classifies every construct in the sample against the spec
+and fails if one is unspecified.
 
 ## VS Code extension
 
-`vscode-extension/` is a self-contained TypeScript project that bundles
-syntax highlighting and points at the `jwc-lsp` binary. Iterating on it:
-
-```bash
-cd vscode-extension
-npm install
-npm run compile
-```
-
-The extension's `package.json` declares the LSP launch command — if you
-rename or move the `jwc-lsp` binary in Rust, update the extension config in
-the same change.
-
-## Roadmap awareness
-
-`ROADMAP.md` is the source of truth for what counts as "done" vs.
-"partial" vs. **"non-goal"**. Before adding a feature that overlaps a
-Phase item, re-read the relevant section. The **Non-goals** block at the
-top of ROADMAP.md is policy — those items (LLVM IR, cross-target matrix,
-WASM, self-hosting, multi-database driver, SSE v2, OTLP-as-core,
-job-priority/DLQ ML, rich-domain object graphs) won't ship pre-1.0 and
-PRs that add them get closed. The north star — "Web backend yoz —
-CRUD'ni qo'lda yozmasdan, ORM bilan kurashmasdan, native-tez" — gates
-every new feature.
+`vscode-extension/` is self-contained TypeScript: syntax highlighting and
+snippets. Its keyword list is generated from `token.rs::KEYWORDS` — if you
+add a keyword, update the TextMate grammar in the same change. The language
+server is not built at the moment; it returns, rewritten, in v0.27.0.

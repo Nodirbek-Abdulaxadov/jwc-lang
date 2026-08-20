@@ -74,13 +74,15 @@ try {
 
     Install-Binary 'jwc.exe' $exeSrc
 
-    # Also install jwc-lsp if it was built alongside. The VS Code extension
-    # auto-discovers it on PATH or under $LOCALAPPDATA\jwc\bin.
+    # Also install jwc-lsp if it was built alongside. It is not built at
+    # the moment -- it was written against the pre-1.0 parser, which
+    # v0.25.0 removed, and it returns rewritten in v0.27.0 -- so this is a
+    # no-op on a current checkout and stays for the ones that still have it.
     $lspSrc = Join-Path (Split-Path -Parent $exeSrc) 'jwc-lsp.exe'
     if (Test-Path $lspSrc) {
         Install-Binary 'jwc-lsp.exe' $lspSrc
     } else {
-        Write-Host "(jwc-lsp.exe not found next to $exeSrc -- skipping LSP install)"
+        Write-Host "(no jwc-lsp.exe to install -- the language server returns in v0.27.0)"
     }
 
     # Add installDir to USER PATH if missing

@@ -1,2 +1,0 @@
-caught: division by zero
-nested caught

@@ -170,8 +170,14 @@ fetch_and_install() {
     tar -xzf "${tmp}/${asset}" -C "${tmp}"
 
     mkdir -p "${INSTALL_DIR}"
-    install -m 0755 "${tmp}/jwc"     "${INSTALL_DIR}/jwc"
-    install -m 0755 "${tmp}/jwc-lsp" "${INSTALL_DIR}/jwc-lsp"
+    install -m 0755 "${tmp}/jwc" "${INSTALL_DIR}/jwc"
+    # `jwc-lsp` is not built at the moment: it was written against the
+    # pre-1.0 parser, which v0.25.0 removed, and it returns rewritten in
+    # v0.27.0. Older release archives still carry it, so install it when
+    # the archive has one rather than failing on its absence.
+    if [ -f "${tmp}/jwc-lsp" ]; then
+        install -m 0755 "${tmp}/jwc-lsp" "${INSTALL_DIR}/jwc-lsp"
+    fi
 }
 
 fetch_and_install "${short}"
@@ -214,7 +220,9 @@ if ! "${INSTALL_DIR}/jwc" --version >/dev/null 2>&1; then
 fi
 
 echo "Installed: ${INSTALL_DIR}/jwc"
-echo "Installed: ${INSTALL_DIR}/jwc-lsp"
+if [ -f "${INSTALL_DIR}/jwc-lsp" ]; then
+    echo "Installed: ${INSTALL_DIR}/jwc-lsp"
+fi
 
 if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
     echo

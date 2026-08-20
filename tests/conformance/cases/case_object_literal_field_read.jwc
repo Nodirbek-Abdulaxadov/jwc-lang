@@ -1,6 +1,0 @@
-// Conformance: object literal field read end-to-end (Value::Record path).
-function main() {
-    let b = { id: 1, name: "Brand" };
-    print(b.id);
-    print(b.name);
-}
