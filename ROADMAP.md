@@ -792,6 +792,36 @@ o'tolmaydi; 413 body-limit testi middleware'gacha yetmaydi; timing testi
 `login` ning ikki tarmog'i orasida statistik farq bermaydi (yoki farq
 hujjatlashtiriladi); 24h soak'da RSS o'sishi < 5%, 0 ta pool leak.
 
+**Bajarildi (soak'dan tashqari).** To'rt bosqich. Uchta mezon testda:
+`serve::client_ip_tests` (besh xil XFF shakli hech narsani o'zgartirmaydi),
+`an_oversized_body_never_reaches_the_chain` (413, va nazorat sifatida
+limitdan past tanada 403), va
+`the_two_failure_branches_of_login_cost_the_same`.
+
+**24 soatlik soak bu muhitda yurmaydi** va mezon ochiq qoladi —
+`security.md` §9 shuni yozib qo'yadi. `bombardier` ham o'rnatilmagan.
+
+Yo'l-yo'lakay topilgan eng muhim narsa: **`login` da timing orakuli bor
+edi.** Noma'lum email Argon2id'gacha yetmasdan qaytardi — **2.4ms**, ma'lum
+email esa **415.8ms**. "Ikkala xato uchun bir xil xabar" ni soat butunlay
+bekor qilardi. Endi ikkala tarmoq ham verify qiladi (nomaʼlumi decoy'ga
+qarshi): 410.9ms va 414.8ms.
+
+Boshqalar:
+
+- **`hash.*` bo'linishi allaqachon bor edi** (v0.24.0 dan), lekin
+  namunada hashlangan tokenni **qidiradigan** joy yo'q edi — endi
+  `POST /api/v1/invites/accept` bor, va `Invites.token_hash` ustidagi
+  `unique` shu tufayli ma'noga ega.
+- **`server { }` ning ko'p kaliti o'qilib tashlab yuborilardi.**
+  `request_timeout`, `shutdown_grace`, `cors { }` endi ishlaydi; `tls { }`
+  va `header_timeout` esa **boot'da rad etiladi** — e'lon qilingan TLS
+  ostida ochiq HTTP xizmat qilish operator ko'ra olmaydigan yagona
+  noto'g'ri sozlama.
+- **`cargo audit` dagi 7 ta advisory faqat dev-dependency'da**, va bu
+  grafik haqidagi da'vo — `cargo audit` uni tekshira olmaydi, shuning uchun
+  test tekshiradi.
+
 ---
 
 ### v1.0.0-rc.1 — **Freeze candidate**
