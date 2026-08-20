@@ -278,8 +278,32 @@ Rules:
 `where` inside a call is grammar (`call_args`) and is legal only in an
 aggregate call (`E0533`).
 
-`count(x)` → `int`, never null. `sum`/`min`/`max`/`avg` → `T?`
-(types §6.3).
+`FILTER`, not `count(CASE WHEN pred THEN x END)`: the two compute the same
+number, but one says what was meant and the planner reads it as a filter.
+
+`count(x)` → `int`, never null. `min`/`max` → `T?`. `sum` widens and `avg`
+is `numeric?` — see types §6.3, and note that a summed column changes from
+a JSON number to a JSON string, because `bigint` and `numeric` both are.
+
+`having` compares an aggregate, so the literal on the other side is cast to
+what the **aggregate** returns, not to the column's type:
+`HAVING count(t1.id) > ($1::text)::bigint`.
+
+### 6.4 What an aggregate emits **[0.25.c]**
+
+```sql
+count(t1.id)
+count(DISTINCT t1.id)
+count(t1.id) FILTER (WHERE t1.status = ($1::text)::billing.invoice_status)
+(sum(t1.amount) FILTER (WHERE …))::text
+```
+
+The parentheses around a filtered aggregate before a cast are load-bearing:
+`sum(x) FILTER (WHERE p)::text` casts `p`, not the sum.
+
+A bare (`as group`) join is emitted into `FROM` like any other join and
+contributes no projection field. `group by` and `having` follow the outer
+`where`, in that order.
 
 ---
 

@@ -1638,7 +1638,15 @@ impl<'a> Checker<'a> {
         match name {
             // count never returns null (types.md §6.3).
             "count" => Ty::int(),
-            "sum" | "avg" => arg.strip_opt().opt(),
+            // `sum` widens and `avg` is always numeric — the same
+            // widening Postgres does, and for the same reason: a sum that
+            // kept its operand's width would overflow on exactly the data
+            // that makes a sum worth asking for (types.md §6.3).
+            "sum" => widen_sum(&arg.strip_opt()).opt(),
+            "avg" => match arg.strip_opt() {
+                Ty::Scalar(s) if s.numeric_rank().is_some() => Ty::numeric().opt(),
+                other => other.opt(),
+            },
             "min" | "max" => arg.strip_opt().opt(),
             _ => Ty::Unknown,
         }
@@ -2436,6 +2444,45 @@ impl<'a> Checker<'a> {
             }
         }
 
+        self.check_fan_out(s);
+    }
+
+    /// queries.md §6.2 — two bare joins fan out, so a plain `count` over
+    /// either one counts the other's rows as well.
+    ///
+    /// A customer with 3 orders and 2 notes reports 6 orders. Nothing
+    /// fails; the number is just wrong, and it is wrong in proportion to
+    /// the other collection, so it looks plausible on small data and
+    /// diverges on real data.
+    fn check_fan_out(&mut self, s: &SelectExpr) {
+        let bare = s
+            .joins
+            .iter()
+            .filter(|j| {
+                j.result
+                    .as_ref()
+                    .is_some_and(|r| r.cardinality == Cardinality::Group)
+            })
+            .count();
+        if bare < 2 {
+            return;
+        }
+        let Some(p) = &s.projection else { return };
+        for f in &p.fields {
+            let ProjField::Expr { value, .. } = f else {
+                continue;
+            };
+            for span in plain_counts(value) {
+                self.warn(
+                    span,
+                    "W0502",
+                    format!(
+                        "`count` under {bare} bare joins counts the other join's rows too"
+                    ),
+                    "queries.md §6.2",
+                );
+            }
+        }
     }
 
     /// queries.md §5.2 — `first` needs a deterministic result.
@@ -3024,6 +3071,51 @@ fn is_namespace(name: &str) -> bool {
         "date" | "string" | "array" | "hash" | "jwt" | "crypto" | "request" | "response"
             | "context" | "redis" | "mail" | "count" | "App"
     )
+}
+
+/// types.md §6.3 — `sum` moves one step up the numeric ladder and stops at
+/// `numeric`, which is unbounded.
+fn widen_sum(t: &Ty) -> Ty {
+    match t {
+        Ty::Scalar(Scalar::Smallint) | Ty::Scalar(Scalar::Int) => Ty::bigint(),
+        Ty::Scalar(Scalar::Bigint) | Ty::Scalar(Scalar::Numeric) => Ty::numeric(),
+        other => other.clone(),
+    }
+}
+
+/// Spans of every non-distinct `count(...)` in an expression.
+fn plain_counts(e: &Expr) -> Vec<Span> {
+    let mut out = Vec::new();
+    walk_counts(e, &mut out);
+    out
+}
+
+fn walk_counts(e: &Expr, out: &mut Vec<Span>) {
+    if let ExprKind::Call { callee, args, filter } = &*e.kind {
+        if matches!(&*callee.kind, ExprKind::Name(n) if n.name == "count") {
+            out.push(e.span);
+        }
+        for a in args {
+            walk_counts(a, out);
+        }
+        if let Some(f) = filter {
+            walk_counts(f, out);
+        }
+        return;
+    }
+    match &*e.kind {
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Coalesce { lhs, rhs } => {
+            walk_counts(lhs, out);
+            walk_counts(rhs, out);
+        }
+        ExprKind::Unary { rhs, .. } => walk_counts(rhs, out),
+        ExprKind::Ternary { cond, then, otherwise } => {
+            walk_counts(cond, out);
+            walk_counts(then, out);
+            walk_counts(otherwise, out);
+        }
+        _ => {}
+    }
 }
 
 fn is_aggregate(name: &str) -> bool {

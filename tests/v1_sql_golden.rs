@@ -516,6 +516,93 @@ fn a_join_level_where_narrows_the_collection_not_the_driving_rows() {
     );
 }
 
+#[test]
+fn aggregates_count_group_and_widen_on_real_rows() {
+    // The three things a golden cannot see: `count` over a LEFT JOIN that
+    // matched nothing is 0 while `sum` is null, the FILTER narrows only the
+    // aggregate it is attached to, and the widened types come back as
+    // strings because that is what `sum : numeric?` means on the wire.
+    let Some(conn) = pg() else { return };
+    let project = repo_root().join("tests/sql_golden/cases/aggregates.jwc");
+    let db = seeded(
+        &conn,
+        "jwc_v1_sql_aggregates",
+        &project,
+        "INSERT INTO s.customers (id, name) VALUES (1, 'acme'), (2, 'quiet');
+         INSERT INTO s.orders (customer_id, status, amount, items) VALUES
+             (1, 'paid', 10.00, 2), (1, 'paid', 5.50, 1), (1, 'open', 99.00, 7);",
+    );
+    // The two parameters are the `where O.status == OrderStatus.paid`
+    // filters; the runtime evaluates the enum literal and binds its text.
+    let json = execute(
+        &conn,
+        &db,
+        &statement(&project, "view CustomerTotals"),
+        &["paid", "paid"],
+    );
+    run_psql(&conn, "postgres", &["-c", &format!("DROP DATABASE {db}")]);
+
+    let rows: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let rows = rows.as_array().expect("an array");
+    let acme = rows.iter().find(|r| r["name"] == "acme").unwrap();
+    let quiet = rows.iter().find(|r| r["name"] == "quiet").unwrap();
+
+    assert_eq!(acme["order_count"], 3, "{acme}");
+    assert_eq!(acme["paid_count"], 2, "the FILTER narrows only this one: {acme}");
+    // `sum : numeric?` — a string on the wire, like every numeric
+    // (types.md §2.3). 10.00 + 5.50, not 114.50.
+    assert_eq!(acme["paid_total"], "15.50", "{acme}");
+    // `sum` of an int column widens to bigint, which is also a string.
+    assert_eq!(acme["item_total"], "10", "{acme}");
+    assert_eq!(acme["first_order"], "1", "{acme}");
+    assert_eq!(acme["last_order"], "3", "{acme}");
+
+    // A customer with no orders: the left join keeps the row, `count` is 0
+    // and every other aggregate is null over the empty group.
+    assert_eq!(quiet["order_count"], 0, "{quiet}");
+    assert_eq!(quiet["paid_count"], 0, "{quiet}");
+    assert!(quiet["paid_total"].is_null(), "{quiet}");
+    assert!(quiet["avg_amount"].is_null(), "{quiet}");
+    assert!(quiet["first_order"].is_null(), "{quiet}");
+}
+
+#[test]
+fn having_filters_groups_and_count_distinct_survives_fan_out() {
+    // Two bare joins multiply each other's rows: 3 orders and 2 notes make
+    // six joined rows, so a plain `count` reports 6 for both. This is what
+    // W0502 warns about and what `count.distinct` fixes.
+    let Some(conn) = pg() else { return };
+    let project = repo_root().join("tests/sql_golden/cases/aggregates.jwc");
+    let db = seeded(
+        &conn,
+        "jwc_v1_sql_having",
+        &project,
+        "INSERT INTO s.customers (id, name) VALUES (1, 'acme'), (2, 'quiet');
+         INSERT INTO s.orders (customer_id, status, amount, items) VALUES
+             (1, 'open', 1.00, 1), (1, 'open', 1.00, 1), (1, 'open', 1.00, 1),
+             (2, 'open', 1.00, 1);
+         INSERT INTO s.notes (customer_id, body) VALUES (1, 'a'), (1, 'b');",
+    );
+    let busy = execute(&conn, &db, &statement(&project, "view BusyCustomers"), &["2"]);
+    let activity = execute(&conn, &db, &statement(&project, "view CustomerActivity"), &[]);
+    run_psql(&conn, "postgres", &["-c", &format!("DROP DATABASE {db}")]);
+
+    let busy: serde_json::Value = serde_json::from_str(&busy).expect("json");
+    let busy = busy.as_array().expect("an array");
+    assert_eq!(busy.len(), 1, "only acme has more than two orders: {busy:?}");
+    assert_eq!(busy[0]["order_count"], 3);
+
+    let activity: serde_json::Value = serde_json::from_str(&activity).expect("json");
+    let acme = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["customer_id"] == "1")
+        .unwrap();
+    assert_eq!(acme["orders"], 3, "3 orders, not 3 × 2 notes: {acme}");
+    assert_eq!(acme["notes"], 2, "2 notes, not 2 × 3 orders: {acme}");
+}
+
 fn run_psql(conn: &str, db: &str, args: &[&str]) -> String {
     let mut cmd = Command::new("psql");
     for part in conn.split_whitespace() {

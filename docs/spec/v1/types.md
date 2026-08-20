@@ -259,7 +259,9 @@ returns.
 | `inner join … as one a` | `a : Record{…}` |
 | `… as many xs` | `xs : Record{…}[]` — empty array, never null |
 | `count(x)` | `int` — never null |
-| `sum` / `min` / `max` / `avg` | `T?` — null over an empty group |
+| `min` / `max` | `T?` — null over an empty group |
+| `sum` | widened `T?` — `smallint`/`int` → `bigint`, `bigint`/`numeric` → `numeric` |
+| `avg` | `numeric?` over any numeric operand |
 | `request.query(k)` etc. | `text?` |
 | `?? ` right operand non-null | strips `?` (§6.6) |
 
@@ -267,6 +269,15 @@ returns.
 they would make the *driving* binding nullable, which inverts the projection
 tree for no expressiveness the sample or DESIGN.md asks for. Use `left join`
 with the sides swapped.
+
+`sum` widens because a sum that kept its operand's width would overflow on
+exactly the data that makes a sum worth asking for: a thousand rows of
+`int` is the ordinary case, not the pathological one. It is the same
+widening Postgres does, so the emitted SQL needs no cast to reach the
+declared type — and both `bigint` and `numeric` are strings on the wire
+(§2.3), so a summed column changes representation from number to string.
+That is visible in a response and is the reason it is written down here
+rather than left to the emitter.
 
 ### 6.4 Using a `T?`
 

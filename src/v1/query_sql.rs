@@ -381,7 +381,7 @@ impl<'a> Compiler<'a> {
         }
         match &*e.kind {
             ExprKind::Call { .. } => self.aggregate(e, scope),
-            _ => None,
+            _ => self.unsupported("a projection field is a column or an aggregate"),
         }
     }
 
@@ -435,18 +435,52 @@ impl<'a> Compiler<'a> {
                         BinOp::ILike => "ILIKE",
                         _ => return None,
                     };
-                    let col = self.column_ref(lhs, scope)?;
+                    let (col, cast) = self.operand(lhs, scope)?;
                     // Both sides columns: a join condition, no parameter.
                     if let Some(right) = self.column_ref(rhs, scope) {
                         return Some(format!("{col} {sql_op} {right}"));
                     }
-                    let cast = self.param_cast(lhs, scope)?;
                     let p = self.bind(rhs, &cast);
                     format!("{col} {sql_op} {p}")
                 }
             },
             ExprKind::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
             _ => return None,
+        })
+    }
+
+    /// The left side of a comparison: a column, or — in `having` — an
+    /// aggregate. Returns the SQL and the Postgres type a bound parameter
+    /// on the other side must be cast to.
+    fn operand(&mut self, e: &Expr, scope: &str) -> Option<(String, String)> {
+        if let Some(c) = self.column_ref(e, scope) {
+            return Some((c, self.param_cast(e, scope)?));
+        }
+        let sql = self.aggregate(e, scope)?;
+        let ty = self.aggregate_type(e, scope)?;
+        Some((sql, ty))
+    }
+
+    /// The Postgres type an aggregate comes back as, for casting the
+    /// literal it is compared against in `having`.
+    fn aggregate_type(&self, e: &Expr, scope: &str) -> Option<String> {
+        let ExprKind::Call { callee, args, .. } = &*e.kind else {
+            return None;
+        };
+        let name = match &*callee.kind {
+            ExprKind::Name(n) => n.name.as_str(),
+            // `count.distinct`
+            ExprKind::Field { .. } => "count",
+            _ => return None,
+        };
+        Some(match name {
+            "count" => "bigint".to_string(),
+            "sum" | "avg" => match self.column_scalar(args.first()?, scope)?.as_str() {
+                "smallint" | "int" | "integer" if name == "sum" => "bigint".to_string(),
+                _ => "numeric".to_string(),
+            },
+            // `min` / `max` keep the operand's type.
+            _ => self.param_cast(args.first()?, scope)?,
         })
     }
 
@@ -464,8 +498,90 @@ impl<'a> Compiler<'a> {
         Some(super::sql::pg_type(&c.ty))
     }
 
-    fn aggregate(&mut self, _e: &Expr, _scope: &str) -> Option<String> {
-        self.unsupported("aggregates arrive in v0.25.c")
+    /// `count(x)`, `count.distinct(x)`, `sum/min/max/avg(x)`, each
+    /// optionally filtered (queries.md §6.3).
+    fn aggregate(&mut self, e: &Expr, scope: &str) -> Option<String> {
+        let ExprKind::Call {
+            callee,
+            args,
+            filter,
+        } = &*e.kind
+        else {
+            return self.unsupported("only columns and aggregates project");
+        };
+        let (name, distinct) = match &*callee.kind {
+            ExprKind::Name(n) if is_aggregate(&n.name) => (n.name.as_str(), false),
+            ExprKind::Field { base, field } => match &*base.kind {
+                ExprKind::Name(b) if b.name == "count" && field.name == "distinct" => {
+                    ("count", true)
+                }
+                _ => return self.unsupported("only aggregate calls project"),
+            },
+            _ => return self.unsupported("only aggregate calls project"),
+        };
+
+        let arg = args.first()?;
+        let inner = match self.column_ref(arg, scope) {
+            Some(c) => c,
+            // `count(1)` counts rows and needs no column.
+            None => match &*arg.kind {
+                ExprKind::Int(n) => n.clone(),
+                _ => return self.unsupported("an aggregate takes a column"),
+            },
+        };
+
+        let mut sql = if distinct {
+            format!("count(DISTINCT {inner})")
+        } else {
+            format!("{name}({inner})")
+        };
+        let filtered = filter.is_some();
+        if let Some(f) = filter {
+            // Not `count(CASE WHEN … THEN x END)`: FILTER says what is
+            // meant, and the planner reads it (queries.md §6.3).
+            sql.push_str(&format!(" FILTER (WHERE {})", self.predicate(f, scope)?));
+        }
+
+        // The wire form follows the *widened* result, not the operand:
+        // `sum` of a bigint column is numeric, and both are strings on the
+        // wire (types.md §2.3, §6.3).
+        if let Some(cast) = self.aggregate_wire_cast(name, arg, scope) {
+            // `agg(x) FILTER (WHERE p)::text` casts `p`, not the aggregate.
+            sql = if filtered {
+                format!("({sql})::{cast}")
+            } else {
+                format!("{sql}::{cast}")
+            };
+        }
+        Some(sql)
+    }
+
+    fn aggregate_wire_cast(&self, name: &str, arg: &Expr, scope: &str) -> Option<&'static str> {
+        match name {
+            // `count` is an int on the wire, which JSON has (queries.md §6.3).
+            "count" => None,
+            "sum" | "avg" => match self.column_scalar(arg, scope)?.as_str() {
+                // smallint and int sum to bigint; everything else that can
+                // be summed lands on numeric. Both are text on the wire.
+                "smallint" | "int" | "integer" => Some("text"),
+                s if s == "bigint" || s.starts_with("numeric") => Some("text"),
+                _ => None,
+            },
+            _ => self.cast_of(arg, scope),
+        }
+    }
+
+    /// The rendered Postgres type of a column reference.
+    fn column_scalar(&self, e: &Expr, scope: &str) -> Option<String> {
+        let (object, name) = match &*e.kind {
+            ExprKind::Name(n) => (self.object_of(scope)?, n.name.clone()),
+            ExprKind::Field { base, field } => match &*base.kind {
+                ExprKind::Name(b) => (self.object_of(&b.name)?, field.name.clone()),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(self.table_of(&object)?.column(&name)?.ty.render())
     }
 }
 
@@ -713,4 +829,8 @@ fn collect_entries<'a>(entries: &'a [ObjEntry], label: &str, out: &mut Vec<Site<
             collect_expr(value, label, out);
         }
     }
+}
+
+fn is_aggregate(name: &str) -> bool {
+    matches!(name, "count" | "sum" | "min" | "max" | "avg")
 }

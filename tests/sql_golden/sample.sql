@@ -110,7 +110,13 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
   ) t2_agg ON true) q
 
 -- ── view OrgBillingSummary ──
--- not compilable yet: aggregates arrive in v0.25.c
+-- $1 = InvoiceStatus.open :: billing.invoice_status
+-- $2 = InvoiceStatus.paid :: billing.invoice_status
+-- $3 = InvoiceStatus.open :: billing.invoice_status
+SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('org_id', t0.id::text, 'slug', t0.slug, 'invoice_count', count(t1.id), 'open_count', count(t1.id) FILTER (WHERE t1.status = ($1::text)::billing.invoice_status), 'paid_total', (sum(t1.amount) FILTER (WHERE t1.status = ($2::text)::billing.invoice_status))::text, 'oldest_due', min(t1.due_at) FILTER (WHERE t1.status = ($3::text)::billing.invoice_status)) AS j
+  FROM org.orgs t0
+  LEFT JOIN billing.invoices t1 ON t1.org_id = t0.id
+  GROUP BY t0.id, t0.slug) q
 
 -- ── view OrgWithMembers ──
 SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'slug', t0.slug, 'name', t0.name, 'created_at', t0.created_at, 'members', coalesce(t1_agg.data, '[]'::json)) AS j

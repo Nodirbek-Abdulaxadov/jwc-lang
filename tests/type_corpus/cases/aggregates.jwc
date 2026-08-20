@@ -33,3 +33,27 @@ service Aggs {
             as { id, n: count(N.id), members: { account_id } };          -- expect: E0531
     }
 }
+
+-- Two bare joins fan out: `count(N.id)` also counts the members, so a note
+-- count reports notes × members (queries.md §6.2).
+service FanOut {
+    function counts() {
+        return select O from App.s.Orgs
+            left join App.s.Notes N on N.org_id == O.id as group
+            left join App.s.Members M on M.org_id == O.id as group
+            group by O.id
+            as {
+                id,
+                notes:   count(N.id),                  -- expect: W0502
+                members: count.distinct(M.account_id)
+            };
+    }
+
+    -- One bare join cannot fan out, so a plain `count` is right here.
+    function single() {
+        return select O from App.s.Orgs
+            left join App.s.Notes N on N.org_id == O.id as group
+            group by O.id
+            as { id, notes: count(N.id) };
+    }
+}
