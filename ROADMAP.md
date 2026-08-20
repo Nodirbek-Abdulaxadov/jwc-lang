@@ -822,6 +822,73 @@ Boshqalar:
   grafik haqidagi da'vo — `cargo audit` uni tekshira olmaydi, shuning uchun
   test tekshiradi.
 
+#### Tuzatish o'tishi (2026-08-20)
+
+v0.29.0 dan keyin ochiq qolgan bandlar bo'yicha. Ikkitasi yopildi, biri
+ochiq qoladi (24 soatlik soak), va yo'l-yo'lakay ulardan kattarog'i
+topildi.
+
+**`tls { }` va `header_timeout` endi rad etmaydi — ishlaydi.** Ikkalasi
+ham `axum::serve` ostida yashiringan edi, shuning uchun listener
+`hyper-util` ning accept sikliga ko'chirildi: TLS `tokio-rustls` bilan
+(ALPN `h2` + `http/1.1`), header muddati esa hyper'ning `http1` builder'ida.
+Sertifikat boot'da o'qiladi — yechilmagan `tls { }` serverni to'xtatadi,
+ochiq HTTP'ga qaytmaydi.
+
+> Bu yerda **unit testlar ko'rmaydigan** nuqson chiqdi: `header_read_timeout`
+> yonida `Timer` bo'lmasa, hyper **har bir HTTP/1 ulanishida** o'z poll'i
+> ichida panic qiladi. Barcha unit testlar yashil edi. `tests/serve_listener.rs`
+> haqiqiy soketga gapiradi va `TokioTimer` olib tashlansa yiqiladi.
+
+**`server { bind }`** qo'shildi (config §3.2.1). Manzil umuman
+sozlanmas edi — `0.0.0.0` yozib qo'yilgandi.
+
+**`server { }` da xato yozilgan kalit jim edi** — endi `E1206`.
+`init()` da bu `E1202` bilan yopilgan, `server { }` da esa hech narsa
+yo'q edi: `trusted_proxie` proksi ro'yxatini bo'sh qoldirardi, ya'ni
+`client_ip()` har so'rovda proksining o'z manzilini qaytarar va unga
+kalitlangan rate limiter bitta umumiy paqirga aylanardi — aynan o'sha
+kalit oldini olishi kerak bo'lgan nosozlik. `jwc check` toza o'tardi.
+
+**`db::run_on` noto'g'ri proyeksiyani "qator yo'q" ga aylantirardi**
+(`.unwrap_or(None)`): `Shape::First` → 404, `Shape::Rows` → `[]`, ikkalasi
+ham bo'sh jadvaldan farq qilmaydi. Endi fault.
+
+**Eng kattasi: testlarning bir qismi hech qachon yurmagan.** `tests/` dagi
+7 ta suite (`hardening` ham!) CI'ning birorta ish o'rnida nomlanmagan, yana
+4 tasi esa faqat **ma'lumotlar bazasisiz** yurgan — ular esa bazasiz
+`SKIPPED` chop etib, `ok` qaytaradi. Bu muhitga Postgres 16 o'rnatilib
+birinchi marta qaratilganda **7 suite'da 21 ta test yiqildi**:
+
+| Suite | Yiqilgan | Sabab |
+|---|---|---|
+| `sql_golden` | 9 | psql'ga URI'dan keyin `-d` berilgan — psql uni yangi ulanish deb oladi va host/port/user'ni tashlab, standart unix soketga qaytadi |
+| `migrate_apply` | 5 | bitta bazani bo'lishadi, mutex yo'q — biri `reset` qilar ekan ikkinchisi yarmida edi |
+| `jwc_test` | 3 | shu sabab |
+| `ddl_golden` | 1 | psql `-d` |
+| `migrate_golden` | 1 | psql `-d`, va baza yaratishda `postgres` maintenance bazasi ko'rsatilmagan — CI'da foydalanuvchi `postgres` bo'lgani uchun tasodifan ishlagan |
+| `migrate_roundtrip` | 1 | ikki test bitta `_rt_a`/`_rt_b` juftini bo'lishardi |
+| `http_golden` | 1 | `answered == 25` deb yozib qo'yilgan, namunada esa 26 ta route — v0.29.a da qo'shilgan, va test o'sha kuni yurmagan |
+
+Hammasi tuzatildi; psql yordamchisi `tests/common/mod.rs` ga chiqarildi.
+CI endi har bir suite'ni nomlaydi va `hardening` ni **bazali** ham yuradi
+(timing testi faqat shu yerda ma'noga ega). Takrorlanmasligi uchun
+`every_test_suite_is_named_in_ci` — `tests/` ni `ci.yml` ga solishtiradi,
+bu ham `no_triaged_advisory_crate_reaches_the_shipped_binary` bilan bir xil
+shakl: repo haqidagi da'vo, repoga qarshi tekshiriladi.
+
+Shu qatorda: **`spec-coverage.json` ni ham hech kim yangilamasdi.**
+§10 uni "namuna spec'dan ortda qolsa build yiqiladi" mitigatsiyasi deb
+sanaydi, lekin `check_sample.py` ni na CI, na test chaqirardi — fayl
+oxirgi qo'lda yurgizilgan payt suratiga aylanib qolgan va namunadan
+uzilgan edi. `the_spec_coverage_map_is_current` endi generatorni yurgizib
+solishtiradi.
+
+**`TODO.md`** dagi to'rt dala nuqsoniga v1 hukmi berildi: ikkitasi
+qayta yozuvda yopilgan (tekis e'lon fazosi; `E0732`), biri
+konstruksiya bo'yicha ma'nosiz (har bir statement `::text` proyeksiya
+qiladi), biri esa `bind` bilan yopildi.
+
 ---
 
 ### v1.0.0-rc.1 — **Freeze candidate**
