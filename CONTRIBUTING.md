@@ -1,381 +1,294 @@
 # Contributing to JWC
 
-Thanks for taking the time to dig in. This document covers what you need to
-get the compiler/runtime building locally, where the moving parts live, and
-the conventions we follow for tests, style, and commits.
+Thanks for taking the time to dig in. This document covers getting the
+compiler building locally, where the moving parts live, and the
+conventions for tests, style and commits.
 
-If you only read one other file, read [`CLAUDE.md`](./CLAUDE.md) — it is the
-deep architectural reference and is kept in sync with the code.
+**Read [`docs/spec/v1/`](docs/spec/v1/) first.** It is normative: where
+this document, the README, or the code disagree with it, the spec is
+right. [`README.md`](README.md) is the shortest tour of the language.
+
+> **The language changed.** v0.25.0 replaced the 0.9.x grammar with the
+> one in `docs/spec/v1/` and deleted the old front-end. If you are
+> reading a guide that mentions `entity`, `dbcontext`, `with`, `via`,
+> `validate body` or `jwc build --native`, you are reading
+> [`docs/archive-0.9/`](docs/archive-0.9/) — kept because 0.9.x binaries
+> are deployed, not because it describes this compiler.
 
 ## Getting set up
 
 Requirements:
 
-- **Rust stable**, edition 2021 (any recent stable toolchain works; the
-  workspace uses `edition = "2021"` and `Cargo.lock` is committed).
-- **Docker** *optional*, only needed if you want to run the Postgres-backed
-  integration suite locally.
+- **Rust stable**, edition 2021. `Cargo.lock` is committed. CI currently
+  runs 1.98; a local toolchain older than CI's will miss clippy lints
+  that then fail the PR, so `rustup update stable` before you start.
+- **Postgres**, for the suites that need one. Not optional if you are
+  touching the query, schema, or migration layers — see Tests.
+- **Redis**, only for the `redis` feature's suites.
 
 ```bash
-git clone https://github.com/<org>/jwc-lang
+git clone https://github.com/just-web-code/jwc-lang
 cd jwc-lang
 
-cargo build                          # debug build of jwc + jwc-lsp
-cargo build --release                # release build
-cargo build --bin jwc-lsp            # LSP binary only
-cargo test                           # unit tests (integration_db auto-skips without Docker)
+cargo build                     # debug
+cargo build --release           # release
+cargo build --features redis    # the redis.* surface; off by default
+cargo test                      # everything that needs no server
 ```
 
-For fast iteration on a `.jwc` program, run via cargo rather than the
+For fast iteration on a `.jwc` program, run through cargo rather than an
 installed binary:
 
 ```bash
-cargo run -- check examples/testapp/main.jwc
-cargo run -- run   examples/testapp
-cargo run -- serve examples/testapp --port 8080 --watch
+cargo run -- check docs/spec/v1/sample
+cargo run -- explain docs/spec/v1/sample     # every query, with its SQL
+cargo run -- serve docs/spec/v1/sample --port 8080
 ```
 
-Do **not** run `install-from-source.{sh,ps1}` to test your changes — those
+Do **not** run `install-from-source.{sh,ps1}` to test a change — they
 overwrite the user's installed `jwc`.
 
 ## Project layout
 
-Two binaries (`jwc`, `jwc-lsp`) live in a single Rust crate. Key files
-under `src/`:
+One crate, one binary (`jwc`). The language server is `jwc lsp`, not a
+separate binary. Under `src/`:
 
-- `lexer.rs` — hand-written tokenizer (raw strings, template strings, comments).
-- `parser.rs` — recursive-descent parser. Also hosts `validate_program`,
-  which re-walks the AST for compile-time dbcontext/entity/column checks.
-- `ast.rs` — every AST node lives here.
-- `runner/` — the async tree-walking interpreter `Vm` (`#[async_recursion]`).
-  Split across `mod.rs`, `eval.rs`, `builtins.rs`, `dispatch.rs`, `exec.rs`,
-  `sql.rs`, `types.rs`, `util.rs`, `validation.rs`. There is no
-  `call_builtin` function: dispatch is the `Expr::Call` arm of
-  `Vm::eval_expr` in `eval.rs`, and the bodies are `eval_*_call` methods in
-  `builtins.rs`.
-- `engine.rs` — `deadpool-postgres` + `tokio-postgres` pool, prepared
-  statement cache, optional TTL result cache, TLS via `tokio-postgres-rustls`.
-- `server.rs` — axum + tokio HTTP server; each request is `tokio::spawn`'d.
-- `native_build.rs` — AST → Rust source for `jwc build --native` (the AOT path).
-- `queue.rs` — in-process background job queue.
-- `migrate.rs` + `schema_diff.rs` — `jwc migrate new/up/down` with diff-based generation.
-- `sql.rs` — Postgres DDL generator for `jwc gen-sql`.
-- `lint.rs` — AST walk for `jwc lint` (W001/W002 warnings).
-- `diag.rs` — byte offset → `(line, col)` mapping.
-- `src/bin/jwc_lsp.rs` — the LSP server (tower-lsp, stdio).
+**Front end**
+- `lexer.rs`, `token.rs` — hand-written tokenizer.
+- `parser.rs`, `ast.rs` — recursive-descent parser and every AST node.
+- `fmt.rs` — canonical form, for `jwc fmt`.
+- `diag.rs` — diagnostics: codes, spans, byte offset → `(line, col)`.
 
-For the full architectural picture (async stack, ENGINE singleton,
-project loading, migration locking), read [`CLAUDE.md`](./CLAUDE.md).
+**Middle**
+- `symbols.rs` — the program-wide symbol table.
+- `check.rs` — the type checker; `types.rs` — the value lattice.
+- `model.rs` — the resolved schema model; `naming.rs` — physical names
+  and the versioned constraint-naming function.
+- `wiring.rs` — routing, middleware composition, and the error model.
+- `imports.rs`, `packages.rs`, `registry.rs` — package resolution.
 
-## Compilation pipeline
+**Queries and schema**
+- `query.rs` — the query plan: bindings, the join attachment tree.
+- `query_sql.rs`, `sql.rs` — SELECT emission, and the write statements.
+- `cursor.rs` — keyset cursors.
+- `ddl.rs` — DDL emission for `jwc gen-sql`.
 
-`lexer.rs` → `parser::parse_program` → `parser::validate_program` →
-optionally `lint::lint_program` → `runner::run_main` (or
-`sql::generate_postgres_schema` for `gen-sql`, or `native_build` for
-`--native`).
+**Migrations**
+- `snapshot.rs` — the schema as a database holds it.
+- `diff.rs` — two snapshots in, typed operations out.
+- `apply.rs`, `migrate.rs` — `up` / `down` / `status` / `verify`.
 
-**Rule when adding a new syntactic form:** wire it through every layer it
-touches. Skipping one of these is the most common source of "works in
-interpreter, breaks on `jwc build --native`" regressions.
+**Runtime**
+- `exec.rs` — the interpreter; `exec_call.rs` — call dispatch for
+  builtins, free functions and service methods.
+- `serve.rs` — the request pipeline and the server driving it: a manual
+  hyper-util accept loop (needed for both `header_timeout` and TLS),
+  graceful shutdown, and the operational endpoints.
+- `engine.rs`, `db.rs` — the Postgres pool; `redis_engine.rs` — the
+  Redis pool, behind the `redis` feature.
+- `config.rs` — env-driven runtime config.
 
-- **New token / keyword?** `lexer.rs` (`Token`, `TokenKind`, keyword table).
-- **Always:** `ast.rs` (new enum variant) + `parser.rs` (parsing rule).
-- **Always:** `parser::validate_program` (compile-time invariants — column
-  existence, type membership, "did you mean" hints).
-- **Always:** `runner.rs` (interpreter behaviour, async if it can suspend).
-- **New built-in function?** Also add it to the `BUILTINS` list in
-  `src/native_build.rs`, otherwise the AOT codegen will reject the call.
+**Tooling**
+- `lsp.rs`, `openapi.rs`, `hash.rs`, `jwt.rs`, `jwks.rs`,
+  `password.rs`, `locks.rs`.
 
-See [`ROADMAP.md`](./ROADMAP.md) for which phases each subsystem belongs to
-and which gaps are intentional deferrals (LLVM IR backend, cross-target
-native builds, multi-catch dispatch, etc.).
+There is no native/AOT backend. `jwc serve` is the only execution path.
+
+## Adding a syntactic form
+
+Wire it through every layer it touches — skipping one is the most common
+source of "parses but does nothing":
+
+1. **New token or keyword?** `lexer.rs` and its keyword table.
+2. **Always:** `ast.rs` (the node) and `parser.rs` (the rule).
+3. **Always:** `fmt.rs`. A form the formatter doesn't know will be
+   mangled or dropped by `jwc fmt`, and `tests/fmt.rs` checks
+   idempotency.
+4. **Always:** `check.rs` / `wiring.rs` — the compile-time invariants,
+   raised as a numbered diagnostic.
+5. **Always:** the interpreter, in `exec.rs` / `exec_call.rs`.
+6. **The grammar** — `docs/spec/v1/grammar.ebnf` plus the normative
+   prose in the matching `docs/spec/v1/*.md`.
+7. **The sample**, if the form is one a real application would use.
+   `docs/spec/v1/sample/` is what the compiler is graded against, and
+   `spec-coverage.json` maps each construct to the clause defining it.
+
+## Adding a builtin
+
+Builtins are namespaced (`string.*`, `request.*`, `hash.*`, …) and
+dispatched by name in `src/exec_call.rs`.
+
+1. **Dispatch + body** in `exec_call.rs`. Match the null-propagation
+   convention of its neighbours: if every other `string.*` builtin
+   returns null on null input, yours does too.
+2. **Arity and types** in `check.rs`, so a wrong call is a diagnostic
+   rather than a runtime surprise.
+3. **Spec entry** in `docs/spec/v1/builtins.md` — signature, errors,
+   notes. This is the normative definition; the implementation follows
+   it, not the other way round.
+4. **A test** pinning the contract, including the failure modes.
+5. **CHANGELOG** under the unreleased version's "Added", naming the
+   builtin and pointing at the spec entry.
+
+If the builtin can fail in a way a program should be able to catch, it
+needs an error type in the model of `docs/spec/v1/errors.md`, not a bare
+runtime panic.
 
 ## Reviewer cross-references
 
-When you (or a reviewer) approach a PR, the docs below are the
-single-source-of-truth references the spec / security / config
-posture is graded against:
-
-- **Security surfaces.** When the change touches the HTTP server, the
-  SQL layer, the JWT helpers, any outbound HTTP call, or a log path
-  that handles a connection string — re-read
-  [`docs/spec/threat-model.md`](./docs/spec/threat-model.md) and
-  update the relevant row. Run `/security-review` for any new threat
-  class not already on the list.
-- **AOT scope.** Before adding a new builtin or syntactic form, decide
-  whether it must lower under `jwc build --native`. The contract is
-  documented in [`docs/spec/aot-scope.md`](./docs/spec/aot-scope.md);
-  features deferred to the interpreter MUST add `// AOT: deferred` to
-  the relevant code site so the deferral is grep-findable.
-- **Boot-time config.** The canonical list of `JWC_*` environment
-  variables — name, parse kind, default, doc — lives in the
-  Sprint 5A registry: [`src/config.rs::REGISTRY`](./src/config.rs).
-  When a PR introduces a new env var, add it here so the boot-time
-  validation table picks it up and the printed config snapshot covers
-  it.
-- **Error code catalog.** Every new user-facing error (`E####`) is
-  registered in [`src/error_codes.rs`](./src/error_codes.rs). When a
-  PR raises a new failure mode that a user can write code against,
-  land a fresh `EXXX` code in the catalog and reference it in the
-  spec doc / CHANGELOG entry.
-- **Fuzzing runbook.** When a change touches the tokenizer or the
-  parser, run the fuzz harness locally before pushing — the runbook
-  (manifest path, smoke-vs-soak budgets, corpus layout) is in
-  [`fuzz/README.md`](./fuzz/README.md).
+- **Security surfaces.** When a change touches the HTTP server, the SQL
+  layer, the JWT helpers, or a log path that handles a connection
+  string, re-read [`docs/spec/v1/security.md`](docs/spec/v1/security.md)
+  and update the relevant section. The two language promises — every
+  value is a bind parameter, and a result is `Raw` until projected — are
+  load-bearing; a change that weakens either needs to say so out loud.
+- **Configuration.** `server { }` keys are specified in
+  [`docs/spec/v1/config.md`](docs/spec/v1/config.md) and validated in
+  `wiring.rs`. A new key must be *rejected when misspelled* (`E1206`) —
+  the check is not optional, because a silently-ignored key is a
+  security default that quietly didn't apply.
+- **Diagnostic codes.** `E####` / `W####` are append-only: never reuse a
+  code for a different condition. The spec names them; `src/diag.rs` and
+  its callers raise them.
+- **Fuzzing.** When a change touches the tokenizer or the parser, run
+  the harness before pushing — see [`fuzz/README.md`](fuzz/README.md).
 
 ## Tests
 
 ```bash
-cargo test                                       # unit + cheap integration tests
-cargo test --test integration_db                 # Postgres suite (needs Docker)
-cargo test --test integration_db -- some_name    # single test by name
+cargo test                                       # no server needed
 cargo test -- --nocapture                        # show eprintln! output
 ```
 
-`tests/integration_db.rs` boots Postgres via `testcontainers`. Without
-Docker it prints `SKIPPED` via `eprintln!` and returns `Ok(())` — do not
-treat skipped output as a pass when verifying DB-touching work; rerun on a
-host with Docker before claiming the change is done. Tests are serialised
-behind a global `Mutex` because `engine::ENGINE` is a process-wide
-`OnceLock`.
+Several suites are opt-in on a real dependency, and **a SKIPPED line is
+not a pass** — a suite that skips has verified nothing. Do not claim a
+DB-touching change is done off a skipped run:
 
-Adding tests:
+```bash
+export JWC_V1_DATABASE_URL=postgres://…          # a DB it may drop schemas in
+export JWC_V1_PG=postgres://…                    # same server, psql goldens
+export JWC_TEST_REDIS_URL=redis://127.0.0.1:6379 # flushed between tests
+export CURSOR_SECRET=ci-cursor-secret
 
-- **Small smoke test for a validator or parser rule** —
-  see [`tests/typed_catch.rs`](./tests/typed_catch.rs) for a minimal
-  pattern: parse a snippet, assert on the resulting error / AST.
-- **End-to-end through `project::load`** —
-  see [`tests/imports.rs`](./tests/imports.rs) for the larger pattern:
-  set up a temp project tree, exercise the full loader + validator + runner.
+cargo test --features redis --test http_golden --test hardening
+cargo test --test migrate_apply --test migrate_golden --test migrate_roundtrip
+cargo test --test jwc_test --test sql_golden --test ddl_golden --test raw_hatch
+cargo test --features redis --test integration_redis
+cargo test --test serve_listener                 # needs a socket and openssl
+```
+
+Two guards exist because the failure they catch is invisible:
+
+- `hardening.rs::every_test_suite_is_named_in_ci` fails when a suite
+  exists that no CI job runs. It was added after seven suites were found
+  running nowhere for months.
+- `docs_parse.rs::the_spec_coverage_map_is_current` re-runs
+  `check_sample.py` and diffs, so `spec-coverage.json` cannot drift from
+  the sample.
+
+If you add a suite, add it to `.github/workflows/ci.yml` in the same
+change — the first guard will fail the PR otherwise, which is the point.
+
+Writing tests: the suites in `tests/` are the pattern to copy.
+`parse_corpus.rs` / `type_corpus.rs` / `wiring_corpus.rs` are
+table-driven over a directory of cases and are the cheapest place to pin
+a front-end rule. `http_golden.rs` drives real requests. `hardening.rs`
+is where behaviour that has no natural home goes — including assertions
+about the repo itself.
 
 ## Style
 
-Rustfmt is configured in [`rustfmt.toml`](./rustfmt.toml)
-(`max_width = 100`, `edition = "2021"`). Clippy thresholds are in
-[`clippy.toml`](./clippy.toml).
-
-CI (`.github/workflows/ci.yml`) gates every PR on:
+Rustfmt is configured in [`rustfmt.toml`](rustfmt.toml), clippy in
+[`clippy.toml`](clippy.toml). CI gates every PR on:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Run both locally before pushing — a 30-second `cargo fmt && cargo clippy`
-loop saves a CI round-trip.
+Run both locally first. Note clippy is version-sensitive: a lint your
+older toolchain doesn't know will still fail CI.
+
+### `unwrap()` policy
+
+**The budget is closed.** `src/lib.rs` carries
+`#![cfg_attr(not(test), deny(clippy::unwrap_used))]`, so production code
+is unwrap-free and the compiler enforces it. `#[cfg(test)]` modules
+unwrap freely and that is fine.
+
+In production code:
+
+- **A "just checked" value** — use `.expect("INVARIANT: <reason>")`. The
+  prefix is a proof obligation: if you cannot state the invariant in one
+  line, it is not actually safe.
+- **User input, parsing, I/O** — use `?` with context
+  (`.context("parsing X")?`) so the error carries its call site.
+- **A poisoned mutex** — see `src/locks.rs`. `lock_recover` /
+  `wait_recover` exist because a poisoned lock turns one panic into a
+  permanently dead subsystem; the module documents when *not* to use
+  them.
 
 ## Commit and PR conventions
 
-Commit messages use a short prefix matching the existing log:
+Keep commits small and focused — one logical change each. The log uses
+short prefixes (`feat:`, `fix:`, `perf:`, `refactor:`, `docs:`, `test:`,
+`ci:`) but a clear sentence beats a prefix on a change that doesn't fit
+one.
 
-- `feat:` — user-visible new capability
-- `fix:` — bug fix
-- `perf:` — performance change with no behaviour change
-- `refactor:` — internal restructuring, no behaviour change
-- `docs:` — README / ROADMAP / CONTRIBUTING / inline doc updates
-- `test:` — tests only
-- `ci:` — workflow / build infrastructure
-
-Keep commits small and focused. One logical change per commit is much
-easier to review (and to revert) than a giant "various improvements" blob.
+A commit message should say **why**, and what you did to be sure. The
+most useful line in a fix is the one describing how the bug was
+reproduced before it was fixed, and how you confirmed the fix — "checked
+that reverting the change fails the test" is worth more than a summary
+of the diff, which the diff already contains.
 
 For PRs:
 
-- Title: same prefix style as commits.
-- Body: one paragraph of *why*, plus a short bullet list of *what*.
-- If the change overlaps a `ROADMAP.md` phase (e.g. Phase 10.2 tracing,
-  Phase 3.1 LSP), reference the phase number so we can update the roadmap
-  in the same PR or the next one.
-- If you touched `parser.rs`, mention whether you also updated `validate_program`.
-- If you added a built-in, confirm it is also in the `native_build.rs` `BUILTINS` list.
+- Body: one paragraph of *why*, then what changed.
+- If you touched `parser.rs`, say whether `fmt.rs` and the checker were
+  updated too.
+- If you added a builtin or a syntactic form, say where its spec entry
+  is.
+- If a claim in the PR body is not covered by a test, say so plainly
+  rather than implying it is.
 
 ## Where to start
 
-Open issues labelled **`good-first-issue`** are the easiest ramp.
-If none are open right now, these are good self-directed picks that almost
-always need work:
+Issues labelled **`good-first-issue`** are the easiest ramp. Failing
+that, work that reliably needs doing:
 
-- Documentation typos and clarifications in `README.md` / `ROADMAP.md` /
-  `CLAUDE.md`.
-- A new example program under `examples/` (something more interesting than
-  `testapp` — e.g. a small auth + paginated list service).
-- Smoke tests in the [`tests/typed_catch.rs`](./tests/typed_catch.rs) style
-  for any new validator or parser rule that currently lacks coverage.
-- Polishing error messages in `runner.rs` — "did you mean" hints, missing
-  context in panics, error JSON shape consistency.
+- **The four documents this one belongs to.** `SEMVER.md`,
+  `DEPRECATION.md`, `SECURITY.md` and this file were rewritten for v1
+  late; if you find a claim here that the code contradicts, that is a
+  bug in the document and a fix is welcome.
+- **Diagnostics.** A confusing message with a correct code is a good,
+  self-contained change: better spans, a "did you mean", the clause of
+  the spec that explains the rule.
+- **Corpus cases.** A front-end rule with no case in
+  `parse_corpus` / `type_corpus` / `wiring_corpus` is a rule that can
+  regress silently.
+- **`docs/archive-0.9/`** is frozen; do not fix things there beyond
+  broken links.
 
-For larger work, see the **Priority Timeline** at the bottom of
-[`ROADMAP.md`](./ROADMAP.md): the current focus is Phase 10.1 (real
-benchmark numbers), then Phase 10.2 (`tracing` + OpenTelemetry), then
-LSP completeness (Phase 3.1+).
+Larger work is tracked in [`ROADMAP.md`](ROADMAP.md). The next milestone
+is **v1.0.0-rc.1**: the conformance corpus blocking in CI, an external
+review, and a migrated pilot application.
 
-## Shipping a new builtin
+## Licence and Code of Conduct
 
-A new builtin function (`my_helper(...)`) is one of the most common
-contributor PRs. It also touches the most layers — skipping any one
-of them produces a "works in `jwc run` but breaks under `jwc build
---native`" regression, or a builtin that has no spec entry and no
-test pinning its contract. The recipe below is the full checklist:
+**The licence is undecided.** There is no `LICENSE` file in the
+repository root, and that is deliberate rather than an oversight —
+`Cargo.toml` and `deny.toml` both record the crate as workspace-private
+until a licence decision lands, and the crate is `publish = false`.
 
-0. **Registry** — `src/builtins.rs::BUILTIN_DEFS`.
-   Add a row: name, aliases, `min_args`, `max_args`, and `native`. Set
-   `native: true` only once the AOT impl in step 3 exists —
-   `native_builtin_names()` derives the entire AOT whitelist from that
-   flag, so there is no separate list to edit. Arity here is enforced as
-   E022 by `typecheck::typecheck_program`, and it must agree with your
-   own runtime guard in step 1.
+Do not assume a licence from the sibling components: the VS Code
+extension under `vscode-extension/` and the `redis` package repository
+each ship their own MIT `LICENSE`, and those cover only themselves.
 
-   Prefer **no aliases**. Each alias needs its own `jwc_b_<alias>` in the
-   prelude (only five camelCase names are remapped in `builtin_fn_name`);
-   `jwc_b_raw` exists purely as a copy of `jwc_b_response` for this
-   reason.
+Practically, this means a contribution cannot yet be accepted under
+stated terms. If you want to contribute something substantial, open an
+issue first so the licence question can be settled before you spend the
+effort.
 
-1. **Interpreter** — dispatch arm in `src/runner/eval.rs`'s `Expr::Call`
-   chain, body as an `eval_*_call` method in `src/runner/builtins.rs`.
-   Async if it suspends (DB, HTTP, sleep, filesystem). Null-propagation
-   rule: if every other string builtin returns `null` on `null` input,
-   yours should too.
-
-   If the name is one a user program might plausibly declare itself, add
-   the `!self.functions.contains_key(...)` guard the way `substring` /
-   `take` / the `console.*` / `file.*` families do. Native codegen already
-   prefers a same-named user function, so without the guard the two
-   backends resolve the same source to different code.
-
-2. **Validator (optional, recommended)** — `src/parser/validate.rs`.
-   If the builtin has type-checkable invariants beyond arity, assert them
-   at compile time and bail with a numbered E-code so the message is
-   grep-friendly. See E011 / E012 / E013 for the prefix shape. (Arity
-   itself is already covered by step 0.)
-
-3. **Native AOT codegen** — `src/native_prelude.rs.in`.
-   Emit the helper as `fn jwc_b_<name>(...)` (or its `_db.rs.in` /
-   `_crypto.rs.in` sibling). Don't add a new `V::Variant` — the codegen
-   has 25+ V match arms in the prelude that need updating for each new
-   variant; reach for an existing variant (e.g.
-   `V::Str(JwcStr::from(...))`) instead.
-
-   **If the helper is `async`, add its name to the `is_async_builtin`
-   `matches!` in `src/native_build.rs`.** This list is not derived from
-   the registry. Miss it and codegen emits the call without `.await`; the
-   *generated* crate then fails to compile, and no test in this repo
-   catches it, because neither `conformance.rs` nor `native_parity.rs`
-   builds emitted source. `tests/native_emit.rs` has an await-guard you
-   can extend. A new crypto builtin additionally needs its name in
-   `program_uses_crypto`, or the prelude isn't included at all.
-
-4. **Spec entry** — `docs/spec/builtins.md`.
-   Use the entry template (signature, errors, notes, tests). The
-   `Tests:` field names the conformance case(s) that pin the
-   contract — write the test in step 5 and back-fill the name here.
-
-5. **User-facing docs** — two steps, and the first one bites.
-
-   Add the name to a `GROUPS` predicate in
-   `src/bin/gen_builtins_doc.rs`, then regenerate:
-
-   ```bash
-   cargo run --bin gen_builtins_doc > docs/docs/reference/builtins.md
-   ```
-
-   **A def matching no group predicate is silently dropped from the
-   generated page, and `tests/builtins_doc_sync.rs` still passes** —
-   generator and checked-in file agree on the omission. `serve` and
-   `random_int` were invisible this way for several releases. Verify with
-   a `grep` for your builtin in the regenerated file, not with the sync
-   test.
-
-   Then add prose to the matching page under `docs/docs/stdlib/` if the
-   builtin belongs to a documented surface (HTTP / DB / queue / files /
-   observability). Mark illustrative snippets ` ```jwc no-compile ` —
-   `tests/docs_parse.rs` compiles every bare ` ```jwc ` block.
-
-6. **Conformance case** — `tests/conformance/cases/case_<name>.jwc`
-   + `case_<name>.stdout.txt`. Register the case name in
-   `tests/conformance.rs::REGISTERED_CASES` AND add a
-   `conformance_test!(case_<name>);` line. The discovery test will
-   yell if you forget the registry, the macro will yell if you
-   forget the test list. Add `// CONFORMANCE: interpreter-only` as
-   the first line of the `.jwc` file when the builtin isn't yet
-   supported in the AOT path.
-
-7. **CHANGELOG** — under the next unreleased version's "Added"
-   section, naming the builtin and pointing at the spec entry.
-
-A small builtin (string helper, hash, env access) is ~50 LOC across
-the seven files; a larger one (HTTP, DB) is mostly the codegen step
-3.
-
-## `unwrap()` policy
-
-`PRODUCTION_READINESS_PLAN.md` Phase 2 tracks the open `unwrap()`
-budget — 1.0 forbids them in non-test code unless the unwrap is
-provably safe and the proof is captured in the code.
-
-### Audit finding (Sprint 1-5 close-out)
-
-The plan originally listed ~340 unwraps as the open budget. The
-actual count is ~120 distinct `.unwrap()` call sites; the inflated
-number came from sites appearing in both `mod.rs` and the matching
-`tests.rs` sub-module being counted separately. Of the 120, **119
-live inside `#[cfg(test)]` modules** (allowed by policy) and **1
-lives in production code** (now converted to `.expect(...)`). The
-post-audit production unwrap count is **0**.
-
-### Categories
-
-Every unwrap belongs to one of three categories — pick the right
-one before reaching for `.unwrap()`:
-
-- **A — init / lazy / "just checked" patterns**: a `get()` after a
-  matching `is_some()` check, a `Mutex::new(...)` that can't fail,
-  a `OnceLock` you populated three lines above. Use
-  `.expect("INVARIANT: <reason>")`. The `INVARIANT:` prefix is the
-  proof obligation: if you can't name the invariant in one line,
-  the unwrap isn't actually safe.
-- **B — user input / parse / I/O**: anything where the failure is
-  a real runtime condition (bad JSON, missing env var, network
-  blip). Use `?` with `anyhow::Context` (`.context("parsing X")?`)
-  so the error carries the call site forward.
-- **C — Mutex poisoning**: a poisoned mutex is a panic in another
-  thread, not recoverable in the current one. Use
-  `.expect("Mutex poisoned: <name>")` — the prefix lets the audit
-  script distinguish these from category A.
-
-### Marker conventions
-
-The audit script greps for these prefixes:
-
-- `INVARIANT: ...` — category A.
-- `Mutex poisoned: ...` — category C.
-- `// SAFETY: ... [unwrap budget exempt: <reason>]` — escape hatch
-  for the rare case the message itself doesn't fit the
-  `expect()` (e.g. expansion inside a macro). Reserve for cases
-  where A/B/C genuinely don't apply.
-
-### Lint roadmap
-
-- **Today**: `[lints.clippy] unwrap_used = "allow"`, `expect_used =
-  "allow"` workspace-wide. Production count is 0, but the lint
-  stays `allow` because test code legitimately uses both and we
-  haven't yet drawn the per-module cfg boundary.
-- **Next**: per-module
-  `#![cfg_attr(not(test), warn(clippy::unwrap_used))]` on every
-  `src/*.rs` and `src/**/mod.rs`. This warns in production paths
-  while leaving `#[cfg(test)]` modules untouched.
-- **1.0 gate**: per-module `deny(clippy::unwrap_used)` for
-  non-test code, `allow` for tests. The CI check becomes
-  `cargo clippy --lib -- -D clippy::unwrap_used`.
-
-Every unwrap → expect conversion is still welcome as a small PR;
-the audit script counts down from 119 (test) + 0 (prod).
-
-## License and Code of Conduct
-
-This project is distributed under the **MIT** license unless a
-`LICENSE` file in the repository root says otherwise. By submitting a
-contribution you agree it is licensed under the same terms.
-
-We don't have a dedicated `CODE_OF_CONDUCT.md` yet; the default is the
-[Contributor Covenant](https://www.contributor-covenant.org/) —
-be respectful, assume good faith, keep discussion focused on the code.
+There is no `CODE_OF_CONDUCT.md`; the default is the
+[Contributor Covenant](https://www.contributor-covenant.org/) — be
+respectful, assume good faith, keep discussion on the code.

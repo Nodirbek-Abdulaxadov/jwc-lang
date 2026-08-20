@@ -262,4 +262,11 @@ graceful restart between each, recording RSS and the pool gauges, and
 
 ## Licence
 
-See [LICENSE](LICENSE).
+**Undecided, deliberately.** There is no `LICENSE` file: `Cargo.toml` and
+`deny.toml` both record the crate as workspace-private until a licence
+decision lands, and it is `publish = false`. Until that changes, no
+licence is granted — assume all rights reserved rather than inferring one
+from a sibling component.
+
+The VS Code extension under [`vscode-extension/`](vscode-extension/)
+ships its own MIT `LICENSE`, and covers only itself.
