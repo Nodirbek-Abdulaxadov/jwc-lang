@@ -291,20 +291,20 @@
     {
       "construct": "function.free",
       "clause": "names \u00a76.4",
-      "uses": 4,
+      "uses": 5,
       "first_use": "src/app.jwc:51"
     },
     {
       "construct": "function.return_annot",
       "clause": "types \u00a710.2",
       "uses": 4,
-      "first_use": "src/services/auth.jwc:21"
+      "first_use": "src/services/auth.jwc:15"
     },
     {
       "construct": "function.typed_params",
       "clause": "types \u00a710.1",
       "uses": 4,
-      "first_use": "src/services/auth.jwc:9"
+      "first_use": "src/services/auth.jwc:20"
     },
     {
       "construct": "import.namespace",
@@ -352,7 +352,7 @@
       "construct": "insert.returning",
       "clause": "writes \u00a72.2",
       "uses": 4,
-      "first_use": "src/services/auth.jwc:15"
+      "first_use": "src/services/auth.jwc:26"
     },
     {
       "construct": "join.alias",
@@ -610,7 +610,7 @@
       "construct": "select.orderby",
       "clause": "queries \u00a75.3",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:59"
+      "first_use": "src/services/auth.jwc:84"
     },
     {
       "construct": "select.page",
@@ -622,7 +622,7 @@
       "construct": "select.projection",
       "clause": "queries \u00a76.1",
       "uses": 5,
-      "first_use": "src/services/auth.jwc:24"
+      "first_use": "src/services/auth.jwc:41"
     },
     {
       "construct": "select.where",
@@ -646,19 +646,19 @@
       "construct": "service",
       "clause": "types \u00a710",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:8"
+      "first_use": "src/services/auth.jwc:19"
     },
     {
       "construct": "spread",
       "clause": "types \u00a79",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:13"
+      "first_use": "src/services/auth.jwc:24"
     },
     {
       "construct": "spread.except",
       "clause": "types \u00a79.1",
       "uses": 1,
-      "first_use": "src/services/auth.jwc:13"
+      "first_use": "src/services/auth.jwc:24"
     },
     {
       "construct": "table",
@@ -736,7 +736,7 @@
       "construct": "type.record_inline",
       "clause": "types \u00a71",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:21"
+      "first_use": "src/services/auth.jwc:38"
     },
     {
       "construct": "update",

@@ -147,3 +147,43 @@ fn every_documented_jwc_example_parses() {
         broken.join("\n  ")
     );
 }
+
+/// `spec-coverage.json` matches the sample it claims to describe.
+///
+/// ROADMAP §10 lists this file as the mitigation for "the sample stops
+/// keeping up with the spec": a construct not tied to a clause is supposed
+/// to fail the build. Nothing ran the generator — not CI, not a test — so
+/// the file was a snapshot of whenever it was last produced by hand, and
+/// it had drifted from the sample it names. A mitigation nothing executes
+/// is not one.
+#[test]
+fn the_spec_coverage_map_is_current() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let map = root.join("docs/spec/v1/spec-coverage.json");
+    let before = std::fs::read_to_string(&map).expect("spec-coverage.json");
+
+    let out = std::process::Command::new("python3")
+        .arg(root.join("docs/spec/v1/check_sample.py"))
+        .output();
+    let Ok(out) = out else {
+        eprintln!("SKIPPED the_spec_coverage_map_is_current — no python3");
+        return;
+    };
+
+    // The generator rewrites the file in place, so restore it before
+    // asserting: a failing test must not leave the tree dirty.
+    let after = std::fs::read_to_string(&map).expect("spec-coverage.json");
+    std::fs::write(&map, &before).expect("restore");
+
+    assert!(
+        out.status.success(),
+        "check_sample.py rejected the sample:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        before == after,
+        "spec-coverage.json is stale — run `python3 docs/spec/v1/check_sample.py` \
+         and commit the result"
+    );
+}

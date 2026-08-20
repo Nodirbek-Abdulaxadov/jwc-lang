@@ -35,14 +35,22 @@ jobs:
         run: cargo build --workspace --all-targets
 
       # Everything that does not need a database. Named rather than a bare
-      # `cargo test` so a suite added without a CI line reads as an
-      # omission here rather than passing silently.
+      # `cargo test`, so that a suite is run under the environment it
+      # needs rather than skipping in whichever job happened to pick it up.
+      #
+      # The naming was supposed to make an omission visible. It did not:
+      # seven suites, `hardening` among them, were listed in no job at all
+      # and nothing said so. `every_test_suite_is_named_in_ci` in
+      # `tests/hardening.rs` now compares this file against `tests/` and
+      # fails on a suite that appears in neither.
       - name: Cargo test (no DB)
         run: >
           cargo test --lib
           --test parse_corpus --test fmt --test removed_keywords
           --test schema_diagnostics --test type_corpus --test wiring_corpus
           --test ddl_golden --test sql_golden --test docs_parse
+          --test diff_corpus --test hardening --test lsp --test packages
+          --test registry --test snapshot_sample --test tooling
 
       - name: Cargo test (redis feature, no server)
         run: cargo test --features redis --lib
@@ -110,6 +118,42 @@ jobs:
           JWC_V1_PG: "-h 127.0.0.1 -p 5432 -U postgres"
           PGPASSWORD: postgres
         run: cargo test --test ddl_golden -- --nocapture
+
+      # The four suites this job used to leave out, which is the same
+      # mistake one level up: they are gated on a database, they print
+      # SKIPPED without one, and a SKIPPED line is not a pass. Between
+      # them they are the only cover for the applier, the test framework,
+      # the migration round-trip property, and the apply half of the
+      # migration goldens — every claim in v0.26 and v0.28 that a golden
+      # file cannot see.
+      - name: Migrations, the applier, and `jwc test`
+        env:
+          JWC_V1_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+          JWC_V1_PG: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+          PGPASSWORD: postgres
+          CURSOR_SECRET: ci-cursor-secret
+        run: >
+          cargo test
+          --test migrate_apply --test migrate_golden
+          --test migrate_roundtrip --test jwc_test
+          -- --nocapture
+
+      # The listener, which needs no database but does need a socket and
+      # openssl on PATH. `tls { }` and `header_timeout` are unobservable
+      # below the point where a request exists, so nothing else covers
+      # them.
+      - name: The listener
+        run: cargo test --test serve_listener -- --nocapture
+
+      # `hardening` runs in the no-DB job too, where its timing test
+      # skips. The timing claim — that the two failure branches of `login`
+      # cost the same — is a measurement against real Argon2id work on a
+      # real stored hash, so it only means anything here.
+      - name: The login timing branch
+        env:
+          JWC_V1_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+          PGPASSWORD: postgres
+        run: cargo test --test hardening -- --nocapture
 
   # Same reasoning as `postgres` above: the no-server jobs only
   # prove the code compiles and the stubs behave. Every command this driver

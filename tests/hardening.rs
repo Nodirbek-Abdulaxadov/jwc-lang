@@ -336,3 +336,43 @@ fn split_version(v: &str) -> (u32, u32, u32) {
         parts.next().unwrap_or(0),
     )
 }
+
+/// Every suite in `tests/` is named in a CI job.
+///
+/// `.github/workflows/ci.yml` lists its suites by name rather than running
+/// a bare `cargo test`, which is right — several need a database or a
+/// server and skip without one, and a skip reports ok. The comment there
+/// claimed the naming made an omission visible. It did not: seven suites,
+/// this one included, appeared in no job at all, so the hardening tests,
+/// the applier, the migration round-trip property and `jwc test` were
+/// never run by CI. Nothing said so, because nothing was looking.
+///
+/// This is the same shape as
+/// `no_triaged_advisory_crate_reaches_the_shipped_binary` above — a claim
+/// about the repository, checked against the repository.
+#[test]
+fn every_test_suite_is_named_in_ci() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect("ci.yml");
+
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(root.join("tests")).expect("tests/") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !ci.contains(&format!("--test {stem}")) {
+            missing.push(stem.to_string());
+        }
+    }
+    missing.sort();
+    assert!(
+        missing.is_empty(),
+        "these suites are in tests/ and in no CI job, so nothing runs them: {}",
+        missing.join(", ")
+    );
+}
