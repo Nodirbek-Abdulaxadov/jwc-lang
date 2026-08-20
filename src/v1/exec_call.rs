@@ -538,7 +538,10 @@ pub(super) fn rewrite_placeholders(template: &str) -> (String, usize) {
     while let Some(at) = rest.find("{}") {
         sql.push_str(&rest[..at]);
         n += 1;
-        sql.push_str(&format!("${n}"));
+        // Bound as text, like every other parameter in the language — the
+        // author writes the cast, because hand-written SQL carries no type
+        // information to derive one from. `where org_id = ({})::bigint`.
+        sql.push_str(&format!("(${n}::text)"));
         rest = &rest[at + 2..];
     }
     sql.push_str(rest);
@@ -553,7 +556,10 @@ mod raw_tests {
     fn numbers_placeholders_in_order() {
         assert_eq!(
             rewrite_placeholders("select {} where a = {} and b = {}"),
-            ("select $1 where a = $2 and b = $3".to_string(), 3)
+            (
+                "select ($1::text) where a = ($2::text) and b = ($3::text)".to_string(),
+                3
+            )
         );
     }
 
@@ -570,7 +576,7 @@ mod raw_tests {
         // `{` and `}` appear in jsonb literals and array constructors.
         assert_eq!(
             rewrite_placeholders("select '{\"a\": 1}'::jsonb, {}"),
-            ("select '{\"a\": 1}'::jsonb, $1".to_string(), 1)
+            ("select '{\"a\": 1}'::jsonb, ($1::text)".to_string(), 1)
         );
     }
 }

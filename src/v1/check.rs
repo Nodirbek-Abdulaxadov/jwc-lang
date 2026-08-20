@@ -58,6 +58,12 @@ struct Binding {
     name: String,
     /// Declared table or view name.
     object: String,
+    /// The projection field an `as one` join produces. The binding and the
+    /// field are two names for the same row, and `orderby org.name` is
+    /// written with the field because that is what the projection calls it
+    /// (queries.md §5.4). `as many` is not here: a collection has no
+    /// single row to reach through.
+    one_field: Option<String>,
 }
 
 struct QueryScope {
@@ -1205,7 +1211,20 @@ impl<'a> Checker<'a> {
                     .iter()
                     .rev()
                     .find_map(|s| s.bindings.iter().find(|b| b.name == n.name))
-                    .map(|b| b.object.clone());
+                    .map(|b| b.object.clone())
+                    // `org.name` where `org` is the *field* an `as one`
+                    // produces rather than the binding it came from. Both
+                    // name the same row, and `orderby org.name` is written
+                    // with the field because that is what the projection
+                    // calls it (queries.md §5.4).
+                    .or_else(|| {
+                        self.query.iter().rev().find_map(|s| {
+                            s.bindings
+                                .iter()
+                                .find(|b| b.one_field.as_deref() == Some(n.name.as_str()))
+                                .map(|b| b.object.clone())
+                        })
+                    });
                 if let Some(object) = object {
                     return match self.column_of(&object, &field.name) {
                         Some(t) => t,
@@ -2079,6 +2098,7 @@ impl<'a> Checker<'a> {
         let mut bindings = vec![Binding {
             name: s.binder.name.clone(),
             object: object.clone(),
+            one_field: None,
         }];
 
         for j in &s.joins {
@@ -2097,6 +2117,9 @@ impl<'a> Checker<'a> {
             bindings.push(Binding {
                 name: j.binder.name.clone(),
                 object: obj,
+                one_field: j.result.as_ref().and_then(|r| {
+                    (r.cardinality == Cardinality::One).then(|| r.name.name.clone())
+                }),
             });
         }
 
@@ -2137,6 +2160,23 @@ impl<'a> Checker<'a> {
             .as_ref()
             .map(|p| self.projection(p, &object, s));
         for k in &s.order_by {
+            // queries.md §5.4 — a collection has no single value to sort
+            // by. Left to the generic resolver this reported "not a column
+            // of any binding", which points the reader at the wrong fix:
+            // the name is right, it just is not orderable.
+            if let ExprKind::Name(n) = &*k.expr.kind {
+                if collection_field(s, &n.name) {
+                    self.err_note(
+                        n.span,
+                        "E0521",
+                        format!("`{}` is a collection", n.name),
+                        "there is no single value to sort by; order the collection \
+                         inside its own join result, or sort by a scalar field",
+                        "queries.md §5.4",
+                    );
+                    continue;
+                }
+            }
             self.expr(&k.expr);
         }
         if let Some(l) = &s.limit {
@@ -2715,6 +2755,7 @@ impl<'a> Checker<'a> {
             bindings: vec![Binding {
                 name: object.clone(),
                 object: object.clone(),
+                one_field: None,
             }],
         });
         let before = self.diags.len();
@@ -2787,6 +2828,7 @@ impl<'a> Checker<'a> {
             bindings: vec![Binding {
                 name: object.clone(),
                 object: object.clone(),
+                one_field: None,
             }],
         });
         for item in &u.sets {
@@ -2890,6 +2932,7 @@ impl<'a> Checker<'a> {
             bindings: vec![Binding {
                 name: object.clone(),
                 object: object.clone(),
+                one_field: None,
             }],
         });
         if let Some(f) = &d.filter {
@@ -3219,6 +3262,17 @@ fn walk_counts(e: &Expr, out: &mut Vec<Span>) {
         }
         _ => {}
     }
+}
+
+/// True when a name is a projection field this query produces as a
+/// collection — either a join result written here, or a view column the
+/// source already carries.
+fn collection_field(s: &SelectExpr, name: &str) -> bool {
+    s.joins.iter().any(|j| {
+        j.result
+            .as_ref()
+            .is_some_and(|r| r.cardinality == Cardinality::Many && r.name.name == name)
+    })
 }
 
 fn is_aggregate(name: &str) -> bool {

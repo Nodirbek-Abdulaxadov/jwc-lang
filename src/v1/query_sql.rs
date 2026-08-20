@@ -89,6 +89,10 @@ pub struct Compiler<'a> {
     aliases: HashMap<String, String>,
     /// JWC binding alias -> declared table or view name.
     binding_objects: HashMap<String, String>,
+    /// Projection field of an `as one` -> the binding it came from. The
+    /// two are names for the same row, and `orderby org.name` uses the
+    /// field (queries.md §5.4).
+    one_fields: HashMap<String, String>,
     next: usize,
     /// `server { max_page_size }` — the clamp a `page` with no `max` of
     /// its own gets (config.md §3).
@@ -119,6 +123,7 @@ impl<'a> Compiler<'a> {
             params: Vec::new(),
             aliases: HashMap::new(),
             binding_objects: HashMap::new(),
+            one_fields: HashMap::new(),
             next: 0,
             max_page: 100,
             size_param: None,
@@ -219,6 +224,11 @@ impl<'a> Compiler<'a> {
             self.sql_alias(&n.alias);
             self.binding_objects
                 .insert(n.alias.clone(), n.object.clone());
+            if let Some(l) = &n.link {
+                if l.cardinality == Cardinality::One {
+                    self.one_fields.insert(l.field.clone(), n.alias.clone());
+                }
+            }
         }
         for g in &plan.groups {
             self.sql_alias(&g.alias);
@@ -997,9 +1007,16 @@ impl<'a> Compiler<'a> {
                 let ExprKind::Name(b) = &*base.kind else {
                     return None;
                 };
-                // `org.name` where `org` is a binding: the joined column.
-                if let Some(object) = self.object_of(&b.name) {
-                    let alias = self.sql_alias(&b.name);
+                // `org.name` where `org` is a binding, or the field an
+                // `as one` in this query produces — the same row either
+                // way.
+                let binding = self
+                    .one_fields
+                    .get(&b.name)
+                    .cloned()
+                    .unwrap_or_else(|| b.name.clone());
+                if let Some(object) = self.object_of(&binding) {
+                    let alias = self.sql_alias(&binding);
                     let table = self.table(&object)?;
                     let c = table.column(&field.name)?;
                     return Some(format!("{alias}.{}", quote_ident(&c.physical)));

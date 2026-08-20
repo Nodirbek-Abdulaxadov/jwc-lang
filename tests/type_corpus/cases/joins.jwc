@@ -137,3 +137,23 @@ service Bounds {
             as { id, members: { account_id } };
     }
 }
+
+-- queries.md §5.4 — `orderby` reaches a nested `as one` field, because a
+-- join order key exists for it. A collection has no single value to sort
+-- by, so the same syntax over `as many` is E0521.
+service Ordering {
+    function by_nested_one() {
+        return select M from App.s.Members
+            left join App.s.Orgs O on O.id == M.org_id as one org
+            as { account_id, org: { id, name } }
+            orderby org.name asc;
+    }
+
+    function by_collection() {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc limit 200
+            as { id, members: { account_id } }
+            orderby members asc;              -- expect: E0521
+    }
+}

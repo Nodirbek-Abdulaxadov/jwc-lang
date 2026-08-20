@@ -158,6 +158,19 @@ let rows = raw("select … from … where x = {}", $x) as { id, total };
 positional bind placeholders; the arguments are bound, never interpolated.
 A `{}` count mismatch is `E0610`.
 
+Each `{}` expands to `($n::text)` — the same "bound as text, cast in SQL"
+rule the compiler follows everywhere (queries §7.3). Hand-written SQL
+carries no type information to derive the cast from, so the **author**
+writes it:
+
+```jwc no-compile
+raw("select … where org_id = ({})::bigint", $org_id)
+```
+
+Without the cast Postgres infers the column's type for the parameter and
+refuses the text, which is an error at the first call rather than a wrong
+answer later.
+
 6.2 `raw` is **forbidden inside a `view`** (`E0611`) — a view is a
 snapshotted object and a hand-written body cannot be diffed.
 
