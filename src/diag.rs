@@ -93,8 +93,18 @@ impl SourceFile {
     }
 
     /// 1-based line and column (in characters) for a byte offset.
+    ///
+    /// The offset is clamped to a character boundary first. A span that
+    /// lands inside a multi-byte character is a bug in whoever produced
+    /// it, but slicing there panics — and a diagnostic printer that
+    /// crashes on the file it is describing turns a one-line error into
+    /// a compiler stack trace with the real message scrolled off the top.
+    /// It is worth being total here even so.
     pub fn line_col(&self, offset: u32) -> (usize, usize) {
-        let offset = (offset as usize).min(self.text.len());
+        let mut offset = (offset as usize).min(self.text.len());
+        while offset > 0 && !self.text.is_char_boundary(offset) {
+            offset -= 1;
+        }
         let line = match self.line_starts.binary_search(&offset) {
             Ok(i) => i,
             Err(i) => i - 1,

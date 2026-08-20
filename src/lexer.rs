@@ -249,11 +249,26 @@ impl<'a> Lexer<'a> {
                         b'/' => Tok::Slash,
                         b'%' => Tok::Percent,
                         _ => {
+                            // A non-ASCII byte is the *first* byte of a
+                            // character, not a character. Reporting
+                            // `self.i - 1 .. self.i` would put the span
+                            // inside it, and `SourceFile::line_col` then
+                            // slices the source there — so the compiler
+                            // panicked while rendering the diagnostic it
+                            // had just produced. Consume the whole
+                            // character and name it.
+                            let start = self.i - 1;
+                            while self.i < self.src.len()
+                                && (self.src[self.i] & 0b1100_0000) == 0b1000_0000
+                            {
+                                self.i += 1;
+                            }
+                            let text = String::from_utf8_lossy(&self.src[start..self.i]);
                             self.diags.push(
                                 Diagnostic::error(
                                     "E0100",
-                                    Span::new(self.i - 1, self.i),
-                                    format!("unexpected character `{}`", c as char),
+                                    Span::new(start, self.i),
+                                    format!("unexpected character `{text}`"),
                                 )
                                 .clause("names.md §2"),
                             );
@@ -445,6 +460,32 @@ mod tests {
             vec![Trivia::Doc("doc".into()), Trivia::Line("plain".into())]
         );
         assert_eq!(t[0].tok, Tok::Ident("table".into()));
+    }
+
+    #[test]
+    fn a_stray_multibyte_character_is_named_whole_and_does_not_split() {
+        // The span used to be one byte wide, which put it *inside* the
+        // character. `SourceFile::line_col` then sliced the source there
+        // and panicked, so the compiler crashed while rendering the error
+        // it had just produced — and the message printed a mojibake first
+        // byte (`â` for `—`) besides.
+        let (_, d) = Lexer::new("table — x").tokenize();
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, "E0100");
+        assert!(
+            d[0].message.contains('—'),
+            "the character is not named whole: {}",
+            d[0].message
+        );
+        let span = d[0].span;
+        assert_eq!(
+            (span.end - span.start) as usize,
+            "—".len(),
+            "the span must cover the whole character"
+        );
+        // The renderer is the half that used to panic.
+        let file = crate::diag::SourceFile::new("t.jwc", "table — x");
+        assert!(file.render(&d[0]).contains("E0100"));
     }
 
     #[test]
