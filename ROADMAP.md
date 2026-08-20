@@ -798,8 +798,7 @@ hujjatlashtiriladi); 24h soak'da RSS o'sishi < 5%, 0 ta pool leak.
 limitdan past tanada 403), va
 `the_two_failure_branches_of_login_cost_the_same`.
 
-**24 soatlik soak bu muhitda yurmaydi** va mezon ochiq qoladi —
-`security.md` §9 shuni yozib qo'yadi. `bombardier` ham o'rnatilmagan.
+**24 soatlik soak** — quyidagi tuzatish o'tishida yurgizildi, qarang.
 
 Yo'l-yo'lakay topilgan eng muhim narsa: **`login` da timing orakuli bor
 edi.** Noma'lum email Argon2id'gacha yetmasdan qaytardi — **2.4ms**, ma'lum
@@ -924,6 +923,68 @@ sanaydi, lekin `check_sample.py` ni na CI, na test chaqirardi — fayl
 oxirgi qo'lda yurgizilgan payt suratiga aylanib qolgan va namunadan
 uzilgan edi. `the_spec_coverage_map_is_current` endi generatorni yurgizib
 solishtiradi.
+
+#### Soak: "yurmaydi" emas edi, harness ishlamasdi
+
+Avval bu mezon "bu muhitda yurgizib bo'lmaydi" deb yopilgandi. Sabab
+boshqa bo'lib chiqdi: **harness'ning o'zi hech qachon ishlamagan.** Beshta
+nuqson, hammasi "bir marta ham yurgizilmagan" turkumidan:
+
+| Nuqson | Oqibati |
+|---|---|
+| `--format=json` yolg'iz — bombardier intro va progress bar'ni ham shu stdout'ga yozadi | JSON emas; parser `char 0` da o'ladi |
+| tayyorlik probe'i `curl --fail http://.../` | namunada `/` yo'q, ya'ni sog'lom jarayon 30s kutib "boot failure" deb yiqiladi |
+| port band bo'lsa ham probe o'tardi | sikl **boshqa birovning** serverini o'lchaydi, RSS'ni bog'lanolmagan pid'dan oladi |
+| `kill -TERM` himoyasiz, `set -e` ostida | oxirgi sikl yiqilsa, undan oldingi hamma soat chiqindiga ketadi |
+| latency `percentiles` yo'q bilan | p50/p95/p99 doim 0.00 — abadiy tekis p99 |
+
+Bundan tashqari `analyze.py` `pandas` talab qilib, u bo'lmasa `exit 2`
+qilardi, va **pool mezonini umuman tekshirmasdi** — chunki tekshiradigan
+raqam yo'q edi (yuqoriga qarang).
+
+Tuzatilgandan keyin **yurgizildi**, namunaga qarshi, haqiqiy Postgres 16
+va Redis 7 bilan, `/api/v1/plans` (bazaga tegadigan route) ustida:
+
+```
+8 sikl, har birida 75s yuk, orasida graceful restart
+  480,051 so'rov      480,051 2xx      0 yo'qolgan
+  RSS  18.9 → 19.5 MB      drift 3.2%   (chegara 10%)
+  pool max waiting 0       oxirida available 42   (chegara: >0)
+PASS
+```
+
+**Bu 24 soat emas — 8 sikl, ~12 daqiqa,** va shuni ochiq aytish kerak:
+sekin o'sadigan sizish uchun bu qisqa. Lekin mezon endi **o'lchanmagan**
+emas: harness ishlaydi, gauge'lar bor, `analyze.py` hukm chiqaradi, va
+`soak.yml` o'sha buyruq bilan 72 siklni yurgizadi. `p99 drift 40%` —
+0.05ms dan 0.07ms ga, ya'ni 20 mikrosekund; informatsion, va bu
+bombardier build'i persentil bermagani uchun mean/max'ga tushadi.
+
+#### `jwc-shortener`: o'lchandi, va bu port emas — qayta yozish
+
+Avval "`jwc build` yo'qligi uchun bloklangan" deb aytilgandi. O'lchov
+aniqroq javob beradi. v1 checker 873 qatorli manbada **801 xato** topadi;
+izohlarni `--` ga o'tkazgandan keyin ham **616**, va ulardan 576 tasi —
+`views.jwc` dagi ko'p qatorli `r"..."` ichidagi `'`. Qolganlari esa:
+`E0900: 'dbcontext' was removed in 1.0`, `E0900: 'entity' ...`, `try/catch`,
+`routes` bloki tashqarisidagi `route`, deklaratsiya sifatidagi `after`.
+
+Ya'ni shortener boshidan oxirigacha **0.9.x dasturi**, va uchta narsa
+bir vaqtda kerak:
+
+1. **Ko'p qatorli literal 1.0 lug'atida yo'q** — names §2.3 satr ichida
+   yangi qator taqiqlaydi, §2.4 esa `r"..."` ni *regulyar ifodalar uchun*
+   deb belgilaydi. 484 qatorli landing sahifasining v1 da ifodasi yo'q.
+   Bu til qarori, nuqson emas. (Diagnostika esa noto'g'ri edi: raw satrga
+   ham "`\n` yozing" deb maslahat berardi — `r"..."` da `\n` teskari
+   chiziq va `n`. Tuzatildi.)
+2. `qr-lite` — chiziqchali nom, v1 da `import` qilib bo'lmaydi.
+3. `--native` → `E0910` (`DEFERRED-2`).
+
+Bu aynan ROADMAP'ning **v1.0.0-rc.1** dagi "pilot loyiha ko'chirish"
+bandi, va u ishlab turgan xizmatni (1kb.uz) o'zi pin qilgan kompilyatordan
+uzadi. Yo'l-yo'lakay qilinadigan ish emas — lekin endi taxmin emas,
+o'lchov: 616 xato, uchta aniq to'siq.
 
 **`TODO.md`** dagi to'rt dala nuqsoniga v1 hukmi berildi: ikkitasi
 qayta yozuvda yopilgan (tekis e'lon fazosi; `E0732`), biri

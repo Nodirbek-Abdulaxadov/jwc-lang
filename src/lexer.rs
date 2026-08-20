@@ -299,14 +299,31 @@ impl<'a> Lexer<'a> {
                     break;
                 }
                 b'\n' => {
-                    self.diags.push(
-                        Diagnostic::error(
-                            "E0103",
-                            Span::new(open, self.i),
-                            "a string literal may not contain a literal newline",
+                    // The help has to differ by kind. `\n` is the answer in
+                    // a `"..."` and is *not* an answer in an `r"..."`,
+                    // where a backslash is a backslash — telling someone to
+                    // write an escape into a literal that has no escapes
+                    // sends them in a circle. A raw string is scoped to
+                    // regular expressions (names.md §2.4); a multi-line
+                    // document has no literal form in 1.0.
+                    let (message, help) = if raw {
+                        (
+                            "a raw string literal may not span lines",
+                            "`r\"...\"` is for regular expressions and ends at the line. \
+                             `\\n` inside it is a backslash and an `n`, not a newline — \
+                             build multi-line text by concatenating, or keep it out of \
+                             the source",
                         )
-                        .note("write `\\n`")
-                        .clause("names.md §2.3"),
+                    } else {
+                        (
+                            "a string literal may not contain a literal newline",
+                            "write `\\n`",
+                        )
+                    };
+                    self.diags.push(
+                        Diagnostic::error("E0103", Span::new(open, self.i), message)
+                            .note(help)
+                            .clause(if raw { "names.md §2.4" } else { "names.md §2.3" }),
                     );
                     return None;
                 }
@@ -486,6 +503,28 @@ mod tests {
         // The renderer is the half that used to panic.
         let file = crate::diag::SourceFile::new("t.jwc", "table — x");
         assert!(file.render(&d[0]).contains("E0100"));
+    }
+
+    #[test]
+    fn a_newline_in_a_raw_string_is_not_told_to_write_an_escape() {
+        // `\n` is the answer for `"..."` and is *not* an answer for
+        // `r"..."`, which processes no escapes — a backslash there stays a
+        // backslash. Both literals used to get the same help, which sends
+        // whoever hit it in a circle.
+        // The trailing quote is left dangling, so an `E0102` follows each
+        // of these. It is the first diagnostic that gets read.
+        let (_, plain) = Lexer::new("\"a\nb\"").tokenize();
+        assert_eq!(plain[0].code, "E0103", "{plain:?}");
+        assert!(plain[0].note.as_deref().unwrap_or_default().contains(r"\n"));
+
+        let (_, raw) = Lexer::new("r\"a\nb\"").tokenize();
+        assert_eq!(raw[0].code, "E0103", "{raw:?}");
+        let note = raw[0].note.as_deref().unwrap_or_default();
+        assert!(
+            note.contains("backslash"),
+            "the raw-string help still points at an escape: {note}"
+        );
+        assert_eq!(raw[0].clause, Some("names.md §2.4"));
     }
 
     #[test]

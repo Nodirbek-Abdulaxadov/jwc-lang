@@ -158,5 +158,5 @@ request, and refuses an archive entry whose path escapes its directory
 | | Status |
 |---|---|
 | CSRF tokens | out of scope: the API is token-authenticated, not cookie-authenticated |
-| a 24-hour soak | not run in this environment; the criterion stands open (ROADMAP v0.29.0) |
+| a 24-hour soak | the harness runs and passes at 8 cycles / 480k requests (ROADMAP v0.29.0); the full 72-cycle run is `soak.yml`, on a runner that has the hours |
 | a third-party security review | ROADMAP v1.0.0-rc.1 |
