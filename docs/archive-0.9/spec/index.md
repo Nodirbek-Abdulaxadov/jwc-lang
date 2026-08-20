@@ -4,7 +4,7 @@ Status: **DRAFT** · Target: stable at v1.0 · Reflects: **v0.4.8**
 
 > **North star.** "Write web backends without hand-coding CRUD, without
 > fighting an ORM, native-fast." Surface that doesn't serve this goal is
-> declared Non-goal — see [`ROADMAP.md` Non-goals](../../ROADMAP.md#non-goals-10-ga-qadar-va-undan-keyin-ham--qatiy-yoq).
+> declared Non-goal — see [`ROADMAP.md` Non-goals](../../../ROADMAP.md#non-goals-10-ga-qadar-va-undan-keyin-ham--qatiy-yoq).
 > LLVM IR, cross-target native matrix, WASM, self-hosting, multi-DB
 > driver, SSE v2 won't ship pre-1.0.
 
@@ -50,7 +50,7 @@ where the spec is silent — see the precedence note in
 1. Conformance suite (`tests/conformance/`) — executable.
 2. This spec — prose + EBNF.
 3. `parser.rs` / `runner/` — current implementation.
-4. [`../../README.md`](../../README.md) — user-facing summary.
+4. [`../../README.md`](../../../README.md) — user-facing summary.
 
 When the spec disagrees with the implementation, the spec wins; file the
 implementation as a bug. When the spec disagrees with the conformance
@@ -58,7 +58,7 @@ suite, the suite wins and the spec is the bug.
 
 ## Meta documents (repo root)
 
-- [`../../SEMVER.md`](../../SEMVER.md) — what counts as a breaking change.
-- [`../../DEPRECATION.md`](../../DEPRECATION.md) — minimum warning window.
-- [`../../SECURITY.md`](../../SECURITY.md) — reporting, hardening notes.
-- [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) — contributor handbook.
+- [`../../SEMVER.md`](../../../SEMVER.md) — what counts as a breaking change.
+- [`../../DEPRECATION.md`](../../../DEPRECATION.md) — minimum warning window.
+- [`../../SECURITY.md`](../../../SECURITY.md) — reporting, hardening notes.
+- [`../../CONTRIBUTING.md`](../../../CONTRIBUTING.md) — contributor handbook.

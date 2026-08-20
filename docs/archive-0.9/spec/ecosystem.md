@@ -508,10 +508,10 @@ dispatching qiladi. Bu **principle**:
 - [aot-scope.md](./aot-scope.md) — Native AOT'da nimalar ishlaydi
 - [threat-model.md](./threat-model.md) — Paket o'rnatish + sandbox xavfsizligi
 - [semantics.md](./semantics.md) — Til semantikasi, error kinds
-- [`SEMVER.md`](../../SEMVER.md) — Core stable surface
-- [`DEPRECATION.md`](../../DEPRECATION.md) — Cleanup roadmap
+- [`SEMVER.md`](../../../SEMVER.md) — Core stable surface
+- [`DEPRECATION.md`](../../../DEPRECATION.md) — Cleanup roadmap
 - Registry: <https://registry-jwc.1kb.uz/>
-- Source of truth: [`PRODUCTION_READINESS_PLAN.md`](../../PRODUCTION_READINESS_PLAN.md)
+- Source of truth: [`PRODUCTION_READINESS_PLAN.md`](../../../PRODUCTION_READINESS_PLAN.md)
 
 ---
 

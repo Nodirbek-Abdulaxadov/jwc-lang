@@ -774,7 +774,7 @@ the feature warns at boot when `JWC_REDIS_URL` is set, then fails
 holding a pool connection for its whole timeout and starving the pool it
 came from. Both belong with the durable queue's Redis backend.
 
-See [`docs/docs/deployment/redis.md`](docs/docs/deployment/redis.md).
+See [`docs/archive-0.9/deployment/redis.md`](docs/archive-0.9/deployment/redis.md).
 
 ### Changed
 

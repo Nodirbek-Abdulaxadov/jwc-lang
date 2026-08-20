@@ -122,7 +122,7 @@ Production-ready for the maintainer's own workload; external pilots TBD.
 
 - **Interpreter** — stable (`jwc run`, `jwc serve`).
 - **Native AOT** — stable for the documented surface
-  ([`aot-scope`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/aot-scope.md)).
+  ([`aot-scope`](https://github.com/just-web-code/jwc-lang/blob/main/docs/archive-0.9/spec/aot-scope.md)).
 - **Query layer (join + projection + eager-load + grouped aggregation +
   optional/dynamic filters)** — ✅ shipped (Phase 11, v0.6.x). Native AOT
   mirrors the query surface; `jwt_sign`/`jwt_verify` + a couple of query forms

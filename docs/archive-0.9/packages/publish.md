@@ -9,7 +9,7 @@ description: "Publish a JWC package to registry-jwc.1kb.uz: signing in, preparin
 > Mass-ecosystem ambition is not part of the north star — JWC competes on
 > CRUD ergonomics, not on the breadth of npm-style availability. If you
 > need 1000s of packages, JWC isn't the right tool. See
-> [`docs/spec/ecosystem.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/ecosystem.md) for what belongs
+> [`docs/archive-0.9/spec/ecosystem.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/archive-0.9/spec/ecosystem.md) for what belongs
 > in core vs. what belongs in a package.
 
 ## One-time setup

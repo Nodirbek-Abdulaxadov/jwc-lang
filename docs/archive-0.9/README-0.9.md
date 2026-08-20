@@ -56,12 +56,12 @@ own workload; external pilots TBD.
 > `dbcontext`, `with`/`via`, `validate body`) is replaced in 1.0 by `table`,
 > `database`, explicit `join ... as one/many`, and query-level projections.
 > There are no users to migrate, so the break is clean and there is no compat
-> mode. See [`ROADMAP.md`](ROADMAP.md) and
-> [`docs/spec/v1/`](docs/spec/v1/) — design, the 44 confirmed gaps, the error
+> mode. See [`ROADMAP.md`](../../ROADMAP.md) and
+> [`docs/spec/v1/`](../spec/v1/) — design, the 44 confirmed gaps, the error
 > model, and a ~1100-line sample app in the new syntax.
 
 **Building an app with an AI agent?** Hand it
-[`docs/docs/reference/ai-agent-guide.md`](docs/docs/reference/ai-agent-guide.md)
+[`docs/docs/reference/ai-agent-guide.md`](reference/ai-agent-guide.md)
 — one self-contained file covering the whole language, every built-in, the
 native-build rules, and the mistakes agents actually make.
 
@@ -99,7 +99,7 @@ native-build rules, and the mistakes agents actually make.
 - Performance-critical hot paths where the last 10% of an axum/`fiber`
   number matters — use axum/fiber.
 - Anything that needs a mature ecosystem (1000s of packages). JWC's
-  package count is small and curated. See [`docs/spec/ecosystem.md`](docs/spec/ecosystem.md).
+  package count is small and curated. See [`docs/spec/ecosystem.md`](spec/ecosystem.md).
 
 ## Performance
 
@@ -125,7 +125,7 @@ Full numbers, methodology, and reproduction recipe:
   `deadpool-redis` pool. Configured with `JWC_REDIS_URL`; unset means
   disabled, not broken. `redis_eval` sends `EVALSHA`, so a Lua rate-limiter
   does not re-upload its script every request. Guide:
-  [`deployment/redis`](docs/docs/deployment/redis.md).
+  [`deployment/redis`](deployment/redis.md).
 - **The `redis` package** — a pure-JWC layer over those builtins with
   `get/set/del/incr/expire/exists`, `get_json`/`set_json`, and an atomic
   `rate_limit(key, limit, window)`. Falls back to the in-process cache when
@@ -157,9 +157,9 @@ Packages + registry (`jwc add` / `jwc publish`, `jwcproj.lock`),
 (joins, `group by`, `having`, `distinct`, aggregates, projections, optional
 predicates), `file.*` / `directory.*` / `console.*`, and `jwc fmt`.
 
-Full history: [`CHANGELOG.md`](CHANGELOG.md).
+Full history: [`CHANGELOG.md`](../../CHANGELOG.md).
 
-Full env-var reference: [`docs/docs/deployment/env-vars.md`](docs/docs/deployment/env-vars.md).
+Full env-var reference: [`docs/docs/deployment/env-vars.md`](deployment/env-vars.md).
 
 ## Quick Start
 
@@ -411,7 +411,7 @@ function main() {
 library may be mounted at multiple prefixes — each produces its own route set.
 
 A worked end-to-end example is in
-[examples/pkg-demo/](examples/pkg-demo/) — a `greet-lib` package and an `app`
+`examples/pkg-demo/` — a `greet-lib` package and an `app`
 that consumes it via a path dependency.
 
 ## Query and Path Parameters
@@ -660,7 +660,7 @@ let h = hash_password("hunter2");      // argon2id PHC string
 verify_password("hunter2", h)          // true
 ```
 
-See [`docs/builtins.md`](docs/builtins.md) for the complete built-in reference
+See [`docs/builtins.md`](reference/builtins.md) for the complete built-in reference
 (with native-AOT support per built-in).
 
 ## HTTP Client
@@ -808,7 +808,7 @@ function totalIn(country) {
 - Optional predicate `col ==? @v` (drops when the value is empty/null) and a
   dynamic in-list `where col in (@arr)` (binds a runtime array as `= ANY`).
 - Two-level nested eager-load: `select Project with boards.columns`.
-  Full surface: [docs/data/select](./docs/docs/data/select.md).
+  Full surface: [docs/data/select](data/select.md).
 
 ## Entity relations (navigation + auto-JOIN)
 
@@ -1007,13 +1007,13 @@ SQLSTATE `23505` only. Known kinds today: `Error`; `DbError` +
 Unknown kinds bail at compile time with a "did you mean" hint.
 
 The diagnostic catalog (W001–W006, E001–E023) is in
-[`src/error_codes.rs`](src/error_codes.rs). The ones you're most likely to
+[`src/error_codes.rs`](reference/error-codes.md). The ones you're most likely to
 hit: **E016** (literal nested transaction → use `savepoint`), **E017**
 (savepoint outside a transaction), **E018**/**E019**/**E020** (type
 checker — return type / arg count / arg type), **E021** (visibility —
 cross-namespace private call), **E022** (unknown builtin), **E023**
 (package resolution). Full list with fixes:
-[`reference/error-codes`](docs/docs/reference/error-codes.md).
+[`reference/error-codes`](reference/error-codes.md).
 
 ## Foreign Keys
 
@@ -1145,7 +1145,7 @@ Resilience, observability, queue, and security (Sprint 4/5/6):
 - `JWC_HTTP_ALLOWLIST` — comma-separated SSRF allowlist for `http_get` / `http_post` / `fetch_json`
 
 The full env-var catalog (defaults, validation rules, machine-readable
-table) lives in [`docs/docs/deployment/env-vars.md`](docs/docs/deployment/env-vars.md).
+table) lives in [`docs/docs/deployment/env-vars.md`](deployment/env-vars.md).
 
 ## Performance
 
@@ -1170,7 +1170,7 @@ reproducible). Headlines from the 2026-06-13 clean-environment rerun
 
 The roadmap for closing the remaining gap to the statically-compiled stacks
 (struct monomorphization of `entity`/`class` shapes) is in
-[`PRODUCTION_READINESS_PLAN.md`](PRODUCTION_READINESS_PLAN.md).
+[`PRODUCTION_READINESS_PLAN.md`](../../PRODUCTION_READINESS_PLAN.md).
 
 ## Install
 
@@ -1189,7 +1189,7 @@ sudo install -m 755 jwc-lsp /usr/local/bin/
 jwc --version
 ```
 
-A matching `jwc-v0.9.6-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](docs/docs/deployment/musl-static.md) for when (not) to prefer this build.
+A matching `jwc-v0.9.6-x86_64-unknown-linux-musl.tar.gz.sha256` ships alongside — verify with `sha256sum -c`. See [musl-static deployment doc](deployment/musl-static.md) for when (not) to prefer this build.
 
 ### Docker (official multi-arch images)
 
@@ -1202,7 +1202,7 @@ docker pull ghcr.io/just-web-code/jwc:0.9.6
 docker run --rm ghcr.io/just-web-code/jwc:0.9.6 --version
 ```
 
-`ghcr.io/just-web-code/jwc:<version>` ships the `jwc` CLI on `debian:bookworm-slim` (use as a build stage or a `migrate up` k8s init-container). `ghcr.io/just-web-code/jwc-runtime:<version>` is a ~25 MB distroless base for your compiled native app. Full guide + k8s YAML in [`docs/docs/deployment/docker.md`](docs/docs/deployment/docker.md).
+`ghcr.io/just-web-code/jwc:<version>` ships the `jwc` CLI on `debian:bookworm-slim` (use as a build stage or a `migrate up` k8s init-container). `ghcr.io/just-web-code/jwc-runtime:<version>` is a ~25 MB distroless base for your compiled native app. Full guide + k8s YAML in [`docs/docs/deployment/docker.md`](deployment/docker.md).
 
 ### Windows (PowerShell)
 
@@ -1252,7 +1252,7 @@ After install, open a new terminal if `jwc` is not found immediately.
 `jwc build` (alias: `jwc bundle`) packages your project together with the JWC
 runtime into `bin/{debug,release}`. This is **not** native AOT compilation yet —
 the launcher invokes the embedded runtime to execute your `.jwc` sources.
-A real native compiler is Phase 4 of the archived [0.9.x roadmap](docs/spec/roadmap-0.9.x.md).
+A real native compiler is Phase 4 of the archived [0.9.x roadmap](spec/roadmap-0.9.x.md).
 
 The build uses your current machine OS/architecture automatically.
 
@@ -1317,11 +1317,11 @@ Rust toolchain on the host. What that means per platform, honestly:
 CI runs on `ubuntu-latest` only — all three jobs. So "native works on Windows"
 means the code path exists and the triple is accepted, not that anyone
 verified the produced binary behaves. `--target` accepts six triples; see
-[the native build doc](docs/docs/deployment/native-build.md) for which are
+[the native build doc](deployment/native-build.md) for which are
 covered and which are merely accepted.
 
 **In 1.0 `--native` is frozen** and returns in 1.1, rewritten. The reason is
-in [`ROADMAP.md`](ROADMAP.md): while the language semantics are still moving,
+in [`ROADMAP.md`](../../ROADMAP.md): while the language semantics are still moving,
 a second backend doubles every query-compiler change. The interpreter is the
 single reference until the syntax freezes.
 
@@ -1336,9 +1336,9 @@ request scope. Stateful work falls back to `jwc run` (the interpreter):
 - OTLP distributed tracing spans
 
 The authoritative scope list lives in
-[`docs/spec/aot-scope.md`](docs/spec/aot-scope.md). Threat model and the
+[`docs/spec/aot-scope.md`](spec/aot-scope.md). Threat model and the
 hardened defaults shipped in Phase 6 are documented in
-[`docs/spec/threat-model.md`](docs/spec/threat-model.md).
+[`docs/spec/threat-model.md`](spec/threat-model.md).
 
 ## Notes
 

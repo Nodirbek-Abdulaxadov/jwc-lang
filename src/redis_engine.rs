@@ -1,5 +1,5 @@
 //! Redis driver — the **core tier** integration from
-//! `docs/spec/ecosystem.md` Faza 1.
+//! `docs/archive-0.9/spec/ecosystem.md` Faza 1.
 //!
 //! Redis sits in the core tier for the reason the spec gives: sub-ms
 //! latency budget and a binary (RESP) wire protocol. A pure-JWC package

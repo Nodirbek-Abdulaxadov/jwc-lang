@@ -11,7 +11,7 @@ HTTP / DB / secrets axes that bite hardest in real deployments. This
 page is the index; the per-topic sources of truth live in the repo:
 
 - [`SECURITY.md`](https://github.com/just-web-code/jwc-lang/blob/main/SECURITY.md) — vulnerability disclosure policy + supported versions.
-- [`docs/spec/threat-model.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/threat-model.md) — the formal threat model.
+- [`docs/archive-0.9/spec/threat-model.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/archive-0.9/spec/threat-model.md) — the formal threat model.
 
 ## SSRF allowlist (`JWC_HTTP_ALLOWLIST`)
 
@@ -124,7 +124,7 @@ What to do instead:
   single-call tree removal even if a path does leak through.
 
 Recorded as an accepted risk in
-[`docs/spec/threat-model.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/spec/threat-model.md)
+[`docs/archive-0.9/spec/threat-model.md`](https://github.com/just-web-code/jwc-lang/blob/main/docs/archive-0.9/spec/threat-model.md)
 row 6. Per-builtin detail: [Console + files](../stdlib/io.md).
 
 ## Reporting a vulnerability
