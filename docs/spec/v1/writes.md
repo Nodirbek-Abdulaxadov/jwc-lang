@@ -83,6 +83,18 @@ whole-table update. `where true` is the explicit opt-in.
 3.5 Empty spread — see types §9.5. The statement is skipped and the
 projection reads the current row.
 
+3.6 A `set` expression that reads the row's **own columns** is emitted as
+SQL, not evaluated in the process:
+
+```jwc no-compile
+set value = value + 1
+```
+
+becomes `SET value = (value + 1)`. Evaluating it here would need a read
+first, and two callers doing that both read the same number — the race
+§2.3 is about, in the one place where it is easiest to write by accident.
+Everything else in a `set` is still a bind parameter.
+
 ---
 
 ## 4. `update … first` and `delete … first` lowering (#43)
@@ -151,7 +163,12 @@ snapshotted object and a hand-written body cannot be diffed.
 
 6.3 `raw` results are `Raw` unless annotated with `as { }`, in which case the
 annotation is trusted and unchecked. This is the one unchecked boundary in
-the language and `jwc lint` lists every occurrence.
+the language and `jwc v1 explain` lists every occurrence with a count
+(queries §7.4).
+
+The SQL itself must be a **literal** (`E0610`): a computed string cannot
+have its placeholders counted, and counting them is the only thing standing
+between this construct and interpolation.
 
 6.4 `raw` exists so that CTEs, window functions, recursive queries and
 full-text search are reachable without the query compiler growing them

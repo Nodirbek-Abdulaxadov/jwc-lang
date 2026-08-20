@@ -60,6 +60,11 @@ impl<'a> Vm<'a> {
             vals.push(self.eval(a).await?);
         }
 
+        // `raw` runs SQL, so it cannot live in the synchronous table.
+        if path == "raw" {
+            return self.run_raw(args, &vals).await;
+        }
+
         if let Some(v) = self.builtin(&path, &vals)? {
             return Ok(v);
         }
@@ -81,6 +86,38 @@ impl<'a> Vm<'a> {
             Flow::Return(v) => Ok(v),
             _ => Ok(Value::Null),
         }
+    }
+
+    /// writes.md §6 — hand-written SQL, with `{}` bound in order.
+    ///
+    /// The placeholders are rewritten to `$1…$n` and the arguments are
+    /// bound. Nothing is interpolated: the SQL is a literal the checker
+    /// already counted the holes in, so there is no path by which a
+    /// caller's value reaches the statement as text.
+    async fn run_raw(&mut self, args: &[Expr], vals: &[Value]) -> Exec<Value> {
+        let Some(ExprKind::Str(template)) = args.first().map(|a| &*a.kind) else {
+            return Err(fault("`raw()`'s SQL must be a literal"));
+        };
+        let (sql, n) = rewrite_placeholders(template);
+
+        let binds: Vec<Option<String>> = vals.iter().skip(1).map(|v| v.to_bind()).collect();
+        if binds.len() != n {
+            return Err(fault(format!(
+                "`raw()` has {n} placeholder(s) and {} argument(s)",
+                binds.len()
+            )));
+        }
+        if std::env::var("JWC_LOG_SQL").as_deref() == Ok("1") {
+            eprintln!("[sql] {sql}");
+        }
+        // Wrapped the same way every other query is, so a `raw` result is
+        // the same kind of value as a compiled one.
+        let wrapped =
+            format!("SELECT coalesce(json_agg(q), '[]'::json)::text FROM ({sql}) q");
+        let text = super::db::run(&wrapped, &binds, super::sql::Shape::Rows)
+            .await
+            .map_err(super::exec::map_db_error)?;
+        Ok(Value::Raw(text.unwrap_or_else(|| "[]".into())))
     }
 
     /// Returns `None` when the path is not a builtin, so the caller can try
@@ -485,5 +522,55 @@ impl<'a> Vm<'a> {
             body: String::new(),
             headers: Vec::new(),
         }
+    }
+}
+
+/// `{}` → `$1…$n`, in order.
+///
+/// The only transformation `raw` performs. It is separate so it can be
+/// tested without a database: getting the numbering wrong would bind the
+/// right values to the wrong holes, which is a silent wrong answer rather
+/// than an error.
+pub(super) fn rewrite_placeholders(template: &str) -> (String, usize) {
+    let mut sql = String::with_capacity(template.len());
+    let mut rest = template;
+    let mut n = 0usize;
+    while let Some(at) = rest.find("{}") {
+        sql.push_str(&rest[..at]);
+        n += 1;
+        sql.push_str(&format!("${n}"));
+        rest = &rest[at + 2..];
+    }
+    sql.push_str(rest);
+    (sql, n)
+}
+
+#[cfg(test)]
+mod raw_tests {
+    use super::rewrite_placeholders;
+
+    #[test]
+    fn numbers_placeholders_in_order() {
+        assert_eq!(
+            rewrite_placeholders("select {} where a = {} and b = {}"),
+            ("select $1 where a = $2 and b = $3".to_string(), 3)
+        );
+    }
+
+    #[test]
+    fn no_placeholders_is_the_statement_unchanged() {
+        assert_eq!(
+            rewrite_placeholders("select 1"),
+            ("select 1".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn a_lone_brace_is_not_a_placeholder() {
+        // `{` and `}` appear in jsonb literals and array constructors.
+        assert_eq!(
+            rewrite_placeholders("select '{\"a\": 1}'::jsonb, {}"),
+            ("select '{\"a\": 1}'::jsonb, $1".to_string(), 1)
+        );
     }
 }

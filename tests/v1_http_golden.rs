@@ -113,7 +113,9 @@ fn setup_database(url: &str) -> Result<(), String> {
     );
     reset.push_str(&sql);
     reset.push_str(
-        "\nINSERT INTO billing.counters (name, value) VALUES ('invoice', 0);\n\
+        // The seeded invoice is INV-00000001, so the counter stands at 1:
+        // the next number the app hands out has to be the next one.
+        "\nINSERT INTO billing.counters (name, value) VALUES ('invoice', 1);\n\
          INSERT INTO billing.plans (code, name, price, currency, interval) \
          VALUES ('pro', 'Pro', 25.00, 'USD', 'monthly'), \
                 ('free', 'Free', 0.00, 'USD', 'monthly');\n\
@@ -387,6 +389,23 @@ async fn http_golden() {
             .contains("\"org\":{")
             .not_contains("plan__"),
 
+        // ---- keyset pagination (queries.md §9)
+        case("invoices: an empty page still has the envelope", "GET", &format!("{org_path}/invoices"), 200)
+            .header("authorization", &bearer)
+            .contains("\"items\":[]")
+            .contains("\"has_more\":false")
+            .contains("\"next\":null"),
+        case("invoices: a tampered cursor is a 400, not a 500", "GET", &format!("{org_path}/invoices"), 400)
+            .header("authorization", &bearer)
+            .query("cursor", "v1.eyJhIjoxfQ.deadbeef")
+            .contains("kursor yaroqsiz"),
+        case("invoices: junk in the cursor is a 400", "GET", &format!("{org_path}/invoices"), 400)
+            .header("authorization", &bearer)
+            .query("cursor", "not-a-cursor"),
+        case("invoices: a bad size is 400, not 500", "GET", &format!("{org_path}/invoices"), 400)
+            .header("authorization", &bearer)
+            .query("size", "many"),
+
         case("every JSON response declares its charset", "GET", "/api/v1/plans", 200)
             .has_header("content-type", "application/json; charset=utf-8"),
         case("plans is a JSON array", "GET", "/api/v1/plans", 200).contains("[{"),
@@ -464,6 +483,57 @@ async fn http_golden() {
             ));
         }
     }
+
+    // ---- a real page walk (queries.md §9). The envelope is only half the
+    // contract; the other half is that following `next` visits every row
+    // exactly once, which an empty page cannot show.
+    for i in 1..=5 {
+        let made = run(
+            &program,
+            &case("seed invoice", "POST", &format!("{org_path}/invoices"), 201)
+                .json(&format!(
+                    r#"{{"lines":[{{"description":"line {i}","quantity":1,"unit_price":"1.00"}}]}}"#
+                ))
+                .header("authorization", &bearer),
+        )
+        .await;
+        assert_eq!(made.status, 201, "seed invoice {i}: {}", made.body);
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for round in 0..5 {
+        let mut c = case("page", "GET", &format!("{org_path}/invoices"), 200)
+            .header("authorization", &bearer)
+            .query("size", "2");
+        if let Some(cur) = &cursor {
+            c = c.query("cursor", cur);
+        }
+        let page = run(&program, &c).await;
+        assert_eq!(page.status, 200, "page {round}: {}", page.body);
+        let j: serde_json::Value = serde_json::from_str(&page.body).expect("json");
+        let items = j["items"].as_array().expect("items");
+        assert!(items.len() <= 2, "size 2 was not honoured: {}", page.body);
+        for it in items {
+            seen.push(it["id"].as_str().expect("id").to_string());
+        }
+        if !j["has_more"].as_bool().unwrap_or(false) {
+            assert!(j["next"].is_null(), "the last page carries no cursor: {}", page.body);
+            break;
+        }
+        cursor = Some(j["next"].as_str().expect("next").to_string());
+    }
+
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(seen.len(), unique.len(), "a row was visited twice: {seen:?}");
+    assert_eq!(seen.len(), 5, "the walk did not see every row: {seen:?}");
+    // Newest first, and the ids the sample hands out ascend, so the walk
+    // runs down them.
+    let mut descending = seen.clone();
+    descending.sort_by_key(|id| std::cmp::Reverse(id.parse::<i64>().unwrap()));
+    assert_eq!(seen, descending, "the order did not survive paging: {seen:?}");
 
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     assert!(ran >= 25, "expected the golden set, ran {ran}");

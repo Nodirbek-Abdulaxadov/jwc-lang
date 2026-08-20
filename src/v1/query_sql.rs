@@ -16,7 +16,7 @@ use super::ast::*;
 use super::model::{ColumnObj, SchemaModel, TableObj};
 use super::naming::{self, quote_ident};
 use super::query::{Node, Plan};
-use super::sql::{Param, Shape};
+use super::sql::{Bind, PagePlan, Param, Shape};
 use super::views::ViewObj;
 use std::collections::HashMap;
 
@@ -78,6 +78,7 @@ pub struct Compiled {
     pub shape: Shape,
     pub record: bool,
     pub fields: Vec<String>,
+    pub page: Option<PagePlan>,
 }
 
 pub struct Compiler<'a> {
@@ -89,6 +90,12 @@ pub struct Compiler<'a> {
     /// JWC binding alias -> declared table or view name.
     binding_objects: HashMap<String, String>,
     next: usize,
+    /// `server { max_page_size }` — the clamp a `page` with no `max` of
+    /// its own gets (config.md §3).
+    max_page: i64,
+    /// The parameter the page's size was bound to, so the clamp can be
+    /// written more than once without binding it twice.
+    size_param: Option<usize>,
     /// A view body has no parameters, so its literals are emitted as
     /// literals. Everything else is identical, which is the point: a view
     /// is the same projection, standing still.
@@ -113,11 +120,19 @@ impl<'a> Compiler<'a> {
             aliases: HashMap::new(),
             binding_objects: HashMap::new(),
             next: 0,
+            max_page: 100,
+            size_param: None,
             literals: false,
             no_wire: false,
             gap: None,
             gap_code: None,
         }
+    }
+
+    /// Set the clamp a `page` with no `max` falls back to.
+    pub fn max_page_size(mut self, n: i64) -> Self {
+        self.max_page = n;
+        self
     }
 
     /// The reason the last `compile` returned `None`.
@@ -188,7 +203,7 @@ impl<'a> Compiler<'a> {
             };
         }
         self.params.push(Param {
-            expr: e.clone(),
+            bind: Bind::Expr(e.clone()),
             cast: cast.to_string(),
         });
         format!("(${}::text)::{cast}", self.params.len())
@@ -211,11 +226,6 @@ impl<'a> Compiler<'a> {
                 .insert(g.alias.clone(), g.object.clone());
         }
 
-        if select.page.is_some() {
-            // Emitting the ORDER BY and dropping the `page` would answer
-            // the whole table to a request that asked for one page.
-            return self.unsupported("keyset pagination arrives in v0.25.e");
-        }
         let projection = select.projection.as_ref();
         let root_alias = self.sql_alias(&plan.root.alias);
         let root_table = self.table(&plan.root.object)?;
@@ -226,7 +236,9 @@ impl<'a> Compiler<'a> {
         // not, so the keys go first.
         let collection = plan.root.has_many()
             || matches!(root_table, Rel::View(v) if v.has_many);
-        let bounded = select.limit.is_some() || (select.first && !select.order_by.is_empty());
+        let bounded = select.limit.is_some()
+            || select.page.is_some()
+            || (select.first && !select.order_by.is_empty());
         let page = if collection && bounded {
             Some(self.page_cte(select, plan, root_table)?)
         } else {
@@ -249,10 +261,36 @@ impl<'a> Compiler<'a> {
             ));
         }
 
-        let mut sql = format!("SELECT {json} AS j\n  FROM {from}");
+        // A `page` query also returns the ordering tuple of each row: the
+        // cursor for the next page is the last row's, and the keys are
+        // usually not in the projection (queries.md §9.3).
+        let keys = match &select.page {
+            Some(_) => {
+                let cols = self.cursor_keys(select, plan, root_table)?;
+                let order = self.page_order(select, root_table);
+                let order = self.order_by(&order, &plan.root.alias)?;
+                // `rn` rather than trusting a subquery's ORDER BY to survive
+                // into the aggregate above it: the order *is* the answer
+                // here, and a subquery's order is not a guarantee.
+                format!(
+                    ", json_build_array({}) AS k, row_number() OVER (ORDER BY {order}) AS rn",
+                    cols.join(", ")
+                )
+            }
+            None => String::new(),
+        };
+
+        let mut sql = format!("SELECT {json} AS j{keys}\n  FROM {from}");
         if page.is_none() {
+            let mut wheres = Vec::new();
             if let Some(f) = &select.filter {
-                sql.push_str(&format!("\n  WHERE {}", self.predicate(f, &plan.root.alias)?));
+                wheres.push(self.predicate(f, &plan.root.alias)?);
+            }
+            if select.page.is_some() {
+                wheres.push(self.keyset(select, plan, root_table)?);
+            }
+            if !wheres.is_empty() {
+                sql.push_str(&format!("\n  WHERE {}", wheres.join(" AND ")));
             }
         }
         if !select.group_by.is_empty() {
@@ -279,6 +317,13 @@ impl<'a> Compiler<'a> {
                 sql.push_str("\n  LIMIT 1");
             }
             Shape::First
+        } else if let Some(p) = &select.page {
+            if page.is_none() {
+                let l = self.page_limit(p);
+                sql.push_str(&format!("\n  LIMIT {l}"));
+            }
+            // One row comes back: the envelope.
+            Shape::First
         } else {
             if page.is_none() {
                 if let Some(l) = &select.limit {
@@ -293,11 +338,25 @@ impl<'a> Compiler<'a> {
             sql = format!("{}\n{sql}", p.cte);
         }
 
-        let wrapped = match shape {
-            Shape::Rows => {
-                format!("SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM ({sql}) q")
+        let wrapped = if let Some(p) = &select.page {
+            // Three columns, not one JSON object: `items` has to reach the
+            // response as the text Postgres produced, and anything that
+            // parsed it to take it apart would re-serialise it with the
+            // keys sorted (queries.md §7.2).
+            //
+            // The extra row the LIMIT asked for is what answers `has_more`;
+            // it is filtered out of `items` rather than counted separately.
+            let l = self.page_bound(p);
+            format!(
+                "SELECT coalesce(json_agg(q.j ORDER BY q.rn) FILTER (WHERE q.rn <= {l}), '[]'::json)::text, coalesce(json_agg(q.k ORDER BY q.rn) FILTER (WHERE q.rn <= {l}), '[]'::json)::text, count(*) > {l} FROM ({sql}) q"
+            )
+        } else {
+            match shape {
+                Shape::Rows => {
+                    format!("SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM ({sql}) q")
+                }
+                _ => format!("SELECT q.j::text FROM ({sql}) q"),
             }
-            _ => format!("SELECT q.j::text FROM ({sql}) q"),
         };
 
         let fields = match projection {
@@ -320,7 +379,153 @@ impl<'a> Compiler<'a> {
             // query that named no fields.
             record: projection.is_some() || matches!(root_table, Rel::View(_)),
             fields,
+            page: select.page.as_ref().map(|p| PagePlan {
+                after: p.after.clone(),
+                size: p.size.clone(),
+                max: self.page_max(p),
+                // The envelope's `items` keeps whatever the query produced,
+                // so raw survives it (types.md §5.4, queries.md §9.3).
+                raw_items: projection.is_none() && matches!(root_table, Rel::Table(_)),
+            }),
         })
+    }
+
+    // ------------------------------------------------------------- page
+
+    /// The ordering tuple, as text, in the order the cursor carries it.
+    fn cursor_keys(
+        &mut self,
+        select: &SelectExpr,
+        plan: &Plan,
+        rel: Rel<'a>,
+    ) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        for k in self.page_order(select, rel) {
+            let col = self.column_ref(&k.expr, &plan.root.alias)?;
+            out.push(format!("{col}::text"));
+        }
+        Some(out)
+    }
+
+    /// The query's `orderby`, with the relation's key appended when it is
+    /// not already there.
+    ///
+    /// A keyset cursor is only a position if the order is **total**: two
+    /// rows with the same `issued_at` and no tiebreak sit at the same
+    /// cursor, and page 2 either repeats one or skips one, forever.
+    fn page_order(&mut self, select: &SelectExpr, rel: Rel<'a>) -> Vec<SortKey> {
+        let mut keys = select.order_by.clone();
+        let Some(key) = self.page_key(rel) else {
+            return keys;
+        };
+        let has = keys.iter().any(|k| match &*k.expr.kind {
+            ExprKind::Name(n) => n.name == key,
+            ExprKind::Field { field, .. } => field.name == key,
+            _ => false,
+        });
+        if !has {
+            keys.push(SortKey {
+                expr: Expr::new(
+                    ExprKind::Name(Ident {
+                        name: key,
+                        span: select.span,
+                    }),
+                    select.span,
+                ),
+                desc: false,
+                nulls: None,
+                span: select.span,
+            });
+        }
+        keys
+    }
+
+    /// The declared name, on the driving relation, of the column a page is
+    /// keyed by.
+    fn page_key(&mut self, rel: Rel<'a>) -> Option<String> {
+        match rel {
+            Rel::Table(t) => t
+                .primary_key
+                .as_ref()
+                .filter(|pk| pk.columns.len() == 1)
+                .and_then(|pk| pk.columns.first())
+                .cloned(),
+            Rel::View(v) => {
+                let base = self.rel_of(v.base.as_deref()?)?;
+                let bkey = base.key()?;
+                v.base_columns
+                    .iter()
+                    .find(|(_, b)| b == bkey)
+                    .map(|(a, _)| a.clone())
+            }
+        }
+    }
+
+    /// The keyset predicate: "strictly after this tuple, in this order".
+    ///
+    /// Not a row comparison (`(a, b) < ($1, $2)`), which Postgres only
+    /// reads the way it looks when every key runs the same direction. The
+    /// expanded chain is longer and says the same thing for mixed
+    /// directions, so there is one form to read rather than two.
+    fn keyset(&mut self, select: &SelectExpr, plan: &Plan, rel: Rel<'a>) -> Option<String> {
+        let keys = self.page_order(select, rel);
+        let mut cols = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            let col = self.column_ref(&k.expr, &plan.root.alias)?;
+            let cast = self.param_cast(&k.expr, &plan.root.alias)?;
+            let n = self.bind_cursor(i, &cast);
+            cols.push((col, if k.desc { "<" } else { ">" }, n));
+        }
+        let mut chain = String::new();
+        for (i, (col, op, param)) in cols.iter().enumerate().rev() {
+            chain = if chain.is_empty() {
+                format!("{col} {op} {param}")
+            } else {
+                format!("{col} {op} {param} OR ({col} = {param} AND ({chain}))")
+            };
+            let _ = i;
+        }
+        // No cursor means the first page, so the predicate drops — the same
+        // shape `==?` uses (queries.md §3.2).
+        let first = self.params.len() - cols.len() + 1;
+        Some(format!("(${first}::text IS NULL OR ({chain}))"))
+    }
+
+    /// Bind the i-th value the cursor carries.
+    fn bind_cursor(&mut self, index: usize, cast: &str) -> String {
+        self.params.push(Param {
+            bind: Bind::Cursor(index),
+            cast: cast.to_string(),
+        });
+        format!("(${}::text)::{cast}", self.params.len())
+    }
+
+    /// `size`, clamped, plus one — the extra row is how `has_more` is known
+    /// without a second count.
+    fn page_limit(&mut self, p: &PageClause) -> String {
+        format!("({} + 1)", self.page_bound(p))
+    }
+
+    /// The clamped size. Bound once and referenced by number afterwards, so
+    /// the bound appears in the SQL more than once but is decided once.
+    fn page_bound(&mut self, p: &PageClause) -> String {
+        let max = self.page_max(p);
+        let n = match self.size_param {
+            Some(n) => format!("(${n}::text)::int"),
+            None => {
+                let s = self.bind(&p.size, "int");
+                self.size_param = Some(self.params.len());
+                s
+            }
+        };
+        format!("LEAST(GREATEST({n}, 1), {max})")
+    }
+
+    fn page_max(&self, p: &PageClause) -> i64 {
+        match p.max.as_ref().map(|m| &*m.kind) {
+            Some(ExprKind::Int(n)) => n.parse().unwrap_or(self.max_page),
+            _ => self.max_page,
+        }
     }
 
     /// The key-only first stage of the two-stage rewrite (queries.md §8.3).
@@ -425,11 +630,21 @@ impl<'a> Compiler<'a> {
             base.qualified()
         );
         let mut ok = true;
+        let mut wheres = Vec::new();
         if let Some(f) = &select.filter {
             match self.predicate(f, &plan.root.alias) {
-                Some(p) => cte.push_str(&format!("\n   WHERE {p}")),
+                Some(p) => wheres.push(p),
                 None => ok = false,
             }
+        }
+        if select.page.is_some() {
+            match self.keyset(select, plan, base) {
+                Some(p) => wheres.push(p),
+                None => ok = false,
+            }
+        }
+        if !wheres.is_empty() {
+            cte.push_str(&format!("\n   WHERE {}", wheres.join(" AND ")));
         }
         if !select.order_by.is_empty() {
             match self.order_by(&select.order_by, &plan.root.alias) {
@@ -439,6 +654,9 @@ impl<'a> Compiler<'a> {
         }
         if select.first {
             cte.push_str("\n   LIMIT 1");
+        } else if let Some(p) = &select.page {
+            let l = self.page_limit(p);
+            cte.push_str(&format!("\n   LIMIT {l}"));
         } else if let Some(l) = &select.limit {
             let p = self.bind(l, "int");
             cte.push_str(&format!("\n   LIMIT {p}"));
@@ -848,7 +1066,11 @@ impl<'a> Compiler<'a> {
                     let cast = self.param_cast(lhs, scope)?;
                     let p = self.bind(rhs, &cast);
                     let n = self.params.len();
-                    format!("(${n} IS NULL OR {col} = {p})")
+                    // `$n::text`, not a bare `$n`: every parameter is bound
+                    // as text, and a bare one in a null test gives Postgres
+                    // nothing to infer from — "could not determine data
+                    // type of parameter $2".
+                    format!("(${n}::text IS NULL OR {col} = {p})")
                 }
                 _ => {
                     if matches!(&*rhs.kind, ExprKind::Null) {
@@ -880,8 +1102,77 @@ impl<'a> Compiler<'a> {
                 }
             },
             ExprKind::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+            ExprKind::Unary {
+                op: UnaryOp::Not,
+                rhs,
+            } => format!("NOT ({})", self.predicate(rhs, scope)?),
+            // queries.md §3.3 — a list, or one array-typed operand. The
+            // array form is `= ANY($n)`: one parameter, and no way for a
+            // caller's value to reach the SQL as text.
+            ExprKind::In {
+                lhs,
+                items,
+                negated,
+            } => {
+                let col = self.column_ref(lhs, scope)?;
+                let cast = self.param_cast(lhs, scope)?;
+                let not = if *negated { "NOT " } else { "" };
+                if items.len() == 1 && !is_literal(&items[0]) {
+                    let p = self.bind(&items[0], &format!("{cast}[]"));
+                    // `<> ALL`, not `NOT = ANY` — which is not SQL.
+                    if *negated {
+                        format!("{col} <> ALL({p})")
+                    } else {
+                        format!("{col} = ANY({p})")
+                    }
+                } else {
+                    let mut parts = Vec::new();
+                    for i in items {
+                        parts.push(self.bind(i, &cast));
+                    }
+                    format!("{col} {not}IN ({})", parts.join(", "))
+                }
+            }
+            // queries.md §3.5 — how a parent is filtered by its children.
+            ExprKind::Exists { query, negated } => {
+                let ExprKind::Select(inner) = &*query.kind else {
+                    return self.unsupported("`exists` takes a query");
+                };
+                let sql = self.subquery(inner)?;
+                let not = if *negated { "NOT " } else { "" };
+                format!("{not}EXISTS ({sql})")
+            }
             _ => return None,
         })
+    }
+
+    /// `SELECT 1 FROM …` for an `exists`.
+    ///
+    /// Compiled in the *same* compiler, so the outer bindings are still in
+    /// scope: the whole point of the construct is that the inner `where`
+    /// references the row being filtered.
+    fn subquery(&mut self, inner: &SelectExpr) -> Option<String> {
+        // `query::plan` reads the symbol table only to turn a qualified
+        // path into a declared name, and falls back to the last segment.
+        // Declared names are unique, so the fallback is exact.
+        let plan = super::query::plan(inner, &super::symbols::Symbols::default());
+        if plan
+            .diags
+            .iter()
+            .any(|d| d.severity == super::diag::Severity::Error)
+        {
+            return self.unsupported("the subquery does not plan");
+        }
+        let alias = self.sql_alias(&plan.root.alias);
+        self.binding_objects
+            .insert(plan.root.alias.clone(), plan.root.object.clone());
+        let rel = self.table(&plan.root.object)?;
+        let mut sql = format!("SELECT 1 FROM {} {alias}", rel.qualified());
+        sql.push_str(&self.group_joins(&plan)?);
+        if let Some(f) = &inner.filter {
+            sql.push_str(&format!(" WHERE {}", self.predicate(f, &plan.root.alias)?));
+        }
+        Some(sql)
     }
 
     /// The left side of a comparison: a column, or — in `having` — an
@@ -1342,4 +1633,57 @@ fn names(e: &Expr, out: &mut Vec<String>) {
         ExprKind::Unary { rhs, .. } => names(rhs, out),
         _ => {}
     }
+}
+
+/// A literal is a value written in the source; anything else in an `in`
+/// list is a reference, and a single reference is the array form.
+fn is_literal(e: &Expr) -> bool {
+    matches!(
+        &*e.kind,
+        ExprKind::Int(_)
+            | ExprKind::Decimal(_)
+            | ExprKind::Str(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Null
+            | ExprKind::Field { .. }
+    )
+}
+
+// ------------------------------------------------------- raw tracking
+
+/// Whether a query's result stays `Raw` all the way to the response, and
+/// what took it out of that state if not (types.md §5, #41).
+///
+/// "Raw" is the performance promise — one JSON value comes back from
+/// Postgres and is never parsed — and it is easy to lose by accident: a
+/// projection is enough, and so is reading one field. `jwc v1 explain`
+/// prints this per query so the promise is checkable rather than assumed.
+pub enum Raw {
+    Preserved,
+    Lost(&'static str),
+}
+
+impl std::fmt::Display for Raw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Raw::Preserved => write!(f, "raw preserved"),
+            Raw::Lost(why) => write!(f, "raw lost here: {why}"),
+        }
+    }
+}
+
+/// Classify one query. The model is needed because a view source is a
+/// record by construction, which is a *different* reason from a projection.
+pub fn raw_state(model: &SchemaModel, select: &SelectExpr, plan: &Plan) -> Raw {
+    if select.projection.is_some() {
+        return Raw::Lost("`as { }` — a projection is parsed so its fields can be read");
+    }
+    if model.views.iter().any(|v| v.declared == plan.root.object) {
+        return Raw::Lost("a view is a named projection, so selecting from one is a record");
+    }
+    if select.page.is_some() {
+        // The envelope is a record, but `items` inside it is spliced.
+        return Raw::Preserved;
+    }
+    Raw::Preserved
 }

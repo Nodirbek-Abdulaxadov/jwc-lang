@@ -83,6 +83,34 @@ pub async fn run(
     }
 }
 
+/// A page: the rows, their ordering tuples, and whether one more exists.
+///
+/// Three columns rather than one JSON object, because `items` must reach
+/// the response as the text Postgres produced. Parsing it here to take the
+/// envelope apart would re-serialise it with the keys sorted, and the
+/// projection order **is** the key order (queries.md §7.2).
+pub async fn run_page(
+    sql: &str,
+    binds: &[Option<String>],
+) -> Result<(String, String, bool), DbError> {
+    let conn = crate::engine::get_connection()
+        .await
+        .map_err(DbError::Other)?;
+    let params: Vec<&(dyn ToSql + Sync)> = binds
+        .iter()
+        .map(|b| b as &(dyn ToSql + Sync))
+        .collect();
+    let rows = conn.query(sql, &params).await.map_err(classify)?;
+    let Some(r) = rows.first() else {
+        return Ok(("[]".into(), "[]".into(), false));
+    };
+    Ok((
+        r.try_get::<_, Option<String>>(0).unwrap_or(None).unwrap_or_else(|| "[]".into()),
+        r.try_get::<_, Option<String>>(1).unwrap_or(None).unwrap_or_else(|| "[]".into()),
+        r.try_get::<_, Option<bool>>(2).unwrap_or(None).unwrap_or(false),
+    ))
+}
+
 fn classify(e: tokio_postgres::Error) -> DbError {
     let Some(db) = e.as_db_error() else {
         return DbError::Other(anyhow!(e.to_string()));

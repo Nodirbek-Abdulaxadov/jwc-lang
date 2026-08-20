@@ -144,6 +144,11 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
                     c.max_page_size = n.parse().unwrap_or(c.max_page_size);
                 }
             }
+            "cursor_secret" => {
+                if let Some(v) = config_string(&a.value) {
+                    c.cursor_secret = v;
+                }
+            }
             "strict_slash" => {
                 if let ExprKind::Bool(b) = &*a.value.kind {
                     c.strict_slash = *b;
@@ -164,6 +169,31 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
         }
     }
     c
+}
+
+/// A `server { }` value that is a string: a literal, or `env("NAME")`.
+///
+/// A secret written as a literal is a secret in the repository, so the
+/// sample uses `env`; both are read here because the spec allows both and
+/// a local run should not need a `.env` to boot.
+fn config_string(e: &Expr) -> Option<String> {
+    match &*e.kind {
+        ExprKind::Str(s) => Some(s.clone()),
+        ExprKind::Call { callee, args, .. } => {
+            let ExprKind::Name(n) = &*callee.kind else {
+                return None;
+            };
+            if n.name != "env" {
+                return None;
+            }
+            let ExprKind::Str(name) = &*args.first()?.kind else {
+                return None;
+            };
+            std::env::var(name).ok()
+        }
+        ExprKind::Coalesce { lhs, rhs } => config_string(lhs).or_else(|| config_string(rhs)),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------- matching

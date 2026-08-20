@@ -67,9 +67,14 @@ interpolation. `?status=open,paid` becomes an array by
 bind parameter; there is no way to concatenate a user string into a pattern
 position in emitted SQL.
 
-3.5 `exists (select …)` / `not exists (select …)` **[0.25]** — the way a
+3.5 `exists (select …)` / `not exists (select …)` **[0.25.e]** — the way a
 parent is filtered by its children (#8). The inner select's `where` may
-reference the outer bindings.
+reference the outer bindings; its own bindings shadow them.
+
+It emits `EXISTS (SELECT 1 FROM … WHERE …)`. The alternative — a `left
+join` plus `IS NULL`, or a bare join and `distinct` — either multiplies the
+driving rows or needs a `distinct` to undo the multiplication, and both
+change what the query returns rather than only how it is asked.
 
 ---
 
@@ -154,8 +159,13 @@ orderby id asc` orders the lines by *their* id.
 **`orderby` is required on `as many`** (`E0536`). This is the same rule
 `first` has (§5.2) applied to a collection: without a stated order the
 elements come back in whatever order the plan produced, and that changes with
-the data, the statistics and the Postgres version. `limit` stays optional;
-an unbounded collection with no natural bound is `W0501`.
+the data, the statistics and the Postgres version.
+
+`limit` stays optional but a collection without one is `W0501` — a warning,
+not an error, because "how many members can an org have" is the author's
+question. It is a warning at all because an unbounded collection inside a
+row works on the test data and takes the process down on the one org with
+fifty thousand members, and nothing in the source says so.
 
 ### 4.7 Filtering a collection — `where` on the join (#8)
 
@@ -392,13 +402,18 @@ and then refuse the text the runtime sends.
 `tests/sql_golden/` holds the reviewed SQL for every query in the sample and
 in six focused cases; it is the artefact this section is read against.
 
-### 7.4 `jwc explain`
+### 7.4 `jwc explain` **[0.25.e]**
 
-`jwc explain [--sql] [--raw]` prints, per query in the program: the source
-location, the emitted SQL with bind placeholders, and `raw preserved` or
-`raw lost here: <construct>`. `JWC_LOG_SQL=1` logs the same SQL at runtime
-with timings. Together these are the answer to #29; the dev-only
-`/__jwc/queries` endpoint is `DEFERRED-7`.
+`jwc v1 explain [--sql]` prints, per query in the program: the source
+location and label, `raw preserved` or `raw lost here: <construct>`, and
+the emitted SQL with bind placeholders. It also lists every `raw()` escape
+hatch and counts them — writes §6.4 makes that count the measurement of
+which feature to add next, and a measurement nobody prints is an
+assumption.
+
+`JWC_LOG_SQL=1` logs the same SQL at runtime with timings. Together these
+are the answer to #29; the dev-only `/__jwc/queries` endpoint is
+`DEFERRED-7`.
 
 ---
 
@@ -546,9 +561,53 @@ as a `Record{items: Raw[]|Record[], next: text?, has_more: boolean}`. The
 envelope by §5.4 of types.md — that is the whole reason raw composition is a
 text splice.
 
-The cursor is base64url of the ordering tuple plus a version byte and an HMAC
-over `server { cursor_secret }`. A tampered cursor is `BadRequest` 400, not a
-500.
+The cursor is `v1.<base64url(tuple)>.<base64url(hmac)>`, the MAC taken over
+the version and the payload together with `server { cursor_secret }`. A
+tampered cursor is `BadRequest` 400, not a 500 and not a silently-empty
+page. It is signed because it is a **client-supplied predicate**: unsigned,
+a caller could hand back any ordering tuple and read rows the query's own
+`where` was meant to keep from them. A `page` query with no
+`cursor_secret` configured is `E1205` (config §3), so the runtime never has
+to decide what an unsigned cursor means.
+
+`next` is null on the last page, so a caller that follows it until it is
+null cannot loop.
+
+### 9.4 What a page emits **[0.25.e]**
+
+```sql
+SELECT coalesce(json_agg(q.j ORDER BY q.rn)
+                FILTER (WHERE q.rn <= LEAST(GREATEST(($5::text)::int, 1), 100)), '[]'::json)::text,
+       coalesce(json_agg(q.k ORDER BY q.rn) FILTER (WHERE …), '[]'::json)::text,
+       count(*) > LEAST(GREATEST(($5::text)::int, 1), 100)
+  FROM (… LIMIT (LEAST(GREATEST(($5::text)::int, 1), 100) + 1)) q
+```
+
+Three columns, not one JSON object: `items` has to reach the response as
+the text Postgres produced, and anything that parsed the envelope to take
+it apart would re-serialise it with the keys sorted (§7.2).
+
+The `+ 1` is `has_more`: one row past the page is cheaper than a second
+`count(*)` over the same predicate, and it is filtered back out of `items`.
+
+`rn` is a `row_number()` over the same order rather than a reliance on the
+subquery's `ORDER BY` reaching the aggregate above it — the order *is* the
+answer here, and a subquery's order is not a guarantee.
+
+The keyset predicate is an expanded chain, not a row comparison:
+
+```sql
+($3::text IS NULL OR (issued_at < $3 OR (issued_at = $3 AND (id < $4))))
+```
+
+`(a, b) < ($1, $2)` is shorter but only means what it looks like when every
+key runs the same direction. The chain reads the same for mixed ones, so
+there is one form rather than two. With no cursor the predicate drops
+entirely — the shape `==?` uses (§3.2).
+
+The order is made **total** by appending the driving relation's key when
+the query did not: two rows with the same `issued_at` and no tiebreak sit
+at the same cursor, and page 2 either repeats one or skips one, forever.
 
 ---
 

@@ -32,25 +32,25 @@ service Joins {
     -- that could hang off two bindings has to say which (queries.md §4.4).
     function ambiguous_attachment(org_id: bigint) {
         return select O from App.s.Orgs
-            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc
+            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc limit 200
             left join App.s.Notes N                                       -- expect: E0510
                 on N.org_id == O.id and N.org_id == M.org_id
-                as many notes orderby id asc
+                as many notes orderby id asc limit 200
             as { id, members: { account_id }, notes: { id } };
     }
 
     function under_resolves_it(org_id: bigint) {
         return select O from App.s.Orgs
-            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc
+            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc limit 200
             left join App.s.Notes N on N.org_id == O.id and N.org_id == M.org_id
-                as many notes under members orderby id asc
+                as many notes under members orderby id asc limit 200
             as { id, members: { account_id, notes: { id } } };
     }
 
     function under_names_nothing(org_id: bigint) {
         return select O from App.s.Orgs
             left join App.s.Members M on M.org_id == O.id
-                as many members under nope orderby account_id asc         -- expect: E0511
+                as many members under nope orderby account_id asc limit 200         -- expect: E0511
             as { id, members: { account_id } };
     }
 
@@ -58,7 +58,7 @@ service Joins {
     -- order the plan produced (queries.md §4.6).
     function unordered_collection(org_id: bigint) {
         return select O from App.s.Orgs
-            left join App.s.Members M on M.org_id == O.id as many members  -- expect: E0536
+            left join App.s.Members M on M.org_id == O.id as many members  -- expect: E0536, W0501
             as { id, members: { account_id } };
     }
 
@@ -82,7 +82,7 @@ service Joins {
     function group_and_many_together() {
         return select O from App.s.Orgs                                    -- expect: E0532
             left join App.s.Notes N on N.org_id == O.id as group
-            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc
+            left join App.s.Members M on M.org_id == O.id as many members orderby account_id asc limit 200
             group by O.id
             as { id, n: count(N.id), members: { account_id } };            -- expect: E0531
     }
@@ -114,7 +114,26 @@ service Joins {
     function filtered_collection(org_id: bigint) {
         return select O from App.s.Orgs
             left join App.s.Members M on M.org_id == O.id where M.role == Role.admin
-                as many admins orderby account_id asc
+                as many admins orderby account_id asc limit 200
             as { id, admins: { account_id, role } };
+    }
+}
+
+-- queries.md §4.6 — a collection with no bound is W0501: it works on the
+-- test data and takes the process down on the one row with fifty thousand
+-- children.
+service Bounds {
+    function unbounded() {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc   -- expect: W0501
+            as { id, members: { account_id } };
+    }
+
+    function bounded() {
+        return select O from App.s.Orgs
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc limit 200
+            as { id, members: { account_id } };
     }
 }

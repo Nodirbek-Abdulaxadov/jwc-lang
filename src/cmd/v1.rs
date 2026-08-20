@@ -211,6 +211,97 @@ pub fn gen_sql(path: PathBuf, explain: bool, out: Option<PathBuf>) -> Result<()>
     Ok(())
 }
 
+/// `jwc v1 explain <path>` — every query the program issues.
+///
+/// Prints, per query: where it is, the SQL with bind placeholders, and
+/// whether the result stays raw. This is the answer to #29 — generated SQL
+/// used to be invisible, so nobody could tell a query that reads an index
+/// from one that reads the table (queries.md §7.4).
+pub fn explain(path: PathBuf, sql_only: bool) -> Result<()> {
+    use crate::v1::diag::Severity;
+
+    let ws = crate::v1::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
+        bail!("no .jwc files under {}", path.display());
+    }
+    if ws.has_parse_errors() {
+        for e in ws.parse_errors() {
+            eprint!("{e}");
+        }
+        bail!("source did not parse");
+    }
+    let built = crate::v1::model::build(&ws);
+    let sym = crate::v1::symbols::build(&ws, &built.model);
+
+    let mut queries = 0usize;
+    let mut gaps = 0usize;
+    let mut hatches = 0usize;
+    for file in &ws.files {
+        // writes.md §6.4 — the valve's usage count is the measurement of
+        // which feature to add next, so it is printed rather than assumed
+        // to be zero.
+        for (i, line) in file.source.text.lines().enumerate() {
+            if line.contains("raw(") && !line.trim_start().starts_with("--") {
+                hatches += 1;
+                println!(
+                    "\x1b[1m{}:{}\x1b[0m  raw() — hand-written SQL, unchecked shape",
+                    file.source.path.display(),
+                    i + 1
+                );
+                println!("  {}\n", line.trim());
+            }
+        }
+    }
+    for file in &ws.files {
+        for site in crate::v1::query_sql::sites(&file.program) {
+            queries += 1;
+            let (line, _) = file.source.line_col(site.select.span.start);
+            println!(
+                "\x1b[1m{}:{line}\x1b[0m  {}",
+                file.source.path.display(),
+                site.label
+            );
+            let plan = crate::v1::query::plan(site.select, &sym);
+            if let Some(d) = plan
+                .diags
+                .iter()
+                .find(|d| d.severity == Severity::Error)
+            {
+                println!("  rejected: {} {}", d.code, d.message);
+                gaps += 1;
+                continue;
+            }
+            if !sql_only {
+                println!(
+                    "  {}",
+                    crate::v1::query_sql::raw_state(&built.model, site.select, &plan)
+                );
+            }
+            let mut c = crate::v1::query_sql::Compiler::new(&built.model);
+            match c.compile(site.select, &plan) {
+                Some(compiled) => {
+                    for line in compiled.sql.lines() {
+                        println!("  {line}");
+                    }
+                }
+                None => {
+                    println!("  not compilable: {}", c.gap());
+                    gaps += 1;
+                }
+            }
+            println!();
+        }
+    }
+    println!("{queries} quer{}", if queries == 1 { "y" } else { "ies" });
+    if gaps > 0 {
+        println!("{gaps} not compiled");
+    }
+    if hatches > 0 {
+        println!("{hatches} raw() escape hatch{}", if hatches == 1 { "" } else { "es" });
+    }
+    Ok(())
+}
+
 /// `jwc v1 routes <path>` — the resolved route table.
 ///
 /// This is the artefact E0710 (duplicate route) and E0803 (unsatisfied

@@ -69,6 +69,7 @@ pub fn wire(ws: &Workspace, sym: &Symbols) -> Wired {
     w.check_middleware();
     w.check_context();
     w.check_error_model();
+    w.check_cursor_secret();
     Wired {
         routes: w.routes,
         diags: w.diags,
@@ -780,6 +781,60 @@ fn join_path(prefix: &str, suffix: &str) -> String {
         }
     } else {
         format!("{p}/{s}")
+    }
+}
+
+impl Wiring<'_> {
+    /// config.md §3 — a `page` query needs `server { cursor_secret }`.
+    ///
+    /// Checked at compile time so the runtime never has to decide what an
+    /// unsigned cursor means. Unsigned, a cursor is a client-supplied
+    /// predicate: a caller could hand back any ordering tuple and read
+    /// rows the query's own `where` was meant to keep from them.
+    fn check_cursor_secret(&mut self) {
+        let mut paging: Option<Loc> = None;
+        let mut has_secret = false;
+        let mut server: Option<Loc> = None;
+        for (fi, file) in self.ws.files.iter().enumerate() {
+            for d in &file.program.decls {
+                if let Decl::Server(s) = d {
+                    server = Some(Loc {
+                        file: fi,
+                        span: s.span,
+                    });
+                    for e in &s.entries {
+                        if let ServerEntry::Set(a) = e {
+                            if a.key.name == "cursor_secret" {
+                                has_secret = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if paging.is_none() {
+                for site in super::query_sql::sites(&file.program) {
+                    if site.select.page.is_some() {
+                        paging = Some(Loc {
+                            file: fi,
+                            span: site.select.span,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(loc) = paging else { return };
+        if has_secret {
+            return;
+        }
+        self.err(
+            server.unwrap_or(loc),
+            "E1205",
+            "`page` is used but `server { cursor_secret }` is not set",
+            "a cursor is a client-supplied predicate; unsigned, it is a second \
+             filter nobody checked",
+            "config.md §3",
+        );
     }
 }
 

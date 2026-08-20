@@ -25,7 +25,7 @@ view SubscriptionDetail of App.billing {
 --- (queries.md §8.3).
 view InvoiceDetail of App.billing {
     select I from App.billing.Invoices
-        left join App.billing.InvoiceLines L on L.invoice_id == I.id as many lines orderby id asc
+        left join App.billing.InvoiceLines L on L.invoice_id == I.id as many lines orderby id asc limit 200
         left join App.billing.Payments Y on Y.invoice_id == I.id as many payments orderby created_at desc limit 20
         as {
             id,

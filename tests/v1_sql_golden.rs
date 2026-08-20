@@ -95,12 +95,12 @@ fn render(path: &Path) -> String {
             match c.compile(site.select, &plan) {
                 Some(compiled) => {
                     for (i, p) in compiled.params.iter().enumerate() {
-                        out.push_str(&format!(
-                            "-- ${} = {} :: {}\n",
-                            i + 1,
-                            fmt::expr(&p.expr),
-                            p.cast
-                        ));
+                        let from = match &p.bind {
+                            jwc::v1::sql::Bind::Expr(e) => fmt::expr(e),
+                            jwc::v1::sql::Bind::Preset => "<computed>".into(),
+                            jwc::v1::sql::Bind::Cursor(n) => format!("<cursor.{n}>"),
+                        };
+                        out.push_str(&format!("-- ${} = {from} :: {}\n", i + 1, p.cast));
                     }
                     out.push_str(&format!("{}\n", compiled.sql));
                 }
@@ -199,14 +199,14 @@ fn a_collection_is_a_lateral_not_an_ordered_json_agg() {
     // side by side. The lateral does both correctly (queries.md §4.5).
     let sql = sample_sql();
     assert!(sql.contains("LEFT JOIN LATERAL"), "expected a lateral:\n{sql}");
-    assert!(
-        !sql.contains("json_agg(") || !sql.contains("ORDER BY) "),
-        "no ordered json_agg:\n{sql}"
-    );
+    // Scoped to the collection's own aggregate — `c` is the lateral's
+    // subquery. A page envelope orders `json_agg(q.j ORDER BY q.rn)` over
+    // an already-bounded set, which is a different thing and is fine.
     for line in sql.lines() {
         assert!(
-            !(line.contains("json_agg(") && line.contains(" ORDER BY ")),
-            "ordered json_agg is the shape this test exists to forbid:\n{line}"
+            !line.contains("json_agg(c.j ORDER BY"),
+            "ordered json_agg over a collection is the shape this test exists to \
+             forbid — it can order but it cannot bound:\n{line}"
         );
     }
 }

@@ -11,6 +11,7 @@
 
 pub mod ast;
 pub mod check;
+pub mod cursor;
 pub mod db;
 pub mod ddl;
 pub mod exec;

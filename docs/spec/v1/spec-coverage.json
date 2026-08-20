@@ -369,8 +369,8 @@
     {
       "construct": "join.child_limit",
       "clause": "queries \u00a74.6",
-      "uses": 1,
-      "first_use": "src/views/billing.jwc:29"
+      "uses": 2,
+      "first_use": "src/views/billing.jwc:28"
     },
     {
       "construct": "join.child_order",

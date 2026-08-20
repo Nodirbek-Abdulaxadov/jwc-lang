@@ -86,6 +86,10 @@ pub struct Program {
 pub struct ServerConfig {
     pub max_body_bytes: usize,
     pub max_page_size: i64,
+    /// HMAC key for keyset cursors (config.md §3). A `page` query with no
+    /// secret configured is `E1205`, so the runtime never has to decide
+    /// what an unsigned cursor means.
+    pub cursor_secret: String,
     pub strict_slash: bool,
     pub trusted_proxies: Vec<String>,
 }
@@ -95,6 +99,7 @@ impl Default for ServerConfig {
         Self {
             max_body_bytes: 1_048_576,
             max_page_size: 100,
+            cursor_secret: String::new(),
             strict_slash: true,
             trusted_proxies: Vec::new(),
         }
@@ -687,7 +692,7 @@ impl<'a> Vm<'a> {
                     _ => ord.is_ge(),
                 })
             }
-            BinOp::Add => add(&a, &b).ok_or_else(|| fault("`+` is not defined here"))?,
+            BinOp::Add => add(&a, &b).ok_or_else(|| fault(format!("`+` is not defined here: {a:?} + {b:?}")))?,
             BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 numeric_op(op, &a, &b).ok_or_else(|| fault("arithmetic is not defined here"))?
             }
@@ -890,7 +895,8 @@ impl<'a> Vm<'a> {
         // single-table case, so there is no second implementation to keep
         // in step.
         let plan = super::query::plan(s, &self.program.symbols);
-        let mut c = super::query_sql::Compiler::new(&self.program.model);
+        let mut c = super::query_sql::Compiler::new(&self.program.model)
+            .max_page_size(self.program.server.max_page_size);
         let Some(compiled) = c.compile(s, &plan) else {
             // The compiler names the missing piece; repeating a generic
             // "not expressible" here would throw that away.
@@ -902,6 +908,7 @@ impl<'a> Vm<'a> {
             shape: compiled.shape,
             record: compiled.record,
             fields: compiled.fields,
+            page: compiled.page,
         })
         .await
     }
@@ -918,7 +925,10 @@ impl<'a> Vm<'a> {
     }
 
     async fn run_update(&mut self, u: &UpdateExpr) -> Exec<Value> {
-        let mut items = Vec::new();
+        // One list, in source order: each assignment is either a value the
+        // interpreter computed or an expression the database will.
+        let mut sets: Vec<(String, super::sql::SetValue)> = Vec::new();
+        let mut preset: Vec<Value> = Vec::new();
         for it in &u.sets {
             match it {
                 SetItem::Set {
@@ -927,13 +937,25 @@ impl<'a> Vm<'a> {
                     optional,
                     ..
                 } => {
+                    // An expression that reads the row's own columns
+                    // belongs in the database: `set value = value + 1` is
+                    // an increment, and computing it here would need a read
+                    // first — which is the race writes.md §2.3 is about.
+                    if self.reads_a_column(&u.table, value) {
+                        sets.push((column.name.clone(), super::sql::SetValue::Sql(value.clone())));
+                        continue;
+                    }
                     let v = self.eval(value).await?;
                     // writes.md §3.3 — `=?` skips the assignment when the
                     // value is absent.
                     if *optional && v.is_null() {
                         continue;
                     }
-                    items.push((column.name.clone(), v));
+                    sets.push((
+                        column.name.clone(),
+                        super::sql::SetValue::Bound(placeholder(u.span)),
+                    ));
+                    preset.push(v);
                 }
                 SetItem::Spread { source, except, .. } => {
                     let v = self
@@ -947,7 +969,8 @@ impl<'a> Vm<'a> {
                             }
                             // types.md §9.2 — an absent field is omitted,
                             // so its default or current value stands.
-                            items.push((k, val));
+                            sets.push((k, super::sql::SetValue::Bound(placeholder(u.span))));
+                            preset.push(val);
                         }
                     }
                 }
@@ -956,7 +979,7 @@ impl<'a> Vm<'a> {
 
         // types.md §9.5 — an all-absent spread skips the UPDATE and reads
         // the current row instead of emitting an empty SET.
-        if items.is_empty() {
+        if sets.is_empty() {
             let probe = SelectExpr {
                 binder: Ident::new("x", u.span),
                 source: u.table.clone(),
@@ -974,20 +997,11 @@ impl<'a> Vm<'a> {
             return Box::pin(self.run_select(&probe)).await;
         }
 
-        let placeholders: Vec<(String, Expr)> = items
-            .iter()
-            .map(|(k, _)| (k.clone(), placeholder(u.span)))
-            .collect();
         let mut b = Builder::new(&self.program.model);
         let built = b
-            .update(u, &placeholders)
+            .update(u, &sets)
             .ok_or_else(|| fault("this update is not expressible yet"))?;
-        let mut values: Vec<Value> = items.into_iter().map(|(_, v)| v).collect();
-        // The WHERE clause's parameters come after the SET's.
-        let extra = built.params.len().saturating_sub(values.len());
-        for p in built.params.iter().skip(values.len()).take(extra) {
-            values.push(self.eval(&p.expr.clone()).await?);
-        }
+        let values = self.bind_params(&built, Vec::new(), preset).await?;
         self.run_sql_with(built, values).await
     }
 
@@ -1047,11 +1061,142 @@ impl<'a> Vm<'a> {
     }
 
     async fn run_sql(&mut self, built: super::sql::Built) -> Exec<Value> {
-        let mut values = Vec::new();
-        for p in &built.params {
-            values.push(self.eval(&p.expr.clone()).await?);
-        }
+        // A `page` query's cursor parameters are the values the *caller's*
+        // cursor carries, so the cursor is read once, here, before any of
+        // them are bound.
+        let cursor = match &built.page {
+            Some(p) => self.read_cursor(p).await?,
+            None => Vec::new(),
+        };
+        let values = self.bind_params(&built, cursor, Vec::new()).await?;
         self.run_sql_with(built, values).await
+    }
+
+    /// Every parameter, in emission order.
+    ///
+    /// `preset` holds values the caller evaluated before the statement was
+    /// built — an `insert`'s or `update`'s values, which must not be
+    /// re-evaluated because evaluating them again would repeat whatever
+    /// they did the first time.
+    async fn bind_params(
+        &mut self,
+        built: &super::sql::Built,
+        cursor: Vec<Option<String>>,
+        preset: Vec<Value>,
+    ) -> Exec<Vec<Value>> {
+        let mut preset = preset.into_iter();
+        let mut out = Vec::with_capacity(built.params.len());
+        for p in &built.params {
+            out.push(match &p.bind {
+                super::sql::Bind::Preset => preset.next().unwrap_or(Value::Null),
+                super::sql::Bind::Cursor(i) => cursor
+                    .get(*i)
+                    .cloned()
+                    .flatten()
+                    .map_or(Value::Null, Value::Text),
+                super::sql::Bind::Expr(e) => self.eval(&e.clone()).await?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// True when an expression reads a column of the table being written.
+    fn reads_a_column(&self, table: &QualifiedTable, e: &Expr) -> bool {
+        let object = self
+            .program
+            .symbols
+            .by_path
+            .get(&table.text())
+            .cloned()
+            .unwrap_or_else(|| table.object.name.clone());
+        let Some(t) = self
+            .program
+            .model
+            .tables
+            .iter()
+            .find(|t| t.declared == object)
+        else {
+            return false;
+        };
+        match &*e.kind {
+            ExprKind::Name(n) => t.column(&n.name).is_some(),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.reads_a_column(table, lhs) || self.reads_a_column(table, rhs)
+            }
+            ExprKind::Unary { rhs, .. } => self.reads_a_column(table, rhs),
+            _ => false,
+        }
+    }
+
+    /// queries.md §9.3 — `{items, next, has_more}`.
+    ///
+    /// `items` is spliced, not rebuilt: it reaches the response as the text
+    /// Postgres produced, which is what makes raw survive the envelope
+    /// (types.md §5.4).
+    async fn page_envelope(
+        &mut self,
+        built: &super::sql::Built,
+        plan: &super::sql::PagePlan,
+        binds: &[Option<String>],
+    ) -> Exec<Value> {
+        if std::env::var("JWC_LOG_SQL").as_deref() == Ok("1") {
+            eprintln!("[sql] {}", built.sql);
+        }
+        let (items, keys, has_more) = super::db::run_page(&built.sql, binds)
+            .await
+            .map_err(map_db_error)?;
+
+        // The next page starts after the last row on this one. With no next
+        // page there is no cursor: a caller that follows `next` until it is
+        // null cannot loop.
+        let next = if has_more {
+            last_tuple(&keys).map(|t| {
+                Value::Text(super::cursor::encode(&self.program.server.cursor_secret, &t))
+            })
+        } else {
+            None
+        };
+
+        let items = if plan.raw_items {
+            Value::Raw(items)
+        } else {
+            match serde_json::from_str::<serde_json::Value>(&items) {
+                Ok(j) => reorder(Value::from_json(&j), &built.fields),
+                Err(_) => Value::Raw(items),
+            }
+        };
+
+        Ok(Value::Record(vec![
+            ("items".into(), items),
+            ("next".into(), next.unwrap_or(Value::Null)),
+            ("has_more".into(), Value::Bool(has_more)),
+        ]))
+    }
+
+    /// The key values the caller's cursor carries, or an empty tuple for
+    /// the first page.
+    ///
+    /// A cursor that does not verify is a `BadRequest`, not a 500 and not a
+    /// silently-empty page. It is client input, and the only honest answer
+    /// is that it is not a cursor we issued (queries.md §9.3).
+    async fn read_cursor(&mut self, plan: &super::sql::PagePlan) -> Exec<Vec<Option<String>>> {
+        let Some(expr) = &plan.after else {
+            return Ok(Vec::new());
+        };
+        let v = self.eval(&expr.clone()).await?;
+        let Some(text) = v.as_text().map(|s| s.to_string()) else {
+            return Ok(Vec::new());
+        };
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        match super::cursor::decode(&self.program.server.cursor_secret, &text) {
+            Some(keys) => Ok(keys),
+            None => Err(Abort::Thrown(Thrown {
+                error: "BadRequest".into(),
+                args: vec![Value::Text("kursor yaroqsiz".into())],
+            })),
+        }
     }
 
     async fn run_sql_with(
@@ -1063,6 +1208,10 @@ impl<'a> Vm<'a> {
         if std::env::var("JWC_LOG_SQL").as_deref() == Ok("1") {
             eprintln!("[sql] {}", built.sql);
         }
+        if let Some(plan) = &built.page {
+            return self.page_envelope(&built, plan, &binds).await;
+        }
+
         let text = super::db::run(&built.sql, &binds, built.shape)
             .await
             .map_err(map_db_error)?;
@@ -1098,7 +1247,7 @@ impl<'a> Vm<'a> {
 
 /// errors.md §6 — a violated constraint carrying a message becomes a
 /// declared error; a message-less one stays a fault.
-fn map_db_error(e: super::db::DbError) -> Abort {
+pub(super) fn map_db_error(e: super::db::DbError) -> Abort {
     match e {
         super::db::DbError::Constraint { name, message, kind } => match message {
             Some(m) => Abort::Thrown(Thrown {
@@ -1158,4 +1307,16 @@ pub(super) fn value_text(v: &Value) -> String {
 
 fn placeholder(span: super::token::Span) -> Expr {
     Expr::new(ExprKind::Null, span)
+}
+
+/// The last ordering tuple in a page's key column.
+fn last_tuple(keys: &str) -> Option<Vec<Option<String>>> {
+    let parsed: serde_json::Value = serde_json::from_str(keys).ok()?;
+    let last = parsed.as_array()?.last()?;
+    Some(
+        last.as_array()?
+            .iter()
+            .map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+    )
 }

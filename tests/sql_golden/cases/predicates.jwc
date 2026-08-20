@@ -1,0 +1,58 @@
+--- `where` shapes that are not a plain comparison: `in`, the array form,
+--- `exists`, and `not exists` (queries.md §3.3, §3.5).
+namespace predicates;
+
+database App : Postgres;
+schema s of App;
+
+enum Status of App.s { open, paid, void }
+
+table Orgs of App.s {
+    id   bigint primary key identity;
+    name varchar(120);
+}
+
+table Invoices of App.s {
+    id     bigint primary key identity;
+    org_id bigint;
+    status Status default Status.open;
+
+    foreign key (org_id) references App.s.Orgs (id);
+}
+
+service Filters {
+    --- A literal list.
+    function by_status() {
+        return select I from App.s.Invoices
+            where status in (Status.open, Status.paid)
+            orderby id asc;
+    }
+
+    --- One array-typed operand: `= ANY($1)`, one parameter, and no way
+    --- for a caller's value to reach the SQL as text.
+    function by_statuses(statuses: Status[]) {
+        return select I from App.s.Invoices
+            where status in ($statuses)
+            orderby id asc;
+    }
+
+    function not_in(statuses: Status[]) {
+        return select I from App.s.Invoices
+            where status not in ($statuses)
+            orderby id asc;
+    }
+
+    --- Filtering a parent by its children. The inner `where` reaches the
+    --- outer binding, which is the whole point.
+    function with_open_invoices() {
+        return select O from App.s.Orgs
+            where exists (select I from App.s.Invoices where org_id == O.id and status == Status.open)
+            orderby id asc;
+    }
+
+    function without_invoices() {
+        return select O from App.s.Orgs
+            where not exists (select I from App.s.Invoices where org_id == O.id)
+            orderby id asc;
+    }
+}

@@ -53,7 +53,7 @@ table Invites of App.s {
 view OrgList of App.s {
     select O from App.s.Orgs
         left join App.s.Members M on M.org_id == O.id
-            as many members orderby account_id asc
+            as many members orderby account_id asc limit 200
         as { id, slug, name, members: { account_id, role } }
 }
 
@@ -64,7 +64,7 @@ view NoteWithOrg of App.s {
     select N from App.s.Notes
         left join App.s.Orgs O on O.id == N.org_id as one org
         left join App.s.Invites I on I.org_id == N.org_id
-            as many invites under N orderby id asc
+            as many invites under N orderby id asc limit 200
         as { id, body, org: { id, name }, invites: { id, email } }
 }
 

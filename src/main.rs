@@ -349,6 +349,15 @@ enum V1Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Print every query the program issues, with its SQL.
+    Explain {
+        /// File or directory. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// SQL only: skip the raw-tracking line.
+        #[arg(long)]
+        sql: bool,
+    },
     /// Print the resolved route table: method, path, middleware chain.
     Routes {
         #[arg(default_value = ".")]
@@ -557,6 +566,7 @@ fn real_main() -> Result<()> {
             } => cmd::v1::check(path, quiet, parse_only)?,
             V1Command::Fmt { path, check } => cmd::v1::fmt(path, check)?,
             V1Command::GenSql { path, explain, out } => cmd::v1::gen_sql(path, explain, out)?,
+            V1Command::Explain { path, sql } => cmd::v1::explain(path, sql)?,
             V1Command::Routes { path } => cmd::v1::routes(path)?,
             V1Command::Serve { path, port } => cmd::v1::serve(path, port)?,
             V1Command::Ast { path } => cmd::v1::ast(path)?,

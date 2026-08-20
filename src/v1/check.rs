@@ -1194,11 +1194,17 @@ impl<'a> Checker<'a> {
                 return Ty::Unknown;
             }
             // `B.col` where B is a query binding.
+            //
+            // The whole stack, innermost first: inside `exists (…)` the
+            // subquery's own bindings shadow, and the outer ones stay
+            // reachable — filtering a parent by its children is the point
+            // of the construct (queries.md §3.5).
             if self.in_query() {
                 let object = self
                     .query
-                    .last()
-                    .and_then(|s| s.bindings.iter().find(|b| b.name == n.name))
+                    .iter()
+                    .rev()
+                    .find_map(|s| s.bindings.iter().find(|b| b.name == n.name))
                     .map(|b| b.object.clone());
                 if let Some(object) = object {
                     return match self.column_of(&object, &field.name) {
@@ -2010,7 +2016,10 @@ impl<'a> Checker<'a> {
             }
 
             // --- raw escape hatch (writes.md §6)
-            "raw" => Ty::Raw.array(),
+            "raw" => {
+                self.check_raw(exprs, span);
+                Ty::Raw.array()
+            }
 
             _ => return None,
         })
@@ -2174,6 +2183,7 @@ impl<'a> Checker<'a> {
         }
 
         self.check_aggregates(s);
+        self.check_unbounded(s);
         if s.first {
             self.check_first_determinism(s, &object, span);
         }
@@ -2470,6 +2480,74 @@ impl<'a> Checker<'a> {
             return;
         }
         self.err_note(span, "E0542", c.gap().to_string(), "queries.md §8.3", "queries.md §8.3");
+    }
+
+    /// writes.md §6 — the one unchecked boundary, and the rules that keep
+    /// it from being an interpolation hole.
+    fn check_raw(&mut self, exprs: &[Expr], span: Span) {
+        let Some(first) = exprs.first() else {
+            self.err_note(
+                span,
+                "E0610",
+                "`raw()` needs a SQL string",
+                "the SQL is a literal so the placeholders can be counted; a computed                  string would be interpolation by another name",
+                "writes.md §6.1",
+            );
+            return;
+        };
+        let ExprKind::Str(sql) = &*first.kind else {
+            self.err_note(
+                first.span,
+                "E0610",
+                "`raw()`'s SQL must be a literal",
+                "a computed string cannot be checked, and checking it is the only                  thing standing between this and interpolation",
+                "writes.md §6.1",
+            );
+            return;
+        };
+        let holes = sql.matches("{}").count();
+        let args = exprs.len() - 1;
+        if holes != args {
+            self.err_note(
+                span,
+                "E0610",
+                format!("`raw()` has {holes} placeholder(s) and {args} argument(s)"),
+                "each `{}` binds one argument, in order",
+                "writes.md §6.1",
+            );
+        }
+        // A view is a snapshotted object; a hand-written body cannot be
+        // diffed against the next one (writes.md §6.2).
+        if self.body == BodyKind::View {
+            self.err_note(
+                span,
+                "E0611",
+                "`raw()` inside a `view`",
+                "a view is snapshotted and diffed by the migration generator, which                  needs a body it can read",
+                "writes.md §6.2",
+            );
+        }
+    }
+
+    /// queries.md §4.6 — a collection with no bound.
+    ///
+    /// A warning, not an error: "how many members can an org have" is the
+    /// author's question, not the compiler's. But an unbounded collection
+    /// inside a row is the shape that works on the test data and takes the
+    /// process down on the one org with fifty thousand members, and it is
+    /// invisible in the source unless something says so.
+    fn check_unbounded(&mut self, s: &SelectExpr) {
+        for j in &s.joins {
+            let Some(r) = &j.result else { continue };
+            if r.cardinality == Cardinality::Many && r.limit.is_none() {
+                self.warn(
+                    r.span,
+                    "W0501",
+                    format!("`{}` is a collection with no `limit`", r.name.name),
+                    "queries.md §4.6",
+                );
+            }
+        }
     }
 
     /// queries.md §6.2 — two bare joins fan out, so a plain `count` over

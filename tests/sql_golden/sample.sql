@@ -53,7 +53,21 @@ SELECT q.j::text FROM (SELECT json_build_object('id', t0.id::text, 'interval', t
   LIMIT 1) q
 
 -- ── BillingService.invoices ──
--- not compilable yet: keyset pagination arrives in v0.25.e
+-- $1 = $org_id :: bigint
+-- $2 = $status :: billing.invoice_status
+-- $3 = <cursor.0> :: timestamptz
+-- $4 = <cursor.1> :: bigint
+-- $5 = $size :: int
+SELECT coalesce(json_agg(q.j ORDER BY q.rn) FILTER (WHERE q.rn <= LEAST(GREATEST(($5::text)::int, 1), 100)), '[]'::json)::text, coalesce(json_agg(q.k ORDER BY q.rn) FILTER (WHERE q.rn <= LEAST(GREATEST(($5::text)::int, 1), 100)), '[]'::json)::text, count(*) > LEAST(GREATEST(($5::text)::int, 1), 100) FROM (WITH page AS MATERIALIZED (
+  SELECT p1.id FROM billing.invoices p1
+   WHERE (p1.org_id = ($1::text)::bigint) AND (($2::text IS NULL OR p1.status = ($2::text)::billing.invoice_status)) AND ($3::text IS NULL OR (p1.issued_at < ($3::text)::timestamptz OR (p1.issued_at = ($3::text)::timestamptz AND (p1.id < ($4::text)::bigint))))
+   ORDER BY p1.issued_at DESC, p1.id DESC
+   LIMIT (LEAST(GREATEST(($5::text)::int, 1), 100) + 1)
+)
+SELECT json_build_object('id', t0.id::text, 'org_id', t0.org_id::text, 'number', t0.number, 'amount', t0.amount::text, 'currency', t0.currency, 'status', t0.status, 'issued_at', t0.issued_at, 'due_at', t0.due_at, 'paid_at', t0.paid_at, 'lines', t0.lines, 'payments', t0.payments) AS j, json_build_array(t0.issued_at::text, t0.id::text) AS k, row_number() OVER (ORDER BY t0.issued_at DESC, t0.id DESC) AS rn
+  FROM billing.invoice_detail t0
+  JOIN page ON page.id = t0.id
+  ORDER BY t0.issued_at DESC, t0.id DESC) q
 
 -- ── BillingService.invoice ──
 -- $1 = $invoice_id :: bigint
@@ -117,7 +131,8 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
   LEFT JOIN org.orgs t2 ON t2.id = t0.org_id) q
 
 -- ── view InvoiceDetail ──
--- $1 = 20 :: int
+-- $1 = 200 :: int
+-- $2 = 20 :: int
 SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'org_id', t0.org_id::text, 'number', t0.number, 'amount', t0.amount::text, 'currency', t0.currency, 'status', t0.status, 'issued_at', t0.issued_at, 'due_at', t0.due_at, 'paid_at', t0.paid_at, 'lines', coalesce(t1_agg.data, '[]'::json), 'payments', coalesce(t2_agg.data, '[]'::json)) AS j
   FROM billing.invoices t0
   LEFT JOIN LATERAL (
@@ -125,7 +140,8 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
         FROM (SELECT json_build_object('id', t1.id::text, 'description', t1.description, 'quantity', t1.quantity, 'unit_price', t1.unit_price::text) AS j
         FROM billing.invoice_lines t1
         WHERE t1.invoice_id = t0.id
-        ORDER BY t1.id) c
+        ORDER BY t1.id
+        LIMIT ($1::text)::int) c
   ) t1_agg ON true
   LEFT JOIN LATERAL (
       SELECT coalesce(json_agg(c.j), '[]'::json) AS data
@@ -133,7 +149,7 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
         FROM billing.payments t2
         WHERE t2.invoice_id = t0.id
         ORDER BY t2.created_at DESC
-        LIMIT ($1::text)::int) c
+        LIMIT ($2::text)::int) c
   ) t2_agg ON true) q
 
 -- ── view OrgBillingSummary ──
@@ -146,6 +162,7 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
   GROUP BY t0.id, t0.slug) q
 
 -- ── view OrgWithMembers ──
+-- $1 = 200 :: int
 SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object('id', t0.id::text, 'slug', t0.slug, 'name', t0.name, 'created_at', t0.created_at, 'members', coalesce(t1_agg.data, '[]'::json)) AS j
   FROM org.orgs t0
   LEFT JOIN LATERAL (
@@ -154,7 +171,8 @@ SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM (SELECT json_build_object(
         FROM org.members t1
         LEFT JOIN auth.accounts t2 ON t2.id = t1.account_id
         WHERE t1.org_id = t0.id
-        ORDER BY t1.joined_at) c
+        ORDER BY t1.joined_at
+        LIMIT ($1::text)::int) c
   ) t1_agg ON true) q
 
 -- ── view MemberAccess ──

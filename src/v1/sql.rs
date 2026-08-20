@@ -37,11 +37,51 @@ pub struct Built {
     /// map would come back alphabetised, and the projection order **is**
     /// the key order (queries.md §6.1).
     pub fields: Vec<String>,
+    /// Set on a `page` query: the envelope the runtime builds around the
+    /// rows (queries.md §9.3).
+    pub page: Option<PagePlan>,
+}
+
+/// What the runtime needs to turn a page of rows into `{items, next,
+/// has_more}`.
+pub struct PagePlan {
+    /// `after <cursor>` — the caller's cursor, if the query takes one.
+    pub after: Option<Expr>,
+    /// The requested size, before clamping.
+    pub size: Expr,
+    /// The clamp: `max m`, else `server { max_page_size }`.
+    pub max: i64,
+    /// True when `items` stays an unparsed JSON fragment (types.md §5.4).
+    pub raw_items: bool,
+}
+
+/// The right-hand side of a `set`.
+pub enum SetValue {
+    /// A value the interpreter computed: bound as a parameter.
+    Bound(Expr),
+    /// An expression over the row's own columns: emitted as SQL.
+    Sql(Expr),
 }
 
 pub struct Param {
-    pub expr: Expr,
+    pub bind: Bind,
     pub cast: String,
+}
+
+/// Where a parameter's value comes from.
+///
+/// Named rather than positional: the SET clause's values used to be "the
+/// first N parameters", which held only while nothing else could bind one
+/// — and `set value = value + 1` binds the `1`.
+pub enum Bind {
+    /// Evaluate this expression at bind time.
+    Expr(Expr),
+    /// Take the next value the caller computed before building the
+    /// statement (an evaluated `set`, whose side effects must not repeat).
+    Preset,
+    /// The i-th component of the caller's keyset cursor, or NULL when
+    /// there is no cursor (queries.md §9.2).
+    Cursor(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,10 +120,42 @@ impl<'a> Builder<'a> {
     /// casts on the server. One binding path, every type.
     fn bind(&mut self, e: &Expr, cast: &str) -> String {
         self.params.push(Param {
-            expr: e.clone(),
+            bind: Bind::Expr(e.clone()),
             cast: cast.to_string(),
         });
         format!("(${}::text)::{cast}", self.params.len())
+    }
+
+    /// A parameter whose value the caller already computed.
+    fn preset(&mut self, cast: &str) -> String {
+        self.params.push(Param {
+            bind: Bind::Preset,
+            cast: cast.to_string(),
+        });
+        format!("(${}::text)::{cast}", self.params.len())
+    }
+
+    /// An arithmetic expression over the row's own columns. Unqualified,
+    /// because inside `SET` an unqualified name is the target table's.
+    fn set_expr(&mut self, t: &TableObj, e: &Expr, cast: &str) -> Option<String> {
+        Some(match &*e.kind {
+            ExprKind::Name(n) => quote_ident(&t.column(&n.name)?.physical),
+            ExprKind::Binary { op, lhs, rhs } => {
+                let sql_op = match op {
+                    BinOp::Add => "+",
+                    BinOp::Sub => "-",
+                    BinOp::Mul => "*",
+                    BinOp::Div => "/",
+                    BinOp::Rem => "%",
+                    _ => return None,
+                };
+                let a = self.set_expr(t, lhs, cast)?;
+                let b = self.set_expr(t, rhs, cast)?;
+                format!("({a} {sql_op} {b})")
+            }
+            // Anything that is not a column is still a bind parameter.
+            _ => self.bind(e, cast),
+        })
     }
 
     /// The projected field names, in order.
@@ -314,18 +386,26 @@ impl<'a> Builder<'a> {
             shape,
             record: i.projection.is_some(),
             fields: self.field_names(t, i.projection.as_ref()),
+            page: None,
         })
     }
 
     // ------------------------------------------------------------ update
 
-    pub fn update(&mut self, u: &UpdateExpr, sets: &[(String, Expr)]) -> Option<Built> {
+    pub fn update(&mut self, u: &UpdateExpr, sets: &[(String, SetValue)]) -> Option<Built> {
         let t = self.table(&u.table)?;
         let mut assigns = Vec::new();
         for (name, value) in sets {
             let Some(c) = t.column(name) else { continue };
-            let p = self.bind(value, &pg_type(&c.ty));
-            assigns.push(format!("{} = {p}", quote_ident(&c.physical)));
+            let rhs = match value {
+                SetValue::Bound(_) => self.preset(&pg_type(&c.ty)),
+                // `set value = value + 1` reads the row it is writing, so
+                // the increment has to happen in the database. Evaluating
+                // it in the process would need a read first, and two
+                // callers doing that both read the same number.
+                SetValue::Sql(e) => self.set_expr(t, e, &pg_type(&c.ty))?,
+            };
+            assigns.push(format!("{} = {rhs}", quote_ident(&c.physical)));
         }
         if assigns.is_empty() {
             return None;
@@ -377,6 +457,7 @@ impl<'a> Builder<'a> {
             shape,
             record: u.projection.is_some(),
             fields: self.field_names(t, u.projection.as_ref()),
+            page: None,
         })
     }
 
@@ -427,6 +508,7 @@ impl<'a> Builder<'a> {
             shape,
             record: d.projection.is_some(),
             fields: self.field_names(t, d.projection.as_ref()),
+            page: None,
         })
     }
 }
