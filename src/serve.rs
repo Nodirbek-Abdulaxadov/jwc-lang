@@ -265,10 +265,8 @@ fn string_array(e: &Expr) -> Vec<String> {
 /// silently mean eight hours.
 pub fn parse_duration(text: &str) -> Option<std::time::Duration> {
     let t = text.trim();
-    let (value, unit) = match t.find(|c: char| c.is_ascii_alphabetic()) {
-        Some(i) => (&t[..i], &t[i..]),
-        None => return None,
-    };
+    let i = t.find(|c: char| c.is_ascii_alphabetic())?;
+    let (value, unit) = (&t[..i], &t[i..]);
     let n: u64 = value.parse().ok()?;
     let d = match unit {
         "ms" => std::time::Duration::from_millis(n),
