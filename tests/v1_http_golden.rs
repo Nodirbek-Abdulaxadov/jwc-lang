@@ -21,9 +21,12 @@ fn repo_root() -> PathBuf {
 }
 
 struct Case {
-    name: &'static str,
+    name: String,
     method: &'static str,
-    path: &'static str,
+    /// Owned, because the ids the sample hands out are the ones the test
+    /// then asks about — pinning them as literals made the suite depend on
+    /// how many rows an earlier run happened to insert.
+    path: String,
     query: Vec<(String, String)>,
     headers: Vec<(&'static str, String)>,
     body: String,
@@ -37,11 +40,11 @@ struct Case {
     want_headers: Vec<(&'static str, String)>,
 }
 
-fn case(name: &'static str, method: &'static str, path: &'static str, status: u16) -> Case {
+fn case(name: &str, method: &'static str, path: &str, status: u16) -> Case {
     Case {
-        name,
+        name: name.to_string(),
         method,
-        path,
+        path: path.to_string(),
         query: Vec::new(),
         headers: Vec::new(),
         body: String::new(),
@@ -184,6 +187,23 @@ async fn http_golden() {
         .expect("login returns a token");
     let bearer = format!("Bearer {token}");
 
+    // An org of our own. Its id is whatever the sequence hands out, so the
+    // cases that read it back are built from the response rather than from
+    // a number written down here.
+    let created = run(
+        &program,
+        &case("bootstrap org", "POST", "/api/v1/orgs", 201)
+            .json(r#"{"slug":"beta","name":"Beta"}"#)
+            .header("authorization", &bearer),
+    )
+    .await;
+    assert_eq!(created.status, 201, "bootstrap org: {}", created.body);
+    let org: String = serde_json::from_str::<serde_json::Value>(&created.body)
+        .ok()
+        .and_then(|j| j.get("id").and_then(|t| t.as_str().map(String::from)))
+        .expect("create returns the org id");
+    let org_path = format!("/api/v1/orgs/{org}");
+
     let hook = |body: &str| jwc::hash::hmac_sha256_hex("hook-secret", body);
     const PAY_OK: &str =
         r#"{"provider_ref":"pi_1","invoice_id":"1","amount":"10.00","status":"succeeded"}"#;
@@ -322,6 +342,51 @@ async fn http_golden() {
             .contains("\"status\":\"duplicate\""),
 
         // ---- responses (routing.md §6, §7.1)
+        // ---- views (queries.md §8) — every one of these reads a
+        // `CREATE VIEW`, which is what v0.25.d made a real object. The
+        // seeded `acme` (org 1) has no members, so it doubles as the
+        // membership gate's negative case.
+        case("orgs: an existing slug is a 409", "POST", "/api/v1/orgs", 409)
+            .json(r#"{"slug":"acme","name":"Acme"}"#)
+            .header("authorization", &bearer),
+        case("orgs: create", "POST", "/api/v1/orgs", 201)
+            .json(r#"{"slug":"gamma","name":"Gamma"}"#)
+            .header("authorization", &bearer)
+            .contains("\"slug\":\"gamma\""),
+        case("membership gate: a non-member is 403", "GET", "/api/v1/orgs/1", 403)
+            .header("authorization", &bearer),
+        case("org detail: reads OrgWithMembers", "GET", &org_path, 200)
+            .header("authorization", &bearer)
+            .contains("\"slug\":\"beta\"")
+            // The collection is present and non-empty: the creator is a
+            // member, and it arrives through the view's lateral.
+            .contains("\"members\":[{")
+            .contains("\"email\":\"a@example.com\""),
+        case("members: the nested account comes from a join", "GET", &format!("{org_path}/members"), 200)
+            .header("authorization", &bearer)
+            .contains("\"account\":{")
+            .contains("\"role\":\"owner\"")
+            .not_contains("password_hash"),
+        case("billing summary: aggregates over a bare join", "GET", &format!("{org_path}/billing/summary"), 200)
+            .header("authorization", &bearer)
+            .contains("\"invoice_count\":0")
+            // `sum` over an empty group is null, `count` is 0 — and the
+            // flattened columns the view carries for `orderby` stay out of
+            // the response.
+            .contains("\"paid_total\":null")
+            .not_contains("org__"),
+        case("subscription: none yet is a 404", "GET", &format!("{org_path}/subscription"), 404)
+            .header("authorization", &bearer),
+        case("subscribe: creates one", "POST", &format!("{org_path}/subscription"), 201)
+            .json(r#"{"plan_code":"pro"}"#)
+            .header("authorization", &bearer),
+        case("subscription: reads SubscriptionDetail", "GET", &format!("{org_path}/subscription"), 200)
+            .header("authorization", &bearer)
+            .contains("\"plan\":{")
+            .contains("\"code\":\"pro\"")
+            .contains("\"org\":{")
+            .not_contains("plan__"),
+
         case("every JSON response declares its charset", "GET", "/api/v1/plans", 200)
             .has_header("content-type", "application/json; charset=utf-8"),
         case("plans is a JSON array", "GET", "/api/v1/plans", 200).contains("[{"),

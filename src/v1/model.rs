@@ -24,6 +24,8 @@ pub struct SchemaModel {
     pub schemas: Vec<SchemaObj>,
     pub enums: Vec<EnumObj>,
     pub tables: Vec<TableObj>,
+    /// Views as relations, with their columns worked out (views.rs).
+    pub views: Vec<super::views::ViewObj>,
     /// Naming scheme this model was built with (schema.md §8.2).
     pub scheme: &'static str,
 }
@@ -219,12 +221,17 @@ pub fn build(ws: &Workspace) -> Built {
             schemas: Vec::new(),
             enums: Vec::new(),
             tables: Vec::new(),
+            views: Vec::new(),
             scheme: naming::SCHEME_VERSION,
         },
     };
     b.run();
+    // Views resolve against finished tables, so they are a second pass —
+    // but they are part of the model, not something a caller can forget.
+    let mut model = b.model;
+    super::views::attach(&mut model, ws);
     Built {
-        model: b.model,
+        model,
         diags: b.diags,
     }
 }

@@ -2155,8 +2155,12 @@ impl<'a> Checker<'a> {
         // The join attachment tree (queries.md §4.4). Its diagnostics are
         // about how the joins relate to each other, which is why they live
         // in the planner rather than here.
-        let planned = super::query::plan(s, self.sym);
-        for d in planned.diags {
+        let mut planned = super::query::plan(s, self.sym);
+        let diags = std::mem::take(&mut planned.diags);
+        let plan_ok = !diags
+            .iter()
+            .any(|d| d.severity == super::diag::Severity::Error);
+        for d in diags {
             self.diags.push((
                 Loc {
                     file: self.file,
@@ -2164,6 +2168,9 @@ impl<'a> Checker<'a> {
                 },
                 d,
             ));
+        }
+        if plan_ok {
+            self.check_pushdown(s, &planned, span);
         }
 
         self.check_aggregates(s);
@@ -2445,6 +2452,24 @@ impl<'a> Checker<'a> {
         }
 
         self.check_fan_out(s);
+    }
+
+    /// queries.md §8.3 — a bounded page over a query that carries a
+    /// collection must be provably pushed down.
+    ///
+    /// The emitter is the only thing that knows whether it can be, so it is
+    /// asked rather than re-implemented here. Every other reason emission
+    /// gives up is a missing feature, not a wrong program, and stays
+    /// silent.
+    fn check_pushdown(&mut self, s: &SelectExpr, plan: &super::query::Plan, span: Span) {
+        let mut c = super::query_sql::Compiler::new(self.model);
+        if c.compile(s, plan).is_some() {
+            return;
+        }
+        if c.gap_code() != Some("E0542") {
+            return;
+        }
+        self.err_note(span, "E0542", c.gap().to_string(), "queries.md §8.3", "queries.md §8.3");
     }
 
     /// queries.md §6.2 — two bare joins fan out, so a plain `count` over

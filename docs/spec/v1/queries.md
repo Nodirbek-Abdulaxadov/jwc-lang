@@ -423,28 +423,86 @@ A view body may not carry `where`, `first`, `limit`, `page`, or `orderby`
 (`E0541`) — those belong to the query that selects *from* the view. It may
 carry `group by`/`having`.
 
-### 8.2 Materialisation **[0.25]**
+### 8.2 Materialisation **[0.25.d]**
 
-A `view` is a real `CREATE VIEW`. Selecting from it composes.
+A `view` is a real `CREATE VIEW`. A DBA can query it, `\d` lists it, and
+migrations track it (§8.4). Selecting from it composes.
 
-### 8.3 The two-stage rewrite (#44) **[0.25]**
+Its columns are its projection:
+
+| Projection field | View column |
+|---|---|
+| a scalar | that scalar's Postgres type |
+| `as one x` / `as many x` | a `json` column named `x` |
+| `as one x` | **also** `x__<field>` per scalar in the nested shape |
+
+Scalars keep their Postgres type rather than their wire form: a `bigint`
+that came back as text would make `where org_id == @org_id` compare a
+number to a string. The wire cast belongs to the outermost projection —
+the query that selects *from* the view. Nested fields are the exception,
+because they are already final JSON.
+
+The `x__<field>` columns exist for one reason: `orderby org.name` on a
+query against a view has no join to reach for, because the join is inside
+the view, and ordering by a JSON path orders by text (N6). They are
+`private` — excluded from a default projection — because nobody writes
+them; the compiler puts them there for the order to lower to.
+
+A view body has no parameters, so its comparison values are literals:
+`where status == InvoiceStatus.open` emits `'open'::billing.invoice_status`
+rather than a bind placeholder.
+
+Selecting from a view with no `as { }` still yields a `Record`, not `Raw`
+— a view *is* a projection (types §5.3). That is what lets the sample's
+membership gate read `access.role` off a query that named no fields.
+
+### 8.3 The two-stage rewrite (#44) **[0.25.d]**
 
 When a query against a view (or an inline query) has an `as many` child
-**and** an `orderby`/`limit`/`page` on the driving table, the compiler emits
-a two-stage form:
+**and** a bound on the driving relation, the compiler emits a two-stage
+form:
 
 ```sql
-WITH page AS (
-  SELECT i.id FROM billing.invoices i
-   WHERE i.org_id = $1 ORDER BY i.issued_at DESC LIMIT $2
+WITH page AS MATERIALIZED (
+  SELECT p1.id FROM billing.invoices p1
+   WHERE p1.org_id = ($1::text)::bigint
+   ORDER BY p1.issued_at DESC, p1.id DESC
+   LIMIT ($2::text)::int
 )
-SELECT … FROM page JOIN billing.invoices i USING (id)
-     LEFT JOIN LATERAL (…) lines ON true …
+SELECT … AS j
+  FROM billing.invoice_detail t0
+  JOIN page ON page.id = t0.id
+ ORDER BY t0.issued_at DESC, t0.id DESC
 ```
 
-Children are aggregated only for the page. If the pushdown cannot be proven
-— e.g. the `orderby` key is derived from a child — it is `E0542` with the
-rewrite spelled out, never a silent O(table) plan.
+Children are aggregated only for the page.
+
+Three details are load-bearing:
+
+* The first stage scans the **base table**, never the view. Selecting keys
+  from a view still evaluates its laterals: Postgres will not drop a
+  `LEFT JOIN LATERAL … ON true` it cannot prove row-preserving.
+* `MATERIALIZED` is explicit. A single-reference CTE has been inlined by
+  default since Postgres 12, which would put the rewrite back where it
+  started.
+* The bound lives in the CTE and nowhere else, so there is one place where
+  the page is decided.
+
+It fires on `limit`, and on `first` with an `orderby`. An **unbounded**
+query needs no rewrite: with nothing to bound, the collections are built
+for every row either way.
+
+Provability: every column the `where` and the `orderby` name must be a
+column of the base table. A nested field (`orderby org.name`) lowers to a
+flattened view column, which the base table does not have — so bounded, it
+is `E0542`, naming the rewrite: select the page of keys in one query and
+the detail in a second. Never a silent O(table) plan.
+
+An indexed `orderby` will often make Postgres do the right thing on its own
+— rows arrive sorted, the `LIMIT` stops early, and the lateral runs `limit`
+times. The rewrite is for the other case: an order that needs a sort needs
+every candidate row first, and building a collection for each of them is
+the plan #44 is about.
 
 ### 8.4 Views and migrations (#24)
 

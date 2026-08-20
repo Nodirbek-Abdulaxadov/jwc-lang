@@ -57,6 +57,17 @@ view OrgList of App.s {
         as { id, slug, name, members: { account_id, role } }
 }
 
+--- A view with both a nested `one` and a collection: ordering by the
+--- nested field lowers to a flattened column, which the base table does
+--- not have (queries.md §8.3).
+view NoteWithOrg of App.s {
+    select N from App.s.Notes
+        left join App.s.Orgs O on O.id == N.org_id as one org
+        left join App.s.Invites I on I.org_id == N.org_id
+            as many invites under N orderby id asc
+        as { id, body, org: { id, name }, invites: { id, email } }
+}
+
 class NoteInput {
     body   text           required;
     amount numeric(14, 2) required, min(0);

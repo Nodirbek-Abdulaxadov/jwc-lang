@@ -13,11 +13,64 @@
 //!   bound, and a collection with no bound is the thing #44 is about.
 
 use super::ast::*;
-use super::model::{SchemaModel, TableObj};
-use super::naming::quote_ident;
+use super::model::{ColumnObj, SchemaModel, TableObj};
+use super::naming::{self, quote_ident};
 use super::query::{Node, Plan};
 use super::sql::{Param, Shape};
+use super::views::ViewObj;
 use std::collections::HashMap;
+
+/// A table or a view. Emission treats them alike — a view is a real
+/// relation with columns (queries.md §8.2), which is the whole point of
+/// emitting `CREATE VIEW` rather than inlining the body everywhere.
+#[derive(Clone, Copy)]
+pub enum Rel<'a> {
+    Table(&'a TableObj),
+    View(&'a ViewObj),
+}
+
+impl<'a> Rel<'a> {
+    fn qualified(&self) -> String {
+        match self {
+            Rel::Table(t) => t.qualified(),
+            Rel::View(v) => v.qualified(),
+        }
+    }
+
+    fn column(&self, declared: &str) -> Option<&'a ColumnObj> {
+        match self {
+            Rel::Table(t) => t.column(declared),
+            Rel::View(v) => v.column(declared),
+        }
+    }
+
+    fn columns(&self) -> &'a [ColumnObj] {
+        match self {
+            Rel::Table(t) => &t.columns,
+            Rel::View(v) => &v.columns,
+        }
+    }
+
+    /// The first primary-key column — the guard for a nullable `as one`.
+    /// A view has none, so joining *to* one cannot be guarded.
+    fn key(&self) -> Option<&'a str> {
+        match self {
+            Rel::Table(t) => t
+                .primary_key
+                .as_ref()
+                .and_then(|pk| pk.columns.first())
+                .map(|s| s.as_str()),
+            Rel::View(_) => None,
+        }
+    }
+}
+
+/// The first stage of a two-stage page: the CTE, and the key column the
+/// second stage joins it back on.
+struct Page {
+    cte: String,
+    key: String,
+}
 
 pub struct Compiled {
     pub sql: String,
@@ -36,10 +89,20 @@ pub struct Compiler<'a> {
     /// JWC binding alias -> declared table or view name.
     binding_objects: HashMap<String, String>,
     next: usize,
+    /// A view body has no parameters, so its literals are emitted as
+    /// literals. Everything else is identical, which is the point: a view
+    /// is the same projection, standing still.
+    literals: bool,
+    /// Inside a view's column list an aggregate keeps its Postgres type
+    /// too; the wire cast is the outer projection's job.
+    no_wire: bool,
     /// Why emission gave up, when it did. Named at the point of failure —
     /// "not expressible" told a reader nothing about which release to wait
     /// for, and the compiler is the only thing that knows.
     gap: Option<String>,
+    /// Set when the gap is a **diagnostic**, not a missing feature: the
+    /// program is wrong and the checker reports it under this code.
+    gap_code: Option<&'static str>,
 }
 
 impl<'a> Compiler<'a> {
@@ -50,13 +113,22 @@ impl<'a> Compiler<'a> {
             aliases: HashMap::new(),
             binding_objects: HashMap::new(),
             next: 0,
+            literals: false,
+            no_wire: false,
             gap: None,
+            gap_code: None,
         }
     }
 
     /// The reason the last `compile` returned `None`.
     pub fn gap(&self) -> &str {
         self.gap.as_deref().unwrap_or("this query is not expressible yet")
+    }
+
+    /// The diagnostic code, when the gap is a rejected program rather than
+    /// an unimplemented one.
+    pub fn gap_code(&self) -> Option<&'static str> {
+        self.gap_code
     }
 
     /// Give up, saying why. The first reason wins: it is the innermost one,
@@ -78,23 +150,43 @@ impl<'a> Compiler<'a> {
         a
     }
 
-    fn table(&mut self, object: &str) -> Option<&'a TableObj> {
-        match self.model.tables.iter().find(|t| t.declared == object) {
-            Some(t) => Some(t),
-            // A view is a name the planner resolves but the emitter has no
-            // relation for yet.
-            None => self.unsupported(&format!(
-                "`{object}` is a view; selecting from a view arrives in v0.25.d"
-            )),
+    fn table(&mut self, object: &str) -> Option<Rel<'a>> {
+        match self.rel_of(object) {
+            Some(r) => Some(r),
+            None => self.unsupported(&format!("`{object}` is not a table or a view")),
         }
     }
 
-    fn table_of(&self, object: &str) -> Option<&'a TableObj> {
-        self.model.tables.iter().find(|t| t.declared == object)
+    fn rel_of(&self, object: &str) -> Option<Rel<'a>> {
+        if let Some(t) = self.model.tables.iter().find(|t| t.declared == object) {
+            return Some(Rel::Table(t));
+        }
+        self.model
+            .views
+            .iter()
+            .find(|v| v.declared == object)
+            .map(Rel::View)
     }
 
     /// Every parameter is bound as text and cast in SQL; see `sql.rs`.
+    /// In a view body there is nothing to bind to, so a literal is emitted
+    /// as one — and anything that is not a literal has no meaning there.
     fn bind(&mut self, e: &Expr, cast: &str) -> String {
+        if self.literals {
+            return match literal(e, cast) {
+                Some(l) => l,
+                None => {
+                    self.gap = Some(
+                        "a view body may only compare against literals — it has no \
+                         parameters to bind"
+                            .into(),
+                    );
+                    // Emission continues so the caller sees one clear gap
+                    // rather than a cascade; the result is discarded.
+                    "NULL".into()
+                }
+            };
+        }
         self.params.push(Param {
             expr: e.clone(),
             cast: cast.to_string(),
@@ -119,32 +211,49 @@ impl<'a> Compiler<'a> {
                 .insert(g.alias.clone(), g.object.clone());
         }
 
+        if select.page.is_some() {
+            // Emitting the ORDER BY and dropping the `page` would answer
+            // the whole table to a request that asked for one page.
+            return self.unsupported("keyset pagination arrives in v0.25.e");
+        }
         let projection = select.projection.as_ref();
         let root_alias = self.sql_alias(&plan.root.alias);
         let root_table = self.table(&plan.root.object)?;
+
+        // queries.md §8.3 — a bounded page over a query that carries a
+        // collection aggregates every candidate row and then throws all but
+        // `limit` of them away. The keys are cheap; the collections are
+        // not, so the keys go first.
+        let collection = plan.root.has_many()
+            || matches!(root_table, Rel::View(v) if v.has_many);
+        let bounded = select.limit.is_some() || (select.first && !select.order_by.is_empty());
+        let page = if collection && bounded {
+            Some(self.page_cte(select, plan, root_table)?)
+        } else {
+            None
+        };
 
         let (json, joins) = self.emit(&plan.root, projection)?;
 
         let mut from = format!("{} {root_alias}", root_table.qualified());
         from.push_str(&joins);
-        for g in &plan.groups {
-            let ga = self.sql_alias(&g.alias);
-            let gt = self.table(&g.object)?;
-            let on = self.predicate(&g.on, &g.alias)?;
-            let kind = match g.kind {
-                JoinKind::Left => "LEFT JOIN",
-                JoinKind::Inner => "JOIN",
-            };
-            from.push_str(&format!("\n  {kind} {} {ga} ON {on}", gt.qualified()));
-            if let Some(f) = &g.filter {
-                let extra = self.predicate(f, &g.alias)?;
-                from.push_str(&format!(" AND {extra}"));
-            }
+        from.push_str(&self.group_joins(plan)?);
+
+        // The page's key join replaces the filter: the CTE already applied
+        // it, and applying it twice would only cost a second scan.
+        if let Some(p) = &page {
+            from.push_str(&format!(
+                "\n  JOIN page ON page.{} = {root_alias}.{}",
+                quote_ident(&p.key),
+                quote_ident(&p.key)
+            ));
         }
 
         let mut sql = format!("SELECT {json} AS j\n  FROM {from}");
-        if let Some(f) = &select.filter {
-            sql.push_str(&format!("\n  WHERE {}", self.predicate(f, &plan.root.alias)?));
+        if page.is_none() {
+            if let Some(f) = &select.filter {
+                sql.push_str(&format!("\n  WHERE {}", self.predicate(f, &plan.root.alias)?));
+            }
         }
         if !select.group_by.is_empty() {
             let mut cols = Vec::new();
@@ -163,16 +272,26 @@ impl<'a> Compiler<'a> {
             ));
         }
 
+        // The bound lives in the CTE when there is one; repeating it here
+        // would be harmless but would also hide where it is enforced.
         let shape = if select.first {
-            sql.push_str("\n  LIMIT 1");
+            if page.is_none() {
+                sql.push_str("\n  LIMIT 1");
+            }
             Shape::First
         } else {
-            if let Some(l) = &select.limit {
-                let p = self.bind(l, "int");
-                sql.push_str(&format!("\n  LIMIT {p}"));
+            if page.is_none() {
+                if let Some(l) = &select.limit {
+                    let p = self.bind(l, "int");
+                    sql.push_str(&format!("\n  LIMIT {p}"));
+                }
             }
             Shape::Rows
         };
+
+        if let Some(p) = &page {
+            sql = format!("{}\n{sql}", p.cte);
+        }
 
         let wrapped = match shape {
             Shape::Rows => {
@@ -184,7 +303,7 @@ impl<'a> Compiler<'a> {
         let fields = match projection {
             Some(p) => field_names(p),
             None => root_table
-                .columns
+                .columns()
                 .iter()
                 .filter(|c| !c.private)
                 .map(|c| c.declared.clone())
@@ -195,9 +314,309 @@ impl<'a> Compiler<'a> {
             sql: wrapped,
             params: std::mem::take(&mut self.params),
             shape,
-            record: projection.is_some(),
+            // A view *is* a projection (types.md §5.3), so selecting from
+            // one with no `as { }` still yields a record — which is what
+            // lets the sample's membership gate read `access.role` off a
+            // query that named no fields.
+            record: projection.is_some() || matches!(root_table, Rel::View(_)),
             fields,
         })
+    }
+
+    /// The key-only first stage of the two-stage rewrite (queries.md §8.3).
+    ///
+    /// Scans the **base table**, not the driving relation: selecting keys
+    /// from a view still evaluates its laterals, because Postgres will not
+    /// drop a `LEFT JOIN LATERAL … ON true` it cannot prove row-preserving.
+    /// The base table has the index the `orderby` was written for.
+    ///
+    /// `MATERIALIZED` is deliberate: a single-reference CTE is inlined by
+    /// default since Postgres 12, which would put the whole rewrite back
+    /// where it started.
+    fn page_cte(&mut self, select: &SelectExpr, plan: &Plan, rel: Rel<'a>) -> Option<Page> {
+        let (base, key, map) = match rel {
+            Rel::Table(t) => {
+                let key = t
+                    .primary_key
+                    .as_ref()
+                    .filter(|pk| pk.columns.len() == 1)
+                    .and_then(|pk| pk.columns.first())
+                    .cloned();
+                let Some(key) = key else {
+                    return self.cannot_push(
+                        "the driving table has no single-column primary key to page on",
+                    );
+                };
+                (Rel::Table(t), key, Vec::new())
+            }
+            Rel::View(v) => {
+                let Some(basename) = &v.base else {
+                    return self.cannot_push("the view has no base table");
+                };
+                let Some(base) = self.rel_of(basename) else {
+                    return self.cannot_push("the view's base table is not in the model");
+                };
+                let Some(bkey) = base.key() else {
+                    return self.cannot_push(
+                        "the view's base table has no single-column primary key",
+                    );
+                };
+                // The view has to expose the key, or there is nothing to
+                // join the page back on.
+                let Some((view_col, _)) = v
+                    .base_columns
+                    .iter()
+                    .find(|(_, b)| b == bkey)
+                    .map(|(a, b)| (a.clone(), b.clone()))
+                else {
+                    return self.cannot_push(&format!(
+                        "the view does not project `{bkey}`, so a page of keys cannot be \
+                         joined back to it"
+                    ));
+                };
+                (base, view_col, v.base_columns.clone())
+            }
+        };
+
+        // Every column the filter and the order name must exist on the
+        // base table under the same name, or the first stage would be
+        // filtering something else.
+        let to_base = |name: &str| -> Option<String> {
+            if map.is_empty() {
+                return Some(name.to_string());
+            }
+            map.iter()
+                .find(|(v, _)| v == name)
+                .map(|(_, b)| b.clone())
+        };
+        for name in referenced(select, &plan.root.alias) {
+            match to_base(&name).and_then(|b| base.column(&b).map(|_| ())) {
+                Some(()) => {}
+                None => {
+                    return self.cannot_push(&format!(
+                        "`{name}` is not a column of the driving table, so the page \
+                         cannot be selected before the collections are built — project \
+                         it, or order by a column that is"
+                    ))
+                }
+            }
+        }
+
+        // The CTE is emitted with the root binding pointed at the base
+        // table under its own alias, so the existing predicate and order
+        // code needs no second implementation.
+        let base_alias = format!("p{}", self.next);
+        self.next += 1;
+        let saved_alias = self.aliases.insert(plan.root.alias.clone(), base_alias.clone());
+        let saved_object = match base {
+            Rel::Table(t) => self
+                .binding_objects
+                .insert(plan.root.alias.clone(), t.declared.clone()),
+            Rel::View(v) => self
+                .binding_objects
+                .insert(plan.root.alias.clone(), v.declared.clone()),
+        };
+
+        let base_key = to_base(&key)?;
+        let base_col = base.column(&base_key)?.physical.clone();
+        let mut cte = format!(
+            "WITH page AS MATERIALIZED (\n  SELECT {base_alias}.{} FROM {} {base_alias}",
+            quote_ident(&base_col),
+            base.qualified()
+        );
+        let mut ok = true;
+        if let Some(f) = &select.filter {
+            match self.predicate(f, &plan.root.alias) {
+                Some(p) => cte.push_str(&format!("\n   WHERE {p}")),
+                None => ok = false,
+            }
+        }
+        if !select.order_by.is_empty() {
+            match self.order_by(&select.order_by, &plan.root.alias) {
+                Some(o) => cte.push_str(&format!("\n   ORDER BY {o}")),
+                None => ok = false,
+            }
+        }
+        if select.first {
+            cte.push_str("\n   LIMIT 1");
+        } else if let Some(l) = &select.limit {
+            let p = self.bind(l, "int");
+            cte.push_str(&format!("\n   LIMIT {p}"));
+        }
+        cte.push_str("\n)");
+
+        // Restore the binding so the second stage reads the view again.
+        match saved_alias {
+            Some(a) => self.aliases.insert(plan.root.alias.clone(), a),
+            None => self.aliases.remove(&plan.root.alias),
+        };
+        match saved_object {
+            Some(o) => self.binding_objects.insert(plan.root.alias.clone(), o),
+            None => self.binding_objects.remove(&plan.root.alias),
+        };
+        if !ok {
+            return None;
+        }
+
+        let view_key_col = rel.column(&key)?.physical.clone();
+        Some(Page {
+            cte,
+            key: view_key_col,
+        })
+    }
+
+    /// queries.md §8.3 — a pushdown that cannot be proven is an error with
+    /// the rewrite named, never a silent plan over the whole table.
+    fn cannot_push<T>(&mut self, why: &str) -> Option<T> {
+        self.gap = Some(format!(
+            "this page cannot be pushed down — {why}; select the page of keys in one \
+             query and the detail in a second"
+        ));
+        self.gap_code = Some("E0542");
+        None
+    }
+
+    /// The `SELECT` behind a `CREATE VIEW`: a column list, not one JSON
+    /// value.
+    ///
+    /// A view is a relation, so scalars keep their Postgres type — a
+    /// `bigint` that came back as text would make `where org_id == @id`
+    /// compare a number to a string. The wire cast belongs to the
+    /// outermost projection, which is the query that selects *from* here.
+    /// Nested fields are the exception: they are already final JSON.
+    pub fn compile_view(&mut self, select: &SelectExpr, plan: &Plan, view: &ViewObj) -> Option<String> {
+        self.literals = true;
+        let projection = select.projection.as_ref()?;
+        let mut all = Vec::new();
+        plan.root.walk(&mut all);
+        for n in &all {
+            self.sql_alias(&n.alias);
+            self.binding_objects
+                .insert(n.alias.clone(), n.object.clone());
+        }
+        for g in &plan.groups {
+            self.sql_alias(&g.alias);
+            self.binding_objects
+                .insert(g.alias.clone(), g.object.clone());
+        }
+        let root_alias = self.sql_alias(&plan.root.alias);
+        let root = self.table(&plan.root.object)?;
+
+        let mut columns: Vec<String> = Vec::new();
+        let mut joins = String::new();
+        for f in &projection.fields {
+            match f {
+                ProjField::Column(i) => {
+                    let c = root.column(&i.name)?;
+                    columns.push(format!(
+                        "{root_alias}.{} AS {}",
+                        quote_ident(&c.physical),
+                        quote_ident(&naming::physical(&i.name))
+                    ));
+                }
+                ProjField::Expr { alias: a, value, .. } => {
+                    let sql = self.bare_value(value, &plan.root.alias)?;
+                    columns.push(format!(
+                        "{sql} AS {}",
+                        quote_ident(&naming::physical(&a.name))
+                    ));
+                }
+                ProjField::Nested { alias: a, shape, .. } => {
+                    let child = plan
+                        .root
+                        .children
+                        .iter()
+                        .find(|c| c.link.as_ref().is_some_and(|l| l.field == a.name))?;
+                    let (value, from) = self.child(child, shape)?;
+                    columns.push(format!(
+                        "{value} AS {}",
+                        quote_ident(&naming::physical(&a.name))
+                    ));
+                    joins.push_str(&from);
+                    // The flattened columns, in the order views.rs put
+                    // them in — the two lists are one list, split across
+                    // two files, and a mismatch is a wrong column name.
+                    if child.link.as_ref().is_some_and(|l| l.cardinality == Cardinality::One) {
+                        let calias = self.sql_alias(&child.alias);
+                        let crel = self.table(&child.object)?;
+                        for nested in &shape.fields {
+                            let (name, col) = match nested {
+                                ProjField::Column(i) => (i.name.clone(), i.name.clone()),
+                                ProjField::Expr { alias: na, value, .. } => match &*value.kind {
+                                    ExprKind::Name(n) => (na.name.clone(), n.name.clone()),
+                                    _ => continue,
+                                },
+                                ProjField::Nested { .. } => continue,
+                            };
+                            let Some(c) = crel.column(&col) else { continue };
+                            let flat = format!("{}{}{}", a.name, super::views::FLAT, name);
+                            columns.push(format!(
+                                "{calias}.{} AS {}",
+                                quote_ident(&c.physical),
+                                quote_ident(&naming::physical(&flat))
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut from = format!("{} {root_alias}", root.qualified());
+        from.push_str(&joins);
+        from.push_str(&self.group_joins(plan)?);
+
+        let mut sql = format!("SELECT {}\n  FROM {from}", columns.join(",\n       "));
+        if !select.group_by.is_empty() {
+            let mut cols = Vec::new();
+            for g in &select.group_by {
+                cols.push(self.column_ref(g, &plan.root.alias)?);
+            }
+            sql.push_str(&format!("\n  GROUP BY {}", cols.join(", ")));
+        }
+        if let Some(h) = &select.having {
+            sql.push_str(&format!("\n  HAVING {}", self.predicate(h, &plan.root.alias)?));
+        }
+        if self.gap.is_some() {
+            return None;
+        }
+        let _ = view;
+        Some(sql)
+    }
+
+    /// A projected expression with **no** wire cast: inside a view a column
+    /// keeps its Postgres type.
+    fn bare_value(&mut self, e: &Expr, scope: &str) -> Option<String> {
+        if let Some(c) = self.column_ref(e, scope) {
+            return Some(c);
+        }
+        match &*e.kind {
+            ExprKind::Call { .. } => {
+                let saved = std::mem::replace(&mut self.no_wire, true);
+                let out = self.aggregate(e, scope);
+                self.no_wire = saved;
+                out
+            }
+            _ => self.unsupported("a projection field is a column or an aggregate"),
+        }
+    }
+
+    fn group_joins(&mut self, plan: &Plan) -> Option<String> {
+        let mut out = String::new();
+        for g in &plan.groups {
+            let ga = self.sql_alias(&g.alias);
+            let gt = self.table(&g.object)?;
+            let on = self.predicate(&g.on, &g.alias)?;
+            let kind = match g.kind {
+                JoinKind::Left => "LEFT JOIN",
+                JoinKind::Inner => "JOIN",
+            };
+            out.push_str(&format!("\n  {kind} {} {ga} ON {on}", gt.qualified()));
+            if let Some(f) = &g.filter {
+                let extra = self.predicate(f, &g.alias)?;
+                out.push_str(&format!(" AND {extra}"));
+            }
+        }
+        Some(out)
     }
 
     // ------------------------------------------------------------ tree
@@ -241,7 +660,7 @@ impl<'a> Compiler<'a> {
             }
             // The default result excludes `private` columns (schema.md §3.1).
             None => {
-                for c in table.columns.iter().filter(|c| !c.private) {
+                for c in table.columns().iter().filter(|c| !c.private) {
                     entries.push(json_entry(&c.declared, &alias, c));
                 }
             }
@@ -281,11 +700,14 @@ impl<'a> Compiler<'a> {
                     // #3 — a null object, not an object of nulls. The guard
                     // is the child's primary key: NOT NULL when the row
                     // exists, NULL exactly when the LEFT JOIN found nothing.
-                    let guard = table
-                        .primary_key
-                        .as_ref()
-                        .and_then(|pk| pk.columns.first())
-                        .map(|c| format!("{alias}.{}", quote_ident(c)))?;
+                    let Some(key) = table.key() else {
+                        return self.unsupported(
+                            "a nullable `as one` needs the joined relation's primary \
+                             key to tell a missing row from a row of nulls, and a view \
+                             has none",
+                        );
+                    };
+                    let guard = format!("{alias}.{}", quote_ident(key));
                     format!("CASE WHEN {guard} IS NULL THEN NULL ELSE {json} END")
                 };
                 Some((value, from))
@@ -357,10 +779,23 @@ impl<'a> Compiler<'a> {
                 let ExprKind::Name(b) = &*base.kind else {
                     return None;
                 };
-                let object = self.object_of(&b.name)?;
-                let alias = self.sql_alias(&b.name);
-                let table = self.table(&object)?;
-                let c = table.column(&field.name)?;
+                // `org.name` where `org` is a binding: the joined column.
+                if let Some(object) = self.object_of(&b.name) {
+                    let alias = self.sql_alias(&b.name);
+                    let table = self.table(&object)?;
+                    let c = table.column(&field.name)?;
+                    return Some(format!("{alias}.{}", quote_ident(&c.physical)));
+                }
+                // `org.name` where `org` is a nested field of the driving
+                // relation: the join is inside the view, so there is
+                // nothing to reach for. It lowers to the column the view
+                // flattened it into — not to a JSON path, which orders by
+                // text (N6, queries.md §8.2).
+                let object = self.object_of(scope)?;
+                let rel = self.table(&object)?;
+                let flat = format!("{}{}{}", b.name, super::views::FLAT, field.name);
+                let c = rel.column(&flat)?;
+                let alias = self.sql_alias(scope);
                 Some(format!("{alias}.{}", quote_ident(&c.physical)))
             }
             _ => None,
@@ -394,7 +829,7 @@ impl<'a> Compiler<'a> {
             },
             _ => return None,
         };
-        let t = self.table_of(&object)?;
+        let t = self.rel_of(&object)?;
         let c = t.column(&name)?;
         super::ddl::wire_cast(&c.ty)
     }
@@ -474,7 +909,7 @@ impl<'a> Compiler<'a> {
             _ => return None,
         };
         Some(match name {
-            "count" => "bigint".to_string(),
+            "count" => "int".to_string(),
             "sum" | "avg" => match self.column_scalar(args.first()?, scope)?.as_str() {
                 "smallint" | "int" | "integer" if name == "sum" => "bigint".to_string(),
                 _ => "numeric".to_string(),
@@ -493,7 +928,7 @@ impl<'a> Compiler<'a> {
             },
             _ => return None,
         };
-        let t = self.table_of(&object)?;
+        let t = self.rel_of(&object)?;
         let c = t.column(&name)?;
         Some(super::sql::pg_type(&c.ty))
     }
@@ -557,9 +992,18 @@ impl<'a> Compiler<'a> {
     }
 
     fn aggregate_wire_cast(&self, name: &str, arg: &Expr, scope: &str) -> Option<&'static str> {
+        // `count` is `int` (queries.md §6.3) and Postgres's is `bigint`, so
+        // the cast is the declared type, not the wire form — it applies in
+        // a view's column list too, where it is what keeps the column an
+        // `int` rather than a `bigint` the outer projection would then
+        // serialise as a string.
+        if name == "count" {
+            return Some("int");
+        }
+        if self.no_wire {
+            return None;
+        }
         match name {
-            // `count` is an int on the wire, which JSON has (queries.md §6.3).
-            "count" => None,
             "sum" | "avg" => match self.column_scalar(arg, scope)?.as_str() {
                 // smallint and int sum to bigint; everything else that can
                 // be summed lands on numeric. Both are text on the wire.
@@ -581,7 +1025,7 @@ impl<'a> Compiler<'a> {
             },
             _ => return None,
         };
-        Some(self.table_of(&object)?.column(&name)?.ty.render())
+        Some(self.rel_of(&object)?.column(&name)?.ty.render())
     }
 }
 
@@ -833,4 +1277,69 @@ fn collect_entries<'a>(entries: &'a [ObjEntry], label: &str, out: &mut Vec<Site<
 
 fn is_aggregate(name: &str) -> bool {
     matches!(name, "count" | "sum" | "min" | "max" | "avg")
+}
+
+/// A view body's comparison values. Only literals reach here — a view has
+/// no parameters, and `check.rs` has no locals in scope to offer it.
+fn literal(e: &Expr, cast: &str) -> Option<String> {
+    Some(match &*e.kind {
+        // A numeric literal is already its own type in SQL; only the
+        // string-shaped ones need to be told what they are.
+        ExprKind::Int(n) => n.clone(),
+        ExprKind::Decimal(n) => n.clone(),
+        ExprKind::Str(s) => format!("'{}'::{cast}", escape(s)),
+        ExprKind::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        ExprKind::Null => "NULL".to_string(),
+        // `InvoiceStatus.open` — the wire form of an enum is its member
+        // name (types.md §3.4), physical form or not.
+        ExprKind::Field { base, field } => match &*base.kind {
+            ExprKind::Name(_) => format!("'{}'::{cast}", escape(&field.name)),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Every column name a query's `where` and `orderby` reach for, unqualified
+/// or qualified to the driving binding. A name reached through another
+/// binding is not a driving-table column and is left out on purpose — that
+/// is exactly the case the pushdown cannot prove.
+fn referenced(select: &SelectExpr, root: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(f) = &select.filter {
+        names(f, &mut out);
+    }
+    for k in &select.order_by {
+        names(&k.expr, &mut out);
+    }
+    // `I.id` and `id` are the same column when `I` is the driving binding;
+    // only a *different* binding puts the name out of the base's reach.
+    let prefix = format!("{root}.");
+    for n in &mut out {
+        if let Some(rest) = n.strip_prefix(&prefix) {
+            *n = rest.to_string();
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn names(e: &Expr, out: &mut Vec<String>) {
+    match &*e.kind {
+        ExprKind::Name(n) => out.push(n.name.clone()),
+        // `org.name` on a view is a flattened column, which the base table
+        // does not have — so it stays out and the pushdown is refused.
+        ExprKind::Field { base, field } => {
+            if let ExprKind::Name(b) = &*base.kind {
+                out.push(format!("{}.{}", b.name, field.name));
+            }
+        }
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Coalesce { lhs, rhs } => {
+            names(lhs, out);
+            names(rhs, out);
+        }
+        ExprKind::Unary { rhs, .. } => names(rhs, out),
+        _ => {}
+    }
 }

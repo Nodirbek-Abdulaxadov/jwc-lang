@@ -314,6 +314,97 @@ CREATE TRIGGER tg_subscriptions__touch
     FOR EACH ROW EXECUTE FUNCTION billing.tg_subscriptions__touch();
 
 
+-- ── View ──
+CREATE VIEW billing.invoice_detail AS
+SELECT t0.id AS id,
+       t0.org_id AS org_id,
+       t0.number AS number,
+       t0.amount AS amount,
+       t0.currency AS currency,
+       t0.status AS status,
+       t0.issued_at AS issued_at,
+       t0.due_at AS due_at,
+       t0.paid_at AS paid_at,
+       coalesce(t1_agg.data, '[]'::json) AS lines,
+       coalesce(t2_agg.data, '[]'::json) AS payments
+  FROM billing.invoices t0
+  LEFT JOIN LATERAL (
+      SELECT coalesce(json_agg(c.j), '[]'::json) AS data
+        FROM (SELECT json_build_object('id', t1.id::text, 'description', t1.description, 'quantity', t1.quantity, 'unit_price', t1.unit_price::text) AS j
+        FROM billing.invoice_lines t1
+        WHERE t1.invoice_id = t0.id
+        ORDER BY t1.id) c
+  ) t1_agg ON true
+  LEFT JOIN LATERAL (
+      SELECT coalesce(json_agg(c.j), '[]'::json) AS data
+        FROM (SELECT json_build_object('id', t2.id::text, 'provider', t2.provider, 'provider_ref', t2.provider_ref, 'amount', t2.amount::text, 'status', t2.status, 'created_at', t2.created_at) AS j
+        FROM billing.payments t2
+        WHERE t2.invoice_id = t0.id
+        ORDER BY t2.created_at DESC
+        LIMIT 20) c
+  ) t2_agg ON true;
+
+CREATE VIEW billing.subscription_detail AS
+SELECT t0.id AS id,
+       t0.org_id AS org_id,
+       t0.status AS status,
+       t0.current_period_start AS current_period_start,
+       t0.current_period_end AS current_period_end,
+       t0.cancel_at AS cancel_at,
+       CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, 'code', t1.code, 'name', t1.name, 'price', t1.price::text, 'currency', t1.currency, 'interval', t1.interval) END AS plan,
+       t1.id AS plan__id,
+       t1.code AS plan__code,
+       t1.name AS plan__name,
+       t1.price AS plan__price,
+       t1.currency AS plan__currency,
+       t1.interval AS plan__interval,
+       CASE WHEN t2.id IS NULL THEN NULL ELSE json_build_object('id', t2.id::text, 'slug', t2.slug, 'name', t2.name) END AS org,
+       t2.id AS org__id,
+       t2.slug AS org__slug,
+       t2.name AS org__name
+  FROM billing.subscriptions t0
+  LEFT JOIN billing.plans t1 ON t1.id = t0.plan_id
+  LEFT JOIN org.orgs t2 ON t2.id = t0.org_id;
+
+CREATE VIEW org.member_access AS
+SELECT t0.org_id AS org_id,
+       t0.account_id AS account_id,
+       t0.role AS role,
+       CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, 'slug', t1.slug, 'name', t1.name) END AS org,
+       t1.id AS org__id,
+       t1.slug AS org__slug,
+       t1.name AS org__name
+  FROM org.members t0
+  LEFT JOIN org.orgs t1 ON t1.id = t0.org_id;
+
+CREATE VIEW org.org_billing_summary AS
+SELECT t0.id AS org_id,
+       t0.slug AS slug,
+       count(t1.id)::int AS invoice_count,
+       (count(t1.id) FILTER (WHERE t1.status = 'open'::billing.invoice_status))::int AS open_count,
+       sum(t1.amount) FILTER (WHERE t1.status = 'paid'::billing.invoice_status) AS paid_total,
+       min(t1.due_at) FILTER (WHERE t1.status = 'open'::billing.invoice_status) AS oldest_due
+  FROM org.orgs t0
+  LEFT JOIN billing.invoices t1 ON t1.org_id = t0.id
+  GROUP BY t0.id, t0.slug;
+
+CREATE VIEW org.org_with_members AS
+SELECT t0.id AS id,
+       t0.slug AS slug,
+       t0.name AS name,
+       t0.created_at AS created_at,
+       coalesce(t1_agg.data, '[]'::json) AS members
+  FROM org.orgs t0
+  LEFT JOIN LATERAL (
+      SELECT coalesce(json_agg(c.j), '[]'::json) AS data
+        FROM (SELECT json_build_object('role', t1.role, 'joined_at', t1.joined_at, 'account', CASE WHEN t2.id IS NULL THEN NULL ELSE json_build_object('id', t2.id::text, 'email', t2.email, 'display_name', t2.display_name) END) AS j
+        FROM org.members t1
+        LEFT JOIN auth.accounts t2 ON t2.id = t1.account_id
+        WHERE t1.org_id = t0.id
+        ORDER BY t1.joined_at) c
+  ) t1_agg ON true;
+
+
 -- ── Comment ──
 COMMENT ON TABLE audit.events IS 'Append-only. Every FK is `on delete set null` so a deleted org never
 blocks the log, and every column that could be missing is nullable —
@@ -342,4 +433,18 @@ COMMENT ON TABLE billing.plans IS 'Money is `numeric`, never an integer count of
 COMMENT ON TABLE org.orgs IS 'Tenant. Every billing and audit row hangs off one of these.';
 
 COMMENT ON COLUMN org.orgs.slug IS 'URL-safe handle. Immutable after creation.';
+
+COMMENT ON VIEW billing.invoice_detail IS 'Two `as many` children. A paged select against this view compiles to
+the two-stage form so children are aggregated for the page only
+(queries.md §8.3).';
+
+COMMENT ON VIEW org.member_access IS 'The membership gate reads `role` off this view, which is legal because
+a view is a projection and therefore a Record (types.md §5.3).';
+
+COMMENT ON VIEW org.org_billing_summary IS 'Bare join + aggregates + group by. No `as many` in the same query,
+which is what keeps it out of E0532 (queries.md §6.2).';
+
+COMMENT ON VIEW org.org_with_members IS 'One org with its members, each member carrying its account.
+`account` attaches to `members` because its `on` clause names only
+`Members` besides the joined table (queries.md §4.4).';
 

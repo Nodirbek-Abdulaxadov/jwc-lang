@@ -31,7 +31,10 @@ pub enum Phase {
     ForeignKey = 4,
     Index = 5,
     Trigger = 6,
-    Comment = 7,
+    /// After the tables it reads, before the comments that name it. A view
+    /// that selects from another view sorts after it.
+    View = 7,
+    Comment = 8,
 }
 
 pub fn emit(model: &SchemaModel) -> Vec<Statement> {
@@ -194,7 +197,18 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
         });
     }
 
-    // 7 — comments (schema.md §7)
+    // 7 — views (queries.md §8.2). A view is a real object, not a macro:
+    // a DBA can query it, `\d` lists it, and migrations track it.
+    for v in ordered_views(model) {
+        let Some(body) = &v.body else { continue };
+        out.push(Statement {
+            sql: format!("CREATE VIEW {} AS\n{body};", v.qualified()),
+            loc: v.loc,
+            phase: Phase::View,
+        });
+    }
+
+    // 8 — comments (schema.md §7)
     for t in &model.tables {
         if !t.docs.is_empty() {
             out.push(Statement {
@@ -223,8 +237,52 @@ pub fn emit(model: &SchemaModel) -> Vec<Statement> {
             });
         }
     }
+    for v in ordered_views(model) {
+        if v.docs.is_empty() {
+            continue;
+        }
+        out.push(Statement {
+            sql: format!(
+                "COMMENT ON VIEW {} IS {};",
+                v.qualified(),
+                sql_string(&v.docs.join("\n"))
+            ),
+            loc: v.loc,
+            phase: Phase::Comment,
+        });
+    }
 
     out
+}
+
+/// Views in dependency order: one that reads another comes after it.
+///
+/// `CREATE VIEW` resolves its source at creation time, so the order is not
+/// cosmetic — the wrong one fails to apply. The list is already sorted, so
+/// ties keep that order and the output stays byte-stable.
+fn ordered_views(model: &SchemaModel) -> Vec<&super::views::ViewObj> {
+    let mut done: Vec<&super::views::ViewObj> = Vec::new();
+    let mut left: Vec<&super::views::ViewObj> = model.views.iter().collect();
+    while !left.is_empty() {
+        let before = left.len();
+        left.retain(|v| {
+            let ready = v.reads.iter().all(|dep| {
+                !model.views.iter().any(|o| &o.declared == dep)
+                    || done.iter().any(|d| &d.declared == dep)
+            });
+            if ready {
+                done.push(v);
+            }
+            !ready
+        });
+        if left.len() == before {
+            // A cycle between views is not emittable; the remaining ones go
+            // out in declaration order so the failure is Postgres's, with
+            // the offending statement named, rather than a silent drop.
+            done.append(&mut left);
+        }
+    }
+    done
 }
 
 fn create_table(t: &TableObj) -> String {

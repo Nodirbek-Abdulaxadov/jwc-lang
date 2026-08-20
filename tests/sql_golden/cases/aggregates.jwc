@@ -43,13 +43,14 @@ view CustomerTotals of App.s {
 
 --- `having` reads an aggregate, so the literal it is compared against is
 --- cast to what the aggregate comes back as, not to the column's type.
+--- The `orderby` lives on the query, not in the view: a view body carrying
+--- a per-query clause is E0541 (queries.md §8.1).
 view BusyCustomers of App.s {
     select C from App.s.Customers
         left join App.s.Orders O on O.customer_id == C.id as group
         group by C.id
         having count(O.id) > 2
         as { customer_id: id, order_count: count(O.id) }
-        orderby id asc
 }
 
 --- Two bare joins fan out, so a plain `count` over either one counts the

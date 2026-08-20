@@ -154,6 +154,7 @@ fn emission_order_is_the_specified_order() {
             "ForeignKey",
             "Index",
             "Trigger",
+            "View",
             "Comment"
         ]
     );

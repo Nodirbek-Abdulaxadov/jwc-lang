@@ -344,7 +344,10 @@ deterministically (by schema name, then object name):
    in one pass after every table exists**
 5. `CREATE UNIQUE INDEX` / `CREATE INDEX`
 6. `CREATE FUNCTION` + `CREATE TRIGGER`
-7. `COMMENT ON`
+7. `CREATE VIEW` — after every table it reads, and after any view **it**
+   reads (queries §8.2). `CREATE VIEW` resolves its source at creation
+   time, so this order is not cosmetic: the wrong one fails to apply.
+8. `COMMENT ON`
 
 Phase 4 is why cross-schema FK cycles work. The sample has one
 (`auth → org → auth`) and no per-file ordering can resolve it; a separate

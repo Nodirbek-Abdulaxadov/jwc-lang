@@ -1,0 +1,27 @@
+namespace pushdown;
+
+-- queries.md §8.3 — a bounded page over a relation that carries a
+-- collection has to be provable: the page of keys is taken from the base
+-- table before the collections are built.
+service Pages {
+    -- `body` is a base column, so the page is pushable.
+    function by_body() {
+        return select NWO from App.s.NoteWithOrg
+            orderby body asc
+            limit 10;
+    }
+
+    -- `org.name` lowers to the flattened column, which the base table does
+    -- not have. Bounded, that cannot be pushed down.
+    function by_org_name() {
+        return select NWO from App.s.NoteWithOrg   -- expect: E0542
+            orderby org.name asc
+            limit 10;
+    }
+
+    -- Unbounded, the same order is fine: there is no page to build first.
+    function all_by_org_name() {
+        return select NWO from App.s.NoteWithOrg
+            orderby org.name asc;
+    }
+}

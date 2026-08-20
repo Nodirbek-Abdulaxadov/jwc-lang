@@ -30,6 +30,7 @@ pub mod token;
 pub mod types;
 pub mod validate;
 pub mod value;
+pub mod views;
 pub mod wiring;
 pub mod workspace;
 

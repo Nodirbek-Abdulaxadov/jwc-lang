@@ -14,7 +14,11 @@ table Accounts of App.s {
     created_at    timestamptz default now();
 }
 
-view AccountRows of App.s {
-    select A from App.s.Accounts
-        orderby id asc
+--- No projection means no view: a view *is* its projection (E0540). This
+--- is a query, so it lives in a function.
+service Accounts {
+    function rows() {
+        return select A from App.s.Accounts
+            orderby id asc;
+    }
 }
