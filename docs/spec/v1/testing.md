@@ -100,4 +100,9 @@ instead of its own.
 |---|---|
 | `E1401` | `assert fails` without an error type |
 | `E1402` | `with` on an `assert fails` whose message cannot be a literal |
-| `E1403` | `test` declared inside a service, routes block or middleware |
+
+A `test` block is a declaration, so writing one inside a `service`,
+`routes` or `middleware` body is refused by the grammar before any of these
+rules apply — `grammar.ebnf` admits only functions in a service body, and
+the parser says so. No separate code is reserved for it: a diagnostic for an
+unreachable state is a diagnostic nobody can read.
