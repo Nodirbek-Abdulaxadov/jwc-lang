@@ -112,11 +112,23 @@ The mapping is errors §6: a violated constraint carrying a message becomes
 the declared error whose default status it has; one without a message is a
 fault, and a fault is a 500.
 
-4.3 A `unique` or foreign key reachable from a route and carrying **no
-message** is **`W1302`**. It is not an error — a constraint can be a pure
-invariant that no request should ever be able to violate — but the common
-case is an oversight, and its cost is that a user-visible conflict arrives
-as an unexplained 500.
+4.3 A `unique` or `check` reachable from a route and carrying **no message**
+is **`W1302`**. It is not an error — a constraint can be a pure invariant
+that no request should ever be able to violate — but the common case is an
+oversight, and its cost is that a user-visible conflict arrives as an
+unexplained 500.
+
+Foreign keys are **not** warned about, although ROADMAP §3 (#30) named them
+alongside `unique`. errors §6.3 settled that question afterwards: an FK
+violation is always `BadRequest` 400 with a fixed message, and an FK carries
+no per-constraint message in 1.0 (`DEFERRED-4`) because the right status
+varies by case and the data to choose does not exist yet. Warning about
+every foreign key would be asking for something the language does not offer.
+
+4.3.1 The warning is reported **once per constraint**, at the constraint's
+own declaration, with the routes that reach it in the note. Reporting it per
+route would print the same schema line five times and point the caret at a
+handler that did nothing wrong.
 
 4.4 `--deny-warnings` makes any warning a non-zero exit, which is the CI
 shape.

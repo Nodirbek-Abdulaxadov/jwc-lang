@@ -77,6 +77,18 @@ enum Command {
         #[arg(long)]
         analyze: bool,
     },
+    /// `check`, plus the whole-program lints that are advisory.
+    Lint {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Print every constraint each route can reach, with the status its
+        /// violation produces.
+        #[arg(long)]
+        constraints: bool,
+        /// Exit non-zero on any warning. The CI shape.
+        #[arg(long)]
+        deny_warnings: bool,
+    },
     /// Print the resolved route table: method, path, middleware chain.
     Routes {
         #[arg(default_value = ".")]
@@ -186,6 +198,11 @@ fn main() -> Result<()> {
             route,
             analyze,
         } => cmd::explain(path, sql, function, route, analyze),
+        Command::Lint {
+            path,
+            constraints,
+            deny_warnings,
+        } => cmd::lint(path, constraints, deny_warnings),
         Command::Routes { path } => cmd::routes(path),
         Command::Serve {
             path,

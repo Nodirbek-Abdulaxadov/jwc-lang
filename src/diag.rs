@@ -143,7 +143,17 @@ impl SourceFile {
             pad = col - 1
         ));
         if let Some(note) = &d.note {
-            out.push_str(&format!("{:gw$} = help: {note}\n", "", gw = gutter));
+            // A multi-line note — E0440's expand/contract recipe, E1102's
+            // five-statement enum rebuild — is indented to the same column
+            // as the first line. Left flush, the continuation reads as a
+            // separate diagnostic rather than as part of this one.
+            let mut lines = note.lines();
+            if let Some(first) = lines.next() {
+                out.push_str(&format!("{:gw$} = help: {first}\n", "", gw = gutter));
+                for l in lines {
+                    out.push_str(&format!("{:gw$}          {l}\n", "", gw = gutter));
+                }
+            }
         }
         if let Some(clause) = d.clause {
             out.push_str(&format!("{:gw$} = spec: {clause}\n", "", gw = gutter));

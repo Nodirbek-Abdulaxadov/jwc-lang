@@ -679,7 +679,11 @@ Yo'l-yo'lakay topilgan uchta narsa:
 **Tugadi =** namunadagi 25 endpoint uchun `jwc explain` chiqishi
 `tests/sql_golden/` bilan mos; LSP smoke testi hover-SQL ni tekshiradi;
 `jwc openapi` chiqishi OpenAPI 3.1 validatoridan o'tadi;
-`jwc lint --constraints` namunadagi 5 ta xabarsiz unique'ni ko'rsatadi.
+`jwc lint --constraints` namunadagi xabarsiz unique'larni ko'rsatadi.
+(Reliz yozilganda "5 ta" deb taxmin qilingan edi; v0.20.0 da namuna spec'ga
+moslashtirilgandan keyin ular **3 ta** — `Sessions.token_hash`,
+`ApiKeys.key_hash`, `Invites.token_hash` — va shulardan bittasigina bugun
+route'dan yetib boriladi. Aynan shu uchtasi v0.29.0 ning hash mavzusi.)
 
 ---
 

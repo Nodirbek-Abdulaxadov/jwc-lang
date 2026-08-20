@@ -108,6 +108,7 @@ cargo build --release
 | `jwc fmt [path] [--check]` | rewrite in canonical form; `--check` is the CI shape |
 | `jwc gen-sql [path] [--explain]` | the schema as Postgres DDL, deterministic and offline |
 | `jwc explain [path]` | every query the program issues, with its SQL |
+| `jwc lint [path] [--constraints]` | `check`, plus every constraint each route can reach and the status its violation produces |
 | `jwc routes [path]` | the resolved route table: method, path, middleware chain |
 | `jwc migrate new <name> [path]` | diff the sources against the last snapshot and write the next migration — offline |
 | `jwc migrate up [path]` | apply every pending migration, in order, under an advisory lock |

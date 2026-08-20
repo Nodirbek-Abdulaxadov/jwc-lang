@@ -1212,6 +1212,40 @@ pub fn reachable_from(
     seen
 }
 
+/// Every table a block writes, as the qualified path the source wrote —
+/// `App.org.Orgs`.
+///
+/// The set a route's constraint report is built from: a write is the only
+/// way a constraint can be violated, so the tables reachable from a route
+/// bound the statuses that route can produce (errors.md §6.4).
+pub fn writes_in(b: &Block) -> BTreeSet<(String, WriteKind)> {
+    let mut out = BTreeSet::new();
+    each_expr(b, &mut |e| match &*e.kind {
+        ExprKind::Insert(i) => {
+            out.insert((i.table.text(), WriteKind::Insert));
+        }
+        ExprKind::Update(u) => {
+            out.insert((u.table.text(), WriteKind::Update));
+        }
+        ExprKind::Delete(d) => {
+            out.insert((d.table.text(), WriteKind::Delete));
+        }
+        _ => {}
+    });
+    out
+}
+
+/// Which statement wrote a table. It decides which constraints can actually
+/// raise: an `insert` or `update` can violate the target's own uniques,
+/// checks and foreign keys; a `delete` can violate none of them, and can
+/// only trip a foreign key **pointing at** the row it removes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum WriteKind {
+    Insert,
+    Update,
+    Delete,
+}
+
 /// Every name called anywhere in a block, qualified as written.
 pub fn callees(b: &Block) -> BTreeSet<String> {
     let mut out = BTreeSet::new();

@@ -796,6 +796,236 @@ pub fn migrate_verify(path: PathBuf) -> Result<()> {
     bail!("{} problem{}", problems.len(), plural(problems.len()))
 }
 
+/// `jwc lint [path] [--constraints]` — `jwc check` plus the whole-program
+/// lints that are advisory rather than definitional (tooling.md §4).
+pub fn lint(path: PathBuf, constraints: bool, deny_warnings: bool) -> Result<()> {
+    let ws = crate::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
+        bail!("no .jwc files under {}", path.display());
+    }
+    // Everything `jwc check` would say, said first and once.
+    check(path.clone(), true, false, false)?;
+
+    let built = crate::model::build(&ws);
+    let symbols = crate::symbols::build(&ws, &built.model);
+    let wired = crate::wiring::wire(&ws, &symbols);
+    let bodies = crate::wiring::function_bodies(&ws);
+
+    // Which routes reach which table. A write is the only way a constraint
+    // can be violated, so this bounds the statuses each route can produce
+    // (errors.md §6.4).
+    let mut reached: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut per_route: Vec<(String, Vec<(String, crate::wiring::WriteKind)>)> = Vec::new();
+    for file in &ws.files {
+        for d in &file.program.decls {
+            let crate::ast::Decl::Routes(r) = d else {
+                continue;
+            };
+            for rt in &r.routes {
+                let label = format!(
+                    "{} {}",
+                    rt.method.name.to_uppercase(),
+                    crate::wiring::route_pattern(&r.prefix, &rt.suffix)
+                );
+                let mut tables = crate::wiring::writes_in(&rt.body);
+                for f in crate::wiring::reachable_from(&bodies, &rt.body) {
+                    if let Some(b) = bodies.get(&f) {
+                        tables.extend(crate::wiring::writes_in(b));
+                    }
+                }
+                for (t, kind) in &tables {
+                    // A `delete` cannot violate the target's own unique or
+                    // check, so it does not count as reaching them.
+                    if *kind != crate::wiring::WriteKind::Delete {
+                        reached.entry(t.clone()).or_default().push(label.clone());
+                    }
+                }
+                per_route.push((label, tables.into_iter().collect()));
+            }
+        }
+    }
+    per_route.sort();
+
+    if constraints {
+        for (label, tables) in &per_route {
+            println!("\x1b[1m{label}\x1b[0m");
+            if tables.is_empty() {
+                println!("  (writes nothing — no constraint is reachable)");
+                continue;
+            }
+            let mut rows: Vec<String> = Vec::new();
+            for (path, kind) in tables {
+                rows.extend(constraint_rows(&built.model, &symbols, path, *kind));
+            }
+            rows.sort();
+            rows.dedup();
+            if rows.is_empty() {
+                println!("  (no constraint can be violated by what it writes)");
+            }
+            for line in rows {
+                println!("  {line}");
+            }
+        }
+        println!();
+    }
+
+    // W1302, once per constraint rather than once per route: the caret
+    // belongs on the schema line, and a handler that reaches it did nothing
+    // wrong (tooling.md §4.3.1).
+    let mut warnings = 0usize;
+    for t in &built.model.tables {
+        let routes: Vec<String> = symbols
+            .by_path
+            .iter()
+            .filter(|(_, name)| **name == t.declared)
+            .flat_map(|(p, _)| reached.get(p).cloned().unwrap_or_default())
+            .collect();
+        if routes.is_empty() {
+            continue;
+        }
+        let mut named: Vec<String> = routes;
+        named.sort();
+        named.dedup();
+        let note = format!("reached from: {}", named.join(", "));
+
+        let mut messageless: Vec<(&str, crate::workspace::Loc, &'static str)> = Vec::new();
+        for u in &t.uniques {
+            if u.message.is_none() {
+                messageless.push((&u.name, u.loc, "unique"));
+            }
+        }
+        for c in &t.checks {
+            if c.message.is_none() {
+                messageless.push((&c.name, c.loc, "check"));
+            }
+        }
+        for (name, loc, kind) in messageless {
+            warnings += 1;
+            let d = crate::diag::Diagnostic::warning(
+                "W1302",
+                loc.span,
+                format!("`{name}` carries no message, so violating it is a 500"),
+            )
+            .note(format!(
+                "{note}\nadd `: \"…\"` to make it a declared error \
+                 ({}); a pure invariant no request can violate is fine as it is",
+                if kind == "unique" {
+                    "Conflict, 409"
+                } else {
+                    "BadRequest, 400"
+                }
+            ))
+            .clause("errors.md §6.2");
+            eprint!("{}", ws.render(loc, &d));
+        }
+    }
+    let _ = &wired;
+
+    // errors.md §6.2 asks for the 500-producing set to be *enumerable*
+    // rather than discovered in production. A constraint on a table no route
+    // writes cannot produce a 500 through the API, so it is not a warning —
+    // but leaving it out of the count entirely would make the set look
+    // smaller than it is.
+    let unreachable: usize = built
+        .model
+        .tables
+        .iter()
+        .filter(|t| {
+            !symbols
+                .by_path
+                .iter()
+                .any(|(p, name)| **name == t.declared && reached.contains_key(p))
+        })
+        .map(|t| {
+            t.uniques.iter().filter(|u| u.message.is_none()).count()
+                + t.checks.iter().filter(|c| c.message.is_none()).count()
+        })
+        .sum();
+    if constraints && unreachable > 0 {
+        println!(
+            "{unreachable} more message-less constraint{} on tables no route writes — \
+             not warned, but they are 500s the day one does",
+            plural(unreachable)
+        );
+    }
+
+    println!(
+        "{} route{}, {warnings} warning{}",
+        per_route.len(),
+        plural(per_route.len()),
+        plural(warnings)
+    );
+    if deny_warnings && warnings > 0 {
+        bail!("{warnings} warning{} (--deny-warnings)", plural(warnings));
+    }
+    Ok(())
+}
+
+/// One line per constraint on a table, with the status its violation
+/// produces (errors.md §6).
+fn constraint_rows(
+    model: &crate::model::SchemaModel,
+    sym: &crate::symbols::Symbols,
+    path: &str,
+    kind: crate::wiring::WriteKind,
+) -> Vec<String> {
+    use crate::wiring::WriteKind;
+    let Some(declared) = sym.by_path.get(path) else {
+        return Vec::new();
+    };
+    let Some(t) = model.tables.iter().find(|t| &t.declared == declared) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let row = |name: &str, status: &str, what: String| format!("{name:<32} {status:<4} {what}");
+
+    if kind == WriteKind::Delete {
+        // A delete violates nothing on the row it removes. What it can trip
+        // is a foreign key **pointing at** that row from elsewhere — and
+        // only where the reference is not cascaded or nulled.
+        for other in &model.tables {
+            for f in &other.foreign_keys {
+                if f.target_schema != t.schema_physical || f.target_table != t.physical {
+                    continue;
+                }
+                if matches!(
+                    f.on_delete,
+                    Some(crate::ast::RefAction::Cascade) | Some(crate::ast::RefAction::SetNull)
+                ) {
+                    continue;
+                }
+                out.push(row(
+                    &f.name,
+                    "400",
+                    format!("{}.{} still references this row", other.schema, other.declared),
+                ));
+            }
+        }
+        return out;
+    }
+
+    for u in &t.uniques {
+        match &u.message {
+            // errors.md §6.1 — a unique is a conflict with existing state,
+            // not a malformed request.
+            Some(m) => out.push(row(&u.name, "409", format!("\"{m}\""))),
+            None => out.push(row(&u.name, "500", "(no message — a fault)".into())),
+        }
+    }
+    for c in &t.checks {
+        match &c.message {
+            Some(m) => out.push(row(&c.name, "400", format!("\"{m}\""))),
+            None => out.push(row(&c.name, "500", "(no message — a fault)".into())),
+        }
+    }
+    for f in &t.foreign_keys {
+        // errors.md §6.3 — always 400, with a fixed message. An FK carries
+        // no per-constraint message in 1.0 (DEFERRED-4).
+        out.push(row(&f.name, "400", "referenced row does not exist".into()));
+    }
+    out
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""

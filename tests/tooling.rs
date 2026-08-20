@@ -140,6 +140,84 @@ fn deny_warnings_is_the_ci_shape() {
     assert!(!denied.status.success(), "--deny-warnings did not deny");
 }
 
+#[test]
+fn lint_constraints_reports_the_status_each_violation_produces() {
+    let path = sample();
+    let path = path.to_str().expect("utf8");
+    let out = jwc(&["lint", path, "--constraints"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+
+    // errors.md §6.1 — a unique carrying a message is a Conflict, a check
+    // is a BadRequest, and a message-less one is a fault.
+    assert!(
+        text.contains("uq_accounts__email               409  \"bu email allaqachon ro'yxatdan o'tgan\""),
+        "{text}"
+    );
+    assert!(text.contains("500  (no message — a fault)"), "{text}");
+    // errors.md §6.3 — an FK is always 400, with a fixed message.
+    assert!(text.contains("400  referenced row does not exist"), "{text}");
+
+    // A `delete` can violate nothing on the row it removes. What it can
+    // trip is a foreign key pointing *at* that row, and only where the
+    // reference is not cascaded.
+    let deleting_an_org = section(&text, "DELETE /api/v1/orgs/{org_id}");
+    assert!(
+        deleting_an_org.contains("fk_invoices__org_id"),
+        "deleting an org with invoices is a 400: {deleting_an_org}"
+    );
+    assert!(
+        !deleting_an_org.contains("uq_orgs__slug"),
+        "a delete cannot violate a unique: {deleting_an_org}"
+    );
+
+    // A read-only route reaches nothing.
+    assert!(
+        section(&text, "GET /api/v1/plans").contains("writes nothing"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_message_less_constraint_a_route_can_reach_is_a_warning() {
+    let path = sample();
+    let path = path.to_str().expect("utf8");
+    let out = jwc(&["lint", path]);
+    let err = String::from_utf8_lossy(&out.stderr);
+
+    // Reported once per constraint, at the schema line, with the routes in
+    // the note (tooling.md §4.3.1) — not once per route, at a handler that
+    // did nothing wrong.
+    assert!(err.contains("W1302"), "{err}");
+    assert!(
+        err.contains("uq_invites__token_hash"),
+        "the sample's one reachable message-less unique: {err}"
+    );
+    assert_eq!(
+        err.matches("uq_invites__token_hash` carries no message").count(),
+        1,
+        "reported per route instead of per constraint"
+    );
+    assert!(err.contains("reached from:"), "{err}");
+
+    // Foreign keys are deliberately not warned about: errors §6.3 gives them
+    // a fixed 400 and no per-constraint message exists to add (DEFERRED-4).
+    assert!(!err.contains("W1302]: `fk_"), "{err}");
+
+    assert!(!jwc(&["lint", path, "--deny-warnings"]).status.success());
+}
+
+/// The lines under one route heading in `--constraints` output.
+fn section<'a>(text: &'a str, route: &str) -> &'a str {
+    let start = match text.find(&format!("{route}\u{1b}[0m")) {
+        Some(i) => i,
+        None => return "",
+    };
+    let rest = &text[start..];
+    let end = rest[1..].find("\u{1b}[1m").map(|i| i + 1).unwrap_or(rest.len());
+    &rest[..end]
+}
+
 /// `jwc explain` ends with `N queries`.
 fn count(text: &str) -> usize {
     text.lines()
