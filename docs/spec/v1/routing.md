@@ -57,9 +57,15 @@ routes "/api/v1/orgs/{org_id: bigint}/invoices"
 route  GET "{id: bigint}"
 ```
 
-`W0601` warns on an untyped `{name}` whose value is compared against a
-non-`text` column anywhere in the block — the sample's `{org_id}` fed into a
-`bigint` predicate is exactly that.
+An untyped `{name}` compared against a non-`text` column is `E0376`, not a
+warning: this language does not coerce, so the comparison has no meaning
+rather than a slow one. The error names the missing word — `{org_id: bigint}`
+— because "text and bigint cannot be compared" describes the symptom and
+not the fix.
+
+*(`W0601` was specified here for a design where the comparison was legal
+and merely slow. It is not, so the warning would only ever appear beside
+the error that already rejects the program.)*
 
 ### 3.2 Parsing happens before middleware
 
@@ -107,11 +113,18 @@ This is fixed precedence, not registration order — but it is also a trap, so:
 ### 4.3 Total shadowing is an error
 
 A route that can never match because another route shadows it entirely is
-`E0711`. `/orgs/{a}` declared after `/orgs/{b}` is `E0710` (same shape);
-`/orgs/{org_id}/x` under a `/orgs/{org_id}/{rest}` wildcard would be
-`E0711` — there is no wildcard segment in 1.0, so this fires only through
-`E0701` interactions today. The check exists because the failure is invisible
-at runtime.
+`E0711`. `/orgs/{a}` declared after `/orgs/{b}` is `E0710` (same shape).
+
+**`E0711` is unreachable in 1.0 and is not implemented.** Two things close
+it: there is no wildcard segment, so a route cannot swallow a longer path;
+and the router picks the candidate with the **most literal segments**
+rather than the first declared, so `/orgs/new` beats `/orgs/{id}` whichever
+order they appear in. A shadowing check would be dead code, and dead checks
+are read as coverage.
+
+The specificity rule is what makes that true, so it is pinned by a test
+rather than left as a property of the current implementation. `E0711` stays
+reserved: a wildcard segment would bring it back.
 
 ### 4.4 Trailing slash
 
@@ -260,7 +273,6 @@ against which `E0710`/`E0711` are read.
 | `E0731` | route path does not end in a response |
 | `E0732` | route returns a non-`Response` |
 | `E0900` | removed keyword (§11 below) |
-| `W0601` | untyped path parameter used as a non-text value |
 | `W0602` | `request.path()` in a rate-limit key |
 
 ---

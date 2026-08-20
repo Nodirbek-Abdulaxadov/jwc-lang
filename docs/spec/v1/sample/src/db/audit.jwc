@@ -1,6 +1,8 @@
 namespace db.audit;
 
 import app;
+import db.auth;
+import db.org;
 
 --- Append-only. Every FK is `on delete set null` so a deleted org never
 --- blocks the log, and every column that could be missing is nullable —

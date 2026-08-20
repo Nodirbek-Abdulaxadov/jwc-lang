@@ -25,6 +25,14 @@ table Members of App.s {
     foreign key (org_id) references App.s.Orgs (id) on delete cascade;
 }
 
+--- An account with a stored password digest, for the hash rules
+--- (builtins.md §6).
+table Accounts of App.s {
+    id            bigint primary key identity;
+    email         varchar(255) unique;
+    password_hash varchar(255) private;
+}
+
 table Notes of App.s {
     id      bigint primary key identity;
     org_id  bigint;

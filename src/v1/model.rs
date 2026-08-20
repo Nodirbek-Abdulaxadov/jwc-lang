@@ -284,6 +284,7 @@ impl<'a> Builder<'a> {
                 };
                 match d {
                     Decl::Database(db) => {
+                        self.check_init_keys(db, loc);
                         if self.model.database.is_some() {
                             self.err_note(
                                 loc,
@@ -674,6 +675,7 @@ impl<'a> Builder<'a> {
                     span,
                 } => {
                     let cloc = Loc { file: loc.file, span: *span };
+                    self.check_functions(expr, cloc);
                     let sql = self.canonical_predicate(expr, &columns);
                     let mentioned = mentioned_columns(expr, &columns);
                     // The ordinal counts table-form checks only. Counting
@@ -944,6 +946,100 @@ impl<'a> Builder<'a> {
     /// its physical literal, and `AND`/`OR` operands are sorted by their own
     /// canonical text — so `a and b` and `b and a` produce the same index
     /// name and therefore no spurious migration.
+    /// config.md §2.4 — an unknown `init()` key.
+    ///
+    /// A typo here is silent otherwise: the pool takes its default and the
+    /// deployment runs with settings nobody chose, which shows up as
+    /// latency rather than as an error.
+    fn check_init_keys(&mut self, db: &DatabaseDecl, loc: Loc) {
+        const KEYS: [&str; 7] = [
+            "pool_size",
+            "pool_timeout",
+            "statement_timeout",
+            "connect_timeout",
+            "tls",
+            "tls_root_cert",
+            "application_name",
+        ];
+        // config.md §2.3 — `init()` runs before any connection is opened,
+        // so a query there is circular and I/O is a surprise at boot.
+        const ALLOWED: [&str; 6] = ["env", "int", "bigint", "boolean", "text", "numeric"];
+        for a in &db.init {
+            let mut calls = Vec::new();
+            init_calls(&a.value, &mut calls);
+            for (name, span) in calls {
+                if !ALLOWED.contains(&name.as_str()) {
+                    self.err_note(
+                        Loc {
+                            file: loc.file,
+                            span,
+                        },
+                        "E1201",
+                        format!("`{name}(...)` inside `init()`"),
+                        "`init()` runs before any connection is opened; it may call \
+                         `env()` and the coercions and nothing else",
+                        "config.md §2.3",
+                    );
+                }
+            }
+            if !KEYS.contains(&a.key.name.as_str()) {
+                self.err_note(
+                    Loc {
+                        file: loc.file,
+                        span: a.key.span,
+                    },
+                    "E1202",
+                    format!("unknown `init()` key `{}`", a.key.name),
+                    format!("the keys are: {}", KEYS.join(", ")),
+                    "config.md §2.4",
+                );
+            }
+        }
+    }
+
+    /// schema.md §4.4 — a `check` may call only the canonical set.
+    ///
+    /// The constraint is stored in the database and re-evaluated on every
+    /// write forever. A call to anything else is either not there at all
+    /// (the DDL fails to apply, which is the good case) or is a
+    /// user-defined function whose definition the schema does not carry —
+    /// so the table cannot be recreated from this source.
+    fn check_functions(&mut self, e: &Expr, loc: Loc) {
+        const CANONICAL: [&str; 4] = ["char_length", "lower", "upper", "coalesce"];
+        match &*e.kind {
+            ExprKind::Call { callee, args, .. } => {
+                if let ExprKind::Name(n) = &*callee.kind {
+                    if !CANONICAL.contains(&n.name.as_str()) {
+                        self.err_note(
+                            loc,
+                            "E0424",
+                            format!("`{}(...)` is not allowed in a `check`", n.name),
+                            "a check is stored in the database and re-evaluated on every \
+                             write; only `char_length`, `lower`, `upper`, `coalesce` and \
+                             the `~` operator are portable enough to live there",
+                            "schema.md §4.4",
+                        );
+                    }
+                }
+                for a in args {
+                    self.check_functions(a, loc);
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Coalesce { lhs, rhs } => {
+                self.check_functions(lhs, loc);
+                self.check_functions(rhs, loc);
+            }
+            ExprKind::Unary { rhs, .. } => self.check_functions(rhs, loc),
+            ExprKind::In { lhs, items, .. } => {
+                self.check_functions(lhs, loc);
+                for i in items {
+                    self.check_functions(i, loc);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn canonical_predicate(&self, e: &Expr, columns: &[ColumnObj]) -> String {
         canonical_expr(e, columns, &self.enums)
     }
@@ -1263,3 +1359,34 @@ pub fn canonical_expr(
 /// Convenience for callers that have no column table (migration snapshots
 /// re-canonicalise stored text).
 pub fn canonical_span(_s: Span) {}
+
+/// Every call in an `init()` value.
+fn init_calls(e: &Expr, out: &mut Vec<(String, super::token::Span)>) {
+    match &*e.kind {
+        ExprKind::Call { callee, args, .. } => {
+            match &*callee.kind {
+                ExprKind::Name(n) => out.push((n.name.clone(), e.span)),
+                // `hash.password(...)`, `redis.get(...)` — anything with a
+                // namespace is out by construction.
+                ExprKind::Field { base, field } => {
+                    if let ExprKind::Name(b) = &*base.kind {
+                        out.push((format!("{}.{}", b.name, field.name), e.span));
+                    }
+                }
+                _ => {}
+            }
+            for a in args {
+                init_calls(a, out);
+            }
+        }
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Coalesce { lhs, rhs } => {
+            init_calls(lhs, out);
+            init_calls(rhs, out);
+        }
+        ExprKind::Unary { rhs, .. } => init_calls(rhs, out),
+        ExprKind::Select(_) | ExprKind::Insert(_) | ExprKind::Update(_) | ExprKind::Delete(_) => {
+            out.push(("a query".into(), e.span))
+        }
+        _ => {}
+    }
+}

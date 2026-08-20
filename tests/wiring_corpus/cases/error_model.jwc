@@ -1,5 +1,7 @@
 namespace error_model;
 
+import prelude;
+
 -- E7 (middleware.md §5.5) — an `after` block's raise set must be empty.
 -- There is no handler left once the response is decided.
 middleware BadAudit {

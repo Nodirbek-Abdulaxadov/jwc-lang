@@ -18,6 +18,7 @@ pub mod exec;
 mod exec_call;
 pub mod diag;
 pub mod fmt;
+pub mod imports;
 pub mod lexer;
 pub mod model;
 pub mod naming;

@@ -611,6 +611,97 @@ impl<'a> Wiring<'a> {
             }
         }
 
+        // errors.md §3.3 — a declared `raises` is a public contract, so it
+        // must cover what the function can actually raise. A declaration
+        // that is short is worse than none: a caller reads it and handles
+        // less than arrives.
+        for (fi, file) in self.ws.files.iter().enumerate() {
+            for d in &file.program.decls {
+                let functions: Vec<(String, &FunctionDecl)> = match d {
+                    Decl::Function(f) => vec![(f.name.name.clone(), f)],
+                    Decl::Service(sv) => sv
+                        .functions
+                        .iter()
+                        .map(|f| (format!("{}.{}", sv.name.name, f.name.name), f))
+                        .collect(),
+                    _ => continue,
+                };
+                for (key, f) in functions {
+                    if f.raises.is_empty() {
+                        continue;
+                    }
+                    let declared: BTreeSet<String> =
+                        f.raises.iter().map(|i| i.name.clone()).collect();
+                    let inferred = sets.get(&key).cloned().unwrap_or_default();
+                    let missing: Vec<String> =
+                        inferred.difference(&declared).cloned().collect();
+                    if !missing.is_empty() {
+                        self.err(
+                            Loc {
+                                file: fi,
+                                span: f.span,
+                            },
+                            "E1002",
+                            format!(
+                                "`{key}` raises `{}`, which its `raises` does not declare",
+                                missing.join("`, `")
+                            ),
+                            "a declared raise set is a public contract: a caller reads it \
+                             and handles exactly what it names",
+                            "errors.md §3.3",
+                        );
+                    }
+                }
+            }
+        }
+
+        // errors.md §4.1 — exactly one `errorHandler` per program. Two
+        // would make which one answers depend on file order.
+        let mut handlers: Vec<Loc> = Vec::new();
+        for (fi, file) in self.ws.files.iter().enumerate() {
+            for d in &file.program.decls {
+                if let Decl::ErrorHandler(h) = d {
+                    handlers.push(Loc {
+                        file: fi,
+                        span: h.span,
+                    });
+                }
+            }
+        }
+        // config.md §3 — one `server` block, for the same reason.
+        let mut servers: Vec<Loc> = Vec::new();
+        for (fi, file) in self.ws.files.iter().enumerate() {
+            for d in &file.program.decls {
+                if let Decl::Server(sv) = d {
+                    servers.push(Loc {
+                        file: fi,
+                        span: sv.span,
+                    });
+                }
+            }
+        }
+        for loc in servers.iter().skip(1) {
+            self.err(
+                *loc,
+                "E1204",
+                "a second `server` block",
+                "one per program: with two, which settings apply depends on the order \
+                 the files happened to load in",
+                "config.md §3",
+            );
+        }
+
+        for loc in handlers.iter().skip(1) {
+            self.err(
+                *loc,
+                "E1010",
+                "a second `errorHandler`",
+                "exactly one per program: with two, which one answers depends on the \
+                 order the files happened to load in",
+                "errors.md §4.1",
+            );
+        }
+
         for (fi, file) in self.ws.files.iter().enumerate() {
             for d in &file.program.decls {
                 let Decl::ErrorHandler(h) = d else { continue };

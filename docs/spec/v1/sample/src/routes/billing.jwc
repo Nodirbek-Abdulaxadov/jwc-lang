@@ -1,6 +1,5 @@
 namespace routes.billing;
 
-import db.billing;
 import dto.billing;
 import middleware.audit;
 import middleware.auth;

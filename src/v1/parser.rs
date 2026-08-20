@@ -232,6 +232,21 @@ impl Parser {
                 self.bump();
             }
         }
+        // names.md §3 — a `---` at the end of the file documents nothing.
+        // `fmt` has nowhere to put it, so the text is dropped: the author
+        // wrote documentation the program will never carry.
+        let trailing = self.attached();
+        if !trailing.docs.is_empty() {
+            let span = self.peek().span;
+            self.diags.push(
+                Diagnostic::error("E0104", span, "this doc comment documents nothing")
+                    .note(
+                        "a `---` comment attaches to the declaration below it; there is \
+                         none here, so the text would be dropped",
+                    )
+                    .clause("names.md §3"),
+            );
+        }
         Program { decls }
     }
 

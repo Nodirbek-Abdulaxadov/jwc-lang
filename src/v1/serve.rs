@@ -657,3 +657,86 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod route_matching {
+    use super::*;
+    use crate::v1::exec::ServerConfig;
+
+    fn route(method: &str, pattern: &str) -> ResolvedRoute {
+        ResolvedRoute {
+            method: method.to_string(),
+            pattern: pattern.to_string(),
+            segments: super::super::wiring::parse_path(pattern),
+            params: Vec::new(),
+            chain: Vec::new(),
+            after: Vec::new(),
+            loc: crate::v1::workspace::Loc {
+                file: 0,
+                span: crate::v1::token::Span { start: 0, end: 0 },
+            },
+        }
+    }
+
+    fn program(routes: Vec<ResolvedRoute>) -> Program {
+        Program {
+            model: crate::v1::model::SchemaModel {
+                database: None,
+                schemas: Vec::new(),
+                enums: Vec::new(),
+                tables: Vec::new(),
+                views: Vec::new(),
+                scheme: crate::v1::naming::SCHEME_VERSION,
+            },
+            symbols: Default::default(),
+            routes,
+            functions: HashMap::new(),
+            middleware: HashMap::new(),
+            route_bodies: HashMap::new(),
+            error_handler: None,
+            errors: HashMap::new(),
+            server: ServerConfig::default(),
+        }
+    }
+
+    /// routing.md §4.3 — the rule that makes `E0711` unreachable.
+    ///
+    /// A literal is never shadowed by a parameter, **in either declaration
+    /// order**, because the router scores candidates by how many literal
+    /// segments they match. If this ever becomes first-match-wins, a
+    /// shadowing check has to come back.
+    #[test]
+    fn a_literal_beats_a_parameter_in_either_order() {
+        for routes in [
+            vec![route("GET", "/orgs/new"), route("GET", "/orgs/{id}")],
+            vec![route("GET", "/orgs/{id}"), route("GET", "/orgs/new")],
+        ] {
+            let p = program(routes);
+            let (r, binds) = match_route(&p, "GET", "/orgs/new").expect("a match");
+            assert_eq!(r.pattern, "/orgs/new", "the literal must win");
+            assert!(binds.is_empty());
+
+            let (r, binds) = match_route(&p, "GET", "/orgs/7").expect("a match");
+            assert_eq!(r.pattern, "/orgs/{id}");
+            assert_eq!(binds, vec![("id".to_string(), "7".to_string())]);
+        }
+    }
+
+    #[test]
+    fn a_longer_literal_prefix_wins() {
+        let p = program(vec![
+            route("GET", "/orgs/{id}/members"),
+            route("GET", "/orgs/{id}/{rest}"),
+        ]);
+        let (r, _) = match_route(&p, "GET", "/orgs/7/members").expect("a match");
+        assert_eq!(r.pattern, "/orgs/{id}/members");
+    }
+
+    #[test]
+    fn the_method_is_part_of_the_match() {
+        let p = program(vec![route("GET", "/orgs"), route("POST", "/orgs")]);
+        assert_eq!(match_route(&p, "POST", "/orgs").unwrap().0.pattern, "/orgs");
+        assert_eq!(match_route(&p, "POST", "/orgs").unwrap().0.method, "POST");
+        assert!(match_route(&p, "PUT", "/orgs").is_none());
+    }
+}

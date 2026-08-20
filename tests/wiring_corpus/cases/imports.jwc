@@ -1,0 +1,30 @@
+namespace imports_case;
+
+-- names.md §6.2–§6.3 — `import` does not restrict visibility; the
+-- declaration space is flat. It is checked anyway, because an import list
+-- nobody checks drifts into fiction, and a fictional dependency graph is
+-- worse than none: people read it.
+import prelude;
+import nope.missing;                   -- expect: E0201
+import unused.namespace;               -- expect: E0201
+
+service Uses {
+    -- `Notes` lives in `prelude`, which is imported above.
+    function all() {
+        return select N from App.s.Notes
+            as { id }
+            orderby id asc;
+    }
+}
+
+-- names.md §3 — a convention nobody checks is one half the files follow,
+-- and then the reader can no longer tell a `class` from a column.
+table lowercase_table of App.s {       -- expect: W0101
+    id bigint primary key identity;
+}
+
+class Snake_Cased {                    -- expect: W0101
+    body text required;
+}
+
+schema BadSchema of App;               -- expect: W0101

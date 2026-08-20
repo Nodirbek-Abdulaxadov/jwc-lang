@@ -32,6 +32,11 @@ pub fn check(ws: &Workspace, sym: &Symbols, model: &super::model::SchemaModel) -
         query: Vec::new(),
         scoped_to: None,
         tainted: HashSet::new(),
+        path_keyed: HashSet::new(),
+        saw_request_path: false,
+        password_hashed: HashSet::new(),
+        saw_password_hash: false,
+        untyped_params: HashSet::new(),
         saw_private: false,
         body: BodyKind::Free,
         current_fn: None,
@@ -86,6 +91,14 @@ struct Checker<'a> {
     /// Locals holding a value projected from a `private` column. Legal to
     /// read in code, never legal in a response (schema.md §3.1).
     tainted: HashSet<String>,
+    /// Locals whose value came from `request.path()`, for W0602.
+    path_keyed: HashSet<String>,
+    saw_request_path: bool,
+    /// Locals holding a `hash.password(...)` result, for W1201.
+    password_hashed: HashSet<String>,
+    saw_password_hash: bool,
+    /// Path parameters this `routes` block declared with no type.
+    untyped_params: HashSet<String>,
     /// Set while checking a projection; records that it named a private
     /// column.
     saw_private: bool,
@@ -211,6 +224,7 @@ impl<'a> Checker<'a> {
             Decl::ErrorHandler(h) => self.error_handler(h),
             Decl::Test(t) => {
                 self.body = BodyKind::Test;
+                self.enter_body();
                 self.push_scope();
                 self.block(&t.body);
                 self.pop_scope();
@@ -294,6 +308,7 @@ impl<'a> Checker<'a> {
 
     fn middleware(&mut self, m: &MiddlewareDecl) {
         self.body = BodyKind::Middleware;
+        self.enter_body();
         self.params.clear();
         for b in &m.binders {
             let ty = self.resolve_type(&b.ty);
@@ -305,6 +320,7 @@ impl<'a> Checker<'a> {
 
         if let Some(after) = &m.after {
             self.body = BodyKind::After;
+            self.enter_body();
             self.push_scope();
             self.block(after);
             self.pop_scope();
@@ -317,13 +333,40 @@ impl<'a> Checker<'a> {
         let prefix_params = path_params(&r.prefix);
         for route in &r.routes {
             self.body = BodyKind::Route;
+            self.enter_body();
             self.params.clear();
+            self.untyped_params = untyped_path_params(&r.prefix)
+                .into_iter()
+                .chain(untyped_path_params(&route.suffix))
+                .collect();
             for (name, ty) in prefix_params.iter().chain(path_params(&route.suffix).iter()) {
                 self.params.insert(name.clone(), ty.clone());
             }
             self.push_scope();
             self.block(&route.body);
             self.pop_scope();
+            self.untyped_params.clear();
+            // routing.md §6.4 — every path ends in a response. A body that
+            // can fall off the end has no answer to send, and the runtime's
+            // only recourse is a 204 nobody asked for.
+            if !diverges(&route.body) {
+                self.err_note(
+                    route.span,
+                    "E0731",
+                    format!(
+                        "`{} {}` has a path that does not return a response",
+                        route.method.name.to_uppercase(),
+                        super::wiring::render(&super::wiring::parse_path(&format!(
+                            "{}/{}",
+                            r.prefix.trim_end_matches('/'),
+                            route.suffix.trim_start_matches('/')
+                        )))
+                    ),
+                    "every path through a route body ends in `return <response>` or \
+                     `throw`",
+                    "routing.md §6.4",
+                );
+            }
         }
         self.params.clear();
         self.body = BodyKind::Free;
@@ -332,6 +375,7 @@ impl<'a> Checker<'a> {
     fn error_handler(&mut self, h: &ErrorHandlerDecl) {
         for arm in &h.arms {
             self.body = BodyKind::ErrorHandler;
+            self.enter_body();
             self.push_scope();
             let ty = match &arm.error {
                 Some(name) => match self.sym.errors.get(&name.name) {
@@ -362,6 +406,7 @@ impl<'a> Checker<'a> {
     /// carry a per-query clause.
     fn view(&mut self, v: &ViewDecl) {
         self.body = BodyKind::View;
+        self.enter_body();
         if v.body.projection.is_none() {
             self.err_note(
                 v.span,
@@ -414,16 +459,34 @@ impl<'a> Checker<'a> {
         self.pop_scope();
     }
 
+    /// A body's taint sets are its own. A local named `key` in one
+    /// middleware is not the `key` in the next, and carrying the set over
+    /// made the second one inherit the first one's answer.
+    fn enter_body(&mut self) {
+        self.tainted.clear();
+        self.path_keyed.clear();
+        self.password_hashed.clear();
+    }
+
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let {
                 name, ty, value, ..
             } => {
                 self.saw_private = false;
+                self.saw_request_path = false;
                 let got = self.expr(value);
                 if self.saw_private {
                     self.tainted.insert(name.name.clone());
                     self.saw_private = false;
+                }
+                if self.saw_request_path {
+                    self.path_keyed.insert(name.name.clone());
+                    self.saw_request_path = false;
+                }
+                if self.saw_password_hash {
+                    self.password_hashed.insert(name.name.clone());
+                    self.saw_password_hash = false;
                 }
                 if let Some(ann) = ty {
                     let want = self.resolve_type(ann);
@@ -569,6 +632,38 @@ impl<'a> Checker<'a> {
                          ends the block",
                         "middleware.md §5.3",
                     );
+                }
+                // routing.md §6.4 — `return $account;` is the mistake; the
+                // fix is `return json($account);`. Void is left to E0731,
+                // which is about the path not ending in a response at all.
+                if self.body == BodyKind::Route
+                    && value.is_some()
+                    && !matches!(ty, Ty::Response | Ty::Unknown | Ty::Void)
+                {
+                    self.err_note(
+                        *span,
+                        "E0732",
+                        format!("a route returned `{ty}`, not a response"),
+                        "wrap it: `return json(...)`, `created(...)`, `noContent()`",
+                        "routing.md §6.4",
+                    );
+                }
+                // middleware.md §5.2 — `return` from a middleware is for
+                // deliberately non-error responses: a redirect, a 304, a
+                // 202. An error that is returned rather than thrown skips
+                // the error handler, so it answers with a different body
+                // than every other error in the program.
+                if self.body == BodyKind::Middleware {
+                    if let Some(v) = value {
+                        if let Some(name) = error_builder(v) {
+                            self.warn(
+                                *span,
+                                "W0801",
+                                format!("a middleware returned `{name}(...)` instead of throwing"),
+                                "middleware.md §5.2",
+                            );
+                        }
+                    }
                 }
                 if self.body == BodyKind::Service && matches!(ty, Ty::Response) {
                     self.err_note(
@@ -724,7 +819,25 @@ impl<'a> Checker<'a> {
 
     fn expr(&mut self, e: &Expr) -> Ty {
         match &*e.kind {
-            ExprKind::Int(_) => Ty::int(),
+            // types.md §2.2 — `int` if it fits, else `bigint`. Past
+            // `bigint` there is no type to give it: Postgres has none, so
+            // the literal cannot round-trip and the program is wrong here
+            // rather than at the first write.
+            ExprKind::Int(n) => match n.parse::<i64>() {
+                Ok(v) if i32::try_from(v).is_ok() => Ty::int(),
+                Ok(_) => Ty::bigint(),
+                Err(_) => {
+                    self.err_note(
+                        e.span,
+                        "E0107",
+                        format!("`{n}` is out of `bigint` range"),
+                        "the widest integer is bigint: -9223372036854775808 … \
+                         9223372036854775807",
+                        "types.md §2.2",
+                    );
+                    Ty::bigint()
+                }
+            },
             ExprKind::Decimal(_) => Ty::numeric(),
             ExprKind::Str(_) | ExprKind::RawStr(_) => Ty::text(),
             ExprKind::Bool(_) => Ty::boolean(),
@@ -1349,13 +1462,44 @@ impl<'a> Checker<'a> {
                         "queries.md §3.2",
                     );
                 }
-                if !comparable(&a, &b) {
-                    self.err(
+                // builtins.md §6 — `hash.password` salts, so two calls on
+                // the same input differ. A `*_hash` column compared to one
+                // can never match: the login silently rejects everybody,
+                // and the test that would catch it is the one nobody
+                // writes because the code reads correctly.
+                if let Some(col) = self.hash_column_compared_to_a_new_hash(lhs, rhs) {
+                    self.warn(
                         span,
-                        "E0376",
-                        format!("`{a}` and `{b}` cannot be compared"),
-                        "types.md §12.6",
+                        "W1201",
+                        format!(
+                            "`{col}` compared against a fresh `hash.password(...)`, which \
+                             can never match"
+                        ),
+                        "builtins.md §6",
                     );
+                }
+                if !comparable(&a, &b) {
+                    match self.untyped_operand(lhs, rhs) {
+                        // routing.md §3.1 — the type is missing from the
+                        // path, and that is a more useful thing to say
+                        // than "text and bigint do not compare".
+                        Some(name) => self.err_note(
+                            span,
+                            "E0376",
+                            format!("`{a}` and `{b}` cannot be compared"),
+                            format!(
+                                "`@{name}` has no type in the path, so it is text: write \
+                                 `{{{name}: <type>}}`"
+                            ),
+                            "routing.md §3.1",
+                        ),
+                        None => self.err(
+                            span,
+                            "E0376",
+                            format!("`{a}` and `{b}` cannot be compared"),
+                            "types.md §12.6",
+                        ),
+                    }
                 }
                 Ty::boolean()
             }
@@ -1907,6 +2051,7 @@ impl<'a> Checker<'a> {
             // --- hash / jwt / crypto (builtins.md §6)
             "hash.password" => {
                 arity(self, 1);
+                self.saw_password_hash = true;
                 Ty::text()
             }
             "hash.verify" | "hash.hmac_verify" => Ty::boolean(),
@@ -1949,7 +2094,12 @@ impl<'a> Checker<'a> {
                 arity(self, 1);
                 Ty::text().array()
             }
-            "request.method" | "request.path" | "request.route" | "request.id" => {
+            "request.path" => {
+                arity(self, 0);
+                self.saw_request_path = true;
+                Ty::text()
+            }
+            "request.method" | "request.route" | "request.id" => {
                 arity(self, 0);
                 Ty::text()
             }
@@ -2023,6 +2173,21 @@ impl<'a> Checker<'a> {
             }
             "redis.rate_limit" => {
                 arity(self, 3);
+                // routing.md §5.4 — `request.route()` exists so a rate-limit
+                // key has bounded cardinality. `request.path()` gives every
+                // id its own bucket, so a caller walking ids is never
+                // limited and the store fills with one-hit keys: a
+                // self-DoS with the rate limiter switched on.
+                if let Some(k) = exprs.first() {
+                    if self.reads_request_path(k) {
+                        self.warn(
+                            k.span,
+                            "W0602",
+                            "a rate-limit key built from `request.path()`",
+                            "routing.md §5.4",
+                        );
+                    }
+                }
                 Ty::boolean()
             }
             "redis.enabled" => {
@@ -2786,6 +2951,10 @@ impl<'a> Checker<'a> {
         });
         self.query.pop();
 
+        if let Some(c) = &i.conflict {
+            self.check_conflict_target(c, &object);
+        }
+
         match shape {
             Some(f) => {
                 let rec = Ty::Record(f);
@@ -2797,6 +2966,110 @@ impl<'a> Checker<'a> {
             }
             None => Ty::Void,
         }
+    }
+
+    /// A `*_hash` column on one side and a fresh password hash on the
+    /// other.
+    fn hash_column_compared_to_a_new_hash(&self, lhs: &Expr, rhs: &Expr) -> Option<String> {
+        let hash_name = |e: &Expr| -> Option<String> {
+            let name = match &*e.kind {
+                ExprKind::Name(n) => n.name.clone(),
+                ExprKind::Field { field, .. } => field.name.clone(),
+                _ => return None,
+            };
+            name.ends_with("_hash").then_some(name)
+        };
+        let fresh = |e: &Expr| -> bool {
+            match &*e.kind {
+                ExprKind::Local(n) => self.password_hashed.contains(&n.name),
+                ExprKind::Call { callee, .. } => {
+                    matches!(&*callee.kind, ExprKind::Field { base, field }
+                        if field.name == "password"
+                            && matches!(&*base.kind, ExprKind::Name(b) if b.name == "hash"))
+                }
+                _ => false,
+            }
+        };
+        match (hash_name(lhs), fresh(rhs), hash_name(rhs), fresh(lhs)) {
+            (Some(c), true, _, _) | (_, _, Some(c), true) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The name of an untyped path parameter on either side of a
+    /// comparison, if there is one.
+    fn untyped_operand(&self, lhs: &Expr, rhs: &Expr) -> Option<String> {
+        [lhs, rhs].into_iter().find_map(|e| match &*e.kind {
+            ExprKind::PathParam(n) if self.untyped_params.contains(&n.name) => {
+                Some(n.name.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// True when an expression reaches `request.path()`, directly or
+    /// through a local it was assigned to.
+    fn reads_request_path(&self, e: &Expr) -> bool {
+        match &*e.kind {
+            ExprKind::Local(n) => self.path_keyed.contains(&n.name),
+            ExprKind::Call { callee, .. } => {
+                matches!(&*callee.kind, ExprKind::Field { base, field }
+                    if field.name == "path"
+                        && matches!(&*base.kind, ExprKind::Name(b) if b.name == "request"))
+            }
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Coalesce { lhs, rhs } => {
+                self.reads_request_path(lhs) || self.reads_request_path(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    /// writes.md §2.4–§2.5 — `on conflict`'s target must be a real unique
+    /// constraint.
+    ///
+    /// Postgres rejects a target it cannot match to an index, so this is a
+    /// runtime 500 otherwise — on the concurrent path, which is the one
+    /// that is hardest to reach in testing and the reason `on conflict` is
+    /// there at all.
+    fn check_conflict_target(&mut self, c: &ConflictClause, object: &str) {
+        let Some(t) = self.sym.tables.get(object) else {
+            return;
+        };
+        if c.columns.is_empty() {
+            // §2.5 — omitting the list is legal only when there is exactly
+            // one unique constraint to mean.
+            let total = t.unique_sets.len() + t.partial_uniques.len();
+            if total != 1 {
+                self.err_note(
+                    c.span,
+                    "E0604",
+                    format!(
+                        "`on conflict` with no columns on a table with {total} unique \
+                         constraint(s)"
+                    ),
+                    "name the columns: `on conflict (provider_ref) …`",
+                    "writes.md §2.5",
+                );
+            }
+            return;
+        }
+        let want: Vec<String> = c.columns.iter().map(|i| i.name.clone()).collect();
+        let matches = |set: &Vec<String>| {
+            set.len() == want.len() && set.iter().all(|c| want.contains(c))
+        };
+        if t.unique_sets.iter().any(matches)
+            || t.partial_uniques.iter().any(|(cols, _)| matches(cols))
+        {
+            return;
+        }
+        self.err_note(
+            c.span,
+            "E0603",
+            format!("`({})` is not a unique constraint on `{object}`", want.join(", ")),
+            "`on conflict` needs an index to match against: declare \
+             `unique (…)` on exactly these columns",
+            "writes.md §2.4",
+        );
     }
 
     fn update(&mut self, u: &UpdateExpr, span: Span) -> Ty {
@@ -3275,6 +3548,30 @@ fn collection_field(s: &SelectExpr, name: &str) -> bool {
     })
 }
 
+/// The response builders that carry a 4xx/5xx status.
+///
+/// `statusCode(n, …)` is included when `n` is a literal in that range —
+/// a computed status is the author saying they know what they are doing.
+fn error_builder(e: &Expr) -> Option<String> {
+    let ExprKind::Call { callee, args, .. } = &*e.kind else {
+        return None;
+    };
+    let ExprKind::Name(n) = &*callee.kind else {
+        return None;
+    };
+    match n.name.as_str() {
+        "badRequest" | "unauthorized" | "forbidden" | "notFound" | "conflict"
+        | "tooManyRequests" | "internalError" => Some(n.name.clone()),
+        "statusCode" => match args.first().map(|a| &*a.kind) {
+            Some(ExprKind::Int(v)) if v.parse::<u16>().is_ok_and(|s| s >= 400) => {
+                Some(format!("statusCode({v}"))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn is_aggregate(name: &str) -> bool {
     matches!(name, "count" | "sum" | "min" | "max" | "avg")
 }
@@ -3395,6 +3692,23 @@ fn diverges(b: &Block) -> bool {
 
 /// Path parameters declared in a `routes` prefix or `route` suffix
 /// (routing.md §3.1).
+/// The `{name}` slots written with no `: type`.
+fn untyped_path_params(path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        let inner = &rest[open + 1..open + close];
+        if !inner.contains(':') {
+            out.push(inner.trim().to_string());
+        }
+        rest = &rest[open + close + 1..];
+    }
+    out
+}
+
 fn path_params(path: &str) -> Vec<(String, Ty)> {
     let mut out = Vec::new();
     let mut rest = path;

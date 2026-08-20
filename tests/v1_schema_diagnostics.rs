@@ -356,3 +356,78 @@ fn editing_a_constraint_message_changes_no_ddl() {
 
     assert_eq!(sql(&a), sql(&b));
 }
+
+#[test]
+fn e1202_unknown_init_key() {
+    // config.md §2.4 — a typo is silent otherwise: the pool takes its
+    // default and the deployment runs with settings nobody chose, which
+    // shows up as latency rather than as an error.
+    expect(
+        "database App : Postgres {\n  init() {\n    pool_size = 20;\n    \
+         poool_size = 30;\n  }\n}\nschema s of App;",
+        "E1202",
+        "poool_size",
+    );
+}
+
+#[test]
+fn a_known_init_key_is_accepted() {
+    let diags = diagnose(
+        "database App : Postgres {\n  init() {\n    pool_size = 20;\n    \
+         statement_timeout = \"10s\";\n    tls = false;\n  }\n}\nschema s of App;",
+    );
+    assert!(
+        !diags.iter().any(|(c, _, _)| c == "E1202"),
+        "the documented keys must be accepted: {diags:?}"
+    );
+}
+
+#[test]
+fn e0424_a_function_a_check_may_not_call() {
+    // schema.md §4.4 — a check is stored in the database and re-evaluated
+    // on every write, so it may only call what is portable enough to live
+    // there.
+    expect(
+        &with("table T of App.s { id bigint primary key identity; a text;\n\
+               check (md5(a) != \"\") : \"nope\"; }"),
+        "E0424",
+        "char_length",
+    );
+}
+
+#[test]
+fn the_canonical_check_functions_are_accepted() {
+    let diags = diagnose(&with(
+        "table T of App.s { id bigint primary key identity; a text;\n\
+         check (char_length(lower(a)) > 2) : \"qisqa\"; }",
+    ));
+    assert!(
+        !diags.iter().any(|(c, _, _)| c == "E0424"),
+        "the canonical set must be accepted: {diags:?}"
+    );
+}
+
+#[test]
+fn e1201_io_inside_init() {
+    // config.md §2.3 — `init()` runs before any connection is opened, so a
+    // query there is circular and I/O is a surprise at boot.
+    expect(
+        "database App : Postgres {\n  init() {\n    \
+         application_name = http.get(\"http://config\");\n  }\n}\nschema s of App;",
+        "E1201",
+        "before any connection",
+    );
+}
+
+#[test]
+fn env_and_the_coercions_are_allowed_in_init() {
+    let diags = diagnose(
+        "database App : Postgres {\n  init() {\n    \
+         pool_size = int(env(\"DB_POOL\") ?? \"20\");\n    \
+         tls = env(\"DB_TLS\") == \"1\";\n  }\n}\nschema s of App;",
+    );
+    assert!(
+        !diags.iter().any(|(c, _, _)| c == "E1201"),
+        "`env()` and the coercions are what `init()` is for: {diags:?}"
+    );
+}

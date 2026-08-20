@@ -457,7 +457,10 @@ If every field of the spread source is absent:
 
 ### 10.1 Parameters
 
-Service and free-function parameters **must** be annotated (`E0350`). This
+Service and free-function parameters **must** be annotated. The grammar
+requires it, so a missing annotation does not parse and the parser's error
+arrives first, naming the missing token; `E0350` stays reserved rather than
+implemented as an unreachable check (names §6.4.3). This
 is what makes cross-file checking possible at all (#31).
 
 ### 10.2 Returns
@@ -627,7 +630,6 @@ how you test nullity and is always allowed.
 | `E0341` | `except` names a field that does not exist |
 | `E0342` | class field names a `private`/`server` column |
 | `E0343` | empty spread leaves a `NOT NULL` column unset |
-| `E0350` | missing parameter annotation |
 | `E0351` | incompatible return shapes without an annotation |
 | `E0352` | package-exported function without a return annotation |
 | `E0360` | `minLength` on an array |

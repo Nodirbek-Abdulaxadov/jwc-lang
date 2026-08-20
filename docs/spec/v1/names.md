@@ -334,6 +334,11 @@ no implicit declaration. This closes the second half of N5: the sample's
 6.4.3 A free function's parameters must be annotated; its return type is
 inferred unless the function is exported by a package (types §10.2).
 
+*(`E0350` was reserved for a missing annotation. The grammar requires
+`name: type`, so a parameter without one does not parse and the parser's
+own error arrives first, naming the missing token. The code stays reserved
+rather than implemented as an unreachable check.)*
+
 ---
 
 ## 7. Diagnostics introduced here

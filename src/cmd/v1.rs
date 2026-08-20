@@ -75,12 +75,15 @@ pub fn check(path: PathBuf, quiet: bool, parse_only: bool) -> Result<()> {
         let symbols = crate::v1::symbols::build(&ws, &built.model);
         let checked = crate::v1::check::check(&ws, &symbols, &built.model);
         let wired = crate::v1::wiring::wire(&ws, &symbols);
+        let mut imports = crate::v1::imports::check(&ws, &ws.packages);
+        imports.extend(crate::v1::imports::case_convention(&ws));
         for (loc, d) in built
             .diags
             .iter()
             .chain(&symbols.diags)
             .chain(&checked.diags)
             .chain(&wired.diags)
+            .chain(&imports)
         {
             match d.severity {
                 Severity::Error => errors += 1,

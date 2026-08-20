@@ -2,7 +2,6 @@ namespace services.auth;
 
 import app;
 import db.auth;
-import db.org;
 import dto.auth;
 import views.org;
 

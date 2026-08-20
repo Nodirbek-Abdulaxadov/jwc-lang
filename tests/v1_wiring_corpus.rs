@@ -79,6 +79,8 @@ fn observed(case: &Path) -> (BTreeSet<(usize, String)>, String) {
     let syms = symbols::build(&ws, &built.model);
     let checked = check::check(&ws, &syms, &built.model);
     let wired = wiring::wire(&ws, &syms);
+    let mut imports = jwc::v1::imports::check(&ws, &ws.packages);
+    imports.extend(jwc::v1::imports::case_convention(&ws));
 
     // The case file is `case.jwc`; the prelude must stay clean, and a
     // diagnostic reported against it is a bug in the fixture.
@@ -96,6 +98,7 @@ fn observed(case: &Path) -> (BTreeSet<(usize, String)>, String) {
         .chain(&syms.diags)
         .chain(&checked.diags)
         .chain(&wired.diags)
+        .chain(&imports)
     {
         rendered.push_str(&ws.render(*loc, d));
         if loc.file != case_index {

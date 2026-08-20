@@ -20,6 +20,9 @@ pub struct Loc {
 pub struct Workspace {
     pub root: PathBuf,
     pub files: Vec<ParsedFile>,
+    /// `jwcproj.json`'s `dependencies` keys. An import resolves to a
+    /// namespace or to one of these (names.md §6.2.1).
+    pub packages: std::collections::BTreeSet<String>,
 }
 
 impl Workspace {
@@ -39,7 +42,12 @@ impl Workspace {
         for p in paths {
             files.push(super::parse_file(&p)?);
         }
-        Ok(Workspace { root, files })
+        let packages = read_packages(&root);
+        Ok(Workspace {
+            root,
+            files,
+            packages,
+        })
     }
 
     pub fn parse_errors(&self) -> Vec<String> {
@@ -100,4 +108,34 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `jwcproj.json`'s `dependencies` keys, from the manifest at or above the
+/// loaded root.
+///
+/// Best-effort: a project with no manifest has no package imports, which
+/// makes every package import an `E0201` rather than a silent pass. A
+/// manifest that does not parse is the same as none — the message the
+/// reader needs is about the import, and `jwc check` on a broken manifest
+/// has a louder problem than this pass.
+fn read_packages(root: &Path) -> std::collections::BTreeSet<String> {
+    let mut dir = if root.is_file() { root.parent() } else { Some(root) };
+    while let Some(d) = dir {
+        let manifest = d.join("jwcproj.json");
+        if manifest.is_file() {
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                return Default::default();
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+                return Default::default();
+            };
+            return json
+                .get("dependencies")
+                .and_then(|d| d.as_object())
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default();
+        }
+        dir = d.parent();
+    }
+    Default::default()
 }

@@ -10,7 +10,7 @@
       "construct": "aggregate",
       "clause": "queries \u00a76.3",
       "uses": 3,
-      "first_use": "src/db/billing.jwc:19"
+      "first_use": "src/db/billing.jwc:20"
     },
     {
       "construct": "aggregate.filter",
@@ -46,7 +46,7 @@
       "construct": "builtin.enum_coercion",
       "clause": "builtins \u00a72",
       "uses": 1,
-      "first_use": "src/routes/billing.jwc:50"
+      "first_use": "src/routes/billing.jwc:49"
     },
     {
       "construct": "builtin.env",
@@ -124,85 +124,85 @@
       "construct": "column.default",
       "clause": "schema \u00a72.4",
       "uses": 4,
-      "first_use": "src/db/audit.jwc:17"
+      "first_use": "src/db/audit.jwc:19"
     },
     {
       "construct": "column.identity",
       "clause": "schema \u00a72.3",
       "uses": 4,
-      "first_use": "src/db/audit.jwc:9"
+      "first_use": "src/db/audit.jwc:11"
     },
     {
       "construct": "column.nullable",
       "clause": "types \u00a76.1",
       "uses": 6,
-      "first_use": "src/db/audit.jwc:10"
+      "first_use": "src/db/audit.jwc:12"
     },
     {
       "construct": "column.on_update",
       "clause": "schema \u00a76",
       "uses": 1,
-      "first_use": "src/db/billing.jwc:39"
+      "first_use": "src/db/billing.jwc:40"
     },
     {
       "construct": "column.private",
       "clause": "schema \u00a73.1",
       "uses": 2,
-      "first_use": "src/db/auth.jwc:12"
+      "first_use": "src/db/auth.jwc:13"
     },
     {
       "construct": "column.rule",
       "clause": "schema \u00a74.4",
       "uses": 7,
-      "first_use": "src/db/auth.jwc:9"
+      "first_use": "src/db/auth.jwc:10"
     },
     {
       "construct": "column.server",
       "clause": "schema \u00a73.2",
       "uses": 1,
-      "first_use": "src/db/org.jwc:35"
+      "first_use": "src/db/org.jwc:36"
     },
     {
       "construct": "column.unique_msg",
       "clause": "errors \u00a76.1",
       "uses": 3,
-      "first_use": "src/db/auth.jwc:9"
+      "first_use": "src/db/auth.jwc:10"
     },
     {
       "construct": "constraint.check",
       "clause": "schema \u00a74.4",
       "uses": 1,
-      "first_use": "src/db/billing.jwc:43"
+      "first_use": "src/db/billing.jwc:44"
     },
     {
       "construct": "constraint.fk",
       "clause": "schema \u00a74.2",
       "uses": 4,
-      "first_use": "src/db/audit.jwc:19"
+      "first_use": "src/db/audit.jwc:21"
     },
     {
       "construct": "constraint.fk_action",
       "clause": "schema \u00a74.2",
       "uses": 4,
-      "first_use": "src/db/audit.jwc:5"
+      "first_use": "src/db/audit.jwc:7"
     },
     {
       "construct": "constraint.pk_table",
       "clause": "schema \u00a74.1",
       "uses": 1,
-      "first_use": "src/db/org.jwc:22"
+      "first_use": "src/db/org.jwc:23"
     },
     {
       "construct": "constraint.unique",
       "clause": "schema \u00a74.3",
       "uses": 2,
-      "first_use": "src/db/billing.jwc:45"
+      "first_use": "src/db/billing.jwc:46"
     },
     {
       "construct": "constraint.unique_partial",
       "clause": "schema \u00a74.3",
       "uses": 2,
-      "first_use": "src/db/billing.jwc:45"
+      "first_use": "src/db/billing.jwc:46"
     },
     {
       "construct": "context.read",
@@ -250,13 +250,13 @@
       "construct": "enum.member_ref",
       "clause": "types \u00a73.3",
       "uses": 12,
-      "first_use": "src/db/audit.jwc:8"
+      "first_use": "src/db/audit.jwc:10"
     },
     {
       "construct": "enum.typed",
       "clause": "schema \u00a75.2",
       "uses": 2,
-      "first_use": "src/db/billing.jwc:5"
+      "first_use": "src/db/billing.jwc:6"
     },
     {
       "construct": "error.decl",
@@ -298,13 +298,13 @@
       "construct": "function.return_annot",
       "clause": "types \u00a710.2",
       "uses": 4,
-      "first_use": "src/services/auth.jwc:22"
+      "first_use": "src/services/auth.jwc:21"
     },
     {
       "construct": "function.typed_params",
       "clause": "types \u00a710.1",
       "uses": 4,
-      "first_use": "src/services/auth.jwc:10"
+      "first_use": "src/services/auth.jwc:9"
     },
     {
       "construct": "import.namespace",
@@ -322,19 +322,19 @@
       "construct": "index",
       "clause": "schema \u00a71",
       "uses": 4,
-      "first_use": "src/db/audit.jwc:22"
+      "first_use": "src/db/audit.jwc:24"
     },
     {
       "construct": "index.desc",
       "clause": "schema \u00a74.3",
       "uses": 1,
-      "first_use": "src/db/billing.jwc:76"
+      "first_use": "src/db/billing.jwc:77"
     },
     {
       "construct": "index.partial",
       "clause": "schema \u00a74.3",
       "uses": 2,
-      "first_use": "src/db/auth.jwc:48"
+      "first_use": "src/db/auth.jwc:49"
     },
     {
       "construct": "insert",
@@ -352,7 +352,7 @@
       "construct": "insert.returning",
       "clause": "writes \u00a72.2",
       "uses": 4,
-      "first_use": "src/services/auth.jwc:16"
+      "first_use": "src/services/auth.jwc:15"
     },
     {
       "construct": "join.alias",
@@ -460,7 +460,7 @@
       "construct": "path_param.typed",
       "clause": "routing \u00a73.1",
       "uses": 2,
-      "first_use": "src/routes/billing.jwc:17"
+      "first_use": "src/routes/billing.jwc:16"
     },
     {
       "construct": "request.body_as",
@@ -490,7 +490,7 @@
       "construct": "request.query",
       "clause": "routing \u00a75.3",
       "uses": 1,
-      "first_use": "src/routes/billing.jwc:49"
+      "first_use": "src/routes/billing.jwc:48"
     },
     {
       "construct": "request.raw_body",
@@ -544,7 +544,7 @@
       "construct": "response.with_headers",
       "clause": "routing \u00a76.2",
       "uses": 1,
-      "first_use": "src/routes/billing.jwc:13"
+      "first_use": "src/routes/billing.jwc:12"
     },
     {
       "construct": "route",
@@ -556,7 +556,7 @@
       "construct": "route.use",
       "clause": "middleware \u00a74.1",
       "uses": 2,
-      "first_use": "src/routes/billing.jwc:24"
+      "first_use": "src/routes/billing.jwc:23"
     },
     {
       "construct": "routes",
@@ -604,13 +604,13 @@
       "construct": "select.optional_pred",
       "clause": "queries \u00a73.2",
       "uses": 2,
-      "first_use": "src/routes/billing.jwc:45"
+      "first_use": "src/routes/billing.jwc:44"
     },
     {
       "construct": "select.orderby",
       "clause": "queries \u00a75.3",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:60"
+      "first_use": "src/services/auth.jwc:59"
     },
     {
       "construct": "select.page",
@@ -622,7 +622,7 @@
       "construct": "select.projection",
       "clause": "queries \u00a76.1",
       "uses": 5,
-      "first_use": "src/services/auth.jwc:25"
+      "first_use": "src/services/auth.jwc:24"
     },
     {
       "construct": "select.where",
@@ -646,25 +646,25 @@
       "construct": "service",
       "clause": "types \u00a710",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:9"
+      "first_use": "src/services/auth.jwc:8"
     },
     {
       "construct": "spread",
       "clause": "types \u00a79",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:14"
+      "first_use": "src/services/auth.jwc:13"
     },
     {
       "construct": "spread.except",
       "clause": "types \u00a79.1",
       "uses": 1,
-      "first_use": "src/services/auth.jwc:14"
+      "first_use": "src/services/auth.jwc:13"
     },
     {
       "construct": "table",
       "clause": "schema \u00a71",
       "uses": 4,
-      "first_use": "src/db/audit.jwc:8"
+      "first_use": "src/db/audit.jwc:10"
     },
     {
       "construct": "ternary",
@@ -706,37 +706,37 @@
       "construct": "type.array",
       "clause": "types \u00a72.1",
       "uses": 2,
-      "first_use": "src/db/auth.jwc:41"
+      "first_use": "src/db/auth.jwc:42"
     },
     {
       "construct": "type.bigint",
       "clause": "types \u00a72.3",
       "uses": 12,
-      "first_use": "src/db/audit.jwc:9"
+      "first_use": "src/db/audit.jwc:11"
     },
     {
       "construct": "type.inet",
       "clause": "types \u00a72.1",
       "uses": 2,
-      "first_use": "src/db/audit.jwc:16"
+      "first_use": "src/db/audit.jwc:18"
     },
     {
       "construct": "type.jsonb",
       "clause": "types \u00a75.6",
       "uses": 3,
-      "first_use": "src/db/audit.jwc:15"
+      "first_use": "src/db/audit.jwc:17"
     },
     {
       "construct": "type.numeric",
       "clause": "types \u00a72.1",
       "uses": 2,
-      "first_use": "src/db/billing.jwc:19"
+      "first_use": "src/db/billing.jwc:20"
     },
     {
       "construct": "type.record_inline",
       "clause": "types \u00a71",
       "uses": 3,
-      "first_use": "src/services/auth.jwc:22"
+      "first_use": "src/services/auth.jwc:21"
     },
     {
       "construct": "update",

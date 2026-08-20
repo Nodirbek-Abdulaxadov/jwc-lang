@@ -1,6 +1,7 @@
 namespace db.auth;
 
 import app;
+import db.org;
 
 --- One human identity. Email is the login handle and is immutable.
 table Accounts of App.auth {

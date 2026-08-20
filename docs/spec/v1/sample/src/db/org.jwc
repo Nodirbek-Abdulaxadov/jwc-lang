@@ -1,6 +1,7 @@
 namespace db.org;
 
 import app;
+import db.auth;
 
 enum MemberRole of App.org { owner, admin, member, viewer }
 

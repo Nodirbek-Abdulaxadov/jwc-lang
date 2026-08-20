@@ -1,6 +1,7 @@
 namespace db.billing;
 
 import app;
+import db.org;
 
 enum BillingInterval of App.billing { monthly, yearly }
 

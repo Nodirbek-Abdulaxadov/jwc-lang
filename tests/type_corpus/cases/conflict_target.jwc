@@ -1,0 +1,36 @@
+namespace conflict_target;
+
+-- writes.md §2.4–§2.5 — `on conflict`'s target must be a real unique
+-- constraint. Postgres rejects a target it cannot match to an index, so
+-- the alternative to this check is a 500 on the concurrent path, which is
+-- the one `on conflict` exists for and the hardest to reach in testing.
+service Writes {
+    -- `slug` is `unique`, so this one matches.
+    function by_slug(slug: text, name: text) {
+        return insert into App.s.Orgs { slug = $slug, name = $name }
+            on conflict (slug) do nothing
+            as { id };
+    }
+
+    -- `name` is not unique.
+    function by_name(slug: text, name: text) {
+        return insert into App.s.Orgs { slug = $slug, name = $name }
+            on conflict (name) do nothing      -- expect: E0603
+            as { id };
+    }
+
+    -- The primary key counts.
+    function by_pk(id: bigint, slug: text, name: text) {
+        return insert into App.s.Orgs { id = $id, slug = $slug, name = $name }
+            on conflict (id) do nothing
+            as { id };
+    }
+
+    -- `Orgs` has two unique constraints (the primary key and `slug`), so
+    -- an omitted list does not say which one is meant.
+    function no_columns(slug: text, name: text) {
+        return insert into App.s.Orgs { slug = $slug, name = $name }
+            on conflict do nothing             -- expect: E0604
+            as { id };
+    }
+}
