@@ -313,7 +313,62 @@ Postgres and is never parsed by the application" — it was never "whatever
 the projection order **is** the JSON key order (§6.1). A response whose
 fields come back alphabetised is not the shape the author wrote.
 
-### 7.3 `jwc explain`
+### 7.3 How a join lowers **[0.25.b]**
+
+The emitted SQL for each join mode is fixed, because the obvious alternative
+is wrong in a way that returns data rather than an error.
+
+**`as one` under `left join`** is a plain `LEFT JOIN` and a guard on the
+child's primary key:
+
+```sql
+CASE WHEN t1.id IS NULL THEN NULL ELSE json_build_object('id', t1.id::text, …) END
+```
+
+Without the guard an unmatched row projects `{"id": null, "name": null}` —
+an object of nulls where §4.5 says null. The guard is the primary key
+because it is the one column that is NOT NULL when the row exists and NULL
+exactly when the join found nothing. Under `inner join` the guard is
+omitted: the join cannot miss, and a comparison per row that can only ever
+be false is not free.
+
+**`as many`** is a `LEFT JOIN LATERAL` whose subquery carries the
+collection's own `where`, `orderby` and `limit`, aggregated outside them:
+
+```sql
+LEFT JOIN LATERAL (
+    SELECT coalesce(json_agg(c.j), '[]'::json) AS data
+      FROM (SELECT json_build_object(…) AS j
+      FROM billing.payments t2
+      WHERE t2.invoice_id = t0.id
+      ORDER BY t2.created_at DESC
+      LIMIT ($1::text)::int) c
+) t2_agg ON true
+```
+
+Not `json_agg(… ORDER BY …)` over a plain join. That form can order a
+collection but cannot bound one — `LIMIT` at that level bounds the *page* —
+and two collections projected side by side multiply each other's rows, so
+three notes and two tags report six of each. Two laterals are independent.
+
+The `coalesce` appears twice for two different nulls: `json_agg` over no
+rows is NULL, and the lateral itself contributes NULL when nothing matched.
+A collection is `[]` in both cases (types §6.2).
+
+**`as group`** contributes to `FROM` and `WHERE` and projects nothing
+(§6.2).
+
+Aliases are `t0`, `t1`, … assigned in tree order, never derived from the
+binding name: a binding may be called `user` or `order`, and a self-join
+gives two bindings the same table. Parameters are numbered in emission
+order and bound as text with the cast in the SQL — `($1::text)::bigint`,
+never `$1::bigint`, which makes Postgres infer `bigint` for the parameter
+and then refuse the text the runtime sends.
+
+`tests/sql_golden/` holds the reviewed SQL for every query in the sample and
+in six focused cases; it is the artefact this section is read against.
+
+### 7.4 `jwc explain`
 
 `jwc explain [--sql] [--raw]` prints, per query in the program: the source
 location, the emitted SQL with bind placeholders, and `raw preserved` or

@@ -1,15 +1,16 @@
-//! Single-table SQL generation.
+//! `insert` / `update` / `delete`, and the pieces every statement shares.
 //!
-//! Joins, views and aggregation belong to the query compiler (v0.25.0);
-//! this covers what writes.md and the single-table half of queries.md
-//! specify, which is what the runtime needs to serve the sample's
-//! join-free endpoints.
+//! `select` lives in [`super::query_sql`]: the join compiler subsumes the
+//! single-table case, so the one that used to be here was a second
+//! implementation of the same thing — and a second one is how the two
+//! drift. Writes stay here because writes.md scopes them to one table.
 //!
 //! Two properties are load-bearing:
 //!
 //! * **Every value is a bind parameter.** Nothing is interpolated, ever.
-//!   Parameters are bound as text and cast in SQL (`$1::bigint`), so one
-//!   binding path covers every type.
+//!   Parameters are bound as text and cast in SQL — `($1::text)::bigint`,
+//!   not `$1::bigint`, which makes Postgres infer the column's type for
+//!   the parameter and then refuse the text the runtime sends.
 //! * **The raw path is a compiled projection** (queries.md §7.2). It emits
 //!   `json_build_object` with `private` columns dropped and `bigint` /
 //!   `numeric` cast to text, so the raw and record paths agree on the wire
@@ -83,56 +84,6 @@ impl<'a> Builder<'a> {
             cast: cast.to_string(),
         });
         format!("(${}::text)::{cast}", self.params.len())
-    }
-
-    // ------------------------------------------------------------ select
-
-    pub fn select(&mut self, s: &SelectExpr) -> Option<Built> {
-        let t = self.table(&s.source)?;
-        let alias = "x";
-        let mut sql = format!(
-            "SELECT {} AS j FROM {} {alias}",
-            self.projection(t, s.projection.as_ref(), alias),
-            t.qualified()
-        );
-        if let Some(f) = &s.filter {
-            sql.push_str(&format!(" WHERE {}", self.predicate(t, f, alias)?));
-        }
-        if !s.order_by.is_empty() {
-            sql.push_str(&format!(" ORDER BY {}", self.order_by(t, &s.order_by, alias)));
-        }
-        let shape = if s.first {
-            sql.push_str(" LIMIT 1");
-            Shape::First
-        } else {
-            if let Some(l) = &s.limit {
-                let p = self.bind(l, "int");
-                sql.push_str(&format!(" LIMIT {p}"));
-            }
-            Shape::Rows
-        };
-        Some(Built {
-            sql: self.wrap(&sql, shape),
-            params: std::mem::take(&mut self.params),
-            shape,
-            record: s.projection.is_some(),
-            fields: self.field_names(t, s.projection.as_ref()),
-        })
-    }
-
-    /// One text column comes back holding the whole result, so the
-    /// application never decodes column by column.
-    fn wrap(&self, inner: &str, shape: Shape) -> String {
-        match shape {
-            // `json`, not `jsonb`: jsonb normalises an object by sorting
-            // its keys, and the projection order **is** the JSON key order
-            // (queries.md §6.1, types.md §5.3).
-            Shape::Rows => format!(
-                "SELECT coalesce(json_agg(q.j), '[]'::json)::text FROM ({inner}) q"
-            ),
-            Shape::First => format!("SELECT q.j::text FROM ({inner}) q"),
-            Shape::None => inner.to_string(),
-        }
     }
 
     /// The projected field names, in order.

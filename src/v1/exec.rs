@@ -1,9 +1,12 @@
 //! The v1 interpreter.
 //!
-//! Scope is v0.24.0's: single-table `select` / `insert` / `update` /
-//! `delete`, the expression core, middleware chains, and the error model.
-//! Joins, views and aggregation are the query compiler's (v0.25.0) and
-//! produce a clear runtime error rather than an approximation.
+//! Scope is v0.24.0's plus the join layer: `select` with joins, `insert` /
+//! `update` / `delete` on one table, the expression core, middleware
+//! chains, and the error model. Every `select` goes through
+//! [`super::query_sql`] — the join compiler subsumes the single-table case,
+//! so there is no second SQL builder to keep in step. What it cannot emit
+//! yet (aggregates, a view as a source) says which release it waits for
+//! rather than producing an approximation.
 //!
 //! There is one implementation. `--native` is frozen (DEFERRED-2), so this
 //! is the reference: no second backend to keep in step while the semantics
@@ -883,11 +886,24 @@ fn parse_iso_duration(s: &str) -> Option<i64> {
 
 impl<'a> Vm<'a> {
     async fn run_select(&mut self, s: &SelectExpr) -> Exec<Value> {
-        let mut b = Builder::new(&self.program.model);
-        let built = b
-            .select(s)
-            .ok_or_else(|| fault("this query needs the query compiler (v0.25.0)"))?;
-        self.run_sql(built).await
+        // One path for every select: the join compiler subsumes the
+        // single-table case, so there is no second implementation to keep
+        // in step.
+        let plan = super::query::plan(s, &self.program.symbols);
+        let mut c = super::query_sql::Compiler::new(&self.program.model);
+        let Some(compiled) = c.compile(s, &plan) else {
+            // The compiler names the missing piece; repeating a generic
+            // "not expressible" here would throw that away.
+            return Err(fault(c.gap()));
+        };
+        self.run_sql(super::sql::Built {
+            sql: compiled.sql,
+            params: compiled.params,
+            shape: compiled.shape,
+            record: compiled.record,
+            fields: compiled.fields,
+        })
+        .await
     }
 
     async fn run_insert(&mut self, i: &InsertExpr) -> Exec<Value> {

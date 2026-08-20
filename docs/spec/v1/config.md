@@ -128,7 +128,7 @@ which is correct behind a terminating proxy.
 | `PORT` | only if the program reads it: `serve(int(env("PORT") ?? "8080"))` |
 | `JWC_LOG_LEVEL` | `error` / `warn` / `info` / `debug` |
 | `JWC_LOG_FORMAT` | `json` (default) / `text` |
-| `JWC_LOG_SQL` | `1` logs every statement with timing (queries §7.3) |
+| `JWC_LOG_SQL` | `1` logs every statement with timing (queries §7.4) |
 | `JWC_REDIS_URL` | the `redis` package |
 
 `env(k)` returns `text?`. The environment is snapshotted at boot; changing a

@@ -1,0 +1,41 @@
+--- An `as one` that hangs off an `as many`: the inner join belongs inside
+--- the collection's lateral, not beside the driving table. Attaching it to
+--- the root would join accounts to orgs and produce the wrong account per
+--- member (N12).
+namespace nested;
+
+database App : Postgres;
+schema s of App;
+
+table Orgs of App.s {
+    id   bigint primary key identity;
+    name varchar(120);
+}
+
+table Accounts of App.s {
+    id    bigint primary key identity;
+    email varchar(255) unique;
+}
+
+table Members of App.s {
+    id         bigint primary key identity;
+    org_id     bigint;
+    account_id bigint;
+    role       varchar(20);
+
+    foreign key (org_id)     references App.s.Orgs (id);
+    foreign key (account_id) references App.s.Accounts (id);
+}
+
+view OrgRoster of App.s {
+    select O from App.s.Orgs
+        left join App.s.Members M on M.org_id == O.id
+            as many members orderby id asc limit 50
+        left join App.s.Accounts A on A.id == M.account_id
+            as one account under members
+        as {
+            id,
+            name,
+            members: { id, role, account: { id, email } },
+        }
+}

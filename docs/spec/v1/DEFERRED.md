@@ -15,7 +15,7 @@ closed; these are dated omissions.
 | `DEFERRED-4` | Per-foreign-key messages | FK violation → `BadRequest` 400, `"referenced row does not exist"`; `jwc lint --constraints` lists them (errors §6.3) | The right status varies by case (400/404/409) and the data to choose does not exist yet |
 | `DEFERRED-5` | General subqueries, CTEs, window functions, recursive queries, full-text | `where exists`/`not exists` in the query language; everything else through the parameterised `raw(…)` escape hatch, banned inside `view`, counted by `jwc lint` (writes §6) | The query compiler is already 28% of the work. The hatch is a valve and its usage count measures which feature to add next |
 | `DEFERRED-6` | Navigating into `jsonb` | A `jsonb` column is `Raw` — it splices into a response and cannot be read field-wise (types §5.6) | Path navigation needs a type for "unknown shape", which is the one thing the `Raw`/`Record` lattice exists to avoid |
-| `DEFERRED-7` | A dev-only `/__jwc/queries` endpoint | `JWC_LOG_SQL=1`, `jwc explain`, and LSP hover-SQL (queries §7.3) | Three mechanisms already cover the DBA and Developer tests. The fourth is convenience |
+| `DEFERRED-7` | A dev-only `/__jwc/queries` endpoint | `JWC_LOG_SQL=1`, `jwc explain`, and LSP hover-SQL (queries §7.4) | Three mechanisms already cover the DBA and Developer tests. The fourth is convenience |
 | `DEFERRED-8` | Multi-row `insert` | `for (x in xs) { insert into … }` inside a `transaction` (writes §2.1) | One statement shape, one RETURNING shape. Batching is a performance change with no new semantics |
 | `DEFERRED-9` | `SKIP LOCKED` / work claiming | `update … first` always emits `FOR UPDATE` (writes §4) | Work-claiming is a queue feature and queues are ROADMAP §7 |
 | `DEFERRED-10` | `send_email` and outbound I/O builtins | A package: `import mail; mail.send(…)` (builtins §10) | Provider shape is not language shape. Core stays Postgres + HTTP |
@@ -66,7 +66,7 @@ normative clause or to a row above. `spec-coverage.json` carries the machine
 | 26 enum evolution | migrations §5 + `DEFERRED-3` |
 | 27 renames → data loss | migrations §6 |
 | 28 constraint name ↔ message coupling | schema §8.3 |
-| 29 generated SQL invisible | queries §7.3 + `DEFERRED-7` |
+| 29 generated SQL invisible | queries §7.4 + `DEFERRED-7` |
 | 30 message-less constraints & FK → 500 | errors §6 + `DEFERRED-4` |
 | 31 untyped service params / returns | types §10 |
 | 32 validation 400 body / `minLength` overload | types §11 |

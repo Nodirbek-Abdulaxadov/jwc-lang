@@ -1,0 +1,32 @@
+--- Filters: a join-level `where` narrows the collection rather than the
+--- driving rows, `== null` lowers to `IS NULL` rather than a parameter,
+--- and `nulls last` survives to the emitted ORDER BY.
+namespace filters;
+
+database App : Postgres;
+schema s of App;
+
+table Orgs of App.s {
+    id     bigint primary key identity;
+    name   varchar(120);
+    region varchar(20)?;
+}
+
+table Members of App.s {
+    id       bigint primary key identity;
+    org_id   bigint;
+    role     varchar(20);
+    removed  timestamptz?;
+
+    foreign key (org_id) references App.s.Orgs (id);
+}
+
+view ActiveAdmins of App.s {
+    select O from App.s.Orgs
+        left join App.s.Members M on M.org_id == O.id
+            where removed == null
+            as many admins orderby id asc limit 10
+        where region != null
+        as { id, name, region, admins: { id, role } }
+        orderby name asc nulls last
+}

@@ -1,0 +1,20 @@
+--- No projection: every readable column, in declaration order, with the
+--- `private` ones absent. `private` is a rule about what leaves the
+--- process, and the default projection is the easiest place to break it.
+namespace default_projection;
+
+database App : Postgres;
+schema s of App;
+
+table Accounts of App.s {
+    id            bigint primary key identity;
+    email         varchar(255) unique;
+    password_hash varchar(255) private;
+    balance       numeric(14, 2);
+    created_at    timestamptz default now();
+}
+
+view AccountRows of App.s {
+    select A from App.s.Accounts
+        orderby id asc
+}
