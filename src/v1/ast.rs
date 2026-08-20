@@ -790,6 +790,11 @@ pub struct JoinClause {
     pub table: QualifiedTable,
     pub binder: Ident,
     pub on: Expr,
+    /// `left join … on … where … as many admins` — filters the child
+    /// collection, not the driving rows (queries.md §4.7).
+    pub filter: Option<Expr>,
+    /// `None` only on a malformed join; a bare join is `Cardinality::Group`
+    /// and says so (queries.md §6.2).
     pub result: Option<JoinResult>,
     pub span: Span,
 }
@@ -815,6 +820,11 @@ pub struct JoinResult {
 pub enum Cardinality {
     One,
     Many,
+    /// `as group` — the join contributes to filtering and to aggregates and
+    /// produces no field. Written out rather than inferred from a missing
+    /// `as`, because "I forgot the projection" and "I meant to aggregate"
+    /// used to be the same syntax (queries.md §6.2).
+    Group,
 }
 
 #[derive(Clone, Debug)]

@@ -38,9 +38,22 @@ table Notes of App.s {
     unique (org_id, body) where retired == null : "band";
 }
 
+table Invites of App.s {
+    id          bigint primary key identity;
+    org_id      bigint;
+    invited_by  bigint;
+    accepted_by bigint?;
+    email       varchar(255);
+
+    foreign key (org_id)      references App.s.Orgs (id);
+    foreign key (invited_by)  references App.s.Orgs (id);
+    foreign key (accepted_by) references App.s.Orgs (id);
+}
+
 view OrgList of App.s {
     select O from App.s.Orgs
-        left join App.s.Members M on M.org_id == O.id as many members
+        left join App.s.Members M on M.org_id == O.id
+            as many members orderby account_id asc
         as { id, slug, name, members: { account_id, role } }
 }
 

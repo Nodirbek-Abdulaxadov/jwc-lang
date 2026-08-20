@@ -46,7 +46,7 @@ view InvoiceDetail of App.billing {
 --- which is what keeps it out of E0532 (queries.md §6.2).
 view OrgBillingSummary of App.billing {
     select O from App.org.Orgs
-        left join App.billing.Invoices I on I.org_id == O.id
+        left join App.billing.Invoices I on I.org_id == O.id as group
         group by O.id, O.slug
         as {
             org_id: id,

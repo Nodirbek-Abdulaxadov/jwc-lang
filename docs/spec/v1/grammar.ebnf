@@ -197,10 +197,11 @@ select_expr     = "select" ident "from" source
 source          = qualified_table ;                  (* a view is a table-like object *)
 
 join_clause     = join_kind "join" qualified_table [ ident ]
-                  "on" expr [ join_result ] ;
+                  "on" expr [ "where" expr ] join_result ;
 join_kind       = "left" | "inner" ;                 (* queries.md §4.1 *)
-join_result     = "as" ( "one" | "many" ) ident
-                  [ order_by ] [ limit_clause ] ;
+join_result     = "as" "one" ident [ "under" ident ]
+                | "as" "many" ident [ "under" ident ] order_by [ limit_clause ]
+                | "as" "group" ;                     (* queries.md §6.2 *)
 
 projection      = "as" object_shape ;
 object_shape    = "{" [ proj_field { "," proj_field } ] "}" ;

@@ -17,7 +17,7 @@ service Bindings {
 
     function ambiguous_unqualified_column(org_id: bigint) {
         return select O from App.s.Orgs
-            left join App.s.Notes N on N.org_id == O.id
+            left join App.s.Notes N on N.org_id == O.id as group
             where id == $org_id                                     -- expect: E0213
             group by O.id
             as { id, n: count(N.id) };

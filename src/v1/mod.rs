@@ -21,6 +21,7 @@ pub mod lexer;
 pub mod model;
 pub mod naming;
 pub mod parser;
+pub mod query;
 pub mod serve;
 pub mod sql;
 pub mod symbols;

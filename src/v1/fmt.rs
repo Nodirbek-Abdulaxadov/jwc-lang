@@ -1128,12 +1128,18 @@ fn join_text(j: &JoinClause) -> String {
         j.table.text(),
         expr(&j.on)
     );
+    if let Some(f) = &j.filter {
+        s.push_str(&format!(" where {}", expr(f)));
+    }
     if let Some(r) = &j.result {
-        let card = match r.cardinality {
-            Cardinality::One => "one",
-            Cardinality::Many => "many",
-        };
-        s.push_str(&format!(" as {card} {}", r.name.name));
+        match r.cardinality {
+            Cardinality::Group => {
+                s.push_str(" as group");
+                return s;
+            }
+            Cardinality::One => s.push_str(&format!(" as one {}", r.name.name)),
+            Cardinality::Many => s.push_str(&format!(" as many {}", r.name.name)),
+        }
         if let Some(u) = &r.under {
             s.push_str(&format!(" under {}", u.name));
         }

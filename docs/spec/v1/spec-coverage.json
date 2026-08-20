@@ -375,7 +375,7 @@
     {
       "construct": "join.child_order",
       "clause": "queries \u00a74.6",
-      "uses": 1,
+      "uses": 2,
       "first_use": "src/views/billing.jwc:28"
     },
     {

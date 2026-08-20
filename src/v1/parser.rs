@@ -2430,25 +2430,49 @@ impl Parser {
         let on = self.parse_expr()?;
         let mut end = on.span;
 
-        let result = if self.at_word("as") {
+        // A `where` here filters the *child* collection (queries.md §4.7).
+        let filter = if self.at_word("where") && !self.word_at(1, "exists") {
+            self.bump();
+            let e = self.parse_expr()?;
+            end = e.span;
+            Some(e)
+        } else {
+            None
+        };
+
+        // `as {` is the query's projection, not this join's result — a join
+        // with no result is E0535 from the planner, and the projection has
+        // to keep parsing.
+        let result = if self.at_word("as")
+            && (self.word_at(1, "one") || self.word_at(1, "many") || self.word_at(1, "group"))
+        {
             let rstart = self.span();
             self.bump();
             let cardinality = if self.eat_word("one") {
                 Cardinality::One
             } else if self.eat_word("many") {
                 Cardinality::Many
+            } else if self.at_word("group") && !self.word_at(1, "by") {
+                self.bump();
+                Cardinality::Group
             } else {
                 let s = self.span();
                 self.err_note(
                     "E0017",
                     s,
-                    "expected `one` or `many`",
-                    "cardinality is written at the join: `as one account` / `as many members`",
+                    "expected `one`, `many` or `group`",
+                    "cardinality is written at the join: `as one account`, \
+                     `as many members`, or `as group` for a join that only feeds \
+                     aggregates",
                     "queries.md §4.3",
                 );
                 return Err(());
             };
-            let name = self.expect_ident()?;
+            let name = if cardinality == Cardinality::Group {
+                Ident::new("", rstart)
+            } else {
+                self.expect_ident()?
+            };
             let under = if self.eat_word("under") {
                 Some(self.expect_ident()?)
             } else {
@@ -2479,6 +2503,8 @@ impl Parser {
                 span: rstart.to(end),
             })
         } else {
+            // Reported by the planner as E0535, not here: a join with no
+            // result still parses, so the rest of the file stays checkable.
             None
         };
 
@@ -2487,6 +2513,7 @@ impl Parser {
             table,
             binder,
             on,
+            filter,
             result,
             span: start.to(end),
         })

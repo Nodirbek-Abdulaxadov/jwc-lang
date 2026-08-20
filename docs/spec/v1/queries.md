@@ -91,33 +91,48 @@ The optional identifier after the joined table is the binding name; it
 defaults to the table's declared name. A repeated binding name is `E0212`
 (names §5.4), which is what makes self-joins expressible.
 
-### 4.3 `as one` / `as many`
+### 4.3 What a join produces — `as one` / `as many` / `as group`
 
 ```
-left join App.org.Members  on Members.org_id == Orgs.id           as many members
-left join App.auth.Accounts on Accounts.id == Members.account_id  as one account
+left join App.org.Members M   on M.org_id == O.id  as many members orderby joined_at asc
+left join App.auth.Accounts A on A.id == M.account_id as one account
+left join App.billing.Invoices I on I.org_id == O.id as group
 ```
 
 - `as one x` — at most one related row. `x : Record?` under `left`,
   `Record` under `inner` (types §6.3).
-- `as many x` — `x : Record[]`, empty array when there are none. Never null.
-- A join with **no** `as` result is a **bare join** (§6.2): it contributes
-  to filtering and to aggregates and produces no field.
+- `as many x` — `x : Record[]`, empty array when there are none. Never
+  null. An `orderby` is **required** (§4.6).
+- `as group` — the join contributes to filtering and to aggregates and
+  produces no field (§6.2).
+
+**Every join says which.** A join with no `as` clause is `E0535`. It used to
+mean the third mode by omission, which made "I meant to aggregate" and "I
+forgot the projection" the same syntax; a keyword costs one word and tells
+the reader — and the planner — which one was meant.
 
 ### 4.4 The attachment tree is declared, not inferred (N12)
 
-A join's `as one` / `as many` result attaches to the binding its `on`
-clause references **other than the binding being joined**. If the `on` clause
+A query is a **tree**, not a list: `OrgWithMembers` joins members to the org
+and accounts to the members, and the projection nests the same way.
+
+A join's `as one` / `as many` result attaches to the binding its `on` clause
+references **other than the binding being joined**. If the `on` clause
 references more than one such binding, the attachment is ambiguous and is
 `E0510`, naming the candidates. The fix is to write the parent explicitly:
 
 ```
-left join App.auth.Accounts on Accounts.id == Members.account_id as one account under members
+left join App.auth.Accounts A on A.id == M.account_id as one account under members
 ```
 
-`under <binding>` is the disambiguator. It is required only when `E0510`
-fires; the sample's `OrgWithMembers` does not need it, and now says so by
-construction rather than by accident of clause order.
+`under` names either the binding alias (`M`) or the field its join produces
+(`members`) — the two are names for the same node, and a reader thinks in
+whichever the surrounding code uses. An alias wins on a collision. Naming
+neither is `E0511`.
+
+`under` is required only when `E0510` fires; the sample's `OrgWithMembers`
+does not need it, and now says so by construction rather than by accident of
+clause order.
 
 ### 4.5 `as one` with no match (#3)
 
@@ -128,7 +143,7 @@ serialises as `null`.
 ### 4.6 Ordering and limiting inside `as many` (#5)
 
 ```
-left join App.billing.Payments on … as many payments orderby created_at desc limit 20
+left join App.billing.Payments Y on … as many payments orderby created_at desc limit 20
 ```
 
 The `orderby`/`limit` bind to the child collection, not the outer query — and
@@ -136,7 +151,26 @@ so does their **name resolution**: inside a join result's own `orderby` and
 `limit`, an unqualified name is a column of that joined table. `as many lines
 orderby id asc` orders the lines by *their* id.
 
-Unbounded `as many` on a collection with no natural bound is `W0501`.
+**`orderby` is required on `as many`** (`E0536`). This is the same rule
+`first` has (§5.2) applied to a collection: without a stated order the
+elements come back in whatever order the plan produced, and that changes with
+the data, the statistics and the Postgres version. `limit` stays optional;
+an unbounded collection with no natural bound is `W0501`.
+
+### 4.7 Filtering a collection — `where` on the join (#8)
+
+```
+left join App.org.Members M on M.org_id == O.id where M.role == MemberRole.admin
+    as many admins orderby joined_at asc
+```
+
+A `where` written **on the join clause** filters that collection. It is not
+the query's `where`: it never removes a driving row, so an org with no admins
+comes back with `admins: []` rather than disappearing.
+
+The query's own `where` filters driving rows, as always. The two read
+differently because they are different questions — "orgs that have an admin"
+is `where exists (…)` (§3.5), not this.
 
 ---
 

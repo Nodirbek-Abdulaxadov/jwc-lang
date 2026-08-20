@@ -25,9 +25,11 @@ service Aggs {
     }
 
     function aggregation_with_as_many() {
-        return select O from App.s.Orgs
-            left join App.s.Members M on M.org_id == O.id as many members
+        return select O from App.s.Orgs                                  -- expect: E0532
+            left join App.s.Notes N on N.org_id == O.id as group
+            left join App.s.Members M on M.org_id == O.id
+                as many members orderby account_id asc
             group by O.id
-            as { id, n: count(M.account_id), members: { account_id } };  -- expect: E0531, E0532
+            as { id, n: count(N.id), members: { account_id } };          -- expect: E0531
     }
 }

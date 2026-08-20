@@ -2144,6 +2144,20 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // The join attachment tree (queries.md §4.4). Its diagnostics are
+        // about how the joins relate to each other, which is why they live
+        // in the planner rather than here.
+        let planned = super::query::plan(s, self.sym);
+        for d in planned.diags {
+            self.diags.push((
+                Loc {
+                    file: self.file,
+                    span: d.span,
+                },
+                d,
+            ));
+        }
+
         self.check_aggregates(s);
         if s.first {
             self.check_first_determinism(s, &object, span);
@@ -2271,6 +2285,9 @@ impl<'a> Checker<'a> {
                         Cardinality::Many => rec.array(),
                         Cardinality::One if join.kind == JoinKind::Left => rec.opt(),
                         Cardinality::One => rec,
+                        // `as group` produces no field, so a projection
+                        // naming it is E0534 above.
+                        Cardinality::Group => Ty::Unknown,
                     };
                     out.push((alias.name.clone(), ty));
                 }
@@ -2419,22 +2436,6 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // queries.md §6.2 — a bare-join aggregation cannot also carry an
-        // `as many` result. DEFERRED-12.
-        if s.joins.iter().any(|j| {
-            j.result
-                .as_ref()
-                .is_some_and(|r| r.cardinality == Cardinality::Many)
-        }) {
-            self.err_note(
-                p.span,
-                "E0532",
-                "aggregation and `as many` in one query",
-                "split it in two: one query for the aggregate, one for the children \
-                 (DEFERRED-12)",
-                "queries.md §6.2",
-            );
-        }
     }
 
     /// queries.md §5.2 — `first` needs a deterministic result.
