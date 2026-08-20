@@ -107,9 +107,6 @@ impl<'a> Vm<'a> {
                 binds.len()
             )));
         }
-        if std::env::var("JWC_LOG_SQL").as_deref() == Ok("1") {
-            eprintln!("[sql] {sql}");
-        }
         // Wrapped the same way every other query is, so a `raw` result is
         // the same kind of value as a compiled one.
         let wrapped =
@@ -128,6 +125,20 @@ impl<'a> Vm<'a> {
         let n = |i: usize| arg(i).as_i64().unwrap_or(0);
 
         Ok(Some(match path {
+            // ---- debug (tooling.md §3)
+            //
+            // Returns its argument unchanged, so wrapping a subexpression in
+            // it changes nothing but what is printed. Outside `--dev` it
+            // prints nothing at all rather than erroring: a debug statement
+            // that survived review should not be what takes an endpoint
+            // down.
+            "debug.dump" => {
+                if crate::exec::dev_mode() {
+                    eprintln!("[dump] {}", arg(0).debug_text());
+                }
+                arg(0)
+            }
+
             // ---- responses (routing.md §6.1)
             "json" => self.respond(200, &arg(0)),
             "created" => self.respond(201, &arg(0)),

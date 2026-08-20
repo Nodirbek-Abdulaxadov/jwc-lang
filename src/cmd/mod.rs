@@ -45,7 +45,7 @@ mod jwc_v1_paths {
 /// `--parse-only` stops after the front-end, which is what the parse corpus
 /// exercises. The full pass adds the schema model (schema.md §11) and the
 /// type checker (types.md, queries.md, writes.md).
-pub fn check(path: PathBuf, quiet: bool, parse_only: bool) -> Result<()> {
+pub fn check(path: PathBuf, quiet: bool, parse_only: bool, deny_warnings: bool) -> Result<()> {
     use crate::diag::Severity;
 
     let ws = crate::workspace::Workspace::load(&path)?;
@@ -98,6 +98,9 @@ pub fn check(path: PathBuf, quiet: bool, parse_only: bool) -> Result<()> {
             ws.files.len(),
             plural(ws.files.len())
         );
+    }
+    if deny_warnings && warnings > 0 {
+        bail!("{warnings} warning{} (--deny-warnings)", plural(warnings));
     }
     if !quiet {
         println!(
@@ -212,13 +215,18 @@ pub fn gen_sql(path: PathBuf, explain: bool, out: Option<PathBuf>) -> Result<()>
     Ok(())
 }
 
-/// `jwc v1 explain <path>` — every query the program issues.
+/// `jwc explain [path]` — every query the program issues, with its SQL.
 ///
-/// Prints, per query: where it is, the SQL with bind placeholders, and
-/// whether the result stays raw. This is the answer to #29 — generated SQL
-/// used to be invisible, so nobody could tell a query that reads an index
-/// from one that reads the table (queries.md §7.4).
-pub fn explain(path: PathBuf, sql_only: bool) -> Result<()> {
+/// Offline unless `--analyze` is given. `--function` and `--route` narrow it
+/// to what one entry point can reach, over the static call graph
+/// (tooling.md §1).
+pub fn explain(
+    path: PathBuf,
+    sql_only: bool,
+    function: Option<String>,
+    route: Option<String>,
+    analyze: bool,
+) -> Result<()> {
     use crate::diag::Severity;
 
     let ws = crate::workspace::Workspace::load(&path)?;
@@ -234,27 +242,47 @@ pub fn explain(path: PathBuf, sql_only: bool) -> Result<()> {
     let built = crate::model::build(&ws);
     let sym = crate::symbols::build(&ws, &built.model);
 
+    // Which owners to print. `None` is everything.
+    let mut wanted = select_owners(&ws, &sym, function.as_deref(), route.as_deref())?;
+    if let Some(w) = &mut wanted {
+        expand_views(&ws, &sym, w);
+    }
+    let wanted = wanted;
+    let show = |owner: &str| -> bool {
+        wanted
+            .as_ref()
+            .is_none_or(|w| w.contains(&owner_key(owner)))
+    };
+
     let mut queries = 0usize;
     let mut gaps = 0usize;
     let mut hatches = 0usize;
-    for file in &ws.files {
-        // writes.md §6.4 — the valve's usage count is the measurement of
-        // which feature to add next, so it is printed rather than assumed
-        // to be zero.
-        for (i, line) in file.source.text.lines().enumerate() {
-            if line.contains("raw(") && !line.trim_start().starts_with("--") {
-                hatches += 1;
-                println!(
-                    "\x1b[1m{}:{}\x1b[0m  raw() — hand-written SQL, unchecked shape",
-                    file.source.path.display(),
-                    i + 1
-                );
-                println!("  {}\n", line.trim());
+
+    if wanted.is_none() {
+        for file in &ws.files {
+            // writes.md §6.4 — the valve's usage count is the measurement of
+            // which feature to add next, so it is printed rather than
+            // assumed to be zero.
+            for (i, line) in file.source.text.lines().enumerate() {
+                if line.contains("raw(") && !line.trim_start().starts_with("--") {
+                    hatches += 1;
+                    println!(
+                        "\x1b[1m{}:{}\x1b[0m  raw() — hand-written SQL, unchecked shape",
+                        file.source.path.display(),
+                        i + 1
+                    );
+                    println!("  {}\n", line.trim());
+                }
             }
         }
     }
+
+    let mut statements: Vec<String> = Vec::new();
     for file in &ws.files {
         for site in crate::query_sql::sites(&file.program) {
+            if !show(&site.owner) {
+                continue;
+            }
             queries += 1;
             let (line, _) = file.source.line_col(site.select.span.start);
             println!(
@@ -263,11 +291,7 @@ pub fn explain(path: PathBuf, sql_only: bool) -> Result<()> {
                 site.label
             );
             let plan = crate::query::plan(site.select, &sym);
-            if let Some(d) = plan
-                .diags
-                .iter()
-                .find(|d| d.severity == Severity::Error)
-            {
+            if let Some(d) = plan.diags.iter().find(|d| d.severity == Severity::Error) {
                 println!("  rejected: {} {}", d.code, d.message);
                 gaps += 1;
                 continue;
@@ -284,6 +308,7 @@ pub fn explain(path: PathBuf, sql_only: bool) -> Result<()> {
                     for line in compiled.sql.lines() {
                         println!("  {line}");
                     }
+                    statements.push(compiled.sql.clone());
                 }
                 None => {
                     println!("  not compilable: {}", c.gap());
@@ -293,14 +318,193 @@ pub fn explain(path: PathBuf, sql_only: bool) -> Result<()> {
             println!();
         }
     }
+
+    if analyze {
+        analyze_statements(&statements)?;
+    }
+
     println!("{queries} quer{}", if queries == 1 { "y" } else { "ies" });
     if gaps > 0 {
         println!("{gaps} not compiled");
     }
     if hatches > 0 {
-        println!("{hatches} raw() escape hatch{}", if hatches == 1 { "" } else { "es" });
+        println!(
+            "{hatches} raw() escape hatch{}",
+            if hatches == 1 { "" } else { "es" }
+        );
     }
     Ok(())
+}
+
+/// A selected query that reads a view runs that view's body too, so the
+/// view is part of the answer to "what SQL does this route issue".
+///
+/// A fixed point rather than one pass: a view may select from a view
+/// (queries.md §8), and the inner one is just as much part of the statement.
+fn expand_views(
+    ws: &crate::workspace::Workspace,
+    sym: &crate::symbols::Symbols,
+    wanted: &mut std::collections::BTreeSet<String>,
+) {
+    loop {
+        let mut grew = false;
+        for file in &ws.files {
+            for site in crate::query_sql::sites(&file.program) {
+                if !wanted.contains(&owner_key(&site.owner)) {
+                    continue;
+                }
+                let plan = crate::query::plan(site.select, sym);
+                let mut objects = Vec::new();
+                plan.root.walk(&mut objects);
+                let names: Vec<String> = objects
+                    .iter()
+                    .map(|n| n.object.clone())
+                    .chain(plan.groups.iter().map(|g| g.object.clone()))
+                    .collect();
+                for name in names {
+                    if sym.views.contains_key(&name) && wanted.insert(format!("view {name}")) {
+                        grew = true;
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+}
+
+/// `function f` and `f` are the same owner; everything else is its own
+/// label. Call sites write the bare name, `sites()` writes the readable one.
+fn owner_key(owner: &str) -> String {
+    owner.strip_prefix("function ").unwrap_or(owner).to_string()
+}
+
+/// The owner keys `--function` / `--route` select, or `None` for all of them.
+fn select_owners(
+    ws: &crate::workspace::Workspace,
+    sym: &crate::symbols::Symbols,
+    function: Option<&str>,
+    route: Option<&str>,
+) -> Result<Option<std::collections::BTreeSet<String>>> {
+    let _ = sym;
+    if function.is_none() && route.is_none() {
+        return Ok(None);
+    }
+    let bodies = crate::wiring::function_bodies(ws);
+    let mut keys: std::collections::BTreeSet<String> = Default::default();
+
+    if let Some(name) = function {
+        let Some(body) = bodies.get(name) else {
+            bail!(
+                "no function `{name}`. This program declares:\n  {}",
+                bodies.keys().cloned().collect::<Vec<_>>().join("\n  ")
+            );
+        };
+        keys.insert(name.to_string());
+        keys.extend(crate::wiring::reachable_from(&bodies, body));
+    }
+
+    if let Some(spec) = route {
+        // `GET /api/v1/orgs/{org_id}` — the declared pattern, the same
+        // string `request.route()` returns (routing.md §5.4).
+        let (method, pattern) = spec
+            .split_once(char::is_whitespace)
+            .map(|(m, p)| (m.trim().to_uppercase(), p.trim().to_string()))
+            .unwrap_or_else(|| ("GET".to_string(), spec.trim().to_string()));
+
+        let mut found = false;
+        for file in &ws.files {
+            for d in &file.program.decls {
+                let crate::ast::Decl::Routes(r) = d else {
+                    continue;
+                };
+                for rt in &r.routes {
+                    let full = crate::wiring::route_pattern(&r.prefix, &rt.suffix);
+                    if rt.method.name.to_uppercase() != method || full != pattern {
+                        continue;
+                    }
+                    found = true;
+                    keys.insert(format!("route {method} {full}"));
+                    keys.extend(crate::wiring::reachable_from(&bodies, &rt.body));
+                }
+            }
+        }
+        if !found {
+            let built = crate::model::build(ws);
+            let symbols = crate::symbols::build(ws, &built.model);
+            let wired = crate::wiring::wire(ws, &symbols);
+            let mut have: Vec<String> = wired
+                .routes
+                .iter()
+                .map(|r| format!("{} {}", r.method, r.pattern))
+                .collect();
+            have.sort();
+            bail!(
+                "no route `{method} {pattern}`. This program serves:\n  {}",
+                have.join("\n  ")
+            );
+        }
+    }
+
+    Ok(Some(keys))
+}
+
+/// `EXPLAIN` each statement against `DATABASE_URL` (tooling.md §1.4).
+///
+/// Parameters are bound as `NULL`. The plan *shape* is what is being read —
+/// which index, which join — and binding a made-up value would give row
+/// estimates for a row that does not exist.
+fn analyze_statements(statements: &[String]) -> Result<()> {
+    if statements.is_empty() {
+        return Ok(());
+    }
+    let url = crate::engine::database_url_from_env()?;
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        let client = crate::engine::connect_for_migrations(&url).await?;
+        for sql in statements {
+            println!("\x1b[1mEXPLAIN\x1b[0m");
+            let n = highest_parameter(sql);
+            let params: Vec<Option<String>> = vec![None; n];
+            let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                params.iter().map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+            match client.query(&format!("EXPLAIN {sql}"), &refs).await {
+                Ok(rows) => {
+                    for row in rows {
+                        println!("  {}", row.get::<_, String>(0));
+                    }
+                }
+                Err(e) => println!("  could not plan: {e}"),
+            }
+            println!();
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+/// The largest `$n` in a statement, which is how many parameters to bind.
+fn highest_parameter(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut max = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 {
+                if let Ok(n) = sql[i + 1..j].parse::<usize>() {
+                    max = max.max(n);
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    max
 }
 
 /// `jwc v1 routes <path>` — the resolved route table.
@@ -345,11 +549,12 @@ pub fn routes(path: PathBuf) -> Result<()> {
 }
 
 /// `jwc v1 serve <path> --port N` — run the program.
-pub fn serve(path: PathBuf, port: u16, skip_schema_check: bool) -> Result<()> {
+pub fn serve(path: PathBuf, port: u16, skip_schema_check: bool, dev: bool) -> Result<()> {
     let ws = crate::workspace::Workspace::load(&path)?;
     let program = std::sync::Arc::new(crate::serve::load(&ws)?);
     let snap = crate::snapshot::of(&crate::model::build(&ws).model);
 
+    crate::exec::set_dev_mode(dev);
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         crate::engine::init_engine_from_env()?;
@@ -371,6 +576,16 @@ pub fn serve(path: PathBuf, port: u16, skip_schema_check: bool) -> Result<()> {
                     plural(missing.len())
                 );
             }
+        }
+        if std::env::var("JWC_LOG_SQL").as_deref() == Ok("1") {
+            // tooling.md §2.2 — the parameters in a logged statement are
+            // the request's data. Said once at boot rather than on every
+            // line, which is where a warning stops being read.
+            eprintln!(
+                "warning: JWC_LOG_SQL=1 — every statement and its bound \
+                 parameters go to stderr. Those parameters are request data; \
+                 this is a development switch."
+            );
         }
         println!("{} routes", program.routes.len());
         crate::serve::serve(program, port).await

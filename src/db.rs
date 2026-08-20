@@ -68,18 +68,103 @@ pub async fn run(
         .map(|b| b as &(dyn ToSql + Sync))
         .collect();
 
+    let started = std::time::Instant::now();
     match shape {
         Shape::None => {
-            conn.execute(sql, &params).await.map_err(classify)?;
+            let n = conn.execute(sql, &params).await.map_err(classify)?;
+            log_sql(sql, binds, started, n as usize);
             Ok(None)
         }
         Shape::First | Shape::Rows => {
             let rows = conn.query(sql, &params).await.map_err(classify)?;
-            match rows.first() {
-                None => Ok(None),
-                Some(r) => Ok(r.try_get::<_, Option<String>>(0).unwrap_or(None)),
+            let text = match rows.first() {
+                None => None,
+                Some(r) => r.try_get::<_, Option<String>>(0).unwrap_or(None),
+            };
+            if log_enabled() {
+                let n = match shape {
+                    Shape::Rows => json_len(text.as_deref().unwrap_or("[]")),
+                    _ => usize::from(text.is_some()),
+                };
+                log_sql(sql, binds, started, n);
             }
+            Ok(text)
         }
+    }
+}
+
+/// `JWC_LOG_SQL=1`, read once. A per-statement `std::env::var` in the hot
+/// path would cost more than the query on a cached plan.
+fn log_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("JWC_LOG_SQL").as_deref() == Ok("1"))
+}
+
+/// One line per statement: duration, row count, the statement, then every
+/// bound parameter (tooling.md §2.1).
+///
+/// All four, because each answers a different question and three of them are
+/// useless alone — a slow statement with no parameters cannot be reproduced,
+/// and a statement with no row count cannot be told from one that matched
+/// nothing.
+fn log_sql(sql: &str, binds: &[Option<String>], started: std::time::Instant, rows: usize) {
+    if !log_enabled() {
+        return;
+    }
+    let ms = started.elapsed().as_secs_f64() * 1000.0;
+    let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let params = binds
+        .iter()
+        .enumerate()
+        .map(|(i, b)| match b {
+            // `null` never as an empty string: the difference between the
+            // two is the whole subject of `==?` (queries.md §4.4).
+            None => format!("${}=null", i + 1),
+            Some(v) => format!("${}='{}'", i + 1, v.replace('\'', "''")),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!(
+        "[sql] {ms:.2}ms {rows} row{}  {flat}  {params}",
+        if rows == 1 { "" } else { "s" }
+    );
+}
+
+/// Elements in a top-level JSON array, without building the values.
+fn json_len(text: &str) -> usize {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut count = 0usize;
+    let mut any = false;
+    for c in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '[' | '{' => {
+                depth += 1;
+                if depth == 2 {
+                    any = true;
+                }
+            }
+            ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 1 => count += 1,
+            _ => {}
+        }
+    }
+    if any || count > 0 {
+        count + 1
+    } else {
+        0
     }
 }
 
@@ -100,12 +185,22 @@ pub async fn run_page(
         .iter()
         .map(|b| b as &(dyn ToSql + Sync))
         .collect();
+    let started = std::time::Instant::now();
     let rows = conn.query(sql, &params).await.map_err(classify)?;
     let Some(r) = rows.first() else {
+        log_sql(sql, binds, started, 0);
         return Ok(("[]".into(), "[]".into(), false));
     };
+    let items = r
+        .try_get::<_, Option<String>>(0)
+        .unwrap_or(None)
+        .unwrap_or_else(|| "[]".into());
+    if log_enabled() {
+        log_sql(sql, binds, started, json_len(&items));
+    }
+    let _ = &items;
     Ok((
-        r.try_get::<_, Option<String>>(0).unwrap_or(None).unwrap_or_else(|| "[]".into()),
+        items,
         r.try_get::<_, Option<String>>(1).unwrap_or(None).unwrap_or_else(|| "[]".into()),
         r.try_get::<_, Option<bool>>(2).unwrap_or(None).unwrap_or(false),
     ))

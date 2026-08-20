@@ -22,6 +22,18 @@ use anyhow::anyhow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// `jwc serve --dev`. Read by `debug.dump`, which prints only under it
+/// (tooling.md §3.3).
+static DEV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_dev_mode(on: bool) {
+    DEV.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn dev_mode() -> bool {
+    DEV.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------- signals
 
 /// How a statement finished. `Throw` carries a declared error; a fault is
@@ -1139,9 +1151,6 @@ impl<'a> Vm<'a> {
         plan: &crate::sql::PagePlan,
         binds: &[Option<String>],
     ) -> Exec<Value> {
-        if std::env::var("JWC_LOG_SQL").as_deref() == Ok("1") {
-            eprintln!("[sql] {}", built.sql);
-        }
         let (items, keys, has_more) = crate::db::run_page(&built.sql, binds)
             .await
             .map_err(map_db_error)?;
@@ -1205,9 +1214,6 @@ impl<'a> Vm<'a> {
         values: Vec<Value>,
     ) -> Exec<Value> {
         let binds: Vec<Option<String>> = values.iter().map(|v| v.to_bind()).collect();
-        if std::env::var("JWC_LOG_SQL").as_deref() == Ok("1") {
-            eprintln!("[sql] {}", built.sql);
-        }
         if let Some(plan) = &built.page {
             return self.page_envelope(&built, plan, &binds).await;
         }

@@ -154,6 +154,23 @@ impl Value {
         }
     }
 
+    /// A one-line rendering for `debug.dump` (tooling.md §3).
+    ///
+    /// A `Raw` prints as the text Postgres produced, unparsed — which is
+    /// exactly the thing that cannot be seen any other way, and the reason
+    /// this builtin exists.
+    pub fn debug_text(&self) -> String {
+        match self {
+            Value::Raw(t) => format!("raw {t}"),
+            Value::Response { status, body, .. } => format!("response {status} {body}"),
+            other => {
+                let mut out = String::new();
+                other.write_json(&mut out);
+                out
+            }
+        }
+    }
+
     pub fn field(&self, name: &str) -> Option<&Value> {
         match self {
             Value::Record(fields) => fields.iter().find(|(k, _)| k == name).map(|(_, v)| v),

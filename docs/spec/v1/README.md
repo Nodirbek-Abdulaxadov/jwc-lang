@@ -21,6 +21,7 @@ expected to: v1 replaces that language rather than extending it
 | [`migrations.md`](./migrations.md) | snapshots, diff phases, declared renames, enum evolution |
 | [`builtins.md`](./builtins.md) | the builtin surface, namespaced by where it runs |
 | [`config.md`](./config.md) | `database init()`, `server { }`, environment |
+| [`tooling.md`](./tooling.md) | `jwc explain`, `JWC_LOG_SQL`, `debug.dump`, `jwc lint`, `jwc openapi`, the language server |
 | [`DEFERRED.md`](./DEFERRED.md) | 18 dated omissions + the gap → verdict index for all 56 gaps |
 
 ## The inputs

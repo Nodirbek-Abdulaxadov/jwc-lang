@@ -1375,6 +1375,11 @@ fn field_names(p: &ObjectShape) -> Vec<String> {
 /// separately in each is three chances to miss one.
 pub struct Site<'a> {
     pub label: String,
+    /// The declaration the site belongs to, without the `#n` disambiguator:
+    /// `AuthService.login`, `route GET /api/v1/orgs`, `view OrgSummary`.
+    /// `jwc explain --function` and `--route` select on this
+    /// (tooling.md §1.2).
+    pub owner: String,
     pub select: &'a SelectExpr,
 }
 
@@ -1387,6 +1392,7 @@ pub fn sites(program: &Program) -> Vec<Site<'_>> {
         match d {
             Decl::View(v) => out.push(Site {
                 label: format!("view {}", v.name.name),
+                owner: format!("view {}", v.name.name),
                 select: &v.body,
             }),
             Decl::Service(s) => {
@@ -1403,11 +1409,14 @@ pub fn sites(program: &Program) -> Vec<Site<'_>> {
             }
             Decl::Routes(r) => {
                 for route in &r.routes {
+                    // The declared pattern, normalised the way the route
+                    // table does it — a suffix carries no leading slash and
+                    // a parameter carries its type, so concatenating the two
+                    // raw strings gives `/api/v1/authregister`.
                     let label = format!(
-                        "route {} {}{}",
+                        "route {} {}",
                         route.method.name.to_uppercase(),
-                        r.prefix,
-                        route.suffix
+                        crate::wiring::route_pattern(&r.prefix, &route.suffix)
                     );
                     collect_block(&route.body, &label, &mut out);
                 }
@@ -1429,6 +1438,9 @@ fn collect_block<'a>(block: &'a Block, label: &str, out: &mut Vec<Site<'a>>) {
     let start = out.len();
     for s in block {
         collect_stmt(s, label, out);
+    }
+    for site in &mut out[start..] {
+        site.owner = label.to_string();
     }
     // A function with two queries needs two names; one with a single query
     // reads better without a `#1` nobody has to disambiguate.
@@ -1495,6 +1507,7 @@ fn collect_expr<'a>(e: &'a Expr, label: &str, out: &mut Vec<Site<'a>>) {
         // The whole query is one site; its clauses are not walked.
         ExprKind::Select(s) => out.push(Site {
             label: label.to_string(),
+            owner: label.to_string(),
             select: s,
         }),
         ExprKind::Field { base, .. } | ExprKind::Cast { value: base, .. } => {

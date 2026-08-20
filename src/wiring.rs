@@ -948,6 +948,17 @@ pub fn render(segments: &[Segment]) -> String {
     out
 }
 
+/// The declared pattern for a route, from its block prefix and its own
+/// suffix: `("/api/v1/auth", "register")` is `/api/v1/auth/register`.
+///
+/// This is the string `request.route()` returns and the one
+/// `jwc explain --route` takes (routing.md §5.4). Concatenating the two raw
+/// strings does not produce it: a suffix has no leading slash, and a
+/// parameter still carries its type annotation.
+pub fn route_pattern(prefix: &str, suffix: &str) -> String {
+    render(&parse_path(&format!("{prefix}/{suffix}")))
+}
+
 pub fn parse_path(path: &str) -> Vec<Segment> {
     path.trim_matches('/')
         .split('/')
@@ -1155,7 +1166,54 @@ fn promote(
     }
 }
 
-fn callees(b: &Block) -> BTreeSet<String> {
+/// The body of every named function, keyed the way a call site writes it:
+/// `AuthService.login` for a service function, `main` for a bare one.
+pub fn function_bodies(ws: &Workspace) -> std::collections::BTreeMap<String, &Block> {
+    let mut out = std::collections::BTreeMap::new();
+    for file in &ws.files {
+        for d in &file.program.decls {
+            match d {
+                Decl::Function(f) => {
+                    out.insert(f.name.name.clone(), &f.body);
+                }
+                Decl::Service(s) => {
+                    for f in &s.functions {
+                        out.insert(format!("{}.{}", s.name.name, f.name.name), &f.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Every function reachable from `start`, transitively.
+///
+/// Exact rather than approximate: there are no function values (types §1),
+/// so a call site names its callee literally and the graph has no unknown
+/// edges. This is the same reachability the raise sets are computed over
+/// (errors §3), and `jwc explain --route` reads it to answer "which queries
+/// can a request to this route issue" (tooling §1.3).
+pub fn reachable_from(
+    bodies: &std::collections::BTreeMap<String, &Block>,
+    start: &Block,
+) -> BTreeSet<String> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut stack: Vec<String> = callees(start).into_iter().collect();
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(b) = bodies.get(&name) {
+            stack.extend(callees(b));
+        }
+    }
+    seen
+}
+
+/// Every name called anywhere in a block, qualified as written.
+pub fn callees(b: &Block) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     each_expr(b, &mut |e| {
         if let ExprKind::Call { callee, .. } = &*e.kind {
@@ -1167,7 +1225,8 @@ fn callees(b: &Block) -> BTreeSet<String> {
     out
 }
 
-fn path_of(e: &Expr) -> Option<String> {
+/// `AuthService.login` from the callee expression of a call.
+pub fn path_of(e: &Expr) -> Option<String> {
     match &*e.kind {
         ExprKind::Name(i) => Some(i.name.clone()),
         ExprKind::Field { base, field } => Some(format!("{}.{}", path_of(base)?, field.name)),

@@ -153,6 +153,25 @@ impl<'a> Checker<'a> {
         ));
     }
 
+    fn warn_note(
+        &mut self,
+        span: Span,
+        code: &'static str,
+        msg: impl Into<String>,
+        note: impl Into<String>,
+        clause: &'static str,
+    ) {
+        self.diags.push((
+            Loc {
+                file: self.file,
+                span,
+            },
+            Diagnostic::warning(code, span, msg)
+                .note(note)
+                .clause(clause),
+        ));
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
@@ -1928,6 +1947,28 @@ impl<'a> Checker<'a> {
             }
 
             // --- date (builtins.md §3)
+            // --- debug (tooling.md §3)
+            //
+            // The one builtin that accepts a `Raw`, because the one place a
+            // raw result's shape can be inspected is where the shape is in
+            // question (types.md §5.1). It returns its argument unchanged so
+            // it can be wrapped around a subexpression without restructuring
+            // the code around it.
+            "debug.dump" => {
+                arity(self, 1);
+                self.warn_note(
+                    span,
+                    "W1301",
+                    "`debug.dump` in the program",
+                    "it prints only under `jwc serve --dev` and is a no-op \
+                     elsewhere, but a call left in is a call nobody meant to \
+                     ship — delete it, or run `jwc check` without \
+                     `--deny-warnings`",
+                    "tooling.md §3.4",
+                );
+                a0
+            }
+
             "date.now" => {
                 arity(self, 0);
                 Ty::timestamptz()

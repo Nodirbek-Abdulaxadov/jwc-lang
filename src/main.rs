@@ -33,6 +33,9 @@ enum Command {
         /// Stop after the front-end: no schema model, no type checking.
         #[arg(long)]
         parse_only: bool,
+        /// Exit non-zero on any warning. The CI shape.
+        #[arg(long)]
+        deny_warnings: bool,
     },
     /// Rewrite sources in canonical form.
     Fmt {
@@ -63,6 +66,16 @@ enum Command {
         /// SQL only: skip the raw-tracking line.
         #[arg(long)]
         sql: bool,
+        /// Only the queries this function can reach, over the call graph.
+        #[arg(long)]
+        function: Option<String>,
+        /// Only the queries a request to this route can reach, e.g.
+        /// `--route "GET /api/v1/orgs/{org_id}/invoices"`.
+        #[arg(long)]
+        route: Option<String>,
+        /// Also run `EXPLAIN` on each statement against `DATABASE_URL`.
+        #[arg(long)]
+        analyze: bool,
     },
     /// Print the resolved route table: method, path, middleware chain.
     Routes {
@@ -79,6 +92,10 @@ enum Command {
         /// program reads. The default is to refuse and name it.
         #[arg(long)]
         skip_schema_check: bool,
+        /// Development mode: `debug.dump` prints. Never in production —
+        /// what it prints is request data.
+        #[arg(long)]
+        dev: bool,
     },
     /// Generate and apply schema migrations.
     Migrate {
@@ -158,16 +175,24 @@ fn main() -> Result<()> {
             path,
             quiet,
             parse_only,
-        } => cmd::check(path, quiet, parse_only),
+            deny_warnings,
+        } => cmd::check(path, quiet, parse_only, deny_warnings),
         Command::Fmt { path, check } => cmd::fmt(path, check),
         Command::GenSql { path, explain, out } => cmd::gen_sql(path, explain, out),
-        Command::Explain { path, sql } => cmd::explain(path, sql),
+        Command::Explain {
+            path,
+            sql,
+            function,
+            route,
+            analyze,
+        } => cmd::explain(path, sql, function, route, analyze),
         Command::Routes { path } => cmd::routes(path),
         Command::Serve {
             path,
             port,
             skip_schema_check,
-        } => cmd::serve(path, port, skip_schema_check),
+            dev,
+        } => cmd::serve(path, port, skip_schema_check, dev),
         Command::Migrate { command } => match command {
             MigrateCommand::New {
                 name,

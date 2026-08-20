@@ -175,6 +175,20 @@ not brute-forceable and is the standard construction.
 
 ---
 
+## 7a. `debug` — development only
+
+| Name | Type | Notes |
+|---|---|---|
+| `debug.dump(x)` | the type of `x` | writes `x` to stderr and returns it |
+
+The only builtin that accepts a **`Raw`** (types §5.1): the one place a raw
+result's shape can be inspected is where the shape is in question. It prints
+only under `jwc serve --dev` and is otherwise a no-op that returns its
+argument, and a program containing it warns (`W1301`). Full rules:
+tooling §3.
+
+---
+
 ## 8. Package namespaces
 
 `import redis;` makes `redis.*` resolvable. A package's exported surface is
