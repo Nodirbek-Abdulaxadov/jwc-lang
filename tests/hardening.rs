@@ -153,3 +153,186 @@ async fn with_no_cors_block_nothing_is_emitted() {
     assert_eq!(header(&r, "access-control-allow-origin"), None);
     assert_eq!(header(&r, "vary"), None);
 }
+
+// ── the login timing channel ───────────────────────────────────────────
+
+/// ROADMAP §3's fourth done criterion for v0.29.0: the two failure branches
+/// of `login` must not be distinguishable by the clock.
+///
+/// Needs Postgres. Without `JWC_V1_DATABASE_URL` this prints SKIPPED, and a
+/// SKIPPED line is not a pass — a timing claim is not checkable by reading.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_two_failure_branches_of_login_cost_the_same() {
+    let Ok(url) = std::env::var("JWC_V1_DATABASE_URL") else {
+        eprintln!(
+            "SKIPPED the_two_failure_branches_of_login_cost_the_same — set \
+             JWC_V1_DATABASE_URL. A SKIPPED line is not a pass."
+        );
+        return;
+    };
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/spec/v1/sample");
+    let ws = Workspace::load(&root).expect("sample");
+
+    // The schema, fresh.
+    let sql = jwc::ddl::render(&ws, &jwc::ddl::emit(&jwc::model::build(&ws).model), false);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("schema.sql");
+    std::fs::write(&file, sql).expect("write");
+    for args in [
+        vec![
+            url.as_str(),
+            "-q",
+            "-c",
+            "DROP SCHEMA IF EXISTS audit, auth, billing, org CASCADE",
+        ],
+        vec![url.as_str(), "-q", "-v", "ON_ERROR_STOP=1", "-f", file.to_str().expect("utf8")],
+    ] {
+        let out = std::process::Command::new("psql").args(&args).output().expect("psql");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    // One account whose password we know, so the "wrong password" branch is
+    // a real Argon2id verification against a real stored hash.
+    let stored = jwc::password::hash_password("correct horse battery staple").expect("hash");
+    let insert = format!(
+        "INSERT INTO auth.accounts (email, display_name, password_hash) \
+         VALUES ('known@example.com', 'Known', '{}')",
+        stored.replace('\'', "''")
+    );
+    let out = std::process::Command::new("psql")
+        .args([url.as_str(), "-q", "-v", "ON_ERROR_STOP=1", "-c", &insert])
+        .output()
+        .expect("psql");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    std::env::set_var("DATABASE_URL", &url);
+    std::env::set_var("JWT_SECRET", "test-secret-abcdefghijklmnop");
+    std::env::set_var("CURSOR_SECRET", "test-cursor-secret");
+    jwc::engine::init_engine_from_env().expect("engine");
+    let program = Arc::new(serve::load(&ws).unwrap_or_else(|e| panic!("{e}")));
+
+    let attempt = |email: &'static str| {
+        let p = program.clone();
+        async move {
+            let body = format!(
+                r#"{{"email":"{email}","password":"definitely not the password"}}"#
+            );
+            let started = std::time::Instant::now();
+            let r = call(p, "POST", "/api/v1/auth/login", &[], &body).await;
+            (r.status, started.elapsed())
+        }
+    };
+
+    // Warm the pool and the KDF's first-run cost out of the measurement.
+    for _ in 0..3 {
+        attempt("known@example.com").await;
+        attempt("nobody@example.com").await;
+    }
+
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    for _ in 0..15 {
+        let (status, d) = attempt("known@example.com").await;
+        assert_eq!(status, 401);
+        known.push(d.as_secs_f64() * 1000.0);
+        let (status, d) = attempt("nobody@example.com").await;
+        assert_eq!(status, 401);
+        unknown.push(d.as_secs_f64() * 1000.0);
+    }
+
+    let median = |mut v: Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+        v[v.len() / 2]
+    };
+    let a = median(known);
+    let b = median(unknown);
+    eprintln!("login: known {a:.1}ms, unknown {b:.1}ms");
+
+    // A generous band, deliberately. Without the decoy the miss branch
+    // never touches Argon2id and is two to three orders of magnitude
+    // faster, so any band at all catches the regression — and a tight one
+    // would only make the test flaky on a busy machine.
+    let ratio = a.max(b) / a.min(b);
+    assert!(
+        ratio < 2.5,
+        "the two branches differ by {ratio:.1}x — known {a:.1}ms, unknown {b:.1}ms. \
+         The same message for both failures is undone by the clock."
+    );
+}
+
+// ── the shipped dependency tree ────────────────────────────────────────
+
+/// Every open advisory in `deny.toml`'s ignore list is triaged as
+/// dev-dependency-only. That is a claim about the graph, and a claim about
+/// the graph is checkable.
+///
+/// `cargo audit` reads `Cargo.lock`, which cannot tell a dev-dependency
+/// from a shipped one, so the ignore list is the only place that
+/// distinction lives — and a comment saying "dev only" is exactly the kind
+/// of thing that stops being true without anyone noticing. This is what
+/// notices.
+#[test]
+fn no_triaged_advisory_crate_reaches_the_shipped_binary() {
+    let out = std::process::Command::new("cargo")
+        .args([
+            "tree",
+            "--edges",
+            "normal",
+            "--target",
+            "all",
+            "--manifest-path",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+        ])
+        .output();
+    let Ok(out) = out else {
+        eprintln!("SKIPPED no_triaged_advisory_crate_reaches_the_shipped_binary — no cargo");
+        return;
+    };
+    if !out.status.success() {
+        eprintln!(
+            "SKIPPED no_triaged_advisory_crate_reaches_the_shipped_binary — cargo tree: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
+    let tree = String::from_utf8_lossy(&out.stdout);
+    assert!(tree.len() > 1000, "the tree looks empty");
+
+    // Each of these carries an open advisory and each is triaged in
+    // `deny.toml` as reached only through `testcontainers` -> `bollard`,
+    // which is a dev-dependency.
+    for (crate_name, why) in [
+        ("hickory-proto", "reqwest's DNS resolver, only under testcontainers' feature set"),
+        ("rkyv", "bollard"),
+        ("rustls-pemfile", "bollard"),
+    ] {
+        assert!(
+            !tree.contains(&format!("{crate_name} v")),
+            "`{crate_name}` is in the shipped tree — deny.toml says it is dev-only ({why})"
+        );
+    }
+
+    // `rustls-webpki` *is* shipped, through reqwest. The advisories are
+    // against 0.102; anything at or above 0.103.13 is clear of all four.
+    for line in tree.lines() {
+        let Some(rest) = line.split("rustls-webpki v").nth(1) else {
+            continue;
+        };
+        let version = rest.split_whitespace().next().unwrap_or_default();
+        let (major, minor, patch) = split_version(version);
+        assert!(
+            (major, minor, patch) >= (0, 103, 13),
+            "the shipped rustls-webpki is {version}; the four 0.102 advisories \
+             need 0.103.13 or later"
+        );
+    }
+}
+
+fn split_version(v: &str) -> (u32, u32, u32) {
+    let mut parts = v.split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}

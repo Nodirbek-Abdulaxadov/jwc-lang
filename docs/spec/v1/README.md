@@ -21,6 +21,7 @@ expected to: v1 replaces that language rather than extending it
 | [`migrations.md`](./migrations.md) | snapshots, diff phases, declared renames, enum evolution |
 | [`builtins.md`](./builtins.md) | the builtin surface, namespaced by where it runs |
 | [`config.md`](./config.md) | `database init()`, `server { }`, environment |
+| [`security.md`](./security.md) | the threat model: what is trusted, and what is not covered |
 | [`packages.md`](./packages.md) | the manifest, what a package may declare, the export boundary |
 | [`testing.md`](./testing.md) | `test`, `assert`, `assert fails … with`, per-test isolation |
 | [`tooling.md`](./tooling.md) | `jwc explain`, `JWC_LOG_SQL`, `debug.dump`, `jwc lint`, `jwc openapi`, the language server |

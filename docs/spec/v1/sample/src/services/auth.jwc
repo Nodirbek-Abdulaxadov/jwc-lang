@@ -5,6 +5,17 @@ import db.auth;
 import dto.auth;
 import views.org;
 
+--- A real Argon2id encoding of a password nobody has. `login` verifies
+--- against it when the address is unknown, so the miss costs the same as a
+--- hit — a decoy that failed to parse would return immediately and put the
+--- timing signal straight back.
+---
+--- A constant rather than an `env`, because a deployment that forgot to set
+--- one would silently lose the defence and nothing would say so.
+function decoy_password_hash() -> text {
+    return "$argon2id$v=19$m=19456,t=2,p=1$2w2b+Ihc9+eswxNKyuQUfQ$td4KgFPi6UJPiI5wMj2T2NJIHxv14N7qWP5zn5X6Do4";
+}
+
 service AuthService {
     function register(req: Register) {
         let password_hash = hash.password($req.password);
@@ -18,13 +29,27 @@ service AuthService {
     --- 401, not 403: the caller is not authenticated yet (errors.md §1.2).
     --- The same message for both failures, so the endpoint does not tell an
     --- attacker which addresses exist.
+    ---
+    --- The same *message* is not enough on its own. An unknown address that
+    --- returned before hashing would answer in microseconds where a known
+    --- one takes an Argon2id verification, and the clock would say what the
+    --- sentence refuses to. So both branches verify: the miss against a
+    --- decoy, and the answer is decided afterwards.
     function login(req: Login) -> { token: text, expires_in: int } {
-        let account = select A from App.auth.Accounts
+        let found = select A from App.auth.Accounts
             where email == $req.email
             as { id, password_hash }
-            first or throw Unauthorized("email yoki parol xato");
+            first;
 
-        let ok = hash.verify($req.password, $account.password_hash);
+        let stored = decoy_password_hash();
+
+        if ($found != null) {
+            $stored = $found.password_hash;
+        }
+
+        let ok = hash.verify($req.password, $stored);
+
+        let account = $found or throw Unauthorized("email yoki parol xato");
 
         if (!$ok) {
             throw Unauthorized("email yoki parol xato");
