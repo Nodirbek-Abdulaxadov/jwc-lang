@@ -466,4 +466,4 @@ Tests:     case_file_io_round_trip
 ## Removal / deprecation registry
 
 None yet. Deprecations will be recorded here AND in `CHANGELOG.md` per
-[`DEPRECATION.md`](../../DEPRECATION.md).
+[`DEPRECATION.md`](../../../DEPRECATION.md).

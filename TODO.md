@@ -1,7 +1,7 @@
 # TODO
 
 Defects found in the field, not scheduled into `ROADMAP.md`. Historical phase
-numbering lives in `docs/spec/roadmap-0.9.x.md`. Entries marked
+numbering lives in `docs/archive-0.9/spec/roadmap-0.9.x.md`. Entries marked
 **RESOLVED** are kept for the field report — the reproduction and the reasoning
 are worth more than the strikethrough — with a pointer to the regression cover
 that now holds them down.

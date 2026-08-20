@@ -202,4 +202,4 @@ route GET "api/download" {
 Validate the input yourself before it reaches a path, or keep request data
 out of paths entirely. Operationally, run the process as a dedicated user
 with only the directories it needs mounted. This is recorded as an accepted
-risk in `docs/spec/threat-model.md`.
+risk in `docs/archive-0.9/spec/threat-model.md`.
