@@ -508,13 +508,19 @@ async fn one_sequence(
     }
 }
 
-fn databases() -> Option<(String, String)> {
+/// Two scratch databases beside the one named, both dropped and
+/// recreated.
+///
+/// `tag` keeps two tests in this file off each other. They used to share
+/// `_rt_a` / `_rt_b`, and cargo runs the tests inside one binary in
+/// parallel — so whichever got there second dropped a database the first
+/// was already migrating, and the failure surfaced as a `pg_database`
+/// unique violation naming neither test.
+fn databases(tag: &str) -> Option<(String, String)> {
     let base = std::env::var("JWC_V1_DATABASE_URL").ok()?;
-    // Two databases beside the one named: `…/x` becomes `…/x_rt_a` and
-    // `…/x_rt_b`, so the caller's database is never dropped.
     let (head, name) = base.rsplit_once('/')?;
-    let a = format!("{head}/{name}_rt_a");
-    let bb = format!("{head}/{name}_rt_b");
+    let a = format!("{head}/{name}_{tag}_a");
+    let bb = format!("{head}/{name}_{tag}_b");
     for db in [&a, &bb] {
         let dbname = db.rsplit('/').next()?;
         let out = Command::new("psql")
@@ -539,7 +545,7 @@ fn databases() -> Option<(String, String)> {
 
 #[tokio::test]
 async fn a_migrated_database_is_a_created_database() {
-    let Some((a, b)) = databases() else {
+    let Some((a, b)) = databases("rt") else {
         eprintln!(
             "SKIPPED a_migrated_database_is_a_created_database — set \
              JWC_V1_DATABASE_URL. A SKIPPED line is not a pass: this is the \
@@ -595,7 +601,7 @@ async fn a_migrated_database_is_a_created_database() {
 /// to make that easy.
 #[tokio::test]
 async fn widening_a_column_under_a_view_applies() {
-    let Some((a, _b)) = databases() else {
+    let Some((a, _b)) = databases("view") else {
         eprintln!(
             "SKIPPED widening_a_column_under_a_view_applies — set \
              JWC_V1_DATABASE_URL. A SKIPPED line is not a pass."

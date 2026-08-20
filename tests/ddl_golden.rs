@@ -19,7 +19,9 @@
 
 use jwc::{ddl, model, workspace::Workspace};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+mod common;
+use common::run_psql;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -253,21 +255,4 @@ fn goldens_apply_to_postgres() {
         );
         run_psql(&conn, "postgres", &["-c", &format!("DROP DATABASE {db}")]);
     }
-}
-
-fn run_psql(conn: &str, db: &str, args: &[&str]) -> String {
-    let mut cmd = Command::new("psql");
-    for part in conn.split_whitespace() {
-        cmd.arg(part);
-    }
-    cmd.arg("-d").arg(db);
-    for a in args {
-        cmd.arg(a);
-    }
-    let out = cmd.output().expect("psql");
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    )
 }

@@ -15,10 +15,26 @@ fn url() -> Option<String> {
     std::env::var("JWC_V1_DATABASE_URL").ok()
 }
 
+/// One database, one test at a time.
+///
+/// Every test here starts with `reset`, which drops the schemas and the
+/// bookkeeping table. Run in parallel against one `JWC_V1_DATABASE_URL`
+/// that is not isolation, it is a race: the first test to reset wipes the
+/// schema a second is mid-way through applying, and five of the eight fail
+/// on unrelated-looking errors. The lock was missing for as long as the
+/// suite was only ever SKIPPED, which is how it went unnoticed.
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: the guard is held across
+/// the `await`s that follow, which is what the lock is for and what a
+/// blocking guard must not do.
+static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The url and the exclusion guard. Bind both — dropping the guard on the
+/// same line (`let (url, _) = ...`) releases it immediately and restores
+/// the race this exists to prevent.
 macro_rules! db {
     ($name:literal) => {
         match url() {
-            Some(u) => u,
+            Some(u) => (u, TEST_LOCK.lock().await),
             None => {
                 eprintln!(
                     "SKIPPED {} — set JWC_V1_DATABASE_URL. A SKIPPED line is not a pass.",
@@ -134,7 +150,7 @@ view OrgSummary of App.org {
 
 #[tokio::test]
 async fn up_applies_everything_then_has_nothing_left_to_do() {
-    let url = db!("up_applies_everything_then_has_nothing_left_to_do");
+    let (url, _guard) = db!("up_applies_everything_then_has_nothing_left_to_do");
     let client = connect(&url).await;
     reset(&client).await;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -183,7 +199,7 @@ async fn up_applies_everything_then_has_nothing_left_to_do() {
 
 #[tokio::test]
 async fn down_rolls_back_and_refuses_what_it_cannot_undo() {
-    let url = db!("down_rolls_back_and_refuses_what_it_cannot_undo");
+    let (url, _guard) = db!("down_rolls_back_and_refuses_what_it_cannot_undo");
     let client = connect(&url).await;
     reset(&client).await;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -225,7 +241,7 @@ async fn down_rolls_back_and_refuses_what_it_cannot_undo() {
 
 #[tokio::test]
 async fn a_data_sidecar_runs_in_phase_three() {
-    let url = db!("a_data_sidecar_runs_in_phase_three");
+    let (url, _guard) = db!("a_data_sidecar_runs_in_phase_three");
     let client = connect(&url).await;
     reset(&client).await;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -268,7 +284,7 @@ async fn a_data_sidecar_runs_in_phase_three() {
 
 #[tokio::test]
 async fn an_edited_migration_is_drift_not_silence() {
-    let url = db!("an_edited_migration_is_drift_not_silence");
+    let (url, _guard) = db!("an_edited_migration_is_drift_not_silence");
     let client = connect(&url).await;
     reset(&client).await;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -295,7 +311,7 @@ async fn an_edited_migration_is_drift_not_silence() {
 
 #[tokio::test]
 async fn verify_and_the_boot_check_name_what_is_missing() {
-    let url = db!("verify_and_the_boot_check_name_what_is_missing");
+    let (url, _guard) = db!("verify_and_the_boot_check_name_what_is_missing");
     let client = connect(&url).await;
     reset(&client).await;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -337,7 +353,7 @@ async fn verify_and_the_boot_check_name_what_is_missing() {
 
 #[tokio::test]
 async fn a_hand_edited_no_transaction_file_is_refused() {
-    let url = db!("a_hand_edited_no_transaction_file_is_refused");
+    let (url, _guard) = db!("a_hand_edited_no_transaction_file_is_refused");
     let client = connect(&url).await;
     reset(&client).await;
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -372,7 +388,7 @@ async fn a_hand_edited_no_transaction_file_is_refused() {
 
 #[tokio::test]
 async fn the_advisory_lock_is_held_while_a_migration_runs() {
-    let url = db!("the_advisory_lock_is_held_while_a_migration_runs");
+    let (url, _guard) = db!("the_advisory_lock_is_held_while_a_migration_runs");
     let a = connect(&url).await;
     let b = connect(&url).await;
     apply::lock(&a).await.expect("lock");
@@ -400,7 +416,7 @@ async fn the_advisory_lock_is_held_while_a_migration_runs() {
 
 #[tokio::test]
 async fn the_sample_migrates_from_nothing() {
-    let url = db!("the_sample_migrates_from_nothing");
+    let (url, _guard) = db!("the_sample_migrates_from_nothing");
     let client = connect(&url).await;
     reset(&client).await;
     client

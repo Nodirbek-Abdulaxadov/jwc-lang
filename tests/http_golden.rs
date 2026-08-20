@@ -600,7 +600,16 @@ async fn http_golden() {
             faulted.push(format!("{key} -> {} {}", r.status, r.body));
         }
     }
-    assert_eq!(answered, 25, "the sample has 25 routes");
+    // Against the route table, not a number written down beside it. The
+    // literal said 25 while the sample had grown to 26, and nothing caught
+    // it: this whole test is gated on `JWC_V1_DATABASE_URL`, so the day
+    // the route was added it did not run. What the assertion is for is
+    // "every declared route was exercised", and that is what it now says.
+    assert_eq!(
+        answered,
+        program.routes.len(),
+        "every declared route must be swept"
+    );
     assert!(
         faulted.is_empty(),
         "routes that faulted:\n{}",
@@ -608,7 +617,11 @@ async fn http_golden() {
     );
 
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-    assert!(ran >= 25, "expected the golden set, ran {ran}");
+    assert!(
+        ran >= program.routes.len(),
+        "expected at least one golden case per route, ran {ran} over {} routes",
+        program.routes.len()
+    );
 }
 
 /// `Case::method` is `&'static str`; the route table's is owned.

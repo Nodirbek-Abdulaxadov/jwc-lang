@@ -16,10 +16,25 @@ fn url() -> Option<String> {
     std::env::var("JWC_V1_DATABASE_URL").ok()
 }
 
+/// One database, one test at a time.
+///
+/// `install_schema` drops and recreates the sample's four schemas, so two
+/// tests running at once against one `JWC_V1_DATABASE_URL` are not
+/// isolated — they are racing to drop each other's types mid-apply. Three
+/// of the six failed that way the first time a database was configured,
+/// with errors (`duplicate key value ... pg_type_typname_nsp_index`) that
+/// name the collision rather than the cause.
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The url and the exclusion guard. Bind both — `let (url, _) = ...` drops
+/// the guard immediately and restores the race.
 macro_rules! db {
     ($name:literal) => {
         match url() {
-            Some(u) => u,
+            Some(u) => (
+                u,
+                TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+            ),
             None => {
                 eprintln!(
                     "SKIPPED {} — set JWC_V1_DATABASE_URL. A SKIPPED line is not a pass.",
@@ -90,7 +105,7 @@ fn rows(url: &str, sql: &str) -> i64 {
 
 #[test]
 fn the_samples_tests_pass_and_leave_nothing_behind() {
-    let url = db!("the_samples_tests_pass_and_leave_nothing_behind");
+    let (url, _guard) = db!("the_samples_tests_pass_and_leave_nothing_behind");
     let sample = repo_root().join("docs/spec/v1/sample");
     install_schema(&sample, &url);
 
@@ -110,7 +125,7 @@ fn the_samples_tests_pass_and_leave_nothing_behind() {
 
 #[test]
 fn the_order_does_not_matter() {
-    let url = db!("the_order_does_not_matter");
+    let (url, _guard) = db!("the_order_does_not_matter");
     let sample = repo_root().join("docs/spec/v1/sample");
     install_schema(&sample, &url);
 
@@ -131,7 +146,7 @@ fn the_order_does_not_matter() {
 
 #[test]
 fn a_wrong_message_fails_and_prints_both() {
-    let url = db!("a_wrong_message_fails_and_prints_both");
+    let (url, _guard) = db!("a_wrong_message_fails_and_prints_both");
     let sample = repo_root().join("docs/spec/v1/sample");
     install_schema(&sample, &url);
 
@@ -162,7 +177,7 @@ fn a_wrong_message_fails_and_prints_both() {
 
 #[test]
 fn a_wrong_error_type_fails() {
-    let url = db!("a_wrong_error_type_fails");
+    let (url, _guard) = db!("a_wrong_error_type_fails");
     let sample = repo_root().join("docs/spec/v1/sample");
     install_schema(&sample, &url);
 
@@ -188,7 +203,7 @@ fn a_wrong_error_type_fails() {
 
 #[test]
 fn a_failed_assertion_does_not_poison_the_rest_of_the_test() {
-    let url = db!("a_failed_assertion_does_not_poison_the_rest_of_the_test");
+    let (url, _guard) = db!("a_failed_assertion_does_not_poison_the_rest_of_the_test");
     let sample = repo_root().join("docs/spec/v1/sample");
     install_schema(&sample, &url);
 

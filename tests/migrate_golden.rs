@@ -23,6 +23,8 @@ use jwc::{ddl, migrate, model, snapshot, workspace::Workspace};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -140,9 +142,17 @@ fn a_no_transaction_file_holds_nothing_else() {
 
 fn psql(args: &[&str], conn: &str, db: Option<&str>) -> (bool, String) {
     let mut cmd = Command::new("psql");
-    cmd.args(conn.split_whitespace());
-    if let Some(d) = db {
-        cmd.args(["-d", d]);
+    // `-d` after a URI is a whole new connection target, not a database
+    // name — see `common::psql_target`.
+    match db {
+        Some(d) => {
+            for part in common::psql_target(conn, d) {
+                cmd.arg(part);
+            }
+        }
+        None => {
+            cmd.args(conn.split_whitespace());
+        }
     }
     cmd.args(["-q", "-v", "ON_ERROR_STOP=1"]);
     cmd.args(args);
@@ -191,6 +201,12 @@ fn every_migration_applies_and_reverses() {
             continue;
         }
 
+        // Explicitly through `postgres`, the maintenance database. With
+        // `None` psql picks the default, which for the flag form of
+        // `JWC_V1_PG` is the *username* — so this worked only because CI's
+        // user happens to be `postgres` and that database happens to
+        // exist. Any other user and the step fails on `database "…" does
+        // not exist` while naming nothing that is actually wrong.
         let (ok, log) = psql(
             &[
                 "-c",
@@ -199,7 +215,7 @@ fn every_migration_applies_and_reverses() {
                 &format!("create database {db}"),
             ],
             &conn,
-            None,
+            Some("postgres"),
         );
         assert!(ok, "{case}: could not create the test database\n{log}");
 

@@ -1,5 +1,4 @@
 // See integration_db.rs for the rationale; this harness has the same shape.
-#![allow(clippy::await_holding_lock)]
 #![cfg(feature = "redis")]
 
 //! Integration tests for the Redis driver against a real Redis instance.
@@ -22,7 +21,7 @@
 //! The whole file is `#[cfg(feature = "redis")]` — without the feature the
 //! driver is a set of stubs and there is nothing to integration-test.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use jwc::redis_engine;
 use testcontainers_modules::redis::Redis;
@@ -30,7 +29,11 @@ use testcontainers_modules::testcontainers::runners::SyncRunner;
 use testcontainers_modules::testcontainers::Container;
 
 static SHARED: OnceLock<Option<SharedContainer>> = OnceLock::new();
-static TEST_LOCK: Mutex<()> = Mutex::new(());
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: the guard is held
+/// across the `await`s in `fresh_keyspace` and in every caller, which
+/// is what the lock is for. These tests run on a multi-thread runtime,
+/// so a blocking guard parks a worker rather than yielding it.
+static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct SharedContainer {
     /// Held to keep the container alive for the test process.
@@ -79,8 +82,8 @@ fn shared_redis_url() -> Option<&'static str> {
 }
 
 /// Acquire the global lock and empty the keyspace. `None` = graceful skip.
-async fn fresh_keyspace() -> Option<std::sync::MutexGuard<'static, ()>> {
-    let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+async fn fresh_keyspace() -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    let guard = TEST_LOCK.lock().await;
     shared_redis_url()?;
     redis_engine::init_redis_from_env().ok()?;
     // Via the public surface rather than a raw connection, so a broken
