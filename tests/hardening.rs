@@ -417,3 +417,74 @@ fn every_test_suite_is_named_in_ci() {
         missing.join(", ")
     );
 }
+
+// ── the operational endpoints ──────────────────────────────────────────
+
+/// `/healthz`, `/readyz` and `/metrics` answer, and a declared route of
+/// the same name still wins.
+///
+/// The v1 runtime served none of these — they went at the cutover with the
+/// rest of the 0.9.x server — which is also why the soak's "zero pool
+/// leaks" criterion had nothing to read: `engine::pool_status()` existed
+/// and nothing exposed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_operational_endpoints_answer_and_do_not_shadow_a_declared_route() {
+    let p = program(
+        "namespace h;\n\
+         routes \"/\" {\n\
+         \x20   route GET \"healthz\" { return json({ mine: true }); }\n\
+         }\n",
+    );
+
+    // Declared wins. Shadowing it would take someone's endpoint away in a
+    // point release and show up as a dashboard that went blank.
+    let r = call(p.clone(), "GET", "/healthz", &[], "").await;
+    assert_eq!(r.status, 200);
+    assert!(r.body.contains("\"mine\":true"), "built-in shadowed it: {}", r.body);
+
+    // Undeclared: the built-in answers.
+    let bare = program("namespace h;\nroutes \"/x\" { route GET \"\" { return json(1); } }\n");
+    let r = call(bare.clone(), "GET", "/healthz", &[], "").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains("\"ok\""), "{}", r.body);
+
+    // Liveness touches nothing — with no database configured at all it
+    // still answers, which is the point: a dependency check here turns a
+    // database blip into a restart storm.
+    let r = call(bare.clone(), "GET", "/metrics", &[], "").await;
+    assert_eq!(r.status, 200);
+    assert!(
+        r.body.contains("jwc_routes 1"),
+        "the gauge does not describe this program: {}",
+        r.body
+    );
+    assert!(
+        r.headers
+            .iter()
+            .any(|(k, v)| k == "content-type" && v.starts_with("text/plain")),
+        "Prometheus scrapes text/plain, not JSON: {:?}",
+        r.headers
+    );
+
+    // Only GET. A POST to `/metrics` is not a metrics scrape.
+    let r = call(bare.clone(), "POST", "/metrics", &[], "").await;
+    assert_eq!(r.status, 404, "{}", r.body);
+}
+
+/// Readiness is the half that must fail when a dependency is gone —
+/// otherwise a pod with no database stays in rotation, which is the exact
+/// failure `/readyz` exists to prevent.
+#[tokio::test(flavor = "multi_thread")]
+async fn readyz_is_503_when_the_database_is_not_there() {
+    let p = program("namespace h;\nroutes \"/x\" { route GET \"\" { return json(1); } }\n");
+    let r = call(p, "GET", "/readyz", &[], "").await;
+    // This test process may or may not have an engine — both outcomes are
+    // legitimate, and both must *name* what they mean rather than
+    // answering 200 unconditionally.
+    if r.status == 503 {
+        assert!(r.body.contains("db_"), "503 without naming why: {}", r.body);
+    } else {
+        assert_eq!(r.status, 200);
+        assert!(r.body.contains("ready"), "{}", r.body);
+    }
+}

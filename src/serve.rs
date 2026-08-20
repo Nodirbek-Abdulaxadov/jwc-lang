@@ -483,6 +483,141 @@ pub async fn handle(program: Arc<Program>, incoming: Incoming) -> Response {
     with_cors(&program, origin.as_deref(), answer)
 }
 
+/// `/healthz`, `/readyz`, `/metrics` — config.md §4.
+///
+/// These are not declarable in the vocabulary and they should not be: an
+/// operator needs them at a fixed path before reading anyone's source, and
+/// a deployment whose liveness probe depends on the application having
+/// remembered to write one is a deployment that restarts for the wrong
+/// reasons. The 0.9.x runtime served all three; v1 lost them at the
+/// cutover, which is also why the soak's "zero pool leaks" criterion had
+/// nothing to read.
+async fn operational(program: &Program, incoming: &Incoming) -> Option<Response> {
+    if !incoming.method.eq_ignore_ascii_case("GET") {
+        return None;
+    }
+    match incoming.path.trim_end_matches('/') {
+        // Liveness. Touches nothing: a process that answers this is one
+        // the supervisor should not kill. Wiring a dependency in here is
+        // the classic way to turn a database blip into a restart storm.
+        "/healthz" => Some(Response::json(
+            200,
+            &Value::Record(vec![("status".into(), Value::Text("ok".into()))]),
+        )),
+
+        // Readiness. Every configured dependency, actually round-tripped.
+        // Redis only when it is configured — an existing deployment that
+        // never set `JWC_REDIS_URL` must not start failing its probe
+        // because the runtime grew a Redis driver.
+        "/readyz" => {
+            let mut failed: Vec<&str> = Vec::new();
+            if crate::engine::pool_status().is_none() {
+                failed.push("db_uninitialised");
+            } else if crate::engine::ping().await.is_err() {
+                failed.push("db_unreachable");
+            }
+            if crate::redis_engine::is_enabled() && crate::redis_engine::ping().await.is_err() {
+                failed.push("redis_unreachable");
+            }
+            Some(if failed.is_empty() {
+                Response::json(
+                    200,
+                    &Value::Record(vec![("status".into(), Value::Text("ready".into()))]),
+                )
+            } else {
+                // 503, and the body names which dependency. A probe that
+                // only says "not ready" sends the operator to the logs of
+                // a pod that is already out of rotation.
+                Response::json(
+                    503,
+                    &Value::Record(vec![
+                        ("status".into(), Value::Text("unready".into())),
+                        (
+                            "failed".into(),
+                            Value::Array(
+                                failed
+                                    .iter()
+                                    .map(|f| Value::Text((*f).to_string()))
+                                    .collect(),
+                            ),
+                        ),
+                    ]),
+                )
+            })
+        }
+
+        "/metrics" => Some(Response {
+            status: 200,
+            headers: vec![(
+                "content-type".into(),
+                "text/plain; version=0.0.4; charset=utf-8".into(),
+            )],
+            body: metrics_text(program),
+        }),
+        _ => None,
+    }
+}
+
+/// Prometheus text format. Gauges only — a counter would need per-request
+/// bookkeeping on the hot path, and what the soak criterion asks about is
+/// the pool.
+fn metrics_text(program: &Program) -> String {
+    let mut out = String::new();
+    if let Some(s) = crate::engine::pool_status() {
+        out.push_str(
+            "# HELP jwc_db_pool_size Connections the pool currently holds.\n\
+             # TYPE jwc_db_pool_size gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_size {}\n", s.size));
+        out.push_str(
+            "# HELP jwc_db_pool_available Connections idle and checkout-ready.\n\
+             # TYPE jwc_db_pool_available gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_available {}\n", s.available));
+        out.push_str(
+            "# HELP jwc_db_pool_max_size Ceiling from JWC_DB_POOL_SIZE.\n\
+             # TYPE jwc_db_pool_max_size gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_max_size {}\n", s.max_size));
+        // The leak signal. A pool that never returns a connection shows up
+        // here as `available` pinned at 0 while `waiting` climbs, which is
+        // exactly the shape `soak/analyze.py` is looking for.
+        out.push_str(
+            "# HELP jwc_db_pool_waiting Tasks blocked waiting for a connection.\n\
+             # TYPE jwc_db_pool_waiting gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_waiting {}\n", s.waiting));
+    }
+    if let Some(s) = crate::redis_engine::pool_status() {
+        out.push_str(
+            "# HELP jwc_redis_pool_size Connections the Redis pool holds.\n\
+             # TYPE jwc_redis_pool_size gauge\n",
+        );
+        out.push_str(&format!("jwc_redis_pool_size {}\n", s.size));
+        out.push_str(
+            "# HELP jwc_redis_pool_available Idle Redis connections.\n\
+             # TYPE jwc_redis_pool_available gauge\n",
+        );
+        out.push_str(&format!("jwc_redis_pool_available {}\n", s.available));
+        out.push_str(
+            "# HELP jwc_redis_pool_max_size Ceiling from JWC_REDIS_POOL_SIZE.\n\
+             # TYPE jwc_redis_pool_max_size gauge\n",
+        );
+        out.push_str(&format!("jwc_redis_pool_max_size {}\n", s.max_size));
+        out.push_str(
+            "# HELP jwc_redis_pool_waiting Tasks blocked on a Redis connection.\n\
+             # TYPE jwc_redis_pool_waiting gauge\n",
+        );
+        out.push_str(&format!("jwc_redis_pool_waiting {}\n", s.waiting));
+    }
+    out.push_str(
+        "# HELP jwc_routes Declared routes.\n\
+         # TYPE jwc_routes gauge\n",
+    );
+    out.push_str(&format!("jwc_routes {}\n", program.routes.len()));
+    out
+}
+
 /// The CORS headers for a request, when a `cors { }` block is declared.
 ///
 /// Absent, nothing is added at all: a browser refusing a cross-origin call
@@ -529,6 +664,13 @@ fn with_cors(program: &Program, origin: Option<&str>, mut r: Response) -> Respon
 async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
 
     let Some((route, binds)) = match_route(&program, &incoming.method, &incoming.path) else {
+        // Only once nothing declared matched. A program that writes its own
+        // `/metrics` keeps it — the source is the authority, and silently
+        // shadowing a declared route with a built-in would be the kind of
+        // thing you find out about from a dashboard that went blank.
+        if let Some(r) = operational(&program, &incoming).await {
+            return r;
+        }
         return Response::message(404, "not found");
     };
     let route = route.clone();

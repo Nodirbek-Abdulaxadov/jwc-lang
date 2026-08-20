@@ -152,7 +152,46 @@ it missed.
 
 ---
 
-## 4. Environment variables read by the runtime
+## 4. Operational endpoints
+
+4.0.1 Three paths are served by the runtime, at fixed names, on `GET`:
+
+| Path | Answers | Touches |
+|---|---|---|
+| `/healthz` | `200 {"status":"ok"}` | nothing |
+| `/readyz` | `200 {"status":"ready"}` or `503 {"status":"unready","failed":[…]}` | every configured dependency |
+| `/metrics` | Prometheus text (`text/plain; version=0.0.4`) | nothing |
+
+4.0.2 They are **not declarable**, and that is deliberate. An operator needs
+them at a known path before reading anyone's source, and a liveness probe
+that depends on the application having remembered to write one is a
+deployment that restarts for the wrong reasons.
+
+4.0.3 A **declared route wins**. The built-in answers only when routing
+found nothing, so a program that writes its own `/metrics` keeps it.
+Shadowing a declared route with a built-in would remove someone's endpoint
+in a point release, and the symptom is a dashboard that goes blank.
+
+4.0.4 `/healthz` touches no dependency. Liveness answers "should the
+supervisor kill this process", and wiring a database check into it turns a
+connection blip into a restart storm across every replica at once.
+
+4.0.5 `/readyz` round-trips each configured dependency — Postgres always,
+Redis **only when `JWC_REDIS_URL` is set**, so a deployment that never used
+Redis does not start failing its probe because the runtime grew a driver.
+The body names which one failed: a probe that only says "not ready" sends
+the operator to the logs of a pod that is already out of rotation.
+
+4.0.6 `/metrics` exposes gauges, not counters. `jwc_db_pool_size`,
+`_available`, `_max_size` and `_waiting` (and the `jwc_redis_pool_*` set
+when Redis is configured) are what a connection leak looks like from
+outside: `available` pinned at zero while `waiting` climbs. Per-request
+counters would need bookkeeping on the hot path and are what a real
+metrics exporter is for.
+
+---
+
+## 5. Environment variables read by the runtime
 
 | Variable | Used by |
 |---|---|
@@ -168,7 +207,7 @@ variable at runtime has no effect.
 
 ---
 
-## 5. Secrets never appear in output
+## 6. Secrets never appear in output
 
 `env()` values used as `secret`, `key`, `password`, `token` or `cursor_secret`
 are redacted in `jwc config --print`, in logs, and in error messages. The
@@ -177,7 +216,7 @@ the value.
 
 ---
 
-## 6. Diagnostics introduced here
+## 7. Diagnostics introduced here
 
 | Code | Meaning |
 |---|---|
