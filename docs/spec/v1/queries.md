@@ -632,6 +632,7 @@ transaction's connection.
 | `E0531` | non-aggregate projection field missing from `group by` |
 | `E0532` | bare-join aggregation combined with `as many` |
 | `E0533` | aggregate filter on a non-aggregate call |
+| `E0534` | field read on a binding that is not a join result |
 | `E0540` | view body has no projection |
 | `E0541` | view body carries a per-query clause |
 | `E0542` | pagination pushdown cannot be proven |

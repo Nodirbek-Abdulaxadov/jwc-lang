@@ -272,6 +272,8 @@ against which `E0710`/`E0711` are read.
 | `E0730` | duplicate key in `with { }` |
 | `E0731` | route path does not end in a response |
 | `E0732` | route returns a non-`Response` |
+| `E0733` | a header value is not text |
+| `E0734` | `response.status()` outside an `after` block |
 | `E0900` | removed keyword (§11 below) |
 | `W0602` | `request.path()` in a rate-limit key |
 

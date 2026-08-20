@@ -234,3 +234,13 @@ grouped query (`E0530`).
 table and checked by `tests/builtins_doc_sync.rs`. This file is the
 specification; that file is the inventory. A disagreement is a bug in the
 inventory.
+
+---
+
+## 10. Diagnostics introduced here
+
+| Code | Meaning |
+|---|---|
+| `E0205` | wrong number of arguments to a builtin |
+| `E0206` | a field name in `json.get`-style access is not a string literal |
+| `W1301` | `debug.dump` in the program (tooling §3.4) |

@@ -624,6 +624,7 @@ how you test nullity and is always allowed.
 | `E0305` | class field has no matching column |
 | `E0310` | field read on a raw value |
 | `E0311` | raw value in a non-splice position |
+| `E0312` | field read on a value that has no such field |
 | `E0320` | value may be null |
 | `E0330` | `Response` returned from a service |
 | `E0340` | spread source has no declared shape |
@@ -632,8 +633,14 @@ how you test nullity and is always allowed.
 | `E0343` | empty spread leaves a `NOT NULL` column unset |
 | `E0351` | incompatible return shapes without an annotation |
 | `E0352` | package-exported function without a return annotation |
+| `E0353` | wrong number of arguments to a declared function |
+| `E0354` | argument is not assignable to the declared parameter type |
 | `E0360` | `minLength` on an array |
 | `E0361` | `required` on a `T?` field |
 | `E0370` | no `+` overload for these operands |
 | `E0371` | non-boolean condition |
+| `E0372` | `for` over something that is not an array |
+| `E0373` | index is not a number |
+| `E0374` | the two branches of a conditional produce unrelated shapes |
+| `E0375` | `in` over an array whose element type does not match |
 | `W0301` | dead `??` |

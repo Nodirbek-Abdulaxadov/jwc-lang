@@ -685,6 +685,34 @@ moslashtirilgandan keyin ular **3 ta** — `Sessions.token_hash`,
 `ApiKeys.key_hash`, `Invites.token_hash` — va shulardan bittasigina bugun
 route'dan yetib boriladi. Aynan shu uchtasi v0.29.0 ning hash mavzusi.)
 
+**Bajarildi.** To'rt bosqich, har biri alohida commit: `jwc explain`
+nishonlari + `JWC_LOG_SQL` + `debug.dump` (`docs/spec/v1/tooling.md` —
+yangi normativ hujjat), `jwc lint --constraints`, `jwc openapi`, va til
+serveri (`src/lsp.rs`). Barcha to'rt qabul mezoni testda:
+`explain_and_the_sql_golden_are_the_same_compiler`,
+`openapi_passes_a_real_validator` (haqiqiy `openapi-spec-validator`),
+`tests/lsp.rs` dagi hover-SQL, va `lint_constraints_...`.
+
+Yo'l-yo'lakay:
+
+- **Route pattern'i ikki qatorning yopishtirilishi emas edi.** v0.24.0 dan
+  beri `jwc explain` `/api/v1/authregister` va
+  `/api/v1/orgs/{org_id: bigint}/invoices` deb yozib kelgan. Endi uchala
+  chaqiruvchi ham bitta `wiring::route_pattern` dan o'tadi — bu
+  `request.route()` javob beradigan qator (routing §5.4).
+- **Annotatsiyasiz funksiyaning qaytish tipi endi e'lon qilinadi.**
+  types.md §10.2 annotatsiyani faqat ikki `return` kelishmaganda talab
+  qiladi, shuning uchun ko'pchilik funksiyada u yo'q va har bir chaqiruv
+  joyi `Unknown` ko'rardi. `Checked` endi ularni chiqaradi; `jwc openapi`
+  pass'ni ikki marta yuritadi. `jwc check` hamon bir marta.
+- **`delete` hech qanday unique/check buzmaydi.** `wiring::promote` uni
+  raise set'ga qo'shadi (u yerda ortiqcha baho xavfsiz), lekin
+  `--constraints` aniq javobni beradi: `DELETE /orgs/{org_id}` →
+  `fk_invoices__org_id`, 400.
+
+**Ochiq qolgani:**
+- **`E0910`** — hamon `jwc build` yo'q (DEFERRED-2).
+
 ---
 
 ### v0.28.0 — **Test framework va paketlar**

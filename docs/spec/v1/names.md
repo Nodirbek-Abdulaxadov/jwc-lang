@@ -346,6 +346,13 @@ rather than implemented as an unreachable check.)*
 | Code | Meaning |
 |---|---|
 | `E0104` | doc comment attaches to nothing |
+| `E0100` | unexpected character |
+| `E0102` | unterminated string |
+| `E0103` | literal newline inside a string literal |
+| `E0105` | identifier starts with `_` |
+| `E0106` | `$` or `@` not followed immediately by a name |
+| `E0108` | `\u` not followed by `{XXXX}` |
+| `E0109` | unknown string escape |
 | `E0107` | integer literal out of `bigint` range |
 | `E0110` | physical name collision |
 | `E0111` | duplicate declared name |
@@ -360,6 +367,13 @@ rather than implemented as an unreachable check.)*
 | `E0214` | `let` shadows an existing binding |
 | `E0220` | `@name` outside a route or middleware |
 | `E0900` | removed keyword from the pre-1.0 language |
+
+`E0001`–`E0018` are the parser's recovery diagnostics — "expected `X`, found
+`Y`" at a position where [`grammar.ebnf`](./grammar.ebnf) admits only `X`.
+They are deliberately not tabled one by one: the grammar is their
+specification, and a table restating it would be a second thing to keep in
+step with the first. Every other code in the compiler appears in one of
+these tables, and the audit is `comm -23` over the two lists (CLAUDE.md).
 | `W0101` | case convention |
 | `W0102` | namespace does not match file path |
 | `W0103` | unused import |

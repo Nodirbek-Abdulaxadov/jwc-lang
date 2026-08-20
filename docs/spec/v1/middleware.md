@@ -227,6 +227,7 @@ route and print this table.
 | `E0802` | attachment site lacks a declared binder |
 | `E0803` | `requires` not satisfied by the resolved chain |
 | `E0804` | middleware appears twice in one chain |
+| `E0805` | `uses` names something that is not a declared middleware |
 | `E0810` | `return <expr>` inside `after` |
 | `E0811` | `after` block can raise |
 | `E0820` | `context.k` is not provided on every path |

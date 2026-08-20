@@ -258,6 +258,7 @@ exhaustiveness covers it.
 | `E0603` | `on conflict` columns are not a unique constraint |
 | `E0604` | `on conflict` without columns on a multi-unique table |
 | `E0605` | `update`/`delete` with no `where` |
+| `E0606` | value is not assignable to the column it is written to |
 | `E0610` | `raw` placeholder/argument count mismatch |
 | `E0611` | `raw` inside a view |
 | `E0620` | nested transaction |

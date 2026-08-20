@@ -208,6 +208,45 @@ fn a_message_less_constraint_a_route_can_reach_is_a_warning() {
 }
 
 #[test]
+fn explain_and_the_sql_golden_are_the_same_compiler() {
+    // v0.27.0's done criterion (ROADMAP §3): what `jwc explain` prints for
+    // the sample is what `tests/sql_golden/sample.sql` froze. They go
+    // through the same `sites()` and the same `Compiler`, so this asserts a
+    // property rather than discovering one — which is the point: the day
+    // one of them grows a private path, this fails.
+    let path = sample();
+    let out = jwc(&["explain", path.to_str().expect("utf8"), "--sql"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let printed = stdout(&out);
+
+    let golden = std::fs::read_to_string(repo_root().join("tests/sql_golden/sample.sql"))
+        .expect("tests/sql_golden/sample.sql");
+
+    // Every non-comment line of the golden appears in what was printed.
+    // Line by line rather than statement by statement, because the two
+    // wrap and indent for different readers.
+    let mut missing: Vec<&str> = Vec::new();
+    let mut checked = 0usize;
+    for line in golden.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("--") {
+            continue;
+        }
+        checked += 1;
+        if !printed.contains(t) {
+            missing.push(t);
+        }
+    }
+    assert!(checked > 100, "the golden looks empty: {checked} lines");
+    assert!(
+        missing.is_empty(),
+        "{} golden line(s) `jwc explain` does not print:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}
+
+#[test]
 fn openapi_describes_every_route_and_validates() {
     let path = sample();
     let path = path.to_str().expect("utf8");
