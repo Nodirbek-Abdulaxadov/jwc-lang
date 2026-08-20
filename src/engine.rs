@@ -36,6 +36,12 @@ pub struct JwcEngine {
 
 static ENGINE: OnceLock<JwcEngine> = OnceLock::new();
 
+/// `DATABASE_URL`, or `JWC_DATABASE_URL`. The migrate CLI reads it through
+/// here so it fails with the same sentence the runtime does.
+pub fn database_url_from_env() -> Result<String> {
+    read_database_url()
+}
+
 fn read_database_url() -> Result<String> {
     std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("JWC_DATABASE_URL"))

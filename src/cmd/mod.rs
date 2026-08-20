@@ -345,13 +345,33 @@ pub fn routes(path: PathBuf) -> Result<()> {
 }
 
 /// `jwc v1 serve <path> --port N` — run the program.
-pub fn serve(path: PathBuf, port: u16) -> Result<()> {
+pub fn serve(path: PathBuf, port: u16, skip_schema_check: bool) -> Result<()> {
     let ws = crate::workspace::Workspace::load(&path)?;
     let program = std::sync::Arc::new(crate::serve::load(&ws)?);
+    let snap = crate::snapshot::of(&crate::model::build(&ws).model);
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         crate::engine::init_engine_from_env()?;
+        // #33 — name the missing column at boot rather than wrapping
+        // Postgres's 42703 in a 500 at request time. `information_schema`
+        // is readable by every role, so this costs one query and no
+        // privileges.
+        if !skip_schema_check {
+            let url = crate::engine::database_url_from_env()?;
+            let client = crate::engine::connect_for_migrations(&url).await?;
+            let missing = crate::apply::check_live_schema(&client, &snap).await?;
+            if !missing.is_empty() {
+                for m in &missing {
+                    eprintln!("error: {m}");
+                }
+                bail!(
+                    "the database is behind the sources — run `jwc migrate up`                      ({} thing{} missing)",
+                    missing.len(),
+                    plural(missing.len())
+                );
+            }
+        }
         println!("{} routes", program.routes.len());
         crate::serve::serve(program, port).await
     })
@@ -465,6 +485,100 @@ pub fn migrate_new(
         println!("{}", display_relative(&up));
     }
     Ok(())
+}
+
+/// The migrations directory for a project path.
+fn migrations_dir(path: &Path, dir: Option<PathBuf>) -> PathBuf {
+    dir.unwrap_or_else(|| {
+        let root = if path.is_file() {
+            path.parent().unwrap_or(path).to_path_buf()
+        } else {
+            path.to_path_buf()
+        };
+        root.join("migrations")
+    })
+}
+
+fn migration_client() -> Result<(tokio::runtime::Runtime, tokio_postgres::Client)> {
+    let url = crate::engine::database_url_from_env()?;
+    let rt = tokio::runtime::Runtime::new()?;
+    let client = rt.block_on(crate::engine::connect_for_migrations(&url))?;
+    Ok((rt, client))
+}
+
+/// `jwc migrate up [path] [--to N]` — apply every pending migration.
+pub fn migrate_up(path: PathBuf, dir: Option<PathBuf>, to: Option<u32>) -> Result<()> {
+    let dir = migrations_dir(&path, dir);
+    let (rt, client) = migration_client()?;
+    let ran = rt.block_on(crate::apply::up(&client, &dir, to))?;
+    if ran.is_empty() {
+        println!("nothing to apply");
+    }
+    for name in ran {
+        println!("applied {name}");
+    }
+    Ok(())
+}
+
+/// `jwc migrate down [path] [--count N]` — roll back, newest first.
+pub fn migrate_down(path: PathBuf, dir: Option<PathBuf>, count: usize) -> Result<()> {
+    let dir = migrations_dir(&path, dir);
+    let (rt, client) = migration_client()?;
+    let undone = rt.block_on(crate::apply::down(&client, &dir, count))?;
+    if undone.is_empty() {
+        println!("nothing to roll back");
+    }
+    for name in undone {
+        println!("rolled back {name}");
+    }
+    Ok(())
+}
+
+/// `jwc migrate status [path]` — applied, pending, and drift.
+pub fn migrate_status(path: PathBuf, dir: Option<PathBuf>) -> Result<()> {
+    let dir = migrations_dir(&path, dir);
+    let (rt, client) = migration_client()?;
+    let st = rt.block_on(crate::apply::status(&client, &dir))?;
+    for r in &st.applied {
+        println!("applied  {}", r.name);
+    }
+    for p in &st.pending {
+        println!("pending  {p}");
+    }
+    for d in &st.drift {
+        eprintln!("drift    {d}");
+    }
+    println!(
+        "{} applied, {} pending, {} drift",
+        st.applied.len(),
+        st.pending.len(),
+        st.drift.len()
+    );
+    if !st.drift.is_empty() {
+        bail!("{} drift finding{}", st.drift.len(), plural(st.drift.len()));
+    }
+    Ok(())
+}
+
+/// `jwc migrate verify [path]` — the names the binary expects against the
+/// ones Postgres holds (#28).
+pub fn migrate_verify(path: PathBuf) -> Result<()> {
+    let ws = crate::workspace::Workspace::load(&path)?;
+    if ws.has_parse_errors() {
+        eprint!("{}", ws.parse_errors().join(""));
+        bail!("{} did not parse", path.display());
+    }
+    let snap = crate::snapshot::of(&crate::model::build(&ws).model);
+    let (rt, client) = migration_client()?;
+    let problems = rt.block_on(crate::apply::verify(&client, &snap))?;
+    for p in &problems {
+        eprintln!("{p}");
+    }
+    if problems.is_empty() {
+        println!("ok — every constraint, index and view is present under its expected name");
+        return Ok(());
+    }
+    bail!("{} problem{}", problems.len(), plural(problems.len()))
 }
 
 fn plural(n: usize) -> &'static str {

@@ -75,6 +75,10 @@ enum Command {
         path: PathBuf,
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Start even when the database is missing a table or column the
+        /// program reads. The default is to refuse and name it.
+        #[arg(long)]
+        skip_schema_check: bool,
     },
     /// Generate and apply schema migrations.
     Migrate {
@@ -109,6 +113,42 @@ enum MigrateCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Apply every pending migration, in order, under an advisory lock.
+    Up {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Stop after this ordinal.
+        #[arg(long)]
+        to: Option<u32>,
+    },
+    /// Roll back applied migrations, newest first.
+    ///
+    /// Refuses a migration whose `down` carries an `-- irreversible:`
+    /// marker.
+    Down {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// How many to roll back.
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+    },
+    /// What is applied, what is pending, and what has drifted.
+    Status {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Compare the constraint and index names the binary expects against
+    /// the ones the database holds.
+    Verify {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -123,7 +163,11 @@ fn main() -> Result<()> {
         Command::GenSql { path, explain, out } => cmd::gen_sql(path, explain, out),
         Command::Explain { path, sql } => cmd::explain(path, sql),
         Command::Routes { path } => cmd::routes(path),
-        Command::Serve { path, port } => cmd::serve(path, port),
+        Command::Serve {
+            path,
+            port,
+            skip_schema_check,
+        } => cmd::serve(path, port, skip_schema_check),
         Command::Migrate { command } => match command {
             MigrateCommand::New {
                 name,
@@ -132,6 +176,10 @@ fn main() -> Result<()> {
                 explain,
                 dry_run,
             } => cmd::migrate_new(path, name, dir, explain, dry_run),
+            MigrateCommand::Up { path, dir, to } => cmd::migrate_up(path, dir, to),
+            MigrateCommand::Down { path, dir, count } => cmd::migrate_down(path, dir, count),
+            MigrateCommand::Status { path, dir } => cmd::migrate_status(path, dir),
+            MigrateCommand::Verify { path } => cmd::migrate_verify(path),
         },
         Command::Ast { path } => cmd::ast(path),
     }

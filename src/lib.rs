@@ -17,6 +17,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 // ---- the language
+pub mod apply;
 pub mod ast;
 pub mod check;
 pub mod cursor;

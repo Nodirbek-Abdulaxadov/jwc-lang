@@ -58,6 +58,9 @@ JWC_V1_DATABASE_URL=postgres://…  cargo test --test raw_hatch
 
 # Applies each generated migration on top of the schema it migrates from.
 JWC_V1_PG='-h 127.0.0.1 -p 5432 -U postgres' cargo test --test migrate_golden
+
+# up / down / status / verify. Serial: they share one database.
+JWC_V1_DATABASE_URL=postgres://…  cargo test --test migrate_apply -- --test-threads=1
 ```
 
 What each suite is for:
@@ -77,6 +80,7 @@ What each suite is for:
 | `snapshot_sample` | the sample's migration snapshot, field by field |
 | `diff_corpus` | two schemas in, the migration's operations and phases out |
 | `migrate_golden` | emitted migrations, byte for byte, and that they apply |
+| `migrate_apply` | `up`, `down`, `status`, `verify` against a real database |
 
 The corpora are **exact in both directions**: a missing diagnostic and an
 unannotated one both fail. That is what makes them a specification rather
@@ -124,6 +128,10 @@ the surrounding style. CI runs `clippy --all-targets -- -D warnings`.
 - **`migrate.rs`** — the operations, lowered to files. `down` is generated
   by diffing the other way, and refused outright when the migration is
   irreversible.
+- **`apply.rs`** — `up`, `down`, `status`, `verify`, all under a session
+  advisory lock. The bookkeeping row goes in the **same transaction** as the
+  statements, which is why the applier strips the file's own
+  `BEGIN`/`COMMIT` rather than running it as written.
 - **`check.rs`** — the type pass. `Raw` vs `Record`, `T?` and narrowing,
   class validation, aggregates.
 - **`wiring.rs`** — whole-program checks: the route table, middleware
