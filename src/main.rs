@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use jwc::cmd;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(
@@ -237,7 +238,27 @@ enum MigrateCommand {
     },
 }
 
-fn main() -> Result<()> {
+/// `Err` from a subcommand is almost always the *program's* fault, not the
+/// tool's: a type error, a missing migration, a database that refused a
+/// statement. Returning it from `main` would hand it to `Termination`,
+/// which formats an `anyhow::Error` with `Debug` — and with
+/// `RUST_BACKTRACE=1` in the environment that prints this CLI's own stack
+/// frames under the diagnostic, which reads as a compiler crash. The
+/// answer is the message and its causes; the frames belong to panics.
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // `{:#}` is anyhow's cause chain on one line — the
+            // `with_context` layers this crate adds are the diagnosis and
+            // dropping them would be worse than the frames.
+            eprintln!("Error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Check {

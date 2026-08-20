@@ -97,7 +97,22 @@ async fn run_on(
             let rows = conn.query(sql, &params).await.map_err(classify)?;
             let text = match rows.first() {
                 None => None,
-                Some(r) => r.try_get::<_, Option<String>>(0).unwrap_or(None),
+                // Not `unwrap_or(None)`. Every statement this layer sends
+                // projects a single text column — the query compiler wraps
+                // in `json_agg(...)::text` / `row_to_json(...)::text`, and
+                // so does `raw()`. A non-text first column therefore means
+                // the generator emitted something it should not have, and
+                // swallowing it reports the far more damaging lie that the
+                // query matched nothing: `Shape::First` answers 404 and
+                // `Shape::Rows` answers `[]`, both indistinguishable from
+                // an empty table.
+                Some(r) => r
+                    .try_get::<_, Option<String>>(0)
+                    .map_err(|e| {
+                        DbError::Other(anyhow!(
+                            "statement projected a first column that is not text: {e}"
+                        ))
+                    })?,
             };
             if log_enabled() {
                 let n = match shape {

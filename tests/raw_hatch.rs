@@ -76,3 +76,50 @@ async fn the_raw_valve_runs() {
     assert_eq!(rows[0]["rn"], 1, "{}", r.body);
     assert_eq!(rows[1]["rn"], 2, "{}", r.body);
 }
+
+/// The db layer must not turn a wrong projection into an empty result.
+///
+/// Every statement this layer sends projects one text column — the query
+/// compiler wraps in `json_agg(…)::text` / `row_to_json(…)::text`, and so
+/// does `raw()`. Reading that column used to be
+/// `try_get::<_, Option<String>>(0).unwrap_or(None)`, which meant a
+/// projection that was *not* text reported **no rows**: 404 from
+/// `Shape::First`, `[]` from `Shape::Rows`, both indistinguishable from an
+/// empty table. A generator bug would have looked like missing data
+/// everywhere it touched.
+///
+/// `SELECT 1` is the shortest statement with a non-text first column, so
+/// it stands in for that bug without needing one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_text_first_column_is_a_fault_not_an_empty_result() {
+    let Ok(url) = std::env::var("JWC_V1_DATABASE_URL") else {
+        eprintln!(
+            "SKIPPED a_non_text_first_column_is_a_fault_not_an_empty_result — set \
+             JWC_V1_DATABASE_URL. A SKIPPED line is not a pass."
+        );
+        return;
+    };
+    jwc::engine::init_engine(&url).expect("engine");
+
+    for shape in [jwc::sql::Shape::First, jwc::sql::Shape::Rows] {
+        let r = jwc::db::run("SELECT 1", &[], shape).await;
+        match r {
+            Err(jwc::db::DbError::Other(e)) => {
+                let text = format!("{e:#}");
+                assert!(
+                    text.contains("not text"),
+                    "the fault does not say what went wrong: {text}"
+                );
+            }
+            Ok(v) => panic!("{shape:?} reported {v:?} instead of failing"),
+            Err(other) => panic!("{shape:?} gave the wrong error: {other:?}"),
+        }
+    }
+
+    // And the shape it *is* built for still works, so the guard is not
+    // simply rejecting everything.
+    let r = jwc::db::run("SELECT 'x'::text", &[], jwc::sql::Shape::First)
+        .await
+        .expect("a text first column is what this layer sends");
+    assert_eq!(r.as_deref(), Some("x"));
+}
