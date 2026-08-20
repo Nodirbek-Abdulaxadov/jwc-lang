@@ -85,6 +85,22 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # The sample rate-limits every route through `redis.rate_limit`,
+      # with no `redis.enabled()` guard — correctly, because a limiter
+      # that admits the request when its store is missing is not one. So
+      # exercising the sample needs a Redis exactly the way it needs a
+      # Postgres. It did not while `redis.rate_limit` was a stub that
+      # answered `true`, and every case here passed against a limiter that
+      # had never limited anything.
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -107,11 +123,17 @@ jobs:
           PGPASSWORD: postgres
         run: cargo test --test sql_golden -- --nocapture
 
+      # `--features redis` because the sample's rate limiter is real now:
+      # without the driver compiled in, `redis.rate_limit` raises and every
+      # route answers 500.
       - name: HTTP goldens and the raw valve
         env:
           JWC_V1_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+          JWC_TEST_REDIS_URL: redis://127.0.0.1:6379
           CURSOR_SECRET: ci-cursor-secret
-        run: cargo test --test http_golden --test raw_hatch -- --nocapture
+        run: >
+          cargo test --features redis
+          --test http_golden --test raw_hatch -- --nocapture
 
       - name: DDL applies
         env:
@@ -152,8 +174,9 @@ jobs:
       - name: The login timing branch
         env:
           JWC_V1_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
+          JWC_TEST_REDIS_URL: redis://127.0.0.1:6379
           PGPASSWORD: postgres
-        run: cargo test --test hardening -- --nocapture
+        run: cargo test --features redis --test hardening -- --nocapture
 
   # Same reasoning as `postgres` above: the no-server jobs only
   # prove the code compiles and the stubs behave. Every command this driver

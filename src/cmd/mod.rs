@@ -559,6 +559,12 @@ pub fn serve(path: PathBuf, port: u16, skip_schema_check: bool, dev: bool) -> Re
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         crate::engine::init_engine_from_env()?;
+        // The `redis` package's surface (builtins.md §8) is dead without
+        // this: the driver reads `JWC_REDIS_URL` here and nowhere else, so
+        // until it was called, `redis.enabled()` answered `false` on a
+        // binary built `--features redis` with the variable set, and every
+        // other call raised.
+        crate::redis_engine::init_from_env()?;
         // #33 — name the missing column at boot rather than wrapping
         // Postgres's 42703 in a 500 at request time. `information_schema`
         // is readable by every role, so this costs one query and no
@@ -828,6 +834,9 @@ pub fn test(path: PathBuf, filter: Option<String>, no_rollback: bool) -> Result<
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         crate::engine::init_engine_from_env()?;
+        // `jwc test` runs the same program bodies as `serve`, so a test
+        // touching `redis.*` needs the same driver.
+        crate::redis_engine::init_from_env()?;
         if no_rollback {
             eprintln!(
                 "warning: --no-rollback — every test commits. {} will hold \

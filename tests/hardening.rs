@@ -170,6 +170,32 @@ async fn the_two_failure_branches_of_login_cost_the_same() {
         );
         return;
     };
+    // `login` sits behind the sample's `AuthRateLimit`, which calls
+    // `redis.rate_limit` with no `enabled()` guard — so measuring `login`
+    // needs a Redis as much as a Postgres. It did not use to, because
+    // `redis.rate_limit` was a stub answering `true`: the timing
+    // measurement ran through a limiter that had never limited.
+    let Ok(redis_url) = std::env::var("JWC_TEST_REDIS_URL") else {
+        eprintln!(
+            "SKIPPED the_two_failure_branches_of_login_cost_the_same — `login` \
+             is rate-limited, so this needs JWC_TEST_REDIS_URL too. A SKIPPED \
+             line is not a pass."
+        );
+        return;
+    };
+    std::env::set_var("JWC_REDIS_URL", &redis_url);
+    jwc::redis_engine::init_from_env().expect("redis");
+    if !jwc::redis_engine::is_enabled() {
+        // A build fact, not a missing service — the driver is behind a
+        // Cargo feature. CI passes `--features redis` for this suite.
+        eprintln!(
+            "SKIPPED the_two_failure_branches_of_login_cost_the_same — this \
+             binary was built without `--features redis`. A SKIPPED line is \
+             not a pass."
+        );
+        return;
+    }
+
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/spec/v1/sample");
     let ws = Workspace::load(&root).expect("sample");
 
@@ -211,6 +237,17 @@ async fn the_two_failure_branches_of_login_cost_the_same() {
     jwc::engine::init_engine_from_env().expect("engine");
     let program = Arc::new(serve::load(&ws).unwrap_or_else(|e| panic!("{e}")));
 
+    // The sample limits `login` to five attempts per identity per five
+    // minutes, and this test makes thirty-six. Clearing the buckets before
+    // each attempt keeps the limiter out of a measurement that is about
+    // Argon2id, not about the limiter — the alternative is 429s, which
+    // cost nothing and would hide exactly the gap being measured.
+    let clear = || async {
+        jwc::redis_engine::eval("return redis.call('FLUSHDB')", &[], &[])
+            .await
+            .expect("flush the rate-limit buckets");
+    };
+
     let attempt = |email: &'static str| {
         let p = program.clone();
         async move {
@@ -225,18 +262,22 @@ async fn the_two_failure_branches_of_login_cost_the_same() {
 
     // Warm the pool and the KDF's first-run cost out of the measurement.
     for _ in 0..3 {
+        clear().await;
         attempt("known@example.com").await;
+        clear().await;
         attempt("nobody@example.com").await;
     }
 
     let mut known = Vec::new();
     let mut unknown = Vec::new();
     for _ in 0..15 {
+        clear().await;
         let (status, d) = attempt("known@example.com").await;
-        assert_eq!(status, 401);
+        assert_eq!(status, 401, "the limiter, not the credentials");
         known.push(d.as_secs_f64() * 1000.0);
+        clear().await;
         let (status, d) = attempt("nobody@example.com").await;
-        assert_eq!(status, 401);
+        assert_eq!(status, 401, "the limiter, not the credentials");
         unknown.push(d.as_secs_f64() * 1000.0);
     }
 

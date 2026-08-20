@@ -102,6 +102,38 @@ async fn run(program: &Arc<Program>, c: &Case) -> Response {
     .await
 }
 
+/// The sample's `RateLimit` middleware runs on every route, and it calls
+/// `redis.rate_limit` with no `redis.enabled()` guard — deliberately, and
+/// correctly: a limiter that admits the request when its store is missing
+/// is not a limiter. So the sample needs a Redis exactly the way it needs
+/// a Postgres.
+///
+/// It did not use to, because `redis.rate_limit` was a stub that answered
+/// `true` forever. Every case in this file passed against a limiter that
+/// had never limited anything.
+fn init_redis_or_skip(test_name: &str) -> bool {
+    let Ok(url) = std::env::var("JWC_TEST_REDIS_URL") else {
+        eprintln!(
+            "SKIPPED {test_name} — the sample rate-limits every route, so it \
+             needs JWC_TEST_REDIS_URL as well as a database. A SKIPPED line \
+             is not a pass."
+        );
+        return false;
+    };
+    std::env::set_var("JWC_REDIS_URL", &url);
+    jwc::redis_engine::init_from_env().expect("redis");
+    if !jwc::redis_engine::is_enabled() {
+        // A build fact, not a missing service: the driver is behind a
+        // Cargo feature. CI passes `--features redis` for this suite.
+        eprintln!(
+            "SKIPPED {test_name} — JWC_TEST_REDIS_URL is set but this binary \
+             was built without `--features redis`. A SKIPPED line is not a pass."
+        );
+        return false;
+    }
+    true
+}
+
 fn setup_database(url: &str) -> Result<(), String> {
     // Apply the sample's own generated DDL — the artefact tests/v1_ddl_golden
     // pins — so the runtime runs against exactly what `gen-sql` emits.
@@ -149,6 +181,9 @@ async fn http_golden() {
         );
         return;
     };
+    if !init_redis_or_skip("http_golden") {
+        return;
+    }
     if let Err(e) = setup_database(&url) {
         panic!("could not prepare the database: {e}");
     }

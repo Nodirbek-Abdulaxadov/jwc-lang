@@ -245,3 +245,131 @@ async fn eval_surfaces_script_errors() {
         "a script syntax error is permanent — retrying it would livelock: {err:?}"
     );
 }
+
+/// The language surface, not the driver: `redis.*` as a program sees it
+/// (builtins.md §8).
+///
+/// Everything above this point tests `redis_engine` directly, and all of
+/// it passed while the surface on top was a stub — `redis.enabled()`
+/// answered `false`, `redis.rate_limit()` answered **`true`**, and `get` /
+/// `set` / `del` / `incr` / `expire` were absent, so a program using them
+/// typechecked clean and faulted with `unknown function` on every request.
+/// A rate limiter written against the documented API admitted everything.
+/// Testing the driver could never have caught that; only going through
+/// `handle` can.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_redis_package_surface_reaches_the_server() {
+    let Some(_guard) = fresh_keyspace().await else {
+        return skip_notice("the_redis_package_surface_reaches_the_server");
+    };
+
+    let program = program(concat!(
+        "namespace s;\n",
+        "routes \"/r\" {\n",
+        "    route GET \"/kv\" {\n",
+        "        let stored = redis.set(\"k\", \"v\", 30);\n",
+        "        let back   = redis.get(\"k\");\n",
+        "        let miss   = redis.get(\"absent\");\n",
+        "        let bumped = redis.incr(\"counter\");\n",
+        "        return json({ on: redis.enabled(), stored: $stored,\n",
+        "                      back: $back, miss: $miss, bumped: $bumped });\n",
+        "    }\n",
+        "    route GET \"/limited\" {\n",
+        "        if (!redis.rate_limit(\"bucket\", 2, 60)) {\n",
+        "            return tooManyRequests(\"slow down\");\n",
+        "        }\n",
+        "        return json({ ok: true });\n",
+        "    }\n",
+        "}\n",
+    ));
+
+    let r = call(program.clone(), "GET", "/r/kv").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.contains("\"on\":true"), "enabled() is stubbed: {}", r.body);
+    assert!(r.body.contains("\"stored\":true"), "{}", r.body);
+    assert!(r.body.contains("\"back\":\"v\""), "{}", r.body);
+    assert!(r.body.contains("\"miss\":null"), "a miss must be null: {}", r.body);
+    assert!(r.body.contains("\"bumped\":\"1\""), "{}", r.body);
+
+    // The stub returned `true` forever, so this is the assertion that
+    // separates "a limiter" from "a function named rate_limit".
+    let statuses = {
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            out.push(call(program.clone(), "GET", "/r/limited").await.status);
+        }
+        out
+    };
+    assert_eq!(
+        statuses,
+        vec![200, 200, 429, 429],
+        "`limit = 2` did not bind"
+    );
+
+    // A fixed window: the TTL is set once, by the request that created the
+    // key, so sustained traffic does not keep pushing the expiry out.
+    let ttl = redis_engine::eval("return redis.call('TTL', KEYS[1])", &["bucket".into()], &[])
+        .await
+        .expect("ttl");
+    let ttl: i64 = ttl.and_then(|t| t.parse().ok()).unwrap_or(-1);
+    assert!((1..=60).contains(&ttl), "window not set once: ttl {ttl}");
+}
+
+/// With no server the surface must **raise**, never answer. For
+/// `rate_limit` in particular, "no Redis" reading as "allowed" is the
+/// stub's failure with extra steps.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_server_the_surface_raises_rather_than_allowing() {
+    // Deliberately no `fresh_keyspace` — this is the un-initialised path,
+    // and it is checkable everywhere, including where Docker is not.
+    if redis_engine::is_enabled() {
+        eprintln!(
+            "SKIPPED without_a_server_the_surface_raises_rather_than_allowing — \
+             a server is configured in this process"
+        );
+        return;
+    }
+    let program = program(concat!(
+        "namespace s;\n",
+        "routes \"/r\" {\n",
+        "    route GET \"/limited\" {\n",
+        "        if (!redis.rate_limit(\"bucket\", 1, 60)) {\n",
+        "            return tooManyRequests(\"slow down\");\n",
+        "        }\n",
+        "        return json({ ok: true });\n",
+        "    }\n",
+        "}\n",
+    ));
+    let r = call(program, "GET", "/r/limited").await;
+    assert_eq!(
+        r.status, 500,
+        "no server must not read as `allowed`: {}",
+        r.body
+    );
+}
+
+fn program(source: &str) -> std::sync::Arc<jwc::exec::Program> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.jwc"), source).expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    std::sync::Arc::new(jwc::serve::load(&ws).unwrap_or_else(|e| panic!("{e}")))
+}
+
+async fn call(
+    program: std::sync::Arc<jwc::exec::Program>,
+    method: &str,
+    path: &str,
+) -> jwc::exec::Response {
+    jwc::serve::handle(
+        program,
+        jwc::serve::Incoming {
+            method: method.to_string(),
+            path: path.to_string(),
+            query: Vec::new(),
+            headers: std::collections::HashMap::new(),
+            body: Vec::new(),
+            peer_ip: "203.0.113.7".into(),
+        },
+    )
+    .await
+}

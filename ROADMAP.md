@@ -877,6 +877,47 @@ CI endi har bir suite'ni nomlaydi va `hardening` ni **bazali** ham yuradi
 bu ham `no_triaged_advisory_crate_reaches_the_shipped_binary` bilan bir xil
 shakl: repo haqidagi da'vo, repoga qarshi tekshiriladi.
 
+**`redis.*` butunlay stub edi, va ulardan biri xavfsizlik nuqsoni.**
+`builtins.md` §8 yetti nomni hujjatlashtiradi. Amalda: `redis.enabled()`
+doim `false`, **`redis.rate_limit()` doim `true`**, qolgan beshtasi esa
+umuman yo'q — tipdan o'tardi va har so'rovda `unknown function` fault'i
+bilan yiqilardi. Ya'ni hujjatlashtirilgan API'ga qarshi yozilgan rate
+limiter **hamma so'rovni o'tkazib yuborardi**, va javobda buni aytadigan
+hech narsa yo'q edi.
+
+Sababi bitta qatorda: `src/redis_engine.rs` da to'liq drayver bor —
+`get/set/del/incr/expire/eval`, pool, retry, transient tasnifi — lekin
+**uni hech kim boshlatmasdi.** v1 da `redis_engine::init_from_env()` ga
+birorta chaqiruv yo'q edi, shuning uchun `--features redis` bilan
+yig'ilgan va `JWC_REDIS_URL` qo'yilgan binarda ham `is_enabled()` `false`
+qaytarardi. Butun drayver o'lik kod edi.
+
+Endi `redis.*` drayverga ulangan (`exec_call.rs::redis_call`), boot'da
+`serve` va `test` ikkalasida ham init qilinadi, va **server bo'lmasa
+`enabled()` dan boshqa hammasi raise qiladi** — rate limiter uchun
+"Redis yo'q" hech qachon "ruxsat" degani bo'lmasligi kerak.
+`the_redis_package_surface_reaches_the_server` haqiqiy serverga qarshi
+200/200/429/429 ni tekshiradi; stub'ni qaytarsam `limit = 2 did not bind`
+deb yiqiladi.
+
+Buning natijasi darhol ko'rindi: **namunaning `RateLimit` middleware'i ham
+hech qachon cheklamagan.** U to'g'ri yozilgan — `redis.enabled()` bilan
+o'ralmagan, chunki do'koni yo'q bo'lganda so'rovni o'tkazadigan limiter
+limiter emas — lekin stub ostida har doim `true` olardi. v0.29.b ning
+kalit qurilishi haqidagi testlari o'z o'rnida turadi (`client_ip` ni
+to'g'ridan-to'g'ri tekshiradi), ammo middleware'ning o'zi ishlamasdi.
+Endi `http_golden` va timing testi Redis talab qiladi — namuna Postgres'ni
+qanday talab qilsa, shunday — va CI'ning Postgres ish o'rniga Redis
+xizmati qo'shildi.
+
+**`redis` paketi v0.25.0 cutover'idan beri kompilyatsiya bo'lmasdi.**
+`//` izohlar (v1 da `--`), `public function`, `const`, `cache_*` — hech
+biri 1.0 lug'atida yo'q, va repoda `jwc check` yurgizadigan CI yo'q edi.
+Manifest nomi ham `jwc-redis` edi — `packages.md` §1 bo'yicha chiziqchali
+nom `jwc publish` tomonidan rad etiladi. Paket v1 ga ko'chirildi: nomi
+`redis`, va kodi yo'q — sirt kompilyatorniki, paket esa `import redis;`
+ni yechadigan manifest (names §6.2.3).
+
 Shu qatorda: **`spec-coverage.json` ni ham hech kim yangilamasdi.**
 §10 uni "namuna spec'dan ortda qolsa build yiqiladi" mitigatsiyasi deb
 sanaydi, lekin `check_sample.py` ni na CI, na test chaqirardi — fayl

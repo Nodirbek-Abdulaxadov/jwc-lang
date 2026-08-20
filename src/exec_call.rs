@@ -10,6 +10,17 @@ use crate::value::Value;
 use anyhow::anyhow;
 use base64::Engine as _;
 
+/// INCR then EXPIRE, in one round trip, for `redis.rate_limit`.
+///
+/// One script rather than two calls because the two-call form has a
+/// window: if the process dies between them the counter is left with no
+/// TTL, never resets, and that key is blocked forever. The `n == 1` guard
+/// is what makes it a fixed window instead of one that keeps sliding
+/// forward under sustained traffic and so never expires.
+const RATE_LIMIT: &str = "local n = redis.call('INCR', KEYS[1]) \
+                          if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end \
+                          return n";
+
 fn fault(msg: impl Into<String>) -> Abort {
     Abort::Fault(anyhow!(msg.into()))
 }
@@ -65,6 +76,11 @@ impl<'a> Vm<'a> {
             return self.run_raw(args, &vals).await;
         }
 
+        // `redis.*` talks to a server, for the same reason.
+        if let Some(name) = path.strip_prefix("redis.") {
+            return self.redis_call(name, &vals).await;
+        }
+
         if let Some(v) = self.builtin(&path, &vals)? {
             return Ok(v);
         }
@@ -115,6 +131,71 @@ impl<'a> Vm<'a> {
             .await
             .map_err(crate::exec::map_db_error)?;
         Ok(Value::Raw(text.unwrap_or_else(|| "[]".into())))
+    }
+
+    /// The `redis` package surface (builtins.md §8), over the driver in
+    /// [`crate::redis_engine`].
+    ///
+    /// These were stubs: `enabled` answered `false`, `rate_limit` answered
+    /// **`true`**, and `get` / `set` / `del` / `incr` / `expire` were not
+    /// there at all, so a program using them typechecked clean and then
+    /// faulted with `unknown function` on every request. The
+    /// `rate_limit` stub was the dangerous one — a limiter written against
+    /// the documented API admitted every request, and nothing anywhere
+    /// said so.
+    ///
+    /// Without a reachable server they raise. Answering anyway is what
+    /// the stub did, and for a rate limiter "no server" must never read as
+    /// "allowed".
+    async fn redis_call(&mut self, name: &str, a: &[Value]) -> Exec<Value> {
+        use crate::redis_engine as r;
+        let s = |i: usize| text(a.get(i).unwrap_or(&Value::Null));
+        let n = |i: usize| a.get(i).and_then(|v| v.as_i64()).unwrap_or(0);
+
+        if name == "enabled" {
+            return Ok(Value::Bool(r::is_enabled()));
+        }
+        if !r::is_enabled() {
+            return Err(fault(format!(
+                "`redis.{name}(...)` needs a Redis server: set `JWC_REDIS_URL` \
+                 and build with `--features redis`. `redis.enabled()` is what \
+                 to branch on when the call is optional."
+            )));
+        }
+
+        let out = match name {
+            "get" => r::get(&s(0))
+                .await
+                .map(|v| v.map(Value::Text).unwrap_or(Value::Null)),
+            // A negative TTL is not "expire in the past" — it is a caller
+            // mistake, and 0 already means "no expiry" (both backends read
+            // it that way). Clamping keeps a sign error from deleting the
+            // key it was meant to write.
+            "set" => r::set(&s(0), &s(1), n(2).max(0) as u64)
+                .await
+                .map(|()| Value::Bool(true)),
+            "del" => r::del(&s(0)).await.map(Value::Int),
+            "incr" => r::incr(&s(0)).await.map(Value::Bigint),
+            "expire" => r::expire(&s(0), n(1)).await.map(Value::Bool),
+            "rate_limit" => {
+                let limit = n(1);
+                let window = n(2);
+                r::eval(RATE_LIMIT, &[s(0)], &[window.to_string()])
+                    .await
+                    .map(|hits| {
+                        let hits: i64 = hits.and_then(|h| h.parse().ok()).unwrap_or(i64::MAX);
+                        Value::Bool(hits <= limit)
+                    })
+            }
+            _ => {
+                return Err(fault(format!(
+                    "unknown function `redis.{name}`. The package provides \
+                     get, set, del, incr, expire, rate_limit and enabled \
+                     (builtins.md §8)."
+                )))
+            }
+        };
+        out.map_err(|e| fault(format!("redis.{name}: {e:#}")))
     }
 
     /// Returns `None` when the path is not a builtin, so the caller can try
@@ -438,8 +519,9 @@ impl<'a> Vm<'a> {
             }
 
             // ---- packages (builtins.md §8)
-            "redis.enabled" => Value::Bool(false),
-            "redis.rate_limit" => Value::Bool(true),
+            //
+            // `redis.*` is handled ahead of this table, in `redis_call` —
+            // it is async.
             "mail.send" => Value::Null,
 
             _ => return Ok(None),

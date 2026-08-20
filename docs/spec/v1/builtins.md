@@ -202,6 +202,22 @@ declared by the package (ROADMAP v0.28.0). The redis package provides:
 | `redis.rate_limit(key, limit, window_secs)` | `boolean` — atomic |
 | `redis.enabled()` | `boolean` |
 
+`redis.enabled()` answers whether this process is actually talking to a
+server: the binary was built with the driver *and* `JWC_REDIS_URL` is set.
+It is the only name in the table that answers without one.
+
+Every other name **raises** when there is no server. That is deliberate and
+it is mostly about `rate_limit`: a limiter that reads "no Redis" as
+"allowed" admits every request, and nothing in the response says so. Branch
+on `redis.enabled()` where the call is genuinely optional, and let it raise
+where it is not.
+
+`rate_limit(key, limit, window)` is `INCR` plus `EXPIRE` in one script, so
+the count and its deadline cannot come apart — the two-call form leaves a
+counter with no TTL if the process dies between them, and that key is
+blocked for good. The window is fixed: the TTL is set by the request that
+creates the key and not pushed forward by later ones.
+
 ---
 
 ## 9. Query-only
