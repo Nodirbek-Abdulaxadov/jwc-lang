@@ -100,9 +100,18 @@ default.
 | `header_timeout` | duration | `10s` | request line + headers |
 | `max_page_size` | `int` | 100 | ceiling for `page … size` (queries §9.2) |
 | `strict_slash` | `boolean` | true | `/x/` → 308 → `/x` |
+| `bind` | `text` | `"0.0.0.0"` | the address the listener binds |
 | `cursor_secret` | `text` | — | HMAC key for keyset cursors; **required** if any query uses `page` (`E1205`) |
 | `trusted_proxies` | `inet[]` | `[]` | see §3.3 |
 | `shutdown_grace` | duration | `20s` | drain window on SIGTERM |
+
+3.2.1 `bind` takes an IP address, not a hostname. The default answers on
+every interface, which is what a container publishing a port expects; a
+development machine that should not be answering its own network writes
+`bind = "127.0.0.1"`. A value that does not parse as an address stops the
+server rather than falling back to the default — the fallback would put the
+listener on every interface, which is the opposite of what writing the key
+was reaching for, and nothing outside the process would show it.
 
 3.3 **`trusted_proxies` is the whole of the `client_ip` rule** (#15).
 Empty (the default) means `X-Forwarded-For` is ignored and
@@ -118,17 +127,19 @@ declared route. When absent, no CORS headers are emitted at all.
 3.5 `tls` — when present the listener is HTTPS. Absent means plain HTTP,
 which is correct behind a terminating proxy.
 
-**Not implemented.** The listener is HTTP-only, and a declared `tls { }`
-makes `jwc serve` **refuse to boot** rather than serve plain text under a
-name that says otherwise. That is the one misconfiguration an operator
-cannot see for themselves: the listener answers, and every byte is in the
-clear. Terminate at a proxy and leave the block out.
+`cert` and `key` are paths to PEM files, read **at boot**. A block whose
+paths do not resolve, name a missing file, or hold a key that does not go
+with the certificate stops the server. It does not fall back to plain HTTP:
+that is the one misconfiguration an operator cannot see for themselves,
+because the listener answers either way and every byte would be in the
+clear. The listener advertises `h2` and `http/1.1` over ALPN, so an HTTPS
+client gets the same HTTP/2 an HTTP/1.1 client would negotiate down from.
 
-3.6 `header_timeout` is likewise **not enforced**, and a declared one
-refuses to boot for the same reason: reading the request line and headers
-belongs to the HTTP server, and `axum::serve` does not expose the knob. Set
-it on the proxy in front. The default in the table is what the runtime would
-use if it could, not a promise it keeps.
+3.6 `header_timeout` bounds the request line and the headers. It is
+separate from `request_timeout` because it has to be: that clock starts in
+the handler, and a client dribbling headers a byte at a time never reaches
+one. Past the deadline the connection is closed. It applies to HTTP/1;
+HTTP/2 has frame-level limits of its own and takes no equivalent setting.
 
 3.7 `request_timeout` **is** enforced, around the whole of `handle`. Past it
 the answer is 504 and the handler's task is dropped, which releases whatever
@@ -175,3 +186,4 @@ the value.
 | `E1203` | more than one `database` |
 | `E1204` | more than one `server` block |
 | `E1205` | `page` used with no `cursor_secret` |
+| `E1206` | unknown `server { }` key, or unknown key inside its `cors` / `tls` block |

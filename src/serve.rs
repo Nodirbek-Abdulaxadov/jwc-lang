@@ -22,7 +22,7 @@ use crate::exec::{Abort, Flow, Program, Request, Response, ServerConfig, Vm};
 use crate::value::Value;
 use crate::wiring::{ResolvedRoute, Segment};
 use crate::workspace::Workspace;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -137,12 +137,10 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
             ServerEntry::Group { name, entries, .. } => {
                 match name.name.as_str() {
                     "cors" => c.cors = Some(read_cors(entries)),
-                    // config.md §3.5. Serving plain HTTP under a declared
-                    // `tls { }` is the one misconfiguration an operator
-                    // cannot see: the listener answers, and every byte is
-                    // in the clear. Refusing at boot is the only honest
-                    // outcome while the listener is HTTP-only.
-                    "tls" => c.tls_declared = true,
+                    "tls" => {
+                        c.tls_declared = true;
+                        c.tls = read_tls(entries);
+                    }
                     _ => {}
                 }
                 continue;
@@ -164,6 +162,11 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
                     c.cursor_secret = v;
                 }
             }
+            "bind" => {
+                if let Some(v) = config_string(&a.value) {
+                    c.bind = v;
+                }
+            }
             "strict_slash" => {
                 if let ExprKind::Bool(b) = &*a.value.kind {
                     c.strict_slash = *b;
@@ -180,9 +183,9 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
                 }
             }
             "header_timeout" => {
-                // Read and remembered so `serve` can refuse rather than
-                // silently not enforce it — see `tls` above, same reasoning.
-                c.header_timeout_declared = config_duration(&a.value).is_some();
+                if let Some(d) = config_duration(&a.value) {
+                    c.header_timeout = d;
+                }
             }
             "trusted_proxies" => {
                 if let ExprKind::Array(items) = &*a.value.kind {
@@ -199,6 +202,29 @@ fn read_server_config(s: &ServerDecl) -> ServerConfig {
         }
     }
     c
+}
+
+/// `tls { cert = …; key = …; }` (config.md §3.5).
+///
+/// A block missing either half yields `None`, which reads as "no TLS" —
+/// and that is deliberately not silent: `serve` refuses to boot on a
+/// `tls { }` it could not resolve, because falling back to plain HTTP
+/// under a block that says otherwise is the one misconfiguration an
+/// operator cannot see for themselves.
+fn read_tls(entries: &[crate::ast::Assignment]) -> Option<crate::exec::TlsConfig> {
+    let mut cert = None;
+    let mut key = None;
+    for a in entries {
+        match a.key.name.as_str() {
+            "cert" => cert = config_string(&a.value),
+            "key" => key = config_string(&a.value),
+            _ => {}
+        }
+    }
+    Some(crate::exec::TlsConfig {
+        cert: cert?,
+        key: key?,
+    })
 }
 
 fn read_cors(entries: &[crate::ast::Assignment]) -> crate::exec::CorsConfig {
@@ -750,23 +776,16 @@ fn percent_decode(s: &str) -> String {
 /// buffer, middleware, the error model and the after chain all live in
 /// `handle`, which is what the golden tests drive directly.
 pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
-    // Refuse rather than silently not enforce. Both of these are settings
-    // an operator writes down and then believes; serving plain HTTP under a
-    // declared `tls { }`, or accepting a slow header dribble under a
-    // declared `header_timeout`, is worse than not offering the key.
-    if program.server.tls_declared {
+    // A `tls { }` whose `cert`/`key` did not resolve — an unset
+    // `env("TLS_CERT_PATH")`, most often — must stop the boot. Reading it
+    // as "no TLS" would serve every byte in the clear under a block that
+    // says otherwise, which is the one misconfiguration an operator
+    // cannot see for themselves: the listener answers either way.
+    if program.server.tls_declared && program.server.tls.is_none() {
         bail!(
-            "`server {{ tls {{ … }} }}` is declared, and this build serves plain HTTP. \
-             Terminate TLS at a proxy and remove the block, or the listener would be \
-             in the clear under a name that says otherwise."
-        );
-    }
-    if program.server.header_timeout_declared {
-        bail!(
-            "`server {{ header_timeout }}` is declared and this build does not enforce \
-             it — reading the request line and headers is the HTTP server's, and \
-             `axum::serve` does not expose the knob. Set it on the proxy in front, or \
-             remove the key rather than believing it."
+            "`server {{ tls {{ … }} }}` is declared but `cert` and `key` did not both \
+             resolve to a path. Set them, or remove the block — serving plain HTTP \
+             under it would be invisible from outside."
         );
     }
     let grace_period = program.server.shutdown_grace;
@@ -826,24 +845,157 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
         response.body(axum::body::Body::from(r.body)).expect("response")
     }
 
+    let header_timeout = program.server.header_timeout;
+    let tls = program.server.tls.clone();
+    let bind = program.server.bind.clone();
+
     let app = axum::Router::new()
         .fallback(dispatch)
         .with_state(program);
 
-    let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
+    // Resolved before the socket opens. A certificate that is missing or
+    // malformed is a boot failure, not a first-request failure: the
+    // second would leave a listener up and answering nothing.
+    let acceptor = match &tls {
+        Some(t) => Some(tls_acceptor(t)?),
+        None => None,
+    };
+
+    // Parsed rather than defaulted on failure: `bind = "127.0.0..1"` must
+    // not quietly become `0.0.0.0`, which is the opposite of what the typo
+    // was reaching for and would put the listener on every interface.
+    let ip: std::net::IpAddr = bind
+        .parse()
+        .map_err(|_| anyhow!("`server {{ bind }}` is not an IP address: {bind}"))?;
+    let addr = std::net::SocketAddr::new(ip, port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("listening on http://{addr}");
-    let grace = grace_period;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        println!("draining for {}s", grace.as_secs());
-    })
-    .await?;
+    let scheme = if acceptor.is_some() { "https" } else { "http" };
+    println!("listening on {scheme}://{addr}");
+
+    // The accept loop `axum::serve` would otherwise own. It is written out
+    // here because both of config.md §3's remaining promises live below
+    // that wrapper: `header_read_timeout` is on hyper's builder, and TLS
+    // means wrapping the `TcpStream` before hyper ever sees it.
+    let mut make = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    // config.md §3.2 — the request line and headers must arrive inside
+    // this window. `request_timeout` cannot cover it: that timer starts in
+    // `handle`, and a client dribbling headers a byte at a time never gets
+    // there. HTTP/2 has its own frame-level limits and takes no equivalent.
+    //
+    // `timer` is not optional here. hyper carries no clock of its own, and
+    // a `header_read_timeout` with no timer installed panics the worker on
+    // *every* HTTP/1 connection — which no unit test sees, because the
+    // panic is inside hyper's poll and not in anything this crate calls
+    // directly. `tests/serve_listener.rs` drives a real socket for it.
+    builder
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(header_timeout);
+    let builder = Arc::new(builder);
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown_signal());
+
+    loop {
+        let (stream, peer) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(v) => v,
+                // One failed accept is a per-connection condition (the
+                // peer went away mid-handshake, or the process is at its
+                // descriptor ceiling). Tearing the listener down over it
+                // would turn a transient into an outage.
+                Err(e) => {
+                    eprintln!("accept failed: {e}");
+                    continue;
+                }
+            },
+            _ = shutdown.as_mut() => break,
+        };
+
+        let svc = <_ as tower::Service<std::net::SocketAddr>>::call(&mut make, peer).await;
+        let svc = match svc {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("service setup failed: {e}");
+                continue;
+            }
+        };
+        let svc = hyper_util::service::TowerToHyperService::new(svc);
+        let builder = builder.clone();
+        let acceptor = acceptor.clone();
+        // An owned watcher, so the drain below waits for this connection's
+        // in-flight request rather than cutting it mid-response. It has to
+        // be owned: the TLS handshake happens inside the task, so the
+        // connection this watches does not exist yet at this point.
+        let watcher = graceful.watcher();
+        tokio::spawn(async move {
+            match acceptor {
+                Some(a) => {
+                    // The handshake is inside the spawned task on purpose:
+                    // doing it in the accept loop would let one slow or
+                    // hostile peer stall every other connection behind it.
+                    let stream = match a.accept(stream).await {
+                        Ok(s) => s,
+                        // Routine: port scanners, health checks that speak
+                        // plain HTTP, clients with no shared cipher. Not
+                        // worth a line each at default verbosity.
+                        Err(_) => return,
+                    };
+                    let conn = builder
+                        .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), svc);
+                    let _ = watcher.watch(conn).await;
+                }
+                None => {
+                    let conn = builder
+                        .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), svc);
+                    let _ = watcher.watch(conn).await;
+                }
+            }
+        });
+    }
+
+    println!("draining for {}s", grace_period.as_secs());
+    // config.md §3.8 — in-flight requests get the window to finish; past
+    // it the remaining connections are dropped rather than held open for a
+    // client that may never send another byte.
+    tokio::select! {
+        _ = graceful.shutdown() => {}
+        _ = tokio::time::sleep(grace_period) => {
+            eprintln!("drain window elapsed with connections still open");
+        }
+    }
     Ok(())
+}
+
+/// Build the TLS acceptor from a `tls { }` block.
+///
+/// PEM parsing comes from `rustls-pki-types` rather than `rustls-pemfile`:
+/// the latter carries an open advisory and reaches this tree only as a
+/// dev-dependency of `testcontainers`, which `tests/hardening.rs` asserts
+/// against the real dependency graph.
+fn tls_acceptor(t: &crate::exec::TlsConfig) -> Result<tokio_rustls::TlsAcceptor> {
+    use rustls_pki_types::pem::PemObject;
+
+    let certs = rustls_pki_types::CertificateDer::pem_file_iter(&t.cert)
+        .map_err(|e| anyhow!("`server {{ tls {{ cert }} }}` {}: {e}", t.cert))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("parsing certificates from {}: {e}", t.cert))?;
+    if certs.is_empty() {
+        bail!("{} holds no certificate", t.cert);
+    }
+    let key = rustls_pki_types::PrivateKeyDer::from_pem_file(&t.key)
+        .map_err(|e| anyhow!("`server {{ tls {{ key }} }}` {}: {e}", t.key))?;
+
+    let mut config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| anyhow!("the certificate and key do not go together: {e}"))?;
+    // Advertise HTTP/2 as well as HTTP/1.1. Without this every client
+    // negotiates 1.1 over TLS, which is a silent downgrade from what the
+    // plain-HTTP listener already serves.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
 /// SIGTERM, or Ctrl-C. A deploy sends the first and a developer the second,
@@ -1099,27 +1251,60 @@ mod server_limits {
     }
 
     #[test]
-    fn a_declared_tls_or_header_timeout_refuses_to_boot() {
-        // Serving plain HTTP under a declared `tls { }` is the one
-        // misconfiguration an operator cannot see: the listener answers,
-        // and every byte is in the clear.
-        let src = "namespace s;\nserver { tls { cert = \"/c\"; key = \"/k\"; } }\n";
-        let parsed = crate::parse_str("<t>", src);
-        let decl = parsed.program.decls.iter().find_map(|d| match d {
-            Decl::Server(s) => Some(s),
-            _ => None,
-        });
-        let cfg = read_server_config(decl.expect("server block"));
+    fn the_tls_block_and_header_timeout_are_read_as_values() {
+        let src = "namespace s;\n\
+                   server { header_timeout = \"3s\"; tls { cert = \"/c\"; key = \"/k\"; } }\n";
+        let cfg = server_config_of(src);
+        assert_eq!(cfg.header_timeout, std::time::Duration::from_secs(3));
+        let tls = cfg.tls.expect("tls block");
+        assert_eq!(tls.cert, "/c");
+        assert_eq!(tls.key, "/k");
         assert!(cfg.tls_declared);
+    }
 
-        let src = "namespace s;\nserver { header_timeout = \"10s\"; }\n";
+    #[test]
+    fn bind_defaults_to_every_interface_and_is_settable() {
+        // `0.0.0.0` is the default because a container publishes a port
+        // and expects the process to be reachable through it. The point of
+        // the key is the other direction: a development machine that
+        // should not be answering its own LAN.
+        assert_eq!(ServerConfig::default().bind, "0.0.0.0");
+        let cfg = server_config_of("namespace s;\nserver { bind = \"127.0.0.1\"; }\n");
+        assert_eq!(cfg.bind, "127.0.0.1");
+        let cfg = server_config_of("namespace s;\nserver { bind = \"::1\"; }\n");
+        assert_eq!(cfg.bind, "::1");
+    }
+
+    #[test]
+    fn header_timeout_defaults_to_the_documented_ten_seconds() {
+        // config.md §3.2's table is the promise; a program that writes no
+        // `server` block still gets it.
+        assert_eq!(
+            ServerConfig::default().header_timeout,
+            std::time::Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn a_tls_block_whose_paths_do_not_resolve_stays_declared_and_unresolved() {
+        // The pair is what `serve` refuses on. `env("TLS_CERT_PATH")` unset
+        // must not read as "no TLS was asked for": that would serve every
+        // byte in the clear under a block saying otherwise, and the
+        // listener answers either way, so nothing outside can tell.
+        let src = "namespace s;\n\
+                   server { tls { cert = env(\"JWC_TEST_ABSENT_CERT\"); key = \"/k\"; } }\n";
+        let cfg = server_config_of(src);
+        assert!(cfg.tls_declared, "the block was written");
+        assert!(cfg.tls.is_none(), "and it did not resolve");
+    }
+
+    fn server_config_of(src: &str) -> ServerConfig {
         let parsed = crate::parse_str("<t>", src);
         let decl = parsed.program.decls.iter().find_map(|d| match d {
             Decl::Server(s) => Some(s),
             _ => None,
         });
-        let cfg = read_server_config(decl.expect("server block"));
-        assert!(cfg.header_timeout_declared);
+        read_server_config(decl.expect("server block"))
     }
 
     #[test]

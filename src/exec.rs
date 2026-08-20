@@ -109,18 +109,40 @@ pub struct ServerConfig {
     /// what an unsigned cursor means.
     pub cursor_secret: String,
     pub strict_slash: bool,
+    /// The address the listener binds (config.md §3.2). `0.0.0.0` is the
+    /// default because a container's port mapping needs it; `127.0.0.1`
+    /// is what keeps a development machine off its own LAN, and there was
+    /// no way to ask for that while the address was hardcoded.
+    pub bind: String,
     pub trusted_proxies: Vec<String>,
     /// config.md §3.4 — when present, `OPTIONS` is answered for every
     /// declared route and the headers go on every response. When absent, no
     /// CORS header is emitted at all.
     pub cors: Option<CorsConfig>,
-    /// A `tls { }` block was written. The listener is HTTP-only, so `serve`
-    /// refuses rather than serving plain text under a name that says
-    /// otherwise.
+    /// config.md §3.5 — when present the listener is HTTPS. Absent means
+    /// plain HTTP, which is correct behind a terminating proxy.
+    pub tls: Option<TlsConfig>,
+    /// A `tls { }` block was written, whether or not its `cert` and `key`
+    /// resolved. The pair is what separates "no TLS was asked for" from
+    /// "TLS was asked for and `env(\"TLS_CERT_PATH\")` came back unset" —
+    /// the second must stop the boot, because plain HTTP under a `tls { }`
+    /// is the one misconfiguration an operator cannot see for themselves.
     pub tls_declared: bool,
-    /// Likewise `header_timeout`: reading the request line and headers is
-    /// hyper's business and `axum::serve` does not expose the knob.
-    pub header_timeout_declared: bool,
+    /// config.md §3.2 — the ceiling on reading the request line and
+    /// headers, separate from `request_timeout` because a client that
+    /// dribbles headers one byte at a time never reaches the handler the
+    /// whole-request timer guards.
+    pub header_timeout: std::time::Duration,
+}
+
+/// Where the listener's certificate and key are read from. Both are
+/// paths, and both are resolved at boot: a `tls { }` naming a file that
+/// is missing or malformed stops the server rather than falling back to
+/// plain HTTP, which is the failure an operator cannot see.
+#[derive(Clone, Debug)]
+pub struct TlsConfig {
+    pub cert: String,
+    pub key: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -159,10 +181,12 @@ impl Default for ServerConfig {
             max_page_size: 100,
             cursor_secret: String::new(),
             strict_slash: true,
+            bind: "0.0.0.0".into(),
             trusted_proxies: Vec::new(),
             cors: None,
+            tls: None,
             tls_declared: false,
-            header_timeout_declared: false,
+            header_timeout: std::time::Duration::from_secs(10),
         }
     }
 }

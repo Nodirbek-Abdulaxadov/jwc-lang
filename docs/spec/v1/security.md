@@ -116,12 +116,17 @@ request id.
 
 ## 7. Transport
 
-7.1 The listener is HTTP. `tls { }` is specified and **not implemented**,
-and declaring it makes `jwc serve` refuse to boot rather than serve plain
-text under a name that says otherwise (config §3.5). Terminate at a proxy.
+7.1 `tls { }` makes the listener HTTPS (config §3.5). The certificate and
+key are read at boot, and a block that cannot be resolved into a working
+pair stops the server rather than falling back to plain HTTP — an operator
+cannot see that fallback from outside, because the listener answers either
+way. Without the block the listener is plain HTTP, which is what a
+terminating proxy in front expects.
 
-7.2 `header_timeout` is likewise not enforced and refuses to boot, for the
-same reason: an operator who wrote it down believes it (config §3.6).
+7.2 `header_timeout` bounds the request line and headers, which
+`request_timeout` structurally cannot: its clock starts in the handler, and
+a slow-header dribble never arrives at one (config §3.6). Past the deadline
+the connection is closed.
 
 7.3 `request_timeout` **is** enforced, and a timed-out handler's task is
 dropped, which releases the connection and the pool slot.
@@ -152,8 +157,6 @@ request, and refuses an archive entry whose path escapes its directory
 
 | | Status |
 |---|---|
-| TLS termination | not implemented (§7.1) |
-| slow-header defence | not implemented (§7.2) |
 | CSRF tokens | out of scope: the API is token-authenticated, not cookie-authenticated |
 | a 24-hour soak | not run in this environment; the criterion stands open (ROADMAP v0.29.0) |
 | a third-party security review | ROADMAP v1.0.0-rc.1 |
