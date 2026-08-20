@@ -30,17 +30,40 @@ impl Workspace {
     /// file). Files are sorted so diagnostics and generated SQL come out in
     /// a stable order — `gen-sql` being byte-reproducible depends on it.
     pub fn load(root: impl AsRef<Path>) -> std::io::Result<Workspace> {
+        Self::load_with(root, &std::collections::BTreeMap::new())
+    }
+
+    /// The same, with unsaved buffers taking precedence over what is on
+    /// disk.
+    ///
+    /// The language server holds the editor's text, which by definition is
+    /// not the file yet — a server that read the file would report
+    /// diagnostics for the last save while the user looked at the next
+    /// edit. A path in `overlay` that is not on disk is a new, unsaved file
+    /// and is parsed too.
+    pub fn load_with(
+        root: impl AsRef<Path>,
+        overlay: &std::collections::BTreeMap<PathBuf, String>,
+    ) -> std::io::Result<Workspace> {
         let root = root.as_ref().to_path_buf();
         let mut paths = Vec::new();
         if root.is_file() {
             paths.push(root.clone());
         } else {
             walk(&root, &mut paths)?;
-            paths.sort();
         }
+        for p in overlay.keys() {
+            if !paths.contains(p) {
+                paths.push(p.clone());
+            }
+        }
+        paths.sort();
         let mut files = Vec::with_capacity(paths.len());
         for p in paths {
-            files.push(crate::parse_file(&p)?);
+            match overlay.get(&p) {
+                Some(text) => files.push(crate::parse_str(&p, text)),
+                None => files.push(crate::parse_file(&p)?),
+            }
         }
         let packages = read_packages(&root);
         Ok(Workspace {

@@ -3,6 +3,31 @@
 All notable changes to the **JWC Language** VS Code extension are documented
 here. The extension version tracks the JWC compiler version it ships against.
 
+## 0.27.0 — The language server returns
+
+The server is a subcommand of the compiler now — `jwc lsp` — rather than a
+separate `jwc-lsp` binary. One binary means the server and `jwc check` can
+never be different builds, which was the version-skew failure this extension
+had a whole warning dialog for. A standalone `jwc-lsp` still works, and
+`jwc.lspPath` still overrides everything.
+
+What it answers:
+
+- **diagnostics** — everything `jwc check` reports, on open and on every
+  keystroke, against the editor's buffer rather than the last save;
+- **hover over a query** — the generated SQL, `$n` placeholders and join
+  strategy included. It is the same string `jwc explain` prints for that
+  site, because it is the same compiler;
+- **hover over a name** — what the name is: a table with its columns, a
+  class with its fields, an error with its status;
+- **go to definition** — tables, views, classes, enums, errors, services,
+  functions, middleware;
+- **completion** — after `.`, the members of whatever precedes it (a
+  table's non-`private` columns, a service's functions, a builtin
+  namespace's surface); otherwise the visible names;
+- **signature help** — the callee's parameters, from the typed service
+  boundary.
+
 ## 0.8.8 — Tracks the compiler's 0.8.8 release
 
 No editor-facing changes. The compiler side makes `int()` raise on input

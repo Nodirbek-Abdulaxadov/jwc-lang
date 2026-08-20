@@ -82,9 +82,9 @@ What works today, against a real Postgres:
 | **Routes** | path/query parameters, middleware chains, typed `context`, an error model checked at compile time |
 | **Runtime** | an interpreter on axum + tokio; every value is a bind parameter |
 | **Migrations** | snapshot, diff, ten-phase emission, declared renames, `up` / `down` / `status` / `verify` |
+| **Tooling** | `explain` per route or function, `lint --constraints`, OpenAPI 3.1, a language server |
 
-Not yet: the LSP and `jwc openapi` (v0.27.0), the test framework and
-packages (v0.28.0). See [`ROADMAP.md`](ROADMAP.md) — it is the
+Not yet: the test framework and packages (v0.28.0), hardening (v0.29.0). See [`ROADMAP.md`](ROADMAP.md) — it is the
 source of truth for what counts as done, partial, and **non-goal**.
 
 ---
@@ -108,6 +108,7 @@ cargo build --release
 | `jwc fmt [path] [--check]` | rewrite in canonical form; `--check` is the CI shape |
 | `jwc gen-sql [path] [--explain]` | the schema as Postgres DDL, deterministic and offline |
 | `jwc explain [path]` | every query the program issues, with its SQL |
+| `jwc lsp` | the language server, over stdio: diagnostics, hover-to-SQL, go-to-definition, completion, signature help |
 | `jwc openapi [path] [--out f]` | an OpenAPI 3.1 document, derived from the route table and the typed signatures |
 | `jwc lint [path] [--constraints]` | `check`, plus every constraint each route can reach and the status its violation produces |
 | `jwc routes [path]` | the resolved route table: method, path, middleware chain |

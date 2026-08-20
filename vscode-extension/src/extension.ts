@@ -31,7 +31,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
 
   context.subscriptions.push(
     commands.registerCommand("jwc.restartServer", async () => {
-      output?.appendLine("Restarting jwc-lsp...");
+      output?.appendLine("Restarting the language server...");
       await stopClient();
       await startClient(context);
     }),
@@ -48,23 +48,26 @@ export async function deactivate(): Promise<void> {
 }
 
 async function startClient(context: ExtensionContext): Promise<void> {
-  const serverPath = await resolveServerPath();
-  if (!serverPath) {
+  const server = await resolveServer();
+  if (!server) {
     output?.appendLine(
-      "jwc-lsp not found — the language server returns in v0.27.0. " +
-        "Syntax highlighting works without it."
+      "No `jwc` on PATH — install it and reload. Syntax highlighting works " +
+        "without the server."
     );
     window.showWarningMessage(
-      "JWC: no language server. Diagnostics come from `jwc check` until " +
-        "v0.27.0 ships one; syntax highlighting is unaffected."
+      "JWC: `jwc` was not found on PATH, so there is no language server. " +
+        "Syntax highlighting is unaffected."
     );
     return;
   }
 
-  output?.appendLine(`Starting jwc-lsp: ${serverPath}`);
+  output?.appendLine(
+    `Starting the language server: ${server.command} ${server.args.join(" ")}`
+  );
 
   const run: Executable = {
-    command: serverPath,
+    command: server.command,
+    args: server.args,
     transport: TransportKind.stdio,
     options: { env: process.env },
   };
@@ -99,8 +102,8 @@ async function startClient(context: ExtensionContext): Promise<void> {
     });
     reportVersionSkew(context, client);
   } catch (err) {
-    output?.appendLine(`Failed to start jwc-lsp: ${err}`);
-    window.showErrorMessage(`JWC: failed to start jwc-lsp — ${err}`);
+    output?.appendLine(`Failed to start the language server: ${err}`);
+    window.showErrorMessage(`JWC: failed to start the language server — ${err}`);
   }
 }
 
@@ -125,13 +128,13 @@ function reportVersionSkew(
 
   if (!serverVersion) {
     output?.appendLine(
-      "jwc-lsp did not report a version (pre-0.5 build?). Skipping the version check."
+      "the server did not report a version (pre-0.5 build?). Skipping the version check."
     );
     return;
   }
 
   output?.appendLine(
-    `jwc-lsp ${serverVersion} / extension ${extensionVersion || "unknown"}`
+    `server ${serverVersion} / extension ${extensionVersion || "unknown"}`
   );
 
   if (!extensionVersion) return;
@@ -182,25 +185,51 @@ async function stopClient(): Promise<void> {
   client = undefined;
 }
 
-async function resolveServerPath(): Promise<string | undefined> {
+interface Server {
+  command: string;
+  args: string[];
+}
+
+/**
+ * As of v0.27.0 the language server is a subcommand of the compiler —
+ * `jwc lsp` — rather than a separate `jwc-lsp` binary. One binary means the
+ * server and the checker can never be different builds of the compiler,
+ * which was the version-skew failure below.
+ *
+ * The standalone binary is still accepted so an older install keeps
+ * working, and `jwc.lspPath` still overrides everything.
+ */
+async function resolveServer(): Promise<Server | undefined> {
   const configured = workspace
     .getConfiguration("jwc")
     .get<string>("lspPath", "")
     .trim();
   if (configured) {
-    return configured;
+    // A configured path may name either shape; `jwc lsp` is the current
+    // one, so a bare `jwc` gets the subcommand.
+    const base = path.basename(configured).replace(/\.exe$/i, "");
+    return base === "jwc"
+      ? { command: configured, args: ["lsp"] }
+      : { command: configured, args: [] };
   }
 
-  const exe = process.platform === "win32" ? "jwc-lsp.exe" : "jwc-lsp";
-  if (await isOnPath(exe)) {
-    return exe;
+  const jwc = process.platform === "win32" ? "jwc.exe" : "jwc";
+  if (await isOnPath(jwc)) {
+    return { command: jwc, args: ["lsp"] };
   }
 
   const home = process.env.HOME || process.env.USERPROFILE;
-  if (home) {
-    const candidate = path.join(home, ".jwc", "bin", exe);
+  const legacy = process.platform === "win32" ? "jwc-lsp.exe" : "jwc-lsp";
+  for (const candidate of [
+    home ? path.join(home, ".jwc", "bin", jwc) : undefined,
+    legacy,
+    home ? path.join(home, ".jwc", "bin", legacy) : undefined,
+  ]) {
+    if (!candidate) continue;
     if (await isOnPath(candidate)) {
-      return candidate;
+      return path.basename(candidate).replace(/\.exe$/i, "") === "jwc"
+        ? { command: candidate, args: ["lsp"] }
+        : { command: candidate, args: [] };
     }
   }
 

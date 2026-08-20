@@ -90,6 +90,7 @@ What each suite is for:
 | `migrate_apply` | `up`, `down`, `status`, `verify` against a real database |
 | `migrate_roundtrip` | a migrated database *is* a created database |
 | `tooling` | the CLI contract: which flag selects what, and what a wrong name prints |
+| `lsp` | a scripted session against the real stdio protocol |
 
 `tests/tooling.rs` validates the emitted OpenAPI against
 `openapi-spec-validator` when it is importable, and prints SKIPPED when it is
@@ -196,4 +197,5 @@ and fails if one is unspecified.
 `vscode-extension/` is self-contained TypeScript: syntax highlighting and
 snippets. Its keyword list is generated from `token.rs::KEYWORDS` — if you
 add a keyword, update the TextMate grammar in the same change. The language
-server is not built at the moment; it returns, rewritten, in v0.27.0.
+server is `jwc lsp` (`src/lsp.rs`), a subcommand of the compiler rather than
+a second binary, so the server and `jwc check` cannot be different builds.

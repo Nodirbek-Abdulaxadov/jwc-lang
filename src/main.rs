@@ -77,6 +77,8 @@ enum Command {
         #[arg(long)]
         analyze: bool,
     },
+    /// Run the language server, speaking LSP over stdio.
+    Lsp,
     /// Emit an OpenAPI 3.1 document for the route table.
     ///
     /// Offline: derived from the typed signatures and the raise sets, never
@@ -212,6 +214,7 @@ fn main() -> Result<()> {
             route,
             analyze,
         } => cmd::explain(path, sql, function, route, analyze),
+        Command::Lsp => jwc::lsp::run(),
         Command::Openapi { path, out, title } => cmd::openapi(path, out, title),
         Command::Lint {
             path,
