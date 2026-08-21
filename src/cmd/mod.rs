@@ -1291,3 +1291,36 @@ fn display_relative(p: &Path) -> String {
         .and_then(|cwd| p.strip_prefix(cwd).ok().map(|r| r.display().to_string()))
         .unwrap_or_else(|| p.display().to_string())
 }
+
+/// `jwc build [path] [--release] [--emit-rust]` — the native AOT backend.
+///
+/// Deleted at the v0.25.0 cutover and restored in 0.9.901. The runtime half
+/// — the prelude the generated crate includes — came back unchanged; the
+/// codegen is written against the 1.0 AST, because the old one named
+/// declarations this language does not have.
+pub fn build(path: PathBuf, release: bool, emit_rust: bool) -> Result<()> {
+    let ws = crate::workspace::Workspace::load(&path)?;
+    if ws.files.is_empty() {
+        bail!("no .jwc files under {}", path.display());
+    }
+    if ws.has_parse_errors() {
+        eprint!("{}", ws.parse_errors().join(""));
+        bail!("source did not parse");
+    }
+
+    let app = ws
+        .manifest
+        .as_ref()
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| "app".to_string());
+
+    if emit_rust {
+        let out = crate::native::emit_rust_source(&ws, &path, &app, release)?;
+        println!("{}", out.display());
+        return Ok(());
+    }
+
+    let report = crate::native::compile(&ws, &path, &app, release)?;
+    println!("{}", report.binary_path.display());
+    Ok(())
+}

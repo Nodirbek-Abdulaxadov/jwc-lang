@@ -1,0 +1,25 @@
+namespace app;
+
+function greeting(who: text) -> text {
+    return "salom, " + $who;
+}
+
+routes "/" {
+    route GET "hello" {
+        let who = request.query("who") ?? "dunyo";
+        return json({ message: greeting($who), upper: string.upper($who) });
+    }
+
+    route GET "count" {
+        let total = 0;
+        for (n in [1, 2, 3, 4, 5]) {
+            if ($n == 3) { continue; }
+            $total = $total + $n;
+        }
+        return json({ total: $total });
+    }
+}
+
+function main() {
+    serve(8090);
+}

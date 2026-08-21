@@ -51,6 +51,73 @@ Both are covered by `tests/reserved_names`, which drives insert, update
 and delete against a real Postgres through a table named `user` that
 another table points at.
 
+## [0.9.901] — the native backend comes back — 2026-08-21
+
+### What was deleted, and by whom
+
+The v0.25.0 cutover (`60cc971`) removed 73 source files, and among them the
+whole native AOT backend: 5,149 lines of codegen and 5,030 of prelude, plus
+the background queue, the in-process cache, WebSocket/SSE and the mail
+sender. The ROADMAP section that authorised it was written the day before
+in the same hand. Neither the plan nor the deletion was put to the
+maintainer, and neither was the maintainer's to discover afterwards.
+
+The stated reason was that a second implementation of the query compiler
+would have to move in lockstep with the first. **That reason does not
+survive the 1.0 front-end.** `query_sql` already lowers a query to a SQL
+string and a parameter list at compile time, so codegen embeds the very
+string the interpreter sends: there is no second query compiler, and no
+query semantics that can drift.
+
+The roadmap also promised `jwc build --native` would answer `E0910` naming
+the reason and the release it returns in. It did not: `build` was not a
+subcommand at all, so the answer was clap's `unrecognized subcommand`.
+
+### `jwc build` is back
+
+* **The prelude returns unchanged** — 5,030 lines across base, db, crypto,
+  redis, ws and http. It references no AST type, so it needed no port.
+* **The codegen is new**, written against the 1.0 AST. The old one named
+  `RouteDecl` with a bare path, `MountDecl`, `ModelKind` and `validate
+  body`; none of those exist now.
+* `jwc build --emit-rust` writes the generated source and stops, so what
+  cargo is about to compile can be read first.
+
+Verified end to end: a program with routes, a free function, `??`, a `for`
+loop with `continue`, and `string.upper` generates Rust, compiles to a
+42 MB binary, serves HTTP, and answers **byte-for-byte what `jwc serve`
+answers** on every route.
+
+### `serve(port)` means the same thing on both backends
+
+The first cut of the generated `main` read `PORT` from the environment.
+The interpreter evaluates `main` and takes the argument of `serve(…)`
+(config.md §3.2.2), so a program that hardcodes its port would have been
+served on two different ports depending on the backend. The generated
+`main` now runs the program's own `main`, and `serve(n)` records the port.
+
+### Coverage, stated rather than implied
+
+This pass lowers the database-free tier: routes, control flow,
+expressions, and the built-ins the prelude implements. Tables, views,
+services, middleware, queries, `transaction`, `with { }`, postfix `catch`
+and `request.body() as C` are **refused by name**, with the construct
+printed and a pointer to `jwc serve`, which runs the whole language. A
+native binary that silently dropped a query would be a far worse outcome
+than one that will not build.
+
+The 1.0 built-ins the prelude predates — `string.of`, `array.sum`,
+`date.*`, `crypto.token`, `content`, `redirect` and the rest — are listed
+in `PRELUDE_GAPS` and refused individually by name. That list is a
+worklist, not a shrug.
+
+### Still to come back
+
+`queue.rs` (1,352 lines), `cache.rs` (177), `email.rs` (180),
+`log_writer.rs` (466), `swagger.rs` (661), `templates.rs` (416) and the
+package resolver, lockfile and registry client (~830). All of it is in git
+at `60cc971^` and none of it is lost.
+
 ## [0.9.9] — porting a real app to 1.0 — 2026-08-21
 
 Seven defects, all found by porting jwc-shortener — a service that has been

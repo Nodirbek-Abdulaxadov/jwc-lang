@@ -133,7 +133,7 @@ jobs:
           CURSOR_SECRET: ci-cursor-secret
         run: >
           cargo test --features redis
-          --test http_golden --test raw_hatch --test reserved_names -- --nocapture
+          --test http_golden --test raw_hatch --test reserved_names --test native -- --nocapture
 
       - name: DDL applies
         env:

@@ -152,6 +152,21 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Compile the program to a native binary (AOT).
+    ///
+    /// Restored in 0.9.901. Coverage is the database-free tier; anything
+    /// outside it is refused by name rather than silently dropped, and
+    /// `jwc serve` runs the whole language.
+    Build {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Optimised build.
+        #[arg(long)]
+        release: bool,
+        /// Write the generated Rust and stop, without invoking cargo.
+        #[arg(long)]
+        emit_rust: bool,
+    },
     /// Run the program.
     Serve {
         #[arg(default_value = ".")]
@@ -308,6 +323,11 @@ fn run() -> Result<()> {
             skip_schema_check,
             dev,
         } => cmd::serve(path, port, skip_schema_check, dev),
+        Command::Build {
+            path,
+            release,
+            emit_rust,
+        } => cmd::build(path, release, emit_rust),
         Command::Migrate { command } => match command {
             MigrateCommand::New {
                 name,
