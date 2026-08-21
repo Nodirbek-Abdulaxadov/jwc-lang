@@ -234,6 +234,14 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
             "function f() { if (true) { return 1; } else if (false) { return 2; } else { return 3; } }",
         ),
         ("for_stmt", "function f() { for (x in $xs) { let a = $x; } }"),
+        (
+            "break_stmt",
+            "function f() { for (x in $xs) { if ($x == 1) { break; } } }",
+        ),
+        (
+            "continue_stmt",
+            "function f() { for (x in $xs) { if ($x == 1) { continue; } } }",
+        ),
         ("return_stmt.bare", "middleware M { after { return; } }"),
         ("throw_stmt", "function f() { throw NotFound(\"x\"); }"),
         ("throw_stmt.bare", "function f() { throw QuotaExceeded; }"),

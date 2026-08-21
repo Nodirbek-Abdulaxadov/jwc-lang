@@ -549,6 +549,17 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    /// `break;` / `continue;` — loop control (errors.md §7.2 names both as
+    /// diverging forms, which is what a postfix `catch` inside a retry
+    /// loop needs).
+    Break {
+        at: Attached,
+        span: Span,
+    },
+    Continue {
+        at: Attached,
+        span: Span,
+    },
     Assert {
         at: Attached,
         kind: AssertKind,

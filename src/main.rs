@@ -156,8 +156,10 @@ enum Command {
     Serve {
         #[arg(default_value = ".")]
         path: PathBuf,
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
+        /// Override the port the program declares with `serve(...)`.
+        /// Without it the program's own value is used.
+        #[arg(long)]
+        port: Option<u16>,
         /// Start even when the database is missing a table or column the
         /// program reads. The default is to refuse and name it.
         #[arg(long)]

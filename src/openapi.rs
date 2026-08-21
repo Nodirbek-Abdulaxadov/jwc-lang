@@ -191,6 +191,17 @@ fn response_body(sym: &Symbols, r: &RouteResponse) -> (Value, BTreeSet<String>) 
     if matches!(r.payload, Ty::Void) {
         return (json!({ "description": describe(r.status) }), named);
     }
+    // A `content(mime, body)` route: the media type is known and the body
+    // is text, so there is a type to name and no schema to give.
+    if let Some(media) = &r.media {
+        return (
+            json!({
+                "description": describe(r.status),
+                "content": { media.clone(): { "schema": { "type": "string" } } },
+            }),
+            named,
+        );
+    }
     match schema(sym, &r.payload, &mut named) {
         // tooling.md §5.3 — a `Raw` response is emitted with no schema.
         // The compiler did not check that shape either.

@@ -1043,7 +1043,9 @@ pub fn parse_path(path: &str) -> Vec<Segment> {
 
 fn stmt_span(s: &Stmt) -> Span {
     match s {
-        Stmt::Let { span, .. }
+        Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
+        | Stmt::Let { span, .. }
         | Stmt::Assign { span, .. }
         | Stmt::If { span, .. }
         | Stmt::For { span, .. }

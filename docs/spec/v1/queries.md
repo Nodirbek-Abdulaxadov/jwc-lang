@@ -270,6 +270,11 @@ Rules:
 - Aggregates are legal **only** inside a projection of a query that has a
   `group by`, or that has exactly one binding and no non-aggregate
   projection fields. Elsewhere: `E0530`.
+- That second form — the **whole-table aggregate**, `as { total: count(x) }`
+  with no `group by` — answers exactly one row for any table, empty
+  included (`count` of nothing is 0). So `first` on it needs no `orderby`
+  to be deterministic (§5.2 does not apply) and its type is `T`, not `T?`:
+  there is no null branch to guard.
 - Every non-aggregate projection field must appear in `group by`
   (`E0531`) — the same rule Postgres has, checked earlier and reported
   against the source line.

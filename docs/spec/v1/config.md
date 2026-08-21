@@ -113,6 +113,17 @@ server rather than falling back to the default — the fallback would put the
 listener on every interface, which is the opposite of what writing the key
 was reaching for, and nothing outside the process would show it.
 
+3.2.2 The **port** is not a `server { }` key: it is the argument of
+`serve(port)` in `main()` (builtins §2). `main` is evaluated at boot, so the
+argument is an expression and not a literal —
+`serve(int(env("PORT") ?? "8080"))` is the ordinary form. A `main` that
+raises stops the boot and says so rather than listening somewhere nobody
+asked for; a program with no `main` listens on 8080.
+
+`jwc serve --port N` overrides the program's own value, for a local run that
+needs a different port than the one the program ships with. Without the flag
+the program decides.
+
 3.3 **`trusted_proxies` is the whole of the `client_ip` rule** (#15).
 Empty (the default) means `X-Forwarded-For` is ignored and
 `request.client_ip()` returns the socket peer. Non-empty means the header is

@@ -3,6 +3,99 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.9] — porting a real app to 1.0 — 2026-08-21
+
+Six defects, all found by porting jwc-shortener — a service that has been
+in production since long before the cutover — from the 0.9.x vocabulary to
+1.0. Each one stopped the port dead, and each is now pinned by a test that
+fails without its fix.
+
+### The language could not answer anything but JSON
+
+`routing.md` §6.1 said so outright: "There is no bare-string response
+body." That rules out a landing page, `robots.txt`, `sitemap.xml` and an
+OpenGraph card — five of jwc-shortener's routes. The documented workaround,
+`statusCode(200, $html) with { "Content-Type": "text/html" }`, produced a
+response with **two** `content-type` headers — the builder's
+`application/json` and the author's — around a body that was still
+JSON-encoded, so a browser was handed `"<h1>…</h1>"`, quotes included.
+
+- **`content(mime, body)`** (routing.md §6.5) sends `body` verbatim under
+  `mime`. The media type is a string literal, so framing can never depend
+  on a runtime value and `jwc openapi` can name it; `text/*` gains
+  `charset=utf-8`. It composes with the other builders, because a response
+  is a value: `statusCode(404, content("text/html", $page))`.
+- **`with { }` now replaces** a header the builder already set, matched
+  case-insensitively, instead of appending a second one. Two `Content-Type`
+  headers is a malformed message (RFC 9110 §8.3) that clients resolve
+  differently.
+- New: `E0735` (media type is not a literal), `E0736` (body is not `text`).
+
+### `serve(port)` was never evaluated
+
+`main()` was parsed, checked for arity, and then dropped. The listener took
+the CLI default, so a program asking for 3000 silently got 8080 — and
+`serve(int(env("PORT") ?? "8080"))`, the form this spec's own sample uses,
+could not work at all. `main` now runs at boot on an ordinary Vm, which is
+what makes the argument an expression rather than a decoration.
+`jwc serve --port N` overrides it (config.md §3.2.2).
+
+### `break` and `continue` did not exist
+
+`errors.md` §7.2 is normative that a postfix `catch` block must "`return`,
+`throw`, `break` or `continue`", and `E1020`'s help text says the same — so
+a reader who did what the diagnostic told them got the diagnostic again.
+Neither statement was in the grammar, the AST, or the parser. Both are
+implemented now, which is what makes a retry-on-conflict loop expressible:
+the handler has to stay inside the loop, and `return`/`throw` leave the
+function. `E0813` outside a `for` body.
+
+### Whole-table aggregates were rejected
+
+`queries.md` §6.2 allows an aggregate projection in "a query that has a
+`group by`, **or that has exactly one binding and no non-aggregate
+projection fields**". Only the first half was implemented, so
+`as { total: count(A.id) }` — asking a table how many rows it has — was
+`E0530`. Such a query answers exactly one row for any table, empty
+included, so it also needs no `orderby` under `first` and its type is `T`,
+not `T?`: requiring an `or throw` on a branch that cannot be taken is how a
+real null check learns to be ignored.
+
+### `timestamptz - interval` faulted
+
+types.md §12.2 specifies `timestamptz - timestamptz → interval` and
+`timestamptz - interval → timestamptz`. `+` carried its timestamptz
+overload from the start; `-` fell through to the numeric path and faulted
+with "arithmetic is not defined here". The checker allowed both, so
+`date.now() - date.hours(24)` compiled and answered 500 — and that is how a
+query asks for "the last day".
+
+### A long `+` chain was nesting
+
+1.0 has no multi-line string literal (names.md §2.3, §2.4), so a page is
+built from its own lines. Evaluating that chain by recursion spent one
+`MAX_DEPTH` level per term, and jwc-shortener's landing page is 360 of
+them: it compiled, served, and answered 500 with "expression nesting is too
+deep". A left-leaning chain is a loop wearing a tree's shape, and is now
+folded as one.
+
+### Also
+
+- `response.duration_ms()` / `response.duration_us()` in an `after` block
+  (builtins.md §7). An `after` block exists to observe the response and how
+  long it took is half of that; without it the only honest thing a
+  telemetry row could say about latency was nothing. jwc-shortener wrote a
+  hardcoded zero into 1.48M rows and every percentile from them was a zero.
+
+### Known, not fixed
+
+- `raw(sql, …) as { … }` (writes.md §6.3) does not parse. Both examples in
+  that clause are fenced `no-compile`, which is why no test caught it.
+- `jwc add` produces a project that cannot compile: it vendors sources into
+  `jwc_packages/<name>/` **and** records the dependency, and the workspace
+  walker then loads those sources as ordinary program files — so `import
+  <name>` is both a local namespace and a package, which is `E0203`.
+
 ## [0.9.8] — `migrate down` — 2026-08-21
 
 `jwc migrate down` could not roll back an ordinary schema, and the error

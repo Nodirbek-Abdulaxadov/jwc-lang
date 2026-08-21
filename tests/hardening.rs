@@ -516,3 +516,255 @@ async fn readyz_is_503_when_the_database_is_not_there() {
         assert!(r.body.contains("ready"), "{}", r.body);
     }
 }
+
+/// `content(mime, body)` — routing.md §6.5.
+///
+/// Found porting jwc-shortener, whose landing page, `robots.txt`,
+/// `sitemap.xml` and OpenGraph card are five routes that do not answer
+/// JSON. Before this the only way to reach for one was
+/// `statusCode(200, $html) with { "Content-Type": "text/html" }`, and it
+/// produced a response with **two** `content-type` headers — the builder's
+/// `application/json` and the author's — around a body that was still
+/// JSON-encoded, so a browser was handed `"<h1>…</h1>"`, quotes included.
+#[tokio::test]
+async fn content_sends_the_body_verbatim_under_one_declared_type() {
+    let p = program(
+        "namespace h;\n\
+         routes \"/\" {\n\
+         \x20   route GET \"page\" { return content(\"text/html\", \"<h1>salom</h1>\"); }\n\
+         \x20   route GET \"card\" { return content(\"image/svg+xml\", \"<svg/>\"); }\n\
+         \x20   route GET \"gone\" { return statusCode(404, content(\"text/plain\", \"yo'q\")); }\n\
+         }\n",
+    );
+
+    let page = call(p.clone(), "GET", "/page", &[], "").await;
+    assert_eq!(page.status, 200);
+    // Verbatim: no quotes, and the length is the string's own.
+    assert_eq!(page.body, "<h1>salom</h1>");
+    assert_eq!(
+        page.headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .count(),
+        1,
+        "two content-type headers is a malformed message (RFC 9110 §8.3)"
+    );
+    // §6.5.3 — `text/*` gains the charset it did not declare.
+    assert_eq!(
+        header(&page, "content-type"),
+        Some("text/html; charset=utf-8")
+    );
+
+    // Not `text/*`: passed through exactly as written, no charset invented.
+    let card = call(p.clone(), "GET", "/card", &[], "").await;
+    assert_eq!(header(&card, "content-type"), Some("image/svg+xml"));
+    assert_eq!(card.body, "<svg/>");
+
+    // §6.5.4 — a response is a value, so the status composes.
+    let gone = call(p, "GET", "/gone", &[], "").await;
+    assert_eq!(gone.status, 404);
+    assert_eq!(gone.body, "yo'q");
+    assert_eq!(
+        header(&gone, "content-type"),
+        Some("text/plain; charset=utf-8")
+    );
+}
+
+/// `with { }` replaces a header the builder already set — routing.md §6.2.
+///
+/// The append form left the JSON `content-type` in place ahead of the
+/// author's, so the header that was written last was the one clients were
+/// least likely to honour.
+#[tokio::test]
+async fn with_replaces_a_header_the_builder_already_set() {
+    let p = program(
+        "namespace h;\n\
+         routes \"/\" {\n\
+         \x20   route GET \"p\" {\n\
+         \x20       return json({ a: 1 }) with { \"Content-Type\": \"application/problem+json\" };\n\
+         \x20   }\n\
+         \x20   route GET \"r\" {\n\
+         \x20       return redirect(302, \"/one\") with { \"Location\": \"/two\" };\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let problem = call(p.clone(), "GET", "/p", &[], "").await;
+    assert_eq!(
+        problem
+            .headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        header(&problem, "content-type"),
+        Some("application/problem+json")
+    );
+    // The body is untouched — `with` sets headers and nothing else.
+    assert_eq!(problem.body, "{\"a\":1}");
+
+    // Case-insensitive, and it works for a header no JSON builder sets.
+    let red = call(p, "GET", "/r", &[], "").await;
+    assert_eq!(
+        red.headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("location"))
+            .count(),
+        1
+    );
+    assert_eq!(header(&red, "location"), Some("/two"));
+}
+
+/// `serve(port)` in `main()` decides the port — builtins.md §2.
+///
+/// It had never been evaluated. `main` was parsed and arity-checked and
+/// then dropped on the floor, so the listener always took the CLI default:
+/// a program asking for 3000 got 8080, and the spec's own sample line —
+/// `serve(int(env("PORT") ?? "8080"))` — could not have worked at all.
+#[tokio::test]
+async fn main_decides_the_port_it_listens_on() {
+    let literal = program(
+        "namespace h;\n\
+         routes \"/x\" { route GET \"\" { return json({ ok: true }); } }\n\
+         function main() { serve(3000); }\n",
+    );
+    assert_eq!(
+        jwc::serve::declared_port(&literal).await.expect("boot"),
+        3000
+    );
+
+    // The argument is an expression, which is the whole reason `main` is
+    // evaluated rather than pattern-matched for an integer literal.
+    std::env::set_var("JWC_TEST_PORT_VAR", "4100");
+    let from_env = program(
+        "namespace h;\n\
+         routes \"/x\" { route GET \"\" { return json({ ok: true }); } }\n\
+         function main() { serve(int(env(\"JWC_TEST_PORT_VAR\") ?? \"8080\")); }\n",
+    );
+    assert_eq!(
+        jwc::serve::declared_port(&from_env).await.expect("boot"),
+        4100
+    );
+
+    // Unset: the `??` arm is taken, and that is still the program's answer
+    // rather than a default applied behind its back.
+    std::env::remove_var("JWC_TEST_PORT_VAR");
+    assert_eq!(
+        jwc::serve::declared_port(&from_env).await.expect("boot"),
+        8080
+    );
+
+    // No `main` at all — nothing to read, and the listener is not the place
+    // to refuse a program the checker already has an opinion about.
+    let headless = program(
+        "namespace h;\n\
+         routes \"/x\" { route GET \"\" { return json({ ok: true }); } }\n",
+    );
+    assert_eq!(
+        jwc::serve::declared_port(&headless).await.expect("boot"),
+        8080
+    );
+}
+
+/// A `+` chain is folded, not recursed — types.md §12.1.
+///
+/// v1 has no multi-line string literal (names.md §2.3), so a page is
+/// assembled from its own lines. jwc-shortener's landing page is 360 of
+/// them, and evaluating that chain by recursion spent one `MAX_DEPTH`
+/// level per term: the page compiled, served, and answered 500 with
+/// "expression nesting is too deep".
+///
+/// 300 terms, against a `MAX_DEPTH` of 128 — more than twice the limit
+/// that used to reject this. The count is bounded by the **test** binary's
+/// stack, not the product's: the compiler's other passes still recurse
+/// once per term, and a debug build's frames are large enough to overflow
+/// a test thread somewhere past 300. A release build takes 2000 terms
+/// through `check`, `fmt` and `serve` without trouble.
+#[tokio::test]
+async fn a_long_concatenation_is_not_nesting() {
+    let mut src =
+        String::from("namespace h;\nfunction page() -> text {\n    return \"line 0\\n\"\n");
+    for i in 1..=300 {
+        src.push_str(&format!("        + \"line {i}\\n\"\n"));
+    }
+    src.push_str("    ;\n}\n");
+    src.push_str("routes \"/\" { route GET \"p\" { return content(\"text/plain\", page()); } }\n");
+
+    let r = call(program(&src), "GET", "/p", &[], "").await;
+    assert_eq!(r.status, 200, "body was: {}", r.body);
+    assert_eq!(r.body.lines().count(), 301);
+    assert!(r.body.starts_with("line 0\nline 1\n"));
+    assert!(r.body.ends_with("line 300\n"));
+}
+
+/// `timestamptz - interval` and `timestamptz - timestamptz` — types.md §12.2.
+///
+/// `+` carried its timestamptz overload; `-` fell through to the numeric
+/// path and faulted with "arithmetic is not defined here". The checker
+/// allowed both, so `date.now() - date.hours(24)` compiled and then
+/// answered 500 — and that expression is how a query asks for "the last
+/// day".
+#[tokio::test]
+async fn timestamptz_subtraction_is_defined() {
+    let p = program(
+        "namespace h;\n\
+         routes \"/\" {\n\
+         \x20   route GET \"t\" {\n\
+         \x20       let now = date.now();\n\
+         \x20       let day_ago = $now - date.hours(24);\n\
+         \x20       let back = $day_ago + date.hours(24);\n\
+         \x20       let gap = $now - $day_ago;\n\
+         \x20       return json({ same: string.of($back) == string.of($now), gap: string.of($gap) });\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let r = call(p, "GET", "/t", &[], "").await;
+    assert_eq!(r.status, 200, "body was: {}", r.body);
+    // Subtracting an interval and adding it back is a round trip.
+    assert!(r.body.contains("\"same\":true"), "{}", r.body);
+    // And the difference of the two endpoints is that interval.
+    assert!(r.body.contains("PT86400S"), "{}", r.body);
+}
+
+/// `break` and `continue` — errors.md §7.2.
+///
+/// Both are named by the normative clause and by `E1020`'s own help text,
+/// and neither existed: a reader who did what the diagnostic said got the
+/// same diagnostic again. `continue` is what makes a retry-on-conflict
+/// loop expressible at all, since a postfix `catch` must diverge and
+/// `return`/`throw` leave the function.
+#[tokio::test]
+async fn break_and_continue_control_the_loop() {
+    let p = program(
+        "namespace h;\n\
+         routes \"/\" {\n\
+         \x20   route GET \"b\" {\n\
+         \x20       let seen = \"\";\n\
+         \x20       for (n in [\"a\", \"b\", \"stop\", \"c\"]) {\n\
+         \x20           if ($n == \"stop\") { break; }\n\
+         \x20           $seen = $seen + $n;\n\
+         \x20       }\n\
+         \x20       return json({ seen: $seen });\n\
+         \x20   }\n\
+         \x20   route GET \"c\" {\n\
+         \x20       let seen = \"\";\n\
+         \x20       for (n in [\"a\", \"skip\", \"b\"]) {\n\
+         \x20           if ($n == \"skip\") { continue; }\n\
+         \x20           $seen = $seen + $n;\n\
+         \x20       }\n\
+         \x20       return json({ seen: $seen });\n\
+         \x20   }\n\
+         }\n",
+    );
+
+    let brk = call(p.clone(), "GET", "/b", &[], "").await;
+    assert_eq!(brk.status, 200, "body was: {}", brk.body);
+    assert!(brk.body.contains("\"seen\":\"ab\""), "{}", brk.body);
+
+    let cont = call(p, "GET", "/c", &[], "").await;
+    assert_eq!(cont.status, 200, "body was: {}", cont.body);
+    assert!(cont.body.contains("\"seen\":\"ab\""), "{}", cont.body);
+}
