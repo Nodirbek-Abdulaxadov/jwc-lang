@@ -41,7 +41,7 @@ BEGIN;
 
 -- ── 9 · destructive ──
 DROP TRIGGER IF EXISTS tg_orgs__touch ON org.orgs;
-DROP FUNCTION IF EXISTS org.tg_orgs__touch();
 ALTER TABLE org.orgs DROP COLUMN updated_at;
+DROP FUNCTION IF EXISTS org.tg_orgs__touch();
 
 COMMIT;

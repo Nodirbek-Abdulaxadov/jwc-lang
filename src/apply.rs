@@ -132,8 +132,7 @@ fn body(text: &str, sidecar: Option<&str>) -> String {
 pub async fn up(client: &Client, dir: &Path, to: Option<u32>) -> Result<Vec<String>> {
     lock(client).await?;
     let result = up_locked(client, dir, to).await;
-    unlock(client).await?;
-    result
+    release(client, result).await
 }
 
 async fn up_locked(client: &Client, dir: &Path, to: Option<u32>) -> Result<Vec<String>> {
@@ -192,6 +191,31 @@ async fn up_locked(client: &Client, dir: &Path, to: Option<u32>) -> Result<Vec<S
 pub async fn down(client: &Client, dir: &Path, count: usize) -> Result<Vec<String>> {
     lock(client).await?;
     let result = down_locked(client, dir, count).await;
+    release(client, result).await
+}
+
+/// Drop the advisory lock without letting that overwrite why the migration
+/// failed.
+///
+/// A statement that fails inside the migration's transaction leaves the
+/// connection in an aborted transaction, where every later statement —
+/// `pg_advisory_unlock` included — answers "current transaction is aborted,
+/// commands ignored until end of transaction block". Propagating that with
+/// `?` replaced the real diagnosis with it: a `DROP FUNCTION` refused
+/// because a trigger still depended on it was reported as an aborted
+/// transaction, which names neither the statement nor the dependency, and
+/// is the same message for every possible cause.
+///
+/// On the failure path both calls are best-effort. The lock is session
+/// scoped, so the connection closing behind this releases it regardless;
+/// what matters is that the caller still gets the error that explains
+/// what happened.
+async fn release<T>(client: &Client, result: Result<T>) -> Result<T> {
+    if result.is_err() {
+        let _ = client.batch_execute("ROLLBACK").await;
+        let _ = unlock(client).await;
+        return result;
+    }
     unlock(client).await?;
     result
 }
