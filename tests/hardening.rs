@@ -768,3 +768,55 @@ async fn break_and_continue_control_the_loop() {
     assert_eq!(cont.status, 200, "body was: {}", cont.body);
     assert!(cont.body.contains("\"seen\":\"ab\""), "{}", cont.body);
 }
+
+/// A wildcard route does not swallow the operational endpoints —
+/// config.md §4.0.3.
+///
+/// "A declared route wins" was read as "anything that matched wins", and
+/// the two are different when the match came from a path parameter.
+/// jwc-shortener declares `/{code}` for its redirects; it matches one
+/// segment, so it matched `/readyz` as well, and the readiness probe
+/// answered 404 with the shortener's "no such link". Every pod would have
+/// stayed out of rotation, and nothing in the source names `/readyz` for
+/// an operator to find.
+#[tokio::test]
+async fn a_wildcard_route_does_not_shadow_the_operational_endpoints() {
+    let p = program(
+        "namespace h;\n\
+         routes \"/{code}\" {\n\
+         \x20   route GET \"\" { return json({ code: @code }); }\n\
+         }\n",
+    );
+
+    // The built-in answers, not the catch-all.
+    let ready = call(p.clone(), "GET", "/healthz", &[], "").await;
+    assert_eq!(ready.status, 200);
+    assert!(ready.body.contains("\"status\":\"ok\""), "{}", ready.body);
+
+    let metrics = call(p.clone(), "GET", "/metrics", &[], "").await;
+    assert_eq!(metrics.status, 200);
+    // `jwc_routes` and not a pool gauge: no pool is configured in a unit
+    // test, and the point here is which handler answered.
+    assert!(metrics.body.contains("jwc_routes"), "{}", metrics.body);
+
+    // Any other single segment still reaches the route.
+    let other = call(p, "GET", "/abc123", &[], "").await;
+    assert_eq!(other.status, 200);
+    assert!(other.body.contains("\"code\":\"abc123\""), "{}", other.body);
+}
+
+/// …and a program that writes its own still keeps it — the half of
+/// §4.0.3 that was already right.
+#[tokio::test]
+async fn a_literally_declared_operational_path_still_wins() {
+    let p = program(
+        "namespace h;\n\
+         routes \"/metrics\" {\n\
+         \x20   route GET \"\" { return content(\"text/plain\", \"mine\"); }\n\
+         }\n",
+    );
+
+    let r = call(p, "GET", "/metrics", &[], "").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, "mine");
+}

@@ -666,11 +666,28 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
     // Started before the chain, so `response.duration_*()` reports the
     // whole request — middleware included — and not just the handler.
     let started_at = std::time::Instant::now();
-    let Some((route, binds)) = match_route(&program, &incoming.method, &incoming.path) else {
-        // Only once nothing declared matched. A program that writes its own
-        // `/metrics` keeps it — the source is the authority, and silently
-        // shadowing a declared route with a built-in would be the kind of
-        // thing you find out about from a dashboard that went blank.
+    let matched = match_route(&program, &incoming.method, &incoming.path);
+
+    // config.md §4.0.3 — a declared route wins, and "declared" means the
+    // path was **written down**. A program that writes its own `/metrics`
+    // keeps it; a wildcard that happens to span the name does not.
+    //
+    // The difference is not academic. jwc-shortener declares `/{code}` for
+    // its redirects, which matches one segment and therefore matched
+    // `/readyz` too — so the readiness probe answered 404 with the
+    // shortener's "no such link", every pod stayed out of rotation, and
+    // nothing in the source mentioned `/readyz` for an operator to find.
+    // §4.0.2 promises these three are reachable before reading anyone's
+    // source; a pattern nobody aimed at them must not take that away.
+    let shadows_operational = matched.as_ref().is_some_and(|(_, binds)| !binds.is_empty());
+    if shadows_operational {
+        if let Some(r) = operational(&program, &incoming).await {
+            return r;
+        }
+    }
+
+    let Some((route, binds)) = matched else {
+        // Only once nothing declared matched.
         if let Some(r) = operational(&program, &incoming).await {
             return r;
         }

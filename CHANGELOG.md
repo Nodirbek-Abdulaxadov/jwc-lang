@@ -5,7 +5,7 @@ All notable changes to JWC are documented here. This project adheres to
 
 ## [0.9.9] — porting a real app to 1.0 — 2026-08-21
 
-Six defects, all found by porting jwc-shortener — a service that has been
+Seven defects, all found by porting jwc-shortener — a service that has been
 in production since long before the cutover — from the 0.9.x vocabulary to
 1.0. Each one stopped the port dead, and each is now pinned by a test that
 fails without its fix.
@@ -78,6 +78,22 @@ built from its own lines. Evaluating that chain by recursion spent one
 them: it compiled, served, and answered 500 with "expression nesting is too
 deep". A left-leaning chain is a loop wearing a tree's shape, and is now
 folded as one.
+
+### A wildcard route swallowed the operational endpoints
+
+config.md §4.0.3 — "a declared route wins" — was implemented as "anything
+that matched wins", and the two differ when the match came from a path
+parameter. jwc-shortener declares `/{code}` for its redirects; it spans one
+segment, so it spanned `/readyz` and `/metrics` too, and the readiness probe
+answered `404 {"error":"bunday havola yo'q"}`. Every pod would have stayed
+out of rotation, and nothing in the source names `/readyz` for an operator
+to go looking at.
+
+A route reaching one of the three names **only through a path parameter**
+no longer wins; a literally declared `routes "/metrics"` still does, which
+is the half of §4.0.3 that was already right. §4.0.2 promises an operator
+these paths without reading the source, and a pattern nobody aimed at them
+must not take that away.
 
 ### Also
 
