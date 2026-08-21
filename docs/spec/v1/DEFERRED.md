@@ -10,7 +10,7 @@ closed; these are dated omissions.
 | id | Deferred | What 1.0 does instead | Why |
 |---|---|---|---|
 | `DEFERRED-1` | Explicit nullable coercions (`int?(x)`) | Source-based classification: coercion failure on a client-derived value is `BadRequest` 400, elsewhere a fault (types §7.2) | Taxes 100% of call sites to fix the 1%; a developer who forgets the `?` gets the 500 anyway |
-| `DEFERRED-2` | `--native` AOT backend | `jwc build` bundles launcher + runtime. `--native` is `E0910` | Semantics move until 1.0; a second backend doubles every query-compiler change. Returns in 1.1, rewritten (ROADMAP §7) |
+| ~~`DEFERRED-2`~~ | ~~`--native` AOT backend~~ | **Withdrawn in 0.9.903.** `jwc build` produces a native binary and covers the language; `view`, and nothing else, is refused by name. There is no `--native` flag and there was never an `E0910` | The stated reason — a second backend doubling every query-compiler change — does not hold against the 1.0 front-end: `query_sql` lowers a query to a SQL string at compile time, so codegen *calls* the query compiler rather than reimplementing it. The two backends are held to byte-identical responses over jwc-shortener, MyWallet and task-tracker |
 | `DEFERRED-3` | Enum `DROP VALUE` / reorder rebuild | `E1102` plus the printed five-statement recipe and a guard `SELECT count(*)` (migrations §5.3) | The rebuild needs a cross-schema column map. Refusal loses no data; wrong automation does |
 | `DEFERRED-4` | Per-foreign-key messages | FK violation → `BadRequest` 400, `"referenced row does not exist"`; `jwc lint --constraints` lists them (errors §6.3) | The right status varies by case (400/404/409) and the data to choose does not exist yet |
 | `DEFERRED-5` | General subqueries, CTEs, window functions, recursive queries, full-text | `where exists`/`not exists` in the query language; everything else through the parameterised `raw(…)` escape hatch, banned inside `view`, counted by `jwc lint` (writes §6) | The query compiler is already 28% of the work. The hatch is a valve and its usage count measures which feature to add next |
@@ -24,9 +24,29 @@ closed; these are dated omissions.
 | `DEFERRED-13` | A real module/visibility system | Flat declaration space; `import` is a **checked, mandatory dependency declaration** that does not scope (names §6.3) | Flat + enforced imports is enough for 1.0. Visibility is a 2.0 redesign |
 | `DEFERRED-14` | Typed client SDK generation (TS/Go/Python) | `jwc openapi` | OpenAPI is the boundary; per-language SDKs are separate projects |
 | `DEFERRED-15` | Automatic inverse of destructive migrations | `migrate down` exists; destructive statements emit `-- irreversible` and stop (migrations §9.2) | After a column is dropped the data is gone. Promising reversibility is a lie |
-| `DEFERRED-16` | Background jobs, durable queue, DLQ, WebSocket, SSE | Not declarable in the 1.0 vocabulary. The 0.9.x runtime code is retained but unreachable | design.md never touched these areas. Guessing a vocabulary means writing it twice |
+| `DEFERRED-16` | Background jobs, durable queue, DLQ, WebSocket, SSE, in-process cache | Not declarable in the 1.0 vocabulary. **The runtime code is not all retained** — see the note below | design.md never touched these areas. Guessing a vocabulary means writing it twice |
 | `DEFERRED-17` | Sequences as a declared object class | A counter table plus `update … first` (which emits `FOR UPDATE`) — shown in the sample's `next_invoice_number` | A sequence is a sixth DDL object class with its own diff rules, for one use in the sample. The counter-table form is correct and already specified |
 | `DEFERRED-18` | Generated columns (`GENERATED ALWAYS AS … STORED`) | Compute in application code, or a counter table | The expression would be raw SQL text inside a declaration — a hole in the DBA test, not a feature |
+
+---
+
+## A correction to `DEFERRED-16`
+
+This row used to read "the 0.9.x runtime code is retained but unreachable".
+That was not true of all of it. The v0.25.0 cutover deleted 73 source files
+along with the 0.9.x front-end, and the queue was among them:
+
+| | State |
+|---|---|
+| durable queue, DLQ, `dispatch` | **deleted** at v0.25.0. `queue.rs` (1,352 lines) is at `60cc971^` and nowhere else |
+| WebSocket / SSE | the runtime half is back (`src/native/prelude/ws.rs.in`), and unreachable: the vocabulary has no way to declare one, and the native dispatcher answers 501 |
+| in-process cache | the runtime half is back (`jwc_cache_store`), and unreachable: `cache.*` is not a 1.0 built-in |
+| native AOT backend | **restored** in 0.9.901–0.9.903, and covered — see `DEFERRED-2` |
+
+"Retained but unreachable" and "deleted" are different facts, and a reader
+deciding whether to depend on 1.0 needs the second one. Restoring the queue
+is a decision that has not been taken; what has been taken is the decision
+to stop saying it is already there.
 
 ---
 
