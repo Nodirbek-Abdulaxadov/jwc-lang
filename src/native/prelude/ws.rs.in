@@ -1,0 +1,291 @@
+// --- WebSocket runtime (async, RFC 6455, text frames) -----------------------
+//
+// Only included when the program declares at least one `route WS ...`. Uses
+// tokio for non-blocking frame I/O. Limitations:
+//   * Text and close frames returned to user code; binary surfaces as Str.
+//   * No fragmentation: every frame must have FIN=1.
+//   * No subprotocol negotiation; first match wins.
+
+// --- SHA-1 (RFC 3174) — pure CPU, sync. -------------------------------------
+
+fn jwc_sha1(message: &[u8]) -> [u8; 20] {
+    let mut h: [u32; 5] = [
+        0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0,
+    ];
+    let bit_len: u64 = (message.len() as u64).wrapping_mul(8);
+
+    let mut padded = Vec::with_capacity(message.len() + 64);
+    padded.extend_from_slice(message);
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in padded.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        for i in 0..80 {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
+                _ => (b ^ c ^ d, 0xCA62_C1D6),
+            };
+            let tmp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(w[i]);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = tmp;
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+// --- base64 (RFC 4648 standard alphabet) ------------------------------------
+
+fn jwc_base64_encode(input: &[u8]) -> String {
+    const ALPHA: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= input.len() {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | (input[i + 2] as u32);
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHA[(n & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = input.len() - i;
+    if rem == 1 {
+        let n = (input[i] as u32) << 16;
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
+        out.push(ALPHA[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 0x3F) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+fn ws_accept_for_key(client_key: &str) -> String {
+    let combined = format!("{}{}", client_key.trim(), WS_GUID);
+    let digest = jwc_sha1(combined.as_bytes());
+    jwc_base64_encode(&digest)
+}
+
+async fn ws_send_handshake_response(
+    stream: &mut tokio::net::TcpStream,
+    accept: &str,
+) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {}\r\n\
+         \r\n",
+        accept
+    );
+    tokio::io::AsyncWriteExt::write_all(stream, resp.as_bytes()).await
+}
+
+// --- frame I/O --------------------------------------------------------------
+
+const WS_OP_TEXT: u8 = 0x1;
+const WS_OP_BINARY: u8 = 0x2;
+const WS_OP_CLOSE: u8 = 0x8;
+const WS_OP_PING: u8 = 0x9;
+const WS_OP_PONG: u8 = 0xA;
+
+enum WsFrame {
+    Text(String),
+    Binary(Vec<u8>),
+    Close,
+    Ping(Vec<u8>),
+    Pong(Vec<u8>),
+}
+
+async fn ws_read_exact(stream: &mut tokio::net::TcpStream, n: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; n];
+    tokio::io::AsyncReadExt::read_exact(stream, &mut buf).await?;
+    Ok(buf)
+}
+
+async fn ws_read_frame(stream: &mut tokio::net::TcpStream) -> std::io::Result<WsFrame> {
+    let hdr = ws_read_exact(stream, 2).await?;
+    let _fin = (hdr[0] & 0x80) != 0;
+    let opcode = hdr[0] & 0x0F;
+    let masked = (hdr[1] & 0x80) != 0;
+    let mut len: u64 = (hdr[1] & 0x7F) as u64;
+    if len == 126 {
+        let ext = ws_read_exact(stream, 2).await?;
+        len = u16::from_be_bytes([ext[0], ext[1]]) as u64;
+    } else if len == 127 {
+        let ext = ws_read_exact(stream, 8).await?;
+        len = u64::from_be_bytes([
+            ext[0], ext[1], ext[2], ext[3], ext[4], ext[5], ext[6], ext[7],
+        ]);
+    }
+    let mask = if masked { ws_read_exact(stream, 4).await? } else { Vec::new() };
+    let mut payload = ws_read_exact(stream, len as usize).await?;
+    if masked {
+        for (i, b) in payload.iter_mut().enumerate() {
+            *b ^= mask[i & 3];
+        }
+    }
+    let frame = match opcode {
+        WS_OP_TEXT => WsFrame::Text(String::from_utf8_lossy(&payload).to_string()),
+        WS_OP_BINARY => WsFrame::Binary(payload),
+        WS_OP_CLOSE => WsFrame::Close,
+        WS_OP_PING => WsFrame::Ping(payload),
+        WS_OP_PONG => WsFrame::Pong(payload),
+        _ => WsFrame::Close,
+    };
+    Ok(frame)
+}
+
+async fn ws_write_frame(
+    stream: &mut tokio::net::TcpStream,
+    opcode: u8,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let mut out = Vec::with_capacity(payload.len() + 10);
+    out.push(0x80 | opcode);
+    if payload.len() < 126 {
+        out.push(payload.len() as u8);
+    } else if payload.len() <= u16::MAX as usize {
+        out.push(126);
+        out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        out.push(127);
+        out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    out.extend_from_slice(payload);
+    tokio::io::AsyncWriteExt::write_all(stream, &out).await
+}
+
+// --- per-handler shared stream (task-local Arc<Mutex<...>>) -----------------
+
+tokio::task_local! {
+    static WS_STREAM: std::sync::Arc<tokio::sync::Mutex<tokio::net::TcpStream>>;
+}
+
+// --- built-ins exposed to JWC code ------------------------------------------
+
+async fn jwc_b_ws_send(msg: V) -> V {
+    let text: String = match msg {
+        V::Str(s) => s.into_owned(),
+        other => jwc_to_json(&other),
+    };
+    let arc = match WS_STREAM.try_with(|s| s.clone()) {
+        Ok(a) => a,
+        Err(_) => panic!("ws_send(): only valid inside a WS route handler"),
+    };
+    let mut s = arc.lock().await;
+    match ws_write_frame(&mut *s, WS_OP_TEXT, text.as_bytes()).await {
+        Ok(()) => V::Bool(true),
+        Err(_) => V::Bool(false),
+    }
+}
+
+async fn jwc_b_ws_recv() -> V {
+    let arc = match WS_STREAM.try_with(|s| s.clone()) {
+        Ok(a) => a,
+        Err(_) => panic!("ws_recv(): only valid inside a WS route handler"),
+    };
+    loop {
+        let frame_res = {
+            let mut s = arc.lock().await;
+            ws_read_frame(&mut *s).await
+        };
+        let frame = match frame_res {
+            Ok(f) => f,
+            Err(_) => return V::Null,
+        };
+        match frame {
+            WsFrame::Text(s) => return v_str(s),
+            WsFrame::Binary(b) => return v_str(String::from_utf8_lossy(&b).to_string()),
+            WsFrame::Ping(payload) => {
+                let mut s = arc.lock().await;
+                let _ = ws_write_frame(&mut *s, WS_OP_PONG, &payload).await;
+            }
+            WsFrame::Pong(_) => {}
+            WsFrame::Close => return V::Null,
+        }
+    }
+}
+
+async fn jwc_b_ws_close() -> V {
+    if let Ok(arc) = WS_STREAM.try_with(|s| s.clone()) {
+        let mut s = arc.lock().await;
+        let _ = ws_write_frame(&mut *s, WS_OP_CLOSE, &[]).await;
+    }
+    V::Null
+}
+
+// --- dispatcher called from handle_connection (HTTP prelude) ----------------
+
+async fn jwc_run_ws_handler(
+    mut stream: tokio::net::TcpStream,
+    req: &Request,
+    handler: fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> + Send>>,
+) {
+    let key = match req.headers.get("sec-websocket-key") {
+        Some(k) => k.clone(),
+        None => {
+            let body = "Missing Sec-WebSocket-Key";
+            let resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, resp.as_bytes()).await;
+            return;
+        }
+    };
+    let accept = ws_accept_for_key(&key);
+    if ws_send_handshake_response(&mut stream, &accept).await.is_err() {
+        return;
+    }
+    let arc = std::sync::Arc::new(tokio::sync::Mutex::new(stream));
+    let scope_arc = arc.clone();
+    WS_STREAM
+        .scope(scope_arc, async move {
+            let _ = handler().await;
+        })
+        .await;
+    let mut s = arc.lock().await;
+    let _ = ws_write_frame(&mut *s, WS_OP_CLOSE, &[]).await;
+}

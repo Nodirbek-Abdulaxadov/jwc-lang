@@ -1,0 +1,166 @@
+// HTTP client built-ins: `http_get` / `fetch_json`, plus the SSRF
+// guards they run before every outbound request.
+//
+// Split out of `native_prelude.rs.in` so that `reqwest` (and its
+// hyper / h2 / tower / rustls subtree) is only a dependency of the
+// generated crate when the program can actually reach it. A hello-world
+// used to compile the whole TLS stack and then have the linker discard
+// it — LTO recovers the binary size, but never the compile time.
+//
+// Emitted when `needs_http_client` OR `needs_crypto`: the crypto
+// prelude's JWKS fetch calls `jwc_http_client` and
+// `jwc_check_outbound_url` from this file.
+
+static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn jwc_http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .build()
+            .unwrap_or_else(|e| panic!("failed to build reqwest client: {}", e))
+    })
+}
+
+/// Native-AOT mirror of `runner::util::check_url_allowlisted`. Reads
+/// `JWC_HTTP_ALLOWLIST` once and caches the parsed list; empty / unset
+/// means "no restriction" (backwards compatible). Returns `Ok(())` to
+/// keep the call site shape close to the interpreter helper; the
+/// caller maps `Err` to the user-facing `v_str(format!("..."))` shape.
+fn jwc_check_url_allowlisted(url: &str) -> Result<(), String> {
+    static ALLOWLIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let list = ALLOWLIST.get_or_init(|| {
+        std::env::var("JWC_HTTP_ALLOWLIST")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    if list.is_empty() {
+        return Ok(());
+    }
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("http allowlist: invalid URL '{url}': {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("http allowlist: URL '{url}' has no host"))?
+        .to_ascii_lowercase();
+    if list.iter().any(|h| h == &host) {
+        return Ok(());
+    }
+    Err(format!(
+        "http allowlist: host '{host}' is not in JWC_HTTP_ALLOWLIST (allowed: {})",
+        list.join(", ")
+    ))
+}
+
+/// Native-AOT mirror of `runner::util::ip_is_private`.
+fn jwc_ip_is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                // 100.64.0.0/10 carrier-grade NAT (RFC 6598).
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return jwc_ip_is_private(std::net::IpAddr::V4(mapped));
+            }
+            let segs = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // fe80::/10 link-local, fc00::/7 unique-local.
+                || (segs[0] & 0xffc0) == 0xfe80
+                || (segs[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Native-AOT mirror of `runner::util::host_is_private`. Literal IPs and
+/// the `localhost` name only — a hostname that resolves to a private
+/// address is deliberately not caught here; see the interpreter side for
+/// the DNS-rebinding reasoning.
+fn jwc_host_is_private(host: &str) -> bool {
+    let bare = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if bare == "localhost" || bare.ends_with(".localhost") {
+        return true;
+    }
+    match bare.parse::<std::net::IpAddr>() {
+        Ok(ip) => jwc_ip_is_private(ip),
+        Err(_) => false,
+    }
+}
+
+/// Native-AOT mirror of `runner::util::check_url_not_private`. Opt-in
+/// via `JWC_HTTP_BLOCK_PRIVATE`; off by default.
+fn jwc_check_url_not_private(url: &str) -> Result<(), String> {
+    static BLOCK_PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let blocking = *BLOCK_PRIVATE.get_or_init(|| {
+        std::env::var("JWC_HTTP_BLOCK_PRIVATE")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    });
+    if !blocking {
+        return Ok(());
+    }
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("http private-host guard: invalid URL '{url}': {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("http private-host guard: URL '{url}' has no host"))?;
+    if jwc_host_is_private(host) {
+        return Err(format!(
+            "http private-host guard: host '{host}' is a loopback/private/link-local \
+             address and JWC_HTTP_BLOCK_PRIVATE is set"
+        ));
+    }
+    Ok(())
+}
+
+/// Allowlist first, then the private-host guard — same order and same
+/// opt-in semantics as `runner::util::check_outbound_url`.
+fn jwc_check_outbound_url(url: &str) -> Result<(), String> {
+    jwc_check_url_allowlisted(url)?;
+    jwc_check_url_not_private(url)
+}
+
+async fn jwc_b_http_get(url: V) -> V {
+    let u = match url {
+        V::Str(s) => s,
+        other => return v_str(format!("http_get: url must be a string, got {:?}", other)),
+    };
+    if let Err(msg) = jwc_check_outbound_url(u.as_ref()) {
+        return v_str(msg);
+    }
+    match jwc_http_client().get(u.as_ref()).send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(body) => v_str(body),
+            Err(e) => v_str(format!("http_get body read failed: {}", e)),
+        },
+        Err(e) => v_str(format!("http_get failed: {}", e)),
+    }
+}
+
+async fn jwc_b_fetch_json(url: V) -> V {
+    let body = jwc_b_http_get(url).await;
+    match body {
+        V::Str(s) => jwc_from_json(s.as_ref()).unwrap_or_else(|_| V::Str(s)),
+        other => other,
+    }
+}
