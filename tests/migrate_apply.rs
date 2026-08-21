@@ -447,4 +447,149 @@ async fn the_sample_migrates_from_nothing() {
     let snap = snapshot::of(&m);
     let problems = apply::verify(&client, &snap).await.expect("verify");
     assert!(problems.is_empty(), "{problems:?}");
+
+    // And back down again. Rolling the sample back was never asserted, and
+    // three separate ordering faults shipped through the gap: the touch
+    // function dropped before the trigger that used it, the referenced
+    // tables dropped before their referencers, and a failure inside the
+    // transaction reported as "current transaction is aborted" rather than
+    // as any of it. The corpus has 13 tables, foreign keys across four
+    // schemas, five views and one trigger — if an emitted order is wrong,
+    // it is wrong here.
+    apply::down(&client, &dir, 1)
+        .await
+        .expect("down the sample");
+    for schema in ["auth", "org", "billing", "audit"] {
+        let left: i64 = client
+            .query_one(
+                "SELECT count(*) FROM information_schema.tables WHERE table_schema = $1",
+                &[&schema],
+            )
+            .await
+            .expect("query")
+            .get(0);
+        assert_eq!(left, 0, "{schema} still has tables after the rollback");
+    }
+}
+
+/// A schema whose column is trigger-maintained (`on update now()`,
+/// schema.md §6): one function and one trigger, on one table.
+const TRIGGERED: &str = r#"
+namespace m;
+database App : Postgres;
+schema org of App;
+
+table Notes of App.org {
+    id         bigint primary key identity;
+    body       text;
+    updated_at timestamptz on update now();
+}
+"#;
+
+/// A rollback of a schema that has a trigger.
+///
+/// Phase 9 emits `DROP FUNCTION` and `DROP TABLE` into one bucket, and the
+/// function came first. Postgres refuses to drop a function while a trigger
+/// still references it — and the trigger is on the table three statements
+/// below, so `down` failed on every schema carrying an `on update now()`
+/// column. The sample application has exactly one, which is why this
+/// reproduced on the conformance corpus.
+///
+/// Without the ordering rule in `migrate::rank` this fails on the `down`.
+#[tokio::test]
+async fn down_drops_a_function_after_the_trigger_that_depends_on_it() {
+    let (url, _guard) = db!("down_drops_a_function_after_the_trigger_that_depends_on_it");
+    let client = connect(&url).await;
+    reset(&client).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let src = tempfile::tempdir().expect("tempdir");
+
+    write_migration(
+        &dir,
+        &snapshot::Snapshot::default(),
+        &model_of(TRIGGERED, src.path()),
+        "initial",
+    );
+    apply::up(&client, &dir, None).await.expect("up");
+
+    // The trigger and its function are really there — otherwise this test
+    // would pass for the wrong reason on a build that stopped emitting them.
+    let n: i64 = client
+        .query_one(
+            "SELECT count(*) FROM information_schema.triggers
+              WHERE trigger_schema = 'org'",
+            &[],
+        )
+        .await
+        .expect("query")
+        .get(0);
+    assert_eq!(
+        n, 1,
+        "the schema under test has no trigger to order against"
+    );
+
+    apply::down(&client, &dir, 1)
+        .await
+        .expect("down must roll back a schema that has a trigger");
+
+    let left: i64 = client
+        .query_one(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'org'",
+            &[],
+        )
+        .await
+        .expect("query")
+        .get(0);
+    assert_eq!(left, 0, "the down ran but left tables behind");
+}
+
+/// The error a failed migration reports is the one that explains it.
+///
+/// A statement failing inside the migration's transaction leaves the
+/// connection in an aborted transaction, where `pg_advisory_unlock` — run
+/// on the way out — answers "current transaction is aborted, commands
+/// ignored until end of transaction block". Propagating that with `?`
+/// replaced the real diagnosis with a message that names neither the
+/// statement nor the cause, and reads identically for every possible
+/// failure.
+///
+/// Driven through a hand-written up file, because the generator no longer
+/// emits an order that fails.
+#[tokio::test]
+async fn a_failed_migration_reports_its_own_error_not_the_unlock() {
+    let (url, _guard) = db!("a_failed_migration_reports_its_own_error_not_the_unlock");
+    let client = connect(&url).await;
+    reset(&client).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("migrations");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+
+    std::fs::write(
+        dir.join("0001_bad.up.sql"),
+        "BEGIN;\nCREATE SCHEMA org;\nCREATE TABLE org.t (id bigint);\n\
+         SELECT no_such_function_at_all();\nCOMMIT;\n",
+    )
+    .expect("write up");
+    std::fs::write(dir.join("0001_bad.down.sql"), "BEGIN;\nCOMMIT;\n").expect("write down");
+
+    let err = apply::up(&client, &dir, None)
+        .await
+        .expect_err("should fail");
+    let text = format!(
+        "{err}\n{}",
+        err.chain()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(
+        text.contains("no_such_function_at_all"),
+        "the failure was reported as something else entirely:\n{text}"
+    );
+    assert!(
+        !text.contains("current transaction is aborted"),
+        "the unlock's error masked the real one:\n{text}"
+    );
 }

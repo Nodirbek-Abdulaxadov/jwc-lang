@@ -152,7 +152,12 @@ jobs:
             ${{ env.ASSET }}
             ${{ env.ASSET }}.sha256
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          # Exactly one leg of the matrix asks for the notes. This step runs
+          # once per target, and the action appends the generated notes to
+          # the body every time it runs against an existing release — so
+          # asking on all five printed "What's Changed" five times over. The
+          # v0.9.7 body carries four copies of it.
+          generate_release_notes: ${{ matrix.short == 'x86_64-linux' }}
 
 # The VS Code extension is NOT published here. It has its own workflow —
 # .github/workflows/vscode-marketplace.yml — which fires on the same `v*`

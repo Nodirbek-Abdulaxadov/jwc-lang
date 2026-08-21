@@ -253,7 +253,106 @@ fn phase_title(p: Phase) -> &'static str {
     }
 }
 
+/// Within a phase the diff's own order stands, with two exceptions, both
+/// in phase 9. The ten-phase order sequences kinds of change; these are
+/// dependencies *between* drops of different kinds, which it cannot say.
+///
+/// `DROP TABLE` goes after the column, constraint, index and trigger drops
+/// and before `DROP FUNCTION`:
+///
+/// - A function outlives the trigger that calls it. Postgres refuses to
+///   drop a function while a trigger still references it, and dropping the
+///   table is what takes that trigger away — so emitting the function first
+///   fails on every schema with an `on update now()` column.
+/// - Dropping a constraint first is never wrong, and dropping a foreign key
+///   before its table is what makes the table drop possible at all.
+fn rank(op: &Op) -> u8 {
+    match op {
+        Op::DropTable(_) => 1,
+        Op::DropFunction { .. } => 2,
+        _ => 0,
+    }
+}
+
+/// Order a run of `DROP TABLE` so a table goes before every table it
+/// references.
+///
+/// A foreign key is a dependency Postgres enforces at drop time: dropping
+/// the referenced table while the referencing one still stands is an error
+/// naming the constraint. The drops came out in the diff's order, which is
+/// alphabetical, so `auth.accounts` preceded the `org.members` pointing at
+/// it and a rollback of any ordinary schema failed.
+///
+/// Only tables dropped by *this* migration are edges. A foreign key aimed
+/// at a table that survives lives on the table being dropped and goes with
+/// it. A self-reference is not an edge either.
+///
+/// Kahn's algorithm, always taking the lowest-index ready node, so the
+/// result is a function of the input order and two runs stay byte-identical
+/// (§10.1). A foreign-key cycle has no valid order — no `DROP TABLE`
+/// sequence satisfies it, and breaking one needs a constraint dropped
+/// first, which is a different change — so the cycle's members keep their
+/// original order and Postgres reports it.
+fn order_table_drops(run: &mut [&Change]) {
+    let key = |c: &Change| match &c.op {
+        Op::DropTable(t) => Some(format!("{}.{}", t.schema, t.name)),
+        _ => None,
+    };
+    let names: Vec<String> = run.iter().filter_map(|c| key(c)).collect();
+    if names.len() != run.len() || names.len() < 2 {
+        return;
+    }
+
+    // edges[i] = the tables i references, as indices into `run`.
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); run.len()];
+    let mut indegree = vec![0usize; run.len()];
+    for (i, c) in run.iter().enumerate() {
+        let Op::DropTable(t) = &c.op else { continue };
+        for fk in &t.foreign_keys {
+            let target = format!("{}.{}", fk.target_schema, fk.target_table);
+            let Some(j) = names.iter().position(|n| *n == target) else {
+                continue;
+            };
+            if j == i || edges[i].contains(&j) {
+                continue;
+            }
+            edges[i].push(j);
+            indegree[j] += 1;
+        }
+    }
+
+    let mut out: Vec<usize> = Vec::with_capacity(run.len());
+    let mut done = vec![false; run.len()];
+    while out.len() < run.len() {
+        let Some(i) = (0..run.len()).find(|&i| !done[i] && indegree[i] == 0) else {
+            // A cycle: everything still pending keeps its original order.
+            out.extend((0..run.len()).filter(|&i| !done[i]));
+            break;
+        };
+        done[i] = true;
+        out.push(i);
+        for &j in &edges[i] {
+            indegree[j] -= 1;
+        }
+    }
+
+    let reordered: Vec<&Change> = out.into_iter().map(|i| run[i]).collect();
+    run.copy_from_slice(&reordered);
+}
+
 fn render(stem: &str, changes: &[&Change], title: &str, data_marker: bool) -> String {
+    // Stable, so the diff's order survives everywhere the rank ties — which
+    // is everywhere but the cases above. §10.1 wants two runs byte-identical.
+    let mut ordered: Vec<&Change> = changes.to_vec();
+    ordered.sort_by_key(|c| (c.op.phase(), rank(&c.op)));
+    let start = ordered
+        .iter()
+        .position(|c| matches!(c.op, Op::DropTable(_)))
+        .unwrap_or(ordered.len());
+    let end = start + ordered[start..].partition_point(|c| matches!(c.op, Op::DropTable(_)));
+    order_table_drops(&mut ordered[start..end]);
+    let changes = &ordered[..];
+
     let mut out = header(title);
     out.push_str(
         "--\n-- Phases (migrations.md §4): drop view, schemas and types, tables and\n\

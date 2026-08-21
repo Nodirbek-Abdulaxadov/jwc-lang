@@ -3,6 +3,56 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.8] — `migrate down` — 2026-08-21
+
+`jwc migrate down` could not roll back an ordinary schema, and the error
+it printed described none of the three reasons why. Found by installing
+the v0.9.7 release and running it against a real Postgres; each fault is
+now pinned by a test that fails without its fix.
+
+### Fixed
+
+- **A rollback drops tables in dependency order.** The drops came out in
+  the diff's order, which is alphabetical, so `auth.accounts` preceded
+  the `org.members` and `org.invites` holding foreign keys into it and
+  Postgres refused. `DROP TABLE` is now ordered so a table goes before
+  everything it references — Kahn's algorithm over the foreign keys of
+  the tables this migration drops, always taking the lowest-index ready
+  node so two runs stay byte-identical (§10.1). A foreign-key cycle has
+  no valid `DROP TABLE` order at all; its members keep their original
+  order and Postgres reports it, rather than the generator inventing a
+  sequence that cannot work.
+
+- **A trigger's function is dropped after the trigger.** Phase 9 emits
+  `DROP FUNCTION` and `DROP TABLE` into one bucket and the function came
+  first, so Postgres refused to drop it while the trigger three
+  statements below still referenced it. Any schema with an
+  `on update now()` column was affected; the sample application has one.
+
+- **A failed migration reports its own error.** A statement failing
+  inside the migration's transaction leaves the connection in an aborted
+  transaction, where the `pg_advisory_unlock` on the way out answers
+  `current transaction is aborted, commands ignored until end of
+  transaction block`. That was propagated with `?`, so it replaced the
+  real diagnosis — the same text for every possible cause, naming
+  neither the statement nor the dependency. The unlock is now
+  best-effort on the failure path and the original error survives. This
+  is what had been hiding the two faults above.
+
+- **The release body carries one copy of its notes.** `release.yml` set
+  `generate_release_notes` on a step that runs once per target, and the
+  action appends the generated notes each time it runs against a release
+  that already exists. The v0.9.7 body has four copies of "What's
+  Changed"; one leg of the matrix asks for them now.
+
+### Testing
+
+`the_sample_migrates_from_nothing` applied the conformance corpus and
+verified it, then stopped — it never rolled back, and that is the gap all
+three faults shipped through. It now takes the sample back down and
+asserts every schema is empty. Two further tests cover the function
+ordering and the error masking directly.
+
 ## [0.9.7] — the 1.0 language, implemented — 2026-08-20
 
 **BREAKING: every 0.9.x program stops compiling.** v0.25.0 replaced the
