@@ -1,0 +1,49 @@
+namespace jsonb_write;
+
+-- types.md §5.6 — "a `jsonb` value written from code takes any `Record`,
+-- array, scalar or `Raw`". It is the one column type whose shape is not the
+-- schema's business, which is what a per-event audit payload needs; without
+-- it an activity row could only be written as a pre-encoded string.
+service JsonbWrite {
+    function record_payload(org_id: bigint) {
+        insert into App.s.Events {
+            org_id  = $org_id,
+            payload = { kind: "created", org_id: $org_id }
+        };
+    }
+
+    function array_payload(org_id: bigint) {
+        insert into App.s.Events {
+            org_id  = $org_id,
+            payload = ["a", "b"]
+        };
+    }
+
+    function scalar_payload(org_id: bigint) {
+        insert into App.s.Events {
+            org_id  = $org_id,
+            payload = "just text"
+        };
+    }
+
+    -- The same rule on a function parameter, which is E0354 rather than
+    -- E0606: the write path has its own diagnostic (writes.md §1.3) and
+    -- both read the one assignability lattice.
+    function record_through_a_parameter(org_id: bigint) {
+        JsonbWrite.takes_jsonb({ kind: "created" });
+    }
+
+    function takes_jsonb(payload: jsonb) {
+        return $payload;
+    }
+
+    -- The permission is specific to `jsonb`, not universal: a `varchar`
+    -- column still takes only text.
+    function a_record_does_not_fit_a_varchar(org_id: bigint) {
+        insert into App.s.Notes {
+            org_id = $org_id,
+            body   = { kind: "created" },   -- expect: E0606
+            amount = 0
+        };
+    }
+}

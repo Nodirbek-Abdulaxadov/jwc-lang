@@ -705,3 +705,39 @@ fn jwc_b_v1_hmac_verify(payload: V, signature: V, secret: V) -> V {
     let expected = jwc_b_hmac_sha256(secret, payload);
     jwc_b_v1_constant_time_eq(expected, signature)
 }
+
+/// `hash::hmac_sha256_hex(key, msg)` — the `&str` form the cursor codec
+/// needs. `jwc_b_hmac_sha256` is the built-in and takes `V`.
+fn jwc_hmac_sha256_hex(key: &str, msg: &str) -> String {
+    type H = JwcHmac<JwcSha256>;
+    let mut mac = H::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(msg.as_bytes());
+    jwc_hash_to_hex(&mac.finalize().into_bytes())
+}
+
+/// `jwt.sign(claims, secret, ttl_minutes)` — builtins.md §6.
+///
+/// The claim set is fixed: `sub` from the caller's record, `iat` now, `exp`
+/// `ttl_minutes` later. A caller cannot set `exp` itself, which is what
+/// stops a token from outliving the policy that issued it. Mirrors
+/// `exec_call.rs`'s `"jwt.sign"` arm exactly, down to the `max(1)` on the
+/// TTL — a zero-minute token is a caller mistake, not a request for one
+/// that has already expired.
+fn jwc_b_v1_jwt_sign(claims: V, secret: V, ttl_minutes: V) -> V {
+    let now = chrono::Utc::now().timestamp();
+    let ttl = jwc_to_int(&ttl_minutes).unwrap_or(0).max(1);
+    let sub = jwc_str_view(&jwc_get_field(&claims, "sub"))
+        .unwrap_or("")
+        .to_string();
+    let payload = serde_json::json!({
+        "sub": sub,
+        "iat": now,
+        "exp": now + ttl * 60,
+    })
+    .to_string();
+    let secret = jwc_str_view(&secret).unwrap_or("").to_string();
+    match jwc_jwt_sign_hs256(&payload, &secret) {
+        Ok(token) => v_str(token),
+        Err(e) => panic!("{}", e),
+    }
+}

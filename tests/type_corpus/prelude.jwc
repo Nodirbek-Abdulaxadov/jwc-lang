@@ -58,6 +58,17 @@ table Invites of App.s {
     foreign key (accepted_by) references App.s.Orgs (id);
 }
 
+--- A `jsonb` payload, for the write rules (types.md §5.6). Its shape is
+--- per-event, which is the point: it is the one column type whose shape is
+--- not the schema's business.
+table Events of App.s {
+    id      bigint primary key identity;
+    org_id  bigint;
+    payload jsonb;
+
+    foreign key (org_id) references App.s.Orgs (id);
+}
+
 view OrgList of App.s {
     select O from App.s.Orgs
         left join App.s.Members M on M.org_id == O.id

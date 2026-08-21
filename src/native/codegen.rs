@@ -120,7 +120,7 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "hash.password" => "jwc_b_hash_password",
         "hash.sha256" => "jwc_b_sha256",
         "hash.hmac_sha256" => "jwc_b_hmac_sha256",
-        "jwt.sign" => "jwc_b_jwt_sign",
+        "jwt.sign" => "jwc_b_v1_jwt_sign",
         "jwt.verify" => "jwc_b_jwt_verify",
 
         // The request — builtins.md §7.
@@ -281,6 +281,9 @@ struct Ctx<'a> {
     /// Set by a `request.body() as <Class>`. Drives whether the class table
     /// is worth emitting and whether the crate needs `regex`.
     uses_validation: bool,
+    /// Set by a `page` query. The cursor is HMAC-signed, so the crate needs
+    /// the crypto prelude whether or not the program hashes anything.
+    uses_page: bool,
     mode: Mode,
     /// How many `transaction { }` blocks enclose the statement being
     /// emitted. Each one is an `async` block, so a `return` inside it has
@@ -352,6 +355,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         field_lists: BTreeMap::new(),
         used: std::collections::BTreeSet::new(),
         uses_validation: false,
+        uses_page: false,
         mode: Mode::Value,
         tx_depth: 0,
     };
@@ -363,6 +367,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
          ::std::sync::atomic::AtomicU16::new(8080);\n",
     );
     emit_constraint_messages(&mut out, &built.model);
+    emit_cursor_secret(&mut out, ws);
     let uses_regex = emit_classes(&mut out, &symbols);
 
     // Route bodies are keyed by (method, declared pattern), the same key
@@ -466,7 +471,10 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // question — a second list would be one more thing to forget.
     let defines = |prelude: &str, f: &str| prelude.contains(&format!("fn {f}("));
     let needs_db = ctx.used.iter().any(|f| defines(super::PRELUDE_DB, f));
-    let needs_crypto = ctx.used.iter().any(|f| defines(super::PRELUDE_CRYPTO, f));
+    // A page's cursor is HMAC-signed, and the HMAC lives in the crypto
+    // prelude — so a program that pages needs it even if it hashes nothing.
+    let needs_crypto =
+        ctx.uses_page || ctx.used.iter().any(|f| defines(super::PRELUDE_CRYPTO, f));
     let needs_redis = ctx.used.iter().any(|f| defines(super::PRELUDE_REDIS, f));
     let needs_http_client = ctx.used.iter().any(|f| defines(super::PRELUDE_HTTP, f));
 
@@ -683,6 +691,65 @@ fn emit_classes(out: &mut String, symbols: &crate::symbols::Symbols) -> bool {
     }
     out.push_str("];\n");
     uses_regex
+}
+
+/// `server { cursor_secret }`, as an expression the binary evaluates at
+/// boot — not as the value `jwc build` happened to read.
+///
+/// It is almost always `env("CURSOR_SECRET")`, and baking in whatever that
+/// was on the build machine would sign every deployment's cursors with the
+/// builder's secret. `serve.rs::config_string` reads the same three forms.
+fn emit_cursor_secret(out: &mut String, ws: &Workspace) {
+    fn render(e: &Expr) -> Option<String> {
+        match &*e.kind {
+            ExprKind::Str(s) => Some(format!("String::from({})", rust_str_literal(s))),
+            ExprKind::Call { callee, args, .. } => {
+                let ExprKind::Name(n) = &*callee.kind else {
+                    return None;
+                };
+                if n.name != "env" {
+                    return None;
+                }
+                let ExprKind::Str(name) = &*args.first()?.kind else {
+                    return None;
+                };
+                Some(format!(
+                    "std::env::var({}).unwrap_or_default()",
+                    rust_str_literal(name)
+                ))
+            }
+            ExprKind::Coalesce { lhs, rhs } => {
+                let l = render(lhs)?;
+                let r = render(rhs)?;
+                Some(format!("{{ let __s = {l}; if __s.is_empty() {{ {r} }} else {{ __s }} }}"))
+            }
+            _ => None,
+        }
+    }
+
+    let mut expr = "String::new()".to_string();
+    for file in &ws.files {
+        for decl in &file.program.decls {
+            let Decl::Server(d) = decl else { continue };
+            for e in &d.entries {
+                let crate::ast::ServerEntry::Set(a) = e else {
+                    continue;
+                };
+                if a.key.name == "cursor_secret" {
+                    if let Some(r) = render(&a.value) {
+                        expr = r;
+                    }
+                }
+            }
+        }
+    }
+    out.push_str(&format!(
+        "\n/// `server {{ cursor_secret }}` — read at boot, the way the\n\
+         /// interpreter reads it.\n\
+         fn jwc_cursor_secret_source() -> &'static str {{\n\
+         \x20   static S: ::std::sync::OnceLock<String> = ::std::sync::OnceLock::new();\n\
+         \x20   S.get_or_init(|| {expr})\n}}\n"
+    ));
 }
 
 /// `db::install_messages` builds this map at boot from the schema model;
@@ -1104,7 +1171,10 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
             // `context.<key>` is a read, not a field access on a value.
             if let ExprKind::Name(n) = &*base.kind {
                 if n.name == "context" {
-                    return Ok(format!("jwc_b_context({})", rust_str_literal(&field.name)));
+                    return Ok(format!(
+                        "jwc_b_context(v_str({}))",
+                        rust_str_literal(&field.name)
+                    ));
                 }
             }
             let b = emit_expr(base, ctx)?;
@@ -1369,13 +1439,6 @@ fn emit_select(sel: &crate::ast::SelectExpr, ctx: &mut Ctx) -> Result<String> {
         // "not expressible" here would throw that away.
         bail!("{}", c.gap());
     };
-    if compiled.page.is_some() {
-        bail!(
-            "native build does not lower `page` yet — the cursor is signed \
-             with `server {{ cursor_secret }}`, which the generated binary \
-             does not read"
-        );
-    }
     emit_built(
         &crate::sql::Built {
             sql: compiled.sql,
@@ -1425,9 +1488,26 @@ fn emit_insert(i: &crate::ast::InsertExpr, ctx: &mut Ctx) -> Result<String> {
     emit_built_with(&built, &preset, true, ctx)
 }
 
+/// The most optional (`=?`) assignments one `update` may carry.
+///
+/// Which columns the statement sets is a run-time fact, so each combination
+/// is a different statement and all of them are compiled here. Eight is 256
+/// statements — already far past anything a PATCH endpoint writes, and the
+/// point at which "compile them all" stops being the right answer.
+const MAX_OPTIONAL_SETS: usize = 8;
+
 fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
-    let mut sets: Vec<(String, crate::sql::SetValue)> = Vec::new();
-    let mut preset: Vec<String> = Vec::new();
+    // Three kinds of assignment, in source order because the parameter
+    // order follows it: an expression the database computes, a value bound
+    // unconditionally, and a value bound only when it is present.
+    enum Assign {
+        Sql(Expr),
+        Bound(String, crate::token::Span),
+        /// `=?` — writes.md §3.3.
+        Optional(String, crate::token::Span),
+    }
+
+    let mut plan: Vec<(String, Assign)> = Vec::new();
     for it in &u.sets {
         match it {
             SetItem::Set {
@@ -1441,25 +1521,18 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
                 // is an increment, and computing it here would need a read
                 // first, which is the race the rule is about.
                 if reads_a_column(&u.table, value, ctx) {
-                    sets.push((column.name.clone(), crate::sql::SetValue::Sql(value.clone())));
+                    plan.push((column.name.clone(), Assign::Sql(value.clone())));
                     continue;
                 }
-                if *optional {
-                    // §3.3 — `=?` skips the assignment when the value is
-                    // absent, so which columns the statement sets is only
-                    // known once the value is in hand.
-                    bail!(
-                        "native build does not lower `=?` in an `update` — \
-                         whether the column is set depends on the value at run \
-                         time, and the statement is built at compile time. \
-                         `jwc serve` runs it."
-                    );
-                }
-                sets.push((
+                let v = emit_expr(value, ctx)?;
+                plan.push((
                     column.name.clone(),
-                    crate::sql::SetValue::Bound(placeholder(*span)),
+                    if *optional {
+                        Assign::Optional(v, *span)
+                    } else {
+                        Assign::Bound(v, *span)
+                    },
                 ));
-                preset.push(emit_expr(value, ctx)?);
             }
             SetItem::Spread { .. } => bail!(
                 "native build does not lower `...` spread in an `update` — the \
@@ -1468,14 +1541,138 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
             ),
         }
     }
-    let mut b = crate::sql::Builder::new(ctx.model);
-    let Some(built) = b.update(u, &sets) else {
-        bail!("this update is not expressible yet");
-    };
-    // An UPDATE mixes the two: `Bind::Preset` for each `set`, `Bind::Expr`
-    // for the `where`, which is why `exec::run_update` goes through
-    // `bind_params` where `run_insert` does not.
-    emit_built_with(&built, &preset, false, ctx)
+
+    let optional_count = plan
+        .iter()
+        .filter(|(_, a)| matches!(a, Assign::Optional(..)))
+        .count();
+
+    // The ordinary case: one statement, one set of binds.
+    if optional_count == 0 {
+        let sets: Vec<(String, crate::sql::SetValue)> = plan
+            .iter()
+            .map(|(name, a)| {
+                (
+                    name.clone(),
+                    match a {
+                        Assign::Sql(e) => crate::sql::SetValue::Sql(e.clone()),
+                        Assign::Bound(_, span) | Assign::Optional(_, span) => {
+                            crate::sql::SetValue::Bound(placeholder(*span))
+                        }
+                    },
+                )
+            })
+            .collect();
+        let preset: Vec<String> = plan
+            .iter()
+            .filter_map(|(_, a)| match a {
+                Assign::Bound(v, _) => Some(v.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut b = crate::sql::Builder::new(ctx.model);
+        let Some(built) = b.update(u, &sets) else {
+            bail!("this update is not expressible yet");
+        };
+        // An UPDATE mixes the two: `Bind::Preset` for each `set`,
+        // `Bind::Expr` for the `where`, which is why `exec::run_update` goes
+        // through `bind_params` where `run_insert` does not.
+        return emit_built_with(&built, &preset, false, ctx);
+    }
+
+    if optional_count > MAX_OPTIONAL_SETS {
+        bail!(
+            "native build does not lower an `update` with {optional_count} \
+             `=?` assignments — each combination is a different statement \
+             and this compiles all of them, which stops being reasonable \
+             past {MAX_OPTIONAL_SETS}. `jwc serve` builds the statement per \
+             request."
+        );
+    }
+
+    // Evaluate every value once, ahead of the branch: an `=?` whose value
+    // calls `date.now()` must not be called once to test for presence and
+    // again to bind.
+    let mut out = String::from("{\n");
+    let mut opt_slots: Vec<usize> = Vec::new();
+    for (i, (_, a)) in plan.iter().enumerate() {
+        match a {
+            Assign::Bound(v, _) | Assign::Optional(v, _) => {
+                out.push_str(&format!("    let __set{i} = {v};\n"));
+                if matches!(a, Assign::Optional(..)) {
+                    opt_slots.push(i);
+                }
+            }
+            Assign::Sql(_) => {}
+        }
+    }
+
+    // A bit per `=?`, set when the value is present. types.md §6.5 keeps
+    // absent and null distinguishable, and `=?` treats both as "skip" —
+    // which is what the interpreter's `if *optional && v.is_null()` does.
+    out.push_str("    let __mask: usize = 0");
+    for (bit, slot) in opt_slots.iter().enumerate() {
+        out.push_str(&format!(
+            "\n        | if matches!(__set{slot}, V::Null) {{ 0 }} else {{ 1 << {bit} }}"
+        ));
+    }
+    out.push_str(";\n");
+
+    out.push_str("    match __mask {\n");
+    let variants = 1usize << optional_count;
+    for mask in 0..variants {
+        let mut sets: Vec<(String, crate::sql::SetValue)> = Vec::new();
+        let mut preset: Vec<String> = Vec::new();
+        for (i, (name, a)) in plan.iter().enumerate() {
+            match a {
+                Assign::Sql(e) => {
+                    sets.push((name.clone(), crate::sql::SetValue::Sql(e.clone())));
+                }
+                Assign::Bound(_, span) => {
+                    sets.push((name.clone(), crate::sql::SetValue::Bound(placeholder(*span))));
+                    preset.push(format!("__set{i}.clone()"));
+                }
+                Assign::Optional(_, span) => {
+                    let bit = opt_slots.iter().position(|s| *s == i).unwrap_or(0);
+                    if mask & (1 << bit) != 0 {
+                        sets.push((name.clone(), crate::sql::SetValue::Bound(placeholder(*span))));
+                        preset.push(format!("__set{i}.clone()"));
+                    }
+                }
+            }
+        }
+        let arm = if mask == variants - 1 { "_" } else { &mask.to_string() };
+        if sets.is_empty() {
+            // writes.md §3.3 — every assignment skipped. The interpreter
+            // falls back to selecting the row as it stands rather than
+            // emitting an empty SET, and so does this.
+            let probe = crate::ast::SelectExpr {
+                binder: crate::ast::Ident::new("x", u.span),
+                source: u.table.clone(),
+                joins: vec![],
+                filter: u.filter.clone(),
+                group_by: vec![],
+                having: None,
+                projection: u.projection.clone(),
+                order_by: u.order_by.clone(),
+                limit: None,
+                page: None,
+                first: u.first,
+                span: u.span,
+            };
+            let e = emit_select(&probe, ctx)?;
+            out.push_str(&format!("        {arm} => {e},\n"));
+            continue;
+        }
+        let mut b = crate::sql::Builder::new(ctx.model);
+        let Some(built) = b.update(u, &sets) else {
+            bail!("this update is not expressible yet");
+        };
+        let e = emit_built_with(&built, &preset, false, ctx)?;
+        out.push_str(&format!("        {arm} => {e},\n"));
+    }
+    out.push_str("    }\n}");
+    Ok(out)
 }
 
 fn emit_delete(d: &crate::ast::DeleteExpr, ctx: &mut Ctx) -> Result<String> {
@@ -1505,9 +1702,6 @@ fn emit_built_with(
     all_preset: bool,
     ctx: &mut Ctx,
 ) -> Result<String> {
-    if built.page.is_some() {
-        bail!("native build does not lower `page` yet");
-    }
     let mut preset = preset.iter();
     let mut binds = Vec::new();
     for p in &built.params {
@@ -1525,18 +1719,57 @@ fn emit_built_with(
                 binds.push(format!("jwc_param_str({v})"));
             }
             crate::sql::Bind::Preset => unreachable!("handled above"),
-            crate::sql::Bind::Cursor(_) => {
-                bail!("native build does not lower a keyset cursor yet")
+            // queries.md §9 — the cursor's key values, read once before any
+            // of them are bound. `Cursor(i)` is the i-th key.
+            crate::sql::Bind::Cursor(i) => {
+                binds.push(format!("jwc_param_str(__cursor_key({i}))"));
             }
         }
     }
     ctx.used.insert("jwc_db_run".to_string());
+    let fields = ctx.field_list_id(built.fields.clone());
+
+    if let Some(plan) = &built.page {
+        ctx.uses_page = true;
+        // The cursor is read once, before any parameter is bound: its keys
+        // are the *caller's* values and every `Bind::Cursor` above reads
+        // from the same tuple.
+        let arity = built
+            .params
+            .iter()
+            .filter(|p| matches!(p.bind, crate::sql::Bind::Cursor(_)))
+            .map(|p| match p.bind {
+                crate::sql::Bind::Cursor(i) => i + 1,
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
+        let after = match &plan.after {
+            Some(e) => emit_expr(e, ctx)?,
+            None => "V::Null".to_string(),
+        };
+        return Ok(format!(
+            "{{\n\
+                 let __cursor = jwc_cursor_binds(&{after}, {arity})?;\n\
+                 let __cursor_key = |i: usize| -> V {{\n\
+                     match __cursor.get(i) {{\n\
+                         Some(Some(s)) => v_str(s.clone()),\n\
+                         _ => V::Null,\n\
+                     }}\n\
+                 }};\n\
+                 jwc_db_page({}, vec![{}], {}, JWC_FIELDS_{fields}).await?\n\
+             }}",
+            rust_str_literal(&built.sql),
+            binds.join(", "),
+            plan.raw_items,
+        ));
+    }
+
     let shape = match built.shape {
         crate::sql::Shape::None => "JWC_SHAPE_NONE",
         crate::sql::Shape::First => "JWC_SHAPE_FIRST",
         crate::sql::Shape::Rows => "JWC_SHAPE_ROWS",
     };
-    let fields = ctx.field_list_id(built.fields.clone());
     Ok(format!(
         "jwc_db_run({}, vec![{}], {shape}, {}, JWC_FIELDS_{fields}).await?",
         rust_str_literal(&built.sql),

@@ -1000,3 +1000,145 @@ fn jwc_metrics_route() -> std::pin::Pin<Box<dyn std::future::Future<Output = V> 
         )
     })
 }
+
+// --- keyset pagination (queries.md §9) ---------------------------------------
+//
+// `exec::page_envelope` + `exec::read_cursor` + `cursor::{encode, decode}`,
+// transcribed. The cursor is HMAC-signed: unsigned, it is a predicate the
+// caller writes and nobody checks.
+
+const JWC_CURSOR_VERSION: &str = "v1";
+
+/// `server { cursor_secret }`. Codegen emits the reader, because the value
+/// may be `env("CURSOR_SECRET")` and that is a run-time read.
+fn jwc_cursor_secret() -> String {
+    jwc_cursor_secret_source().to_string()
+}
+
+fn jwc_cursor_encode(keys: &[Option<String>]) -> String {
+    use base64::Engine;
+    let payload = serde_json::to_string(keys).unwrap_or_else(|_| "[]".to_string());
+    let body = format!(
+        "{}.{}",
+        JWC_CURSOR_VERSION,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    );
+    let mac = jwc_hmac_sha256_hex(&jwc_cursor_secret(), &body);
+    format!("{}.{}", body, mac)
+}
+
+/// The key values a cursor carries, or `None` when it is not ours.
+///
+/// Every failure is the same answer — a malformed cursor and a forged one
+/// are the same event from the caller's side, and telling them apart is
+/// information the caller has no use for.
+fn jwc_cursor_decode(cursor: &str) -> Option<Vec<Option<String>>> {
+    use base64::Engine;
+    let (body, mac) = cursor.rsplit_once('.')?;
+    let expected = jwc_hmac_sha256_hex(&jwc_cursor_secret(), body);
+    // Not a `==`: the MAC is the only thing between a caller and an
+    // arbitrary predicate, so how long the check takes must not depend on
+    // how much of it was right.
+    if !jwc_cursor_ct_eq(mac.as_bytes(), expected.as_bytes()) {
+        return None;
+    }
+    let (version, payload) = body.split_once('.')?;
+    if version != JWC_CURSOR_VERSION {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn jwc_cursor_ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// The cursor's key values, ready to bind. An absent or empty cursor is the
+/// first page; one that does not verify is a `BadRequest`, not a 500 and not
+/// a silently-empty page — it is client input, and the only honest answer is
+/// that it is not a cursor we issued.
+fn jwc_cursor_binds(v: &V, arity: usize) -> Result<Vec<Option<String>>, JwcThrown> {
+    let Some(text) = jwc_str_view(v) else {
+        return Ok(vec![None; arity]);
+    };
+    if text.is_empty() {
+        return Ok(vec![None; arity]);
+    }
+    match jwc_cursor_decode(text) {
+        Some(keys) => Ok(keys),
+        None => Err(JwcThrown {
+            error: "BadRequest",
+            status: 400,
+            message: "kursor yaroqsiz".to_string(),
+            body: None,
+        }),
+    }
+}
+
+/// The last ordering tuple on this page — where the next one starts.
+fn jwc_cursor_last_tuple(keys: &str) -> Option<Vec<Option<String>>> {
+    let parsed: serde_json::Value = serde_json::from_str(keys).ok()?;
+    let last = parsed.as_array()?.last()?;
+    Some(
+        last.as_array()?
+            .iter()
+            .map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+    )
+}
+
+/// `queries.md §9.3` — `{items, next, has_more}`.
+///
+/// `items` is spliced, not rebuilt: it reaches the response as the text
+/// Postgres produced, which is what makes raw survive the envelope
+/// (types.md §5.4).
+async fn jwc_db_page(
+    sql: &str,
+    params: DbParams,
+    raw_items: bool,
+    fields: &'static [&'static str],
+) -> JwcResult {
+    let rows = jwc_db_try_query(sql, params).await.map_err(|e| jwc_db_error(e, sql))?;
+    let (items, keys, has_more) = match rows.first() {
+        None => ("[]".to_string(), "[]".to_string(), false),
+        Some(r) => (
+            r.try_get::<_, Option<String>>(0).unwrap_or(None).unwrap_or_else(|| "[]".into()),
+            r.try_get::<_, Option<String>>(1).unwrap_or(None).unwrap_or_else(|| "[]".into()),
+            r.try_get::<_, Option<bool>>(2).unwrap_or(None).unwrap_or(false),
+        ),
+    };
+
+    // With no next page there is no cursor: a caller that follows `next`
+    // until it is null cannot loop.
+    let next = if has_more {
+        match jwc_cursor_last_tuple(&keys) {
+            Some(t) => v_str(jwc_cursor_encode(&t)),
+            None => V::Null,
+        }
+    } else {
+        V::Null
+    };
+
+    let items = if raw_items {
+        V::RawJson(items.into())
+    } else {
+        match jwc_from_json(&items) {
+            Ok(j) => jwc_reorder(j, fields),
+            Err(_) => V::RawJson(items.into()),
+        }
+    };
+
+    let mut names: Vec<JwcStr> = Vec::with_capacity(3);
+    names.push(Cow::Borrowed("items"));
+    names.push(Cow::Borrowed("next"));
+    names.push(Cow::Borrowed("has_more"));
+    Ok(v_record(Arc::new(names), vec![items, next, V::Bool(has_more)]))
+}

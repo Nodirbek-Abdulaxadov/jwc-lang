@@ -3,6 +3,60 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.903] — three defects a real port found — 2026-08-21
+
+Porting task-tracker — a 0.9.x board API with 36 source files, m2m
+labels and assignees, an audit feed and three grouped aggregates — to
+1.0 turned up three defects in the compiler. Each is fixed with the
+corpus case that would have caught it.
+
+### A grouped column could not be aliased
+
+```jwc
+group by T.column_id, C.name
+as { column_id: T.column_id, column_name: C.name, total: count(T.id) }
+```
+
+`E0531: column_name is neither aggregated nor grouped` — against a
+column that is plainly in the `group by`. `group by` collects the column
+name from either spelling, bare or qualified, but the alias map that
+maps a projection alias back to its column read only the bare one. So
+`as { name: C.name }` passed by coincidence (the alias equals the column
+name) and `as { column_name: C.name }` did not.
+
+### A record could not be written to a `jsonb` column
+
+types.md §5.6 says a `jsonb` value written from code takes any `Record`,
+array, scalar or `Raw` — it is the one column type whose shape is not
+the schema's business. The lattice did not have that rule, so an audit
+payload could only be written as a pre-encoded string.
+
+### The native backend refused `=?` and `page`
+
+Both are lowered now.
+
+**`=?`** — which columns an `update` sets is a run-time fact, so every
+combination is compiled and a mask picks one. Two optional assignments
+is four statements; the cap is eight (256), which is far past anything a
+PATCH endpoint writes. The all-absent combination sets nothing and falls
+back to selecting the row as it stands, exactly as `exec::run_update`
+does. Each value is evaluated once, before the branch: an `=?` whose
+value calls `date.now()` must not be called to test for presence and
+again to bind.
+
+**`page`** — the cursor codec, the envelope and the HMAC are transcribed
+from `cursor.rs` and `exec::page_envelope`. `server { cursor_secret }`
+is emitted as the *expression*, not the value `jwc build` happened to
+read: it is almost always `env("CURSOR_SECRET")`, and baking that in
+would sign every deployment's cursors with the builder's secret.
+
+### Also in the native backend
+
+- `jwt.sign(claims, secret, ttl_minutes)` — the prelude had the 0.9
+  two-argument form, which silently dropped the TTL.
+- `context.<key>` and `@param` were emitted as bare `&str` where the
+  built-in wanted a `V`.
+
 ## [0.9.902] — the native build answers what `jwc serve` answers — 2026-08-21
 
 0.9.901 brought the native AOT backend back but covered only the

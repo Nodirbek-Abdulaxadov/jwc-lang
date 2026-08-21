@@ -276,3 +276,96 @@ fn a_1_0_builtin_the_0_9_prelude_lacked_is_implemented_not_refused() {
     // And the ones that are genuinely absent are still named, not guessed at.
     let _ = rust;
 }
+
+#[test]
+fn an_optional_assignment_compiles_one_statement_per_combination() {
+    let dir = std::env::temp_dir().join("jwc_native_optional_set");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tmp");
+    std::fs::write(
+        dir.join("a.jwc"),
+        "namespace a;\n\
+         database App : Postgres;\n\
+         schema s of App;\n\
+         table Notes of App.s { id int primary key identity; title varchar(80); body text; }\n\
+         class Patch { title varchar(80); body text; }\n\
+         routes \"/notes\" {\n\
+         \x20   route PATCH \"{id: int}\" {\n\
+         \x20       let p = request.body() as Patch;\n\
+         \x20       return json(update App.s.Notes set title =? $p.title, body =? $p.body \
+         where id == @id as { id, title, body } first or throw NotFound(\"yo'q\"));\n\
+         \x20   }\n\
+         }\n\
+         function main() { serve(8080); }\n",
+    )
+    .expect("write");
+
+    let ws = jwc::workspace::Workspace::load(&dir).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // writes.md §3.3 — `=?` skips the assignment when the value is absent,
+    // so which columns the statement sets is a run-time fact. The statement
+    // is built at compile time, so every combination is compiled and a mask
+    // picks one. Two optional sets is four statements.
+    assert!(rust.contains("let __mask: usize = 0"));
+    assert!(
+        rust.matches("UPDATE s.notes").count() == 3,
+        "one statement per non-empty combination: {rust}"
+    );
+    // The all-absent case sets nothing. `exec::run_update` selects the row
+    // as it stands rather than emitting an empty SET, and so does this.
+    assert!(
+        rust.contains("FROM s.notes"),
+        "the empty combination should be a select"
+    );
+    // Each value is evaluated once, before the branch: an `=?` whose value
+    // calls `date.now()` must not be called to test for presence and again
+    // to bind.
+    assert!(rust.contains("let __set0 ="));
+}
+
+#[test]
+fn a_page_reads_its_cursor_once_and_signs_the_next_one() {
+    let dir = std::env::temp_dir().join("jwc_native_page");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tmp");
+    std::fs::write(
+        dir.join("a.jwc"),
+        "namespace a;\n\
+         database App : Postgres;\n\
+         schema s of App;\n\
+         server { cursor_secret = env(\"CURSOR_SECRET\"); }\n\
+         table Notes of App.s { id int primary key identity; title varchar(80); }\n\
+         routes \"/notes\" {\n\
+         \x20   route GET \"\" {\n\
+         \x20       return json(select N from App.s.Notes as { id, title } \
+         orderby id asc page after request.query(\"cursor\") size 20);\n\
+         \x20   }\n\
+         }\n\
+         function main() { serve(8080); }\n",
+    )
+    .expect("write");
+
+    let ws = jwc::workspace::Workspace::load(&dir).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The cursor's keys are the caller's values: read once, before any
+    // parameter is bound, because every `Bind::Cursor` reads the same tuple.
+    assert!(rust.contains("let __cursor = jwc_cursor_binds("));
+    assert!(rust.contains("jwc_db_page("));
+    // `server { cursor_secret }` is almost always `env(…)`. Baking in
+    // whatever that was on the build machine would sign every deployment's
+    // cursors with the builder's secret.
+    assert!(
+        rust.contains(r#"std::env::var("CURSOR_SECRET")"#),
+        "the secret should be read at boot, not at build: {rust}"
+    );
+    assert!(
+        !rust.contains("does not lower `page`"),
+        "`page` should be lowered, not refused"
+    );
+}

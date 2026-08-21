@@ -254,6 +254,12 @@ impl Ty {
                     .is_some_and(|(_, have)| have.assignable_to(want))
             }),
             (Array(a), Array(b)) => a.assignable_to(b),
+            // types.md §5.6 — "a `jsonb` value written from code takes any
+            // `Record`, array, scalar or `Raw`". It is the one column type
+            // whose shape is not the schema's business, which is what a
+            // per-event audit payload needs; without this an activity row
+            // could only be written as a pre-encoded string.
+            (Record(_) | Array(_) | Raw | Scalar(_), Scalar(crate::types::Scalar::Jsonb)) => true,
             // rule 5: numeric widening, never narrowing
             (Scalar(a), Scalar(b)) => match (a.numeric_rank(), b.numeric_rank()) {
                 (Some(x), Some(y)) => x <= y,

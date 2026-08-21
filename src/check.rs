@@ -2954,12 +2954,24 @@ impl<'a> Checker<'a> {
             })
             .collect();
         // A projection alias of a grouped column counts as grouped.
+        //
+        // `group by` above collects the *column* name from either spelling —
+        // bare `status` or qualified `C.name` — so the alias map has to read
+        // both too. It used to read only the bare one, which made
+        // `group by T.column_id, C.name` + `as { column_name: C.name }` an
+        // E0531 against a column that was plainly grouped: the alias mapped
+        // to nothing, so `column_name` was looked up as if it were the
+        // column. A projection that aliased a qualified column to its own
+        // name worked by coincidence and one that renamed it did not.
         let aliases: HashMap<String, String> = p
             .fields
             .iter()
             .filter_map(|f| match f {
                 ProjField::Expr { alias, value, .. } => match &*value.kind {
                     ExprKind::Name(n) => Some((alias.name.clone(), n.name.clone())),
+                    ExprKind::Field { field, .. } => {
+                        Some((alias.name.clone(), field.name.clone()))
+                    }
                     _ => None,
                 },
                 _ => None,
