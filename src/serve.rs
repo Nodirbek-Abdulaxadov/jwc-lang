@@ -128,7 +128,7 @@ fn pattern_of(prefix: &str, suffix: &str) -> String {
     crate::wiring::render(&segments)
 }
 
-fn read_server_config(s: &ServerDecl) -> ServerConfig {
+pub(crate) fn read_server_config(s: &ServerDecl) -> ServerConfig {
     let mut c = ServerConfig::default();
     for e in &s.entries {
         let a = match e {

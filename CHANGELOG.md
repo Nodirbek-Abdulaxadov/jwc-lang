@@ -3,6 +3,108 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.902] — the native build answers what `jwc serve` answers — 2026-08-21
+
+0.9.901 brought the native AOT backend back but covered only the
+database-free tier: routes, control flow, expressions, and the built-ins
+the restored prelude implements. Everything else was refused by name.
+This closes the rest of it, and the acceptance test is not "it compiles"
+— it is that the generated binary and `jwc serve` return **byte-identical**
+responses, header for header, over a program that exercises every piece.
+
+### What the pass now lowers
+
+| | 0.9.901 | 0.9.902 |
+|---|---|---|
+| `select` | ✅ | ✅ |
+| `insert` / `update` / `delete` | ❌ | ✅ |
+| `transaction { }` | ❌ | ✅ |
+| `middleware`, `requires`, `provides`, `after { }` | ❌ | ✅ |
+| `service` | ❌ | ✅ |
+| `throw`, `or throw`, postfix `catch` | ❌ | ✅ |
+| `request.body() as <Class>` | ❌ | ✅ |
+| typed path parameters | ❌ | ✅ |
+| `/healthz`, `/readyz`, `/metrics` | ❌ | ✅ |
+| `view` | ❌ | ❌ |
+| `page after $c size $n` | ❌ | ❌ |
+| `...` spread in a write, `=?` | ❌ | ❌ |
+
+The last three are still refused by name, and the message says which
+construct and that `jwc serve` runs it. A binary that quietly dropped a
+query would be a far worse outcome than one that will not build.
+
+### Errors are a `Result`, not a panic
+
+A JWC `throw` now travels the way Rust travels errors: a generated
+function returns `Result<V, JwcThrown>` and every call site propagates
+with `?`. The alternative — unwinding across `.await` and catching at the
+route boundary — needs `UnwindSafe` futures and poisons whatever lock or
+pooled connection was held at the point of the throw.
+
+Panics stay what they were: `Abort::Fault`, the 500. They are now caught
+at the route boundary, so a fault answers 500 instead of dropping the
+connection — the one failure a client cannot tell apart from the server
+being gone.
+
+### Where the two backends had drifted
+
+Restoring the 0.9 prelude verbatim was the right call for 5,030 lines of
+working runtime, but it carried 0.9's answers to questions 1.0 answers
+differently. Each of these was a wire-visible difference between `jwc
+serve` and the binary built from the same source:
+
+- Every JSON response was `application/json`; the interpreter emits
+  `application/json; charset=utf-8`. **Every** response differed.
+- An unmatched path returned a four-key envelope, and a known path under
+  the wrong verb returned 405 with `Allow`. 1.0 returns
+  `{"error":"not found"}` and 404 for both.
+- `notFound("gone")` served the four bytes `gone` as `text/plain`;
+  the interpreter serves `{"error":"gone"}`.
+- `created(json($row))` wrapped the response object as a body instead of
+  re-statusing it, so the body was the marker object and the status 200.
+- `noContent()` announced `text/plain; charset=utf-8` on a 204.
+- `/metrics` reported two gauges under different `HELP` text and omitted
+  `jwc_db_pool_max_size`, `jwc_db_pool_waiting` and `jwc_routes`.
+- `internalError()` took an argument and echoed it.
+
+All of them now come from one place per question, and the differential
+run is what says so.
+
+### The parts that had no native half at all
+
+- **Typed path parameters.** `{id: bigint}` was matched as text and the
+  type discarded, so `/notes/abc` reached the query layer and became a
+  500. routing.md §3.2 makes it a 400 *before* middleware, with a body
+  naming the parameter and the type — which is what it is now.
+- **`request.route()`** returned the request path, so a rate-limit key
+  bucketed by every distinct id instead of by route.
+- **Class validation.** `validate.rs` is now mirrored in the prelude and
+  driven by a table emitted from the same `ClassSym`s the checker built.
+  A rule the checker accepted is a rule the binary enforces; a second,
+  hand-written description of a class is what let `pattern(r"^https?://")`
+  accept `javascript:` in an earlier backend.
+- **Constraint violations.** A unique violation panicked into a 500.
+  errors.md §6 makes a constraint carrying a message a declared error —
+  `Conflict` for 23505, `BadRequest` for a check or not-null — and one
+  without a message stays a fault.
+
+### One bug worth naming
+
+Every INSERT bound `null` for every column. The builder marks each INSERT
+parameter `Bind::Expr` over a placeholder expression and
+`exec::run_insert` supplies the values positionally, bypassing
+`bind_params` entirely; deriving them from the placeholder — which is
+`ExprKind::Null` — bound null for each. Postgres reported it as a
+not-null violation on a column the program had plainly set.
+
+### Which prelude a program gets
+
+Read off the prelude sources rather than a hand-kept list: codegen records
+every prelude function the program reached and asks each prelude file
+whether it defines it. A crate with no `pattern` rule anywhere does not
+compile the regex engine; one with no query does not compile
+tokio-postgres.
+
 ## [0.9.901] — `as "…"` was unusable — 2026-08-21
 
 Two defects, both found porting MyWallet — a JWC backend written against

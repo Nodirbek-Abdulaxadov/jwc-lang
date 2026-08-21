@@ -37,7 +37,7 @@ mod codegen;
 
 /// Codegen alone, for the test suite: no cargo, no filesystem.
 pub fn codegen_for_test(ws: &crate::workspace::Workspace) -> Result<String> {
-    codegen::generate(ws)
+    Ok(codegen::generate(ws)?.source)
 }
 
 /// Where the generated crate is scaffolded, under the project root.
@@ -627,7 +627,7 @@ pub fn compile(
     app_name: &str,
     release: bool,
 ) -> Result<CompileReport> {
-    let rust_src = codegen::generate(ws)?;
+    let gen = codegen::generate(ws)?;
 
     let cargo = find_cargo().context(
         "`cargo` not found.\n\
@@ -636,8 +636,16 @@ pub fn compile(
          `jwc serve` needs no toolchain and runs the whole language.",
     )?;
 
-    let workspace =
-        scaffold_workspace(root, app_name, &rust_src, false, false, false, false, false)?;
+    let workspace = scaffold_workspace(
+        root,
+        app_name,
+        &gen.source,
+        gen.needs_db,
+        gen.needs_http_client,
+        gen.needs_crypto,
+        gen.needs_redis,
+        gen.needs_regex,
+    )?;
     let bin = invoke_cargo(&cargo, &workspace, app_name, release, None)?;
     let binary_path = copy_to_project_bin(root, &bin, release, None)?;
 
@@ -655,7 +663,7 @@ pub fn emit_rust_source(
     app_name: &str,
     release: bool,
 ) -> Result<PathBuf> {
-    let rust_src = codegen::generate(ws)?;
+    let rust_src = codegen::generate(ws)?.source;
     let profile = if release { "release" } else { "debug" };
     let out_dir = root.join("bin").join(profile);
     std::fs::create_dir_all(&out_dir).with_context(|| format!("create bin/{profile}"))?;

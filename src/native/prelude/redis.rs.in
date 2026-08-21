@@ -330,14 +330,17 @@ fn jwc_redis_metrics() -> String {
     };
     let st = pool.status();
     let mut out = String::new();
-    out.push_str("# HELP jwc_redis_pool_size Connections held by the deadpool-redis pool.\n");
+    out.push_str("# HELP jwc_redis_pool_size Connections the Redis pool holds.\n");
     out.push_str("# TYPE jwc_redis_pool_size gauge\n");
     out.push_str(&format!("jwc_redis_pool_size {}\n", st.size));
-    out.push_str("# HELP jwc_redis_pool_available Idle Redis connections immediately checkout-able.\n");
+    out.push_str("# HELP jwc_redis_pool_available Idle Redis connections.\n");
     out.push_str("# TYPE jwc_redis_pool_available gauge\n");
     out.push_str(&format!("jwc_redis_pool_available {}\n", st.available));
-    out.push_str("# HELP jwc_redis_pool_max_size Configured Redis pool ceiling (JWC_REDIS_POOL_SIZE).\n");
+    out.push_str("# HELP jwc_redis_pool_max_size Ceiling from JWC_REDIS_POOL_SIZE.\n");
     out.push_str("# TYPE jwc_redis_pool_max_size gauge\n");
     out.push_str(&format!("jwc_redis_pool_max_size {}\n", st.max_size));
+    out.push_str("# HELP jwc_redis_pool_waiting Tasks blocked on a Redis connection.\n");
+    out.push_str("# TYPE jwc_redis_pool_waiting gauge\n");
+    out.push_str(&format!("jwc_redis_pool_waiting {}\n", st.waiting));
     out
 }

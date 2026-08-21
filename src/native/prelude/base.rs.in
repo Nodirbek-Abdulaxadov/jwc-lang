@@ -745,7 +745,7 @@ fn jwc_uncaught_error_response(msg: String) -> V {
     let mut body = String::from("{\"error\":");
     jwc_write_json_string(&detail, &mut body);
     body.push_str(",\"status\":500,\"code\":\"internal_error\"}");
-    make_response(500, body, "application/json")
+    make_response(500, body, JWC_JSON_CT)
 }
 
 fn jwc_panic_payload_to_string(p: Box<dyn std::any::Any + Send>) -> String {
@@ -1567,6 +1567,76 @@ type RouteFn = fn() -> Pin<Box<dyn Future<Output = V> + Send>>;
 
 const HTTP_RESPONSE_MARKER: &str = "__http_response";
 
+/// Every JSON response the interpreter emits carries the charset
+/// (`exec.rs:228`, `exec_call.rs:631`, `Response::json`). One constant so
+/// the two backends cannot drift apart on it again.
+const JWC_JSON_CT: &str = "application/json; charset=utf-8";
+
+// --- thrown errors (errors.md §5) --------------------------------------------
+//
+// A JWC `throw` is not a Rust panic. Panics are `Abort::Fault` — the 500 an
+// interpreter fault produces — and they cannot cross an `.await` without
+// `catch_unwind`, which would need `UnwindSafe` futures and would poison
+// whatever lock or pooled connection was held at the point of the throw.
+//
+// So a throw travels the way Rust travels errors: generated functions return
+// `Result<V, JwcThrown>` and every call site propagates with `?`. The route
+// wrapper is the only place that turns one into a response, which is exactly
+// where `serve.rs::handle_error` does it.
+#[derive(Clone, Debug)]
+struct JwcThrown {
+    /// The declared error's name — what a postfix `catch` matches on.
+    error: &'static str,
+    /// The status the declaration carries (errors.md §4.3). Codegen resolves
+    /// it from the symbol table at compile time, so there is no name → status
+    /// map to build at boot.
+    status: u16,
+    /// `Thrown::message()`: the first argument when it is text, else empty.
+    message: String,
+    /// A response body the raiser already built. Only validation sets it —
+    /// types.md §11.3 fixes that body's shape, and it is not the ordinary
+    /// `{"error": msg}` envelope.
+    body: Option<String>,
+}
+
+type JwcResult = Result<V, JwcThrown>;
+
+impl JwcThrown {
+    fn new(error: &'static str, status: u16, message: V) -> JwcThrown {
+        JwcThrown {
+            error,
+            status,
+            message: jwc_str_view(&message).unwrap_or("").to_string(),
+            body: None,
+        }
+    }
+
+    /// The `(err)` binder of a postfix `catch` — errors.md §7.2 gives it one
+    /// field, `message`.
+    fn payload(&self) -> V {
+        let mut m = JwcObj::default();
+        m.insert("message".to_string(), v_str(self.message.clone()));
+        v_obj(m)
+    }
+}
+
+/// `serve.rs::handle_error` — a declared error becomes
+/// `Response::message(status, &thrown.message())`, i.e. `{"error": msg}`.
+#[cold]
+fn jwc_thrown_response(t: JwcThrown) -> V {
+    if let Some(body) = t.body {
+        return make_response(t.status, body, JWC_JSON_CT);
+    }
+    // Written rather than routed through `JwcObj`, which is an `FxHashMap`:
+    // a one-key document has no order to lose, but the next reader would
+    // reasonably add a second key.
+    make_response(
+        t.status,
+        format!("{{\"error\":{}}}", jwc_json_string(&t.message)),
+        JWC_JSON_CT,
+    )
+}
+
 fn jwc_to_u16(v: V) -> u16 {
     match v {
         V::Int(n) => n as u16,
@@ -1602,6 +1672,16 @@ struct Request {
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
     path_params: BTreeMap<String, String>,
+    /// `path_params` after `jwc_parse_path_params` — the typed values
+    /// `@name` reads.
+    typed_params: JwcObj,
+    /// Headers an `after { }` block added. middleware.md §5.4 — an after
+    /// block may add headers and nothing else, so they are collected here
+    /// and merged onto the finished response rather than being allowed to
+    /// rewrite it.
+    extra_headers: std::sync::Mutex<Vec<(String, String)>>,
+    /// The declared pattern, `/orgs/{org_id}` — `request.route()`.
+    route_pattern: String,
     /// `true` if the request line was `HTTP/1.1`. Drives default keep-alive.
     http_version_11: bool,
     /// Wall-clock instant the dispatcher saw the request — read by
@@ -1647,8 +1727,79 @@ fn with_current_request<F: FnOnce(&Request) -> V>(f: F) -> V {
 fn jwc_b_path_param(name: V) -> V {
     let k = match name { V::Str(s) => s, _ => return V::Null };
     with_current_request(|req| {
+        // `typed` holds what `parse_params` produced — a `bigint` parameter
+        // is a `V::Int` here, not the raw segment text, so `@id + 1` means
+        // the same thing on both backends.
+        if let Some(v) = req.typed_params.get(k.as_ref()) {
+            return v.clone();
+        }
         req.path_params.get(k.as_ref()).cloned().map(v_str).unwrap_or(V::Null)
     })
+}
+
+/// One JSON string literal, quoted and escaped.
+fn jwc_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    jwc_write_json(&V::Str(Cow::Owned(s.to_string())), &mut out);
+    out
+}
+
+/// `serve.rs::parse_params` — routing.md §3.2. A segment that does not parse
+/// as its declared type is a 400 before any middleware runs, and the body
+/// names the parameter and the type it failed.
+fn jwc_parse_path_params(
+    raw: &BTreeMap<String, String>,
+    types: &[(String, String)],
+) -> Result<JwcObj, (u16, String)> {
+    let mut out = JwcObj::default();
+    for (name, text) in raw {
+        let ty = types
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.as_str())
+            .unwrap_or("text");
+        let v = match ty {
+            "bigint" => text.parse::<i64>().ok().map(V::Int),
+            "int" | "smallint" => text.parse::<i64>().ok().map(V::Int),
+            // Kept as text: `numeric` is exact, and routing it through f64
+            // to validate then discarding the float is exactly what the
+            // interpreter does.
+            "numeric" => text.parse::<f64>().ok().map(|_| v_str(text.clone())),
+            "boolean" => match text.as_str() {
+                "true" => Some(V::Bool(true)),
+                "false" => Some(V::Bool(false)),
+                _ => None,
+            },
+            "uuid" => {
+                if text.len() == 36 && text.chars().filter(|c| *c == '-').count() == 4 {
+                    Some(v_str(text.clone()))
+                } else {
+                    None
+                }
+            }
+            _ => Some(v_str(text.clone())),
+        };
+        match v {
+            Some(v) => {
+                out.insert(name.clone(), v);
+            }
+            None => {
+                // Built as text, not through `JwcObj`: that is an
+                // `FxHashMap`, and the interpreter's `Value::Record` is an
+                // ordered list, so routing this through the map would
+                // reorder the three keys.
+                return Err((
+                    400,
+                    format!(
+                        "{{\"error\":\"bad_path_parameter\",\"parameter\":{},\"expected\":{}}}",
+                        jwc_json_string(name),
+                        jwc_json_string(ty)
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Used by `route ... -> handler;` codegen: pulls a positional arg for the
@@ -1784,6 +1935,75 @@ fn jwc_b_set_context(key: V, value: V) -> V {
 /// dispatcher between the handler returning and the after-block chain
 /// firing. Idempotent — silently ignored when there's no active
 /// request scope (e.g. main()).
+/// `response.set_header(name, value)` — middleware.md §5.4.
+fn jwc_b_response_set_header(name: V, value: V) -> V {
+    let n = jwc_str_view(&name).unwrap_or("").to_string();
+    let v = body_string(value);
+    if n.is_empty() {
+        return V::Null;
+    }
+    with_current_request(|req| {
+        if let Ok(mut bag) = req.extra_headers.lock() {
+            bag.retain(|(k, _)| !k.eq_ignore_ascii_case(&n));
+            bag.push((n.clone(), v.clone()));
+        }
+        V::Null
+    })
+}
+
+/// `response.add_header(name, value)` — appends rather than replacing, for
+/// the headers that legitimately repeat (`Set-Cookie`, `Vary`).
+fn jwc_b_response_add_header(name: V, value: V) -> V {
+    let n = jwc_str_view(&name).unwrap_or("").to_string();
+    let v = body_string(value);
+    if n.is_empty() {
+        return V::Null;
+    }
+    with_current_request(|req| {
+        if let Ok(mut bag) = req.extra_headers.lock() {
+            bag.push((n.clone(), v.clone()));
+        }
+        V::Null
+    })
+}
+
+/// Take everything an `after` block queued. The dispatcher drains once per
+/// block, the way `serve.rs` clears `vm.extra_headers` between them.
+fn jwc_drain_extra_headers() -> Vec<(String, String)> {
+    // `with_current_request` answers a `V`; this one wants the bag itself.
+    CURRENT_REQUEST
+        .try_with(|req| match req.extra_headers.lock() {
+            Ok(mut bag) => std::mem::take(&mut *bag),
+            Err(_) => Vec::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// Merge headers onto a finished response value.
+fn jwc_response_with_headers(resp: V, add: Vec<(String, String)>) -> V {
+    if add.is_empty() {
+        return resp;
+    }
+    let mut m = match resp {
+        V::Object(o) => (*o).clone(),
+        other => {
+            // Not a response object — `after` cannot decorate what is not a
+            // response, and dropping the headers is better than dropping the
+            // body.
+            return other;
+        }
+    };
+    let mut headers = match m.get("headers") {
+        Some(V::Object(h)) => (**h).clone(),
+        _ => JwcObj::default(),
+    };
+    for (k, v) in add {
+        headers.insert(k, v_str(v));
+    }
+    m.insert("headers".to_string(), v_obj(headers));
+    v_obj(m)
+}
+
 fn jwc_set_response_status(status: u16) {
     let _ = CURRENT_REQUEST.try_with(|req| {
         req.response_status
@@ -1839,6 +2059,12 @@ fn jwc_b_client_ip() -> V {
 
 fn jwc_b_request_path() -> V {
     with_current_request(|req| v_str(req.path.clone()))
+}
+
+/// routing.md §5.4 — the *declared* pattern, not the request path, so a
+/// rate-limit key buckets by route rather than by every distinct id.
+fn jwc_b_request_route() -> V {
+    with_current_request(|req| v_str(req.route_pattern.clone()))
 }
 
 fn jwc_b_request_method() -> V {
@@ -1906,6 +2132,39 @@ fn make_response_with_headers(
     v_obj(m)
 }
 
+/// `exec_call::respond` — the response builders' shared core.
+///
+/// A value that is **already** a response keeps its body and its headers and
+/// only has its status replaced. That is what makes `created(json($row))`
+/// mean 201-with-that-body rather than 201-wrapping-a-response-object, and
+/// the same for `statusCode(302, redirect(...))`.
+fn jwc_respond(status: u16, v: V) -> V {
+    if let V::Object(ref m) = v {
+        if matches!(m.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) {
+            let mut inner = (**m).clone();
+            inner.insert("status".to_string(), V::Int(status as i64));
+            return v_obj(inner);
+        }
+    }
+    make_response(status, jwc_to_json(&v), JWC_JSON_CT)
+}
+
+/// `exec_call::respond_message` — the `{"error": msg}` envelope.
+fn jwc_respond_message(status: u16, message: &str) -> V {
+    make_response(
+        status,
+        format!("{{\"error\":{}}}", jwc_json_string(message)),
+        JWC_JSON_CT,
+    )
+}
+
+/// `exec_call::respond_empty` — no body and, deliberately, **no headers**:
+/// a 204 that announced a content-type would be describing a body it does
+/// not have.
+fn jwc_respond_empty(status: u16) -> V {
+    make_response(status, String::new(), "")
+}
+
 fn body_string(v: V) -> String {
     match v {
         V::Str(s) => s.into_owned(),
@@ -1965,7 +2224,7 @@ fn jwc_b_json(v: V) -> V {
             );
         }
     }
-    make_response(200, body, "application/json")
+    jwc_respond(200, v)
 }
 
 /// `json_unchecked(v)` — bypass the string-validation arm of `json(v)`.
@@ -1974,7 +2233,7 @@ fn jwc_b_json(v: V) -> V {
 /// payload (DB select results, body() strings already known to be JSON).
 fn jwc_b_json_unchecked(v: V) -> V {
     let body = jwc_to_json(&v);
-    make_response(200, body, "application/json")
+    make_response(200, body, JWC_JSON_CT)
 }
 
 fn jwc_b_ok(v: V) -> V {
@@ -1984,119 +2243,81 @@ fn jwc_b_ok(v: V) -> V {
     }
 }
 
+// --- responses (routing.md §6.1) ---------------------------------------------
+//
+// One builder per line of `exec_call.rs`'s response block, in the same order
+// and with the same argument treatment. The 0.9 shapes these replace differed
+// in ways that only showed at the wire: `notFound("gone")` served four bytes
+// of `text/plain` here and `{"error":"gone"}` under `jwc run`.
+
 fn jwc_b_created(v: V) -> V {
-    let body = match &v {
-        V::Str(_) => body_string(v.clone()),
-        _ => jwc_to_json(&v),
-    };
-    let ct = match &v {
-        V::Str(_) => "text/plain; charset=utf-8",
-        _ => "application/json",
-    };
-    make_response(201, body, ct)
+    jwc_respond(201, v)
 }
 
-/// Mirrors `runner::eval::error_response`, which is the contract every error
-/// helper answers to: an object body passes through as-is, anything else is
-/// wrapped as `{"error": <text>}`, and the response is JSON either way.
-///
-/// Native used to serve the argument raw as `text/plain`, so
-/// `notFound("gone")` returned the four bytes `gone` here and
-/// `{"error":"gone"}` under `jwc run` — same helper, same argument, a body a
-/// client cannot parse the same way twice. Object arguments already agreed,
-/// which is why this survived: it only shows up when the argument is a
-/// string, and that is the spelling most of the docs use.
-fn error_envelope(status: u16, default_msg: &str, v: V) -> V {
-    // Codegen passes `V::Null` for an omitted argument, so this is also the
-    // `notFound()` / `unauthorized()` no-arg path the interpreter reaches via
-    // `args.first() == None`.
-    if matches!(v, V::Null) {
-        let body = serde_json::json!({ "error": default_msg }).to_string();
-        return make_response(status, body, "application/json");
-    }
-    let s = body_string(v);
-    // A body that is already a JSON *object* is the caller's own envelope —
-    // pass it through rather than nesting it under `error`. Scalars and
-    // arrays are not envelopes and do get wrapped, matching the interpreter's
-    // `as_object_mut()` test.
-    let body = match serde_json::from_str::<serde_json::Value>(&s) {
-        Ok(doc) if doc.is_object() => s,
-        _ => serde_json::json!({ "error": s }).to_string(),
-    };
-    make_response(status, body, "application/json")
-}
-
-fn jwc_b_not_found(v: V) -> V {
-    error_envelope(404, "Not Found", v)
+fn jwc_b_accepted(v: V) -> V {
+    jwc_respond(202, v)
 }
 
 fn jwc_b_no_content(_v: V) -> V {
-    make_response(204, String::new(), "text/plain; charset=utf-8")
+    jwc_respond_empty(204)
 }
 
+/// `badRequest(v)` takes a **value**, not a message: it is the one 4xx
+/// builder whose argument is the body.
 fn jwc_b_bad_request(v: V) -> V {
-    error_envelope(400, "Bad Request", v)
+    jwc_respond(400, v)
 }
 
 fn jwc_b_unauthorized(v: V) -> V {
-    error_envelope(401, "Unauthorized", v)
+    jwc_respond_message(401, jwc_str_view(&v).unwrap_or(""))
 }
 
 fn jwc_b_forbidden(v: V) -> V {
-    error_envelope(403, "Forbidden", v)
+    jwc_respond_message(403, jwc_str_view(&v).unwrap_or(""))
 }
 
-fn jwc_b_internal_error(v: V) -> V {
-    error_envelope(500, "Internal Server Error", v)
+fn jwc_b_not_found(v: V) -> V {
+    jwc_respond_message(404, jwc_str_view(&v).unwrap_or(""))
+}
+
+fn jwc_b_conflict(v: V) -> V {
+    jwc_respond_message(409, jwc_str_view(&v).unwrap_or(""))
+}
+
+fn jwc_b_too_many_requests(v: V) -> V {
+    jwc_respond_message(429, jwc_str_view(&v).unwrap_or(""))
+}
+
+/// Takes no argument in 1.0 and has one fixed message: an internal error is
+/// not a place to leak what went wrong.
+fn jwc_b_internal_error(_v: V) -> V {
+    jwc_respond_message(500, "internal_error")
 }
 
 fn jwc_b_status_code(code: V, v: V) -> V {
-    // JWC source order is `statusCode(code, body_or_headers)`. For 3xx
-    // statuses, an Object body is interpreted as HTTP headers — that's
-    // what makes `statusCode(302, { Location: url })` actually emit a
-    // browser-followed redirect. For every other status the Object is
-    // serialised as a JSON body.
-    let status = jwc_to_int(&code).unwrap_or(200) as u16;
-    let is_redirect = (300..400).contains(&status);
-    if is_redirect {
-        // Object literals lower to `V::Record` on the native path (the
-        // shape-deduped fast layout), and only to `V::Object` after a runtime
-        // field-add or in the interpreter. Accept BOTH — otherwise
-        // `statusCode(302, { Location: url })` falls through to the JSON-body
-        // arm below and emits `{"Location":...}` as the body instead of a
-        // redirect (no Location header is set, so the browser never follows).
-        let headers: Option<JwcObj> = match &v {
-            V::Object(m) => Some((**m).clone()),
-            V::Record {
-                field_names,
-                values,
-            } => {
-                let mut h: JwcObj = FxHashMap::default();
-                for (name, val) in field_names.iter().zip(values.iter()) {
-                    h.insert(name.as_ref().to_string(), val.clone());
-                }
-                Some(h)
-            }
-            _ => None,
-        };
-        if let Some(h) = headers {
-            // `text/html` because we may emit a minimal `<a href=...>` body
-            // someday; for now the body stays empty and the browser follows
-            // the Location header.
-            return make_response_with_headers(
-                status,
-                String::new(),
-                "text/html; charset=utf-8",
-                h,
-            );
-        }
-    }
-    let body = body_string(v.clone());
-    let ct = match &v {
-        V::Str(_) => "text/plain; charset=utf-8",
-        _ => "application/json",
-    };
-    make_response(status, body, ct)
+    jwc_respond(jwc_to_int(&code).unwrap_or(200) as u16, v)
+}
+
+fn jwc_b_redirect(code: V, location: V) -> V {
+    let status = jwc_to_int(&code).unwrap_or(302) as u16;
+    let mut headers = JwcObj::default();
+    headers.insert(
+        "location".to_string(),
+        v_str(jwc_str_view(&location).unwrap_or("").to_string()),
+    );
+    make_response_with_headers(status, String::new(), "", headers)
+}
+
+/// routing.md §6.5 — verbatim body, declared type. Every other builder
+/// JSON-encodes, which for an HTML page means the browser is handed a
+/// quoted string.
+fn jwc_b_content(mime: V, body: V) -> V {
+    let m = jwc_str_view(&mime).unwrap_or("").to_string();
+    make_response(
+        200,
+        jwc_str_view(&body).unwrap_or("").to_string(),
+        &jwc_normalize_content_type(&m),
+    )
 }
 
 /// Extract the wire HTTP status from a handler return value WITHOUT
@@ -2138,6 +2359,7 @@ fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
                 Some(V::Str(s)) => s.clone().into_owned(),
                 _ => "text/plain; charset=utf-8".to_string(),
             };
+            let _ = &ct;
             let headers: Vec<(String, String)> = match m.get("headers") {
                 Some(V::Object(hm)) => hm
                     .iter()
@@ -2168,9 +2390,9 @@ fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
     // JSON document `null`, not an empty body, again mirroring the
     // interpreter's `response_str.unwrap_or_else(|| "null".to_string())`.
     match v {
-        V::Str(s) => (200, s.into_owned(), "application/json".to_string(), Vec::new()),
-        V::Null => (200, "null".to_string(), "application/json".to_string(), Vec::new()),
-        other => (200, jwc_to_json(&other), "application/json".to_string(), Vec::new()),
+        V::Str(s) => (200, s.into_owned(), JWC_JSON_CT.to_string(), Vec::new()),
+        V::Null => (200, "null".to_string(), JWC_JSON_CT.to_string(), Vec::new()),
+        other => (200, jwc_to_json(&other), JWC_JSON_CT.to_string(), Vec::new()),
     }
 }
 
@@ -2179,7 +2401,11 @@ fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
 #[derive(Clone)]
 enum PathSeg {
     Literal(String),
-    Param(String),
+    /// `{id: bigint}` — the declared type travels with the segment because
+    /// routing.md §3.2 parses a path parameter *before* any middleware runs,
+    /// and a value that does not parse is a 400 there, not a 500 in the
+    /// query layer.
+    Param { name: String, ty: String },
 }
 
 #[derive(Clone, Copy)]
@@ -2191,6 +2417,9 @@ enum RouteKind {
 struct RouteEntry {
     method: String,
     segments: Vec<PathSeg>,
+    /// The declared pattern with the type annotations stripped —
+    /// `/orgs/{org_id}`. What `request.route()` answers (routing.md §5.4).
+    pattern: String,
     kind: RouteKind,
     handler: RouteFn,
 }
@@ -2211,21 +2440,42 @@ impl Router {
     }
 
     fn add_kind(&mut self, method: &str, pattern: &str, kind: RouteKind, handler: RouteFn) {
-        let segments = pattern
+        let segments: Vec<PathSeg> = pattern
             .trim_start_matches('/')
             .split('/')
             .filter(|s| !s.is_empty())
             .map(|s| {
                 if s.starts_with('{') && s.ends_with('}') {
-                    PathSeg::Param(s[1..s.len() - 1].to_string())
+                    let inner = &s[1..s.len() - 1];
+                    let (name, ty) = match inner.split_once(':') {
+                        Some((n, t)) => (n.trim(), t.trim()),
+                        None => (inner.trim(), "text"),
+                    };
+                    PathSeg::Param { name: name.to_string(), ty: ty.to_string() }
                 } else {
                     PathSeg::Literal(s.to_string())
                 }
             })
             .collect();
+        let mut rendered = String::new();
+        for seg in &segments {
+            rendered.push('/');
+            match seg {
+                PathSeg::Literal(l) => rendered.push_str(l),
+                PathSeg::Param { name, .. } => {
+                    rendered.push('{');
+                    rendered.push_str(name);
+                    rendered.push('}');
+                }
+            }
+        }
+        if rendered.is_empty() {
+            rendered.push('/');
+        }
         self.entries.push(RouteEntry {
             method: method.to_string(),
             segments,
+            pattern: rendered,
             kind,
             handler,
         });
@@ -2235,20 +2485,26 @@ impl Router {
         &self,
         method: &str,
         path: &str,
-    ) -> Option<(RouteKind, RouteFn, BTreeMap<String, String>)> {
+    ) -> Option<(RouteKind, RouteFn, String, BTreeMap<String, String>, Vec<(String, String)>)> {
         let req_segs: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
         for entry in &self.entries {
             if entry.method != method { continue; }
             if entry.segments.len() != req_segs.len() { continue; }
             let mut params = BTreeMap::new();
+            let mut types: Vec<(String, String)> = Vec::new();
             let mut ok = true;
             for (seg, req) in entry.segments.iter().zip(req_segs.iter()) {
                 match seg {
                     PathSeg::Literal(lit) => if lit != req { ok = false; break; },
-                    PathSeg::Param(name) => { params.insert(name.clone(), (*req).to_string()); }
+                    PathSeg::Param { name, ty } => {
+                        params.insert(name.clone(), (*req).to_string());
+                        types.push((name.clone(), ty.clone()));
+                    }
                 }
             }
-            if ok { return Some((entry.kind, entry.handler, params)); }
+            if ok {
+                return Some((entry.kind, entry.handler, entry.pattern.clone(), params, types));
+            }
         }
         None
     }
@@ -2537,6 +2793,61 @@ async fn jwc_shutdown_signal() {
     });
 }
 
+/// config.md §4 — `/healthz`, `/readyz` and `/metrics`, at fixed names,
+/// reachable before anyone reads the source.
+///
+/// `jwc_op_*` are shims codegen emits: the real implementations live in the
+/// DB and Redis preludes, which are only concatenated for programs that
+/// reach for them, and these three endpoints exist either way.
+async fn jwc_operational(method: &str, path: &str) -> Option<axum::response::Response> {
+    if !method.eq_ignore_ascii_case("GET") {
+        return None;
+    }
+    let json = |status: u16, body: String| {
+        axum::response::Response::builder()
+            .status(status)
+            .header("content-type", JWC_JSON_CT)
+            .body(body.into())
+            .unwrap()
+    };
+    match path.trim_end_matches('/') {
+        // Liveness. Touches nothing: a process that answers this is one the
+        // supervisor should not kill. Wiring a dependency in here is the
+        // classic way to turn a database blip into a restart storm.
+        "/healthz" => Some(json(200, "{\"status\":\"ok\"}".to_string())),
+
+        // Readiness. Every configured dependency, actually round-tripped.
+        "/readyz" => {
+            let failed = jwc_op_readiness().await;
+            Some(if failed.is_empty() {
+                json(200, "{\"status\":\"ready\"}".to_string())
+            } else {
+                // 503, and the body names which dependency. A probe that
+                // only says "not ready" sends the operator to the logs of a
+                // pod that is already out of rotation.
+                let list = failed
+                    .iter()
+                    .map(|f| format!("\"{}\"", f))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                json(
+                    503,
+                    format!("{{\"status\":\"unready\",\"failed\":[{}]}}", list),
+                )
+            })
+        }
+
+        "/metrics" => Some(
+            axum::response::Response::builder()
+                .status(200)
+                .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+                .body(jwc_op_metrics().into())
+                .unwrap(),
+        ),
+        _ => None,
+    }
+}
+
 async fn handle_axum_request(
     axum::extract::State(router): axum::extract::State<Arc<Router>>,
     method: axum::http::Method,
@@ -2565,36 +2876,32 @@ async fn handle_axum_request(
     }
     let method_str = method.as_str().to_string();
 
-    let (kind, handler, path_params) = match router.match_route(&method_str, path_str) {
+    let matched = router.match_route(&method_str, path_str);
+    // config.md §4.0.3 — §4.0.2 promises these three are reachable before
+    // reading anyone's source, so a wildcard pattern nobody aimed at them
+    // must not take that away. A route that matched *without* binding a
+    // path parameter was aimed here deliberately and wins.
+    if matched.as_ref().is_some_and(|(_, _, _, binds, _)| !binds.is_empty()) {
+        if let Some(r) = jwc_operational(&method_str, path_str).await {
+            return r;
+        }
+    }
+    let (kind, handler, route_pattern, path_params, param_types) = match matched {
         Some(found) => found,
         None => {
-            // Match the interpreter: a JSON envelope, and 405 (with `Allow`)
-            // when the path exists under a different verb. This used to be a
-            // plain-text 404 for both cases, which differed from `jwc run`
-            // and gave clients no way to tell the two apart.
-            let allowed = router.allowed_methods(path_str);
-            let clean = path_str.split('?').next().unwrap_or(path_str);
-            if !allowed.is_empty() {
-                let allow = allowed.join(", ");
-                let body = format!(
-                    "{{\"code\":\"method_not_allowed\",\"details\":{{\"allow\":\"{}\",\"method\":\"{}\",\"path\":\"{}\"}},\"error\":\"{} is not allowed on {}\",\"status\":405}}",
-                    allow, method_str, clean, method_str, clean
-                );
-                return axum::response::Response::builder()
-                    .status(405)
-                    .header("content-type", "application/json")
-                    .header("allow", allow)
-                    .body(body.into())
-                    .unwrap();
+            if let Some(r) = jwc_operational(&method_str, path_str).await {
+                return r;
             }
-            let body = format!(
-                "{{\"code\":\"not_found\",\"details\":{{\"method\":\"{}\",\"path\":\"{}\"}},\"error\":\"No route for {} {}\",\"status\":404}}",
-                method_str, clean, method_str, clean
-            );
+            // `serve.rs` answers one thing for anything unmatched:
+            // `Response::message(404, "not found")`. The richer envelope
+            // this used to build — and the 405 with `Allow` — came from
+            // 0.9, where the interpreter did the same. It no longer does,
+            // so a native binary that kept them disagreed with `jwc serve`
+            // on every miss.
             return axum::response::Response::builder()
                 .status(404)
-                .header("content-type", "application/json")
-                .body(body.into())
+                .header("content-type", JWC_JSON_CT)
+                .body("{\"error\":\"not found\"}".into())
                 .unwrap();
         }
     };
@@ -2607,6 +2914,19 @@ async fn handle_axum_request(
             .unwrap();
     }
 
+    // routing.md §3.2 — parsed here, ahead of the chain. A segment that is
+    // not the type the route declared is a 400 that never reaches user code.
+    let typed_params = match jwc_parse_path_params(&path_params, &param_types) {
+        Ok(t) => t,
+        Err((status, body)) => {
+            return axum::response::Response::builder()
+                .status(status)
+                .header("content-type", JWC_JSON_CT)
+                .body(body.into())
+                .unwrap();
+        }
+    };
+
     let req = Arc::new(Request {
         method: method_str,
         path: path_str.to_string(),
@@ -2614,21 +2934,48 @@ async fn handle_axum_request(
         headers: header_map,
         body: body.to_vec(),
         path_params,
+        typed_params,
+        route_pattern,
         http_version_11: true,
         started_at: std::time::Instant::now(),
         response_status: std::sync::atomic::AtomicU16::new(0),
+        extra_headers: std::sync::Mutex::new(Vec::new()),
         context: std::sync::Mutex::new(JwcObj::default()),
     });
 
-    let result_v = CURRENT_REQUEST
-        .scope(req, async move { handler().await })
-        .await;
+    // A panic is the native backend's `Abort::Fault`: the interpreter logs
+    // it and answers 500. Without this guard the panic unwound into hyper
+    // and the client got a dropped connection instead of a response — the
+    // one failure mode a client cannot distinguish from the server being
+    // gone.
+    let guarded = std::panic::AssertUnwindSafe(
+        CURRENT_REQUEST.scope(req, async move { handler().await }),
+    );
+    let result_v = match futures::FutureExt::catch_unwind(guarded).await {
+        Ok(v) => v,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "panic".to_string());
+            eprintln!("[fault] {}", msg);
+            return axum::response::Response::builder()
+                .status(500)
+                .header("content-type", JWC_JSON_CT)
+                .body("{\"error\":\"internal_error\"}".into())
+                .unwrap();
+        }
+    };
 
     let (status, body_str, ct, extra_headers) = jwc_to_response(result_v);
     let status_code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK);
-    let mut builder = axum::response::Response::builder()
-        .status(status_code)
-        .header("content-type", ct.as_str());
+    let mut builder = axum::response::Response::builder().status(status_code);
+    // `respond_empty` leaves this blank on purpose (204, 3xx): a response
+    // with no body has no type to declare.
+    if !ct.is_empty() {
+        builder = builder.header("content-type", ct.as_str());
+    }
     for (k, v) in extra_headers {
         // Drop pairs whose name or value contain characters axum would
         // refuse — silently, because user code rarely has the context to
@@ -2787,3 +3134,321 @@ fn jwc_b_cache_clear() -> V {
         .clear();
     V::Null
 }
+
+// --- class validation and the 400 contract (types.md §11) --------------------
+//
+// `validate.rs` is the interpreter's half. This is that code, transcribed, and
+// driven by a table codegen emits from the same `ClassSym`s the checker built.
+// Errors are **collected**, never fail-fast, and the response body shape is
+// fixed: user code cannot produce a different `validation_failed` payload,
+// because validation is not reachable from user code (errors.md §9, E11).
+
+/// What `coerce` needs to know about a field's base type — `Ty` after `?`
+/// and `[]` are stripped.
+#[derive(Clone, Copy, PartialEq)]
+enum JwcTy {
+    Boolean,
+    Bigint,
+    Int,
+    Numeric,
+    Jsonb,
+    /// Every other scalar, and an `enum`: JSON string in, text out.
+    Text,
+    Class,
+}
+
+struct JwcRule {
+    name: &'static str,
+    /// `minLength(2)` and friends. `None` when the rule takes no argument or
+    /// its argument is not an integer literal.
+    limit: Option<i64>,
+    /// `min(0.01)` — compared as a decimal, not an integer, so
+    /// `amount numeric(14,2) min(0)` rejects `-1.00`.
+    bound: Option<f64>,
+    pattern: &'static str,
+}
+
+struct JwcClassField {
+    name: &'static str,
+    ty: JwcTy,
+    /// The nested class's name when `ty` is `Class`, else empty.
+    class: &'static str,
+    is_array: bool,
+    rules: &'static [JwcRule],
+}
+
+fn jwc_class(name: &str) -> Option<&'static [JwcClassField]> {
+    JWC_CLASSES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, f)| *f)
+}
+
+/// `request.body() as <Class>` — routing.md §5.2. The cast is what validates.
+fn jwc_validate_body(class: &str) -> JwcResult {
+    let raw = with_current_request(|req| v_str(String::from_utf8_lossy(&req.body).to_string()));
+    let text = jwc_str_view(&raw).unwrap_or("").to_string();
+    let Some(fields) = jwc_class(class) else {
+        panic!("unknown class `{}`", class);
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Err(jwc_validation_error(vec![jwc_field_error(
+            "",
+            "json",
+            None,
+            "body is not valid JSON",
+        )]));
+    };
+
+    let mut out: Vec<(String, V)> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    jwc_validate_class(fields, &parsed, "", &mut out, &mut failures);
+    if !failures.is_empty() {
+        return Err(jwc_validation_error(failures));
+    }
+    Ok(jwc_ordered_record(out))
+}
+
+/// An ordered record, the way the interpreter's `Value::Record` is ordered —
+/// declaration order, not hash order.
+fn jwc_ordered_record(fields: Vec<(String, V)>) -> V {
+    let mut names: Vec<JwcStr> = Vec::with_capacity(fields.len());
+    let mut values: Vec<V> = Vec::with_capacity(fields.len());
+    for (k, v) in fields {
+        names.push(Cow::Owned(k));
+        values.push(v);
+    }
+    v_record(Arc::new(names), values)
+}
+
+/// types.md §11.3 — validation has one fixed body and user code cannot
+/// produce a different one, so it is built here rather than routed through
+/// the ordinary `{"error": msg}` envelope.
+fn jwc_validation_error(failures: Vec<String>) -> JwcThrown {
+    JwcThrown {
+        error: "BadRequest",
+        status: 400,
+        message: "validation_failed".to_string(),
+        body: Some(format!(
+            "{{\"error\":\"validation_failed\",\"fields\":[{}]}}",
+            failures.join(",")
+        )),
+    }
+}
+
+/// One entry of the `fields` array, already encoded — the key order is the
+/// contract, so it is written rather than assembled in a map.
+fn jwc_field_error(path: &str, rule: &str, limit: Option<i64>, message: &str) -> String {
+    match limit {
+        Some(l) => format!(
+            "{{\"path\":{},\"rule\":{},\"limit\":{},\"message\":{}}}",
+            jwc_json_string(path),
+            jwc_json_string(rule),
+            l,
+            jwc_json_string(message)
+        ),
+        None => format!(
+            "{{\"path\":{},\"rule\":{},\"message\":{}}}",
+            jwc_json_string(path),
+            jwc_json_string(rule),
+            jwc_json_string(message)
+        ),
+    }
+}
+
+fn jwc_validate_class(
+    fields: &'static [JwcClassField],
+    input: &serde_json::Value,
+    prefix: &str,
+    out: &mut Vec<(String, V)>,
+    failures: &mut Vec<String>,
+) {
+    use serde_json::Value as J;
+    let J::Object(map) = input else {
+        failures.push(jwc_field_error(prefix, "type", None, "expected an object"));
+        return;
+    };
+
+    for f in fields {
+        let path = if prefix.is_empty() {
+            f.name.to_string()
+        } else {
+            format!("{}.{}", prefix, f.name)
+        };
+        // types.md §11.5 — unknown keys are dropped silently; the class is
+        // the whitelist, and rejecting extras breaks every client that adds
+        // a field.
+        let present = map.get(f.name);
+        let required = f.rules.iter().any(|r| r.name == "required");
+
+        let value = match present {
+            None | Some(J::Null) => {
+                if required {
+                    failures.push(jwc_field_error(
+                        &path,
+                        "required",
+                        None,
+                        &format!("{} kerak", f.name),
+                    ));
+                }
+                // §6.5 — absent and null are distinguishable, and absent
+                // means "omit the column" downstream.
+                if present.is_some() {
+                    out.push((f.name.to_string(), V::Null));
+                }
+                continue;
+            }
+            Some(v) => v,
+        };
+
+        match jwc_coerce(f, value) {
+            Some(v) => {
+                jwc_check_rules(f, &path, value, &v, failures);
+                if f.ty == JwcTy::Class {
+                    if let Some(inner) = jwc_class(f.class) {
+                        if let J::Object(_) = value {
+                            let mut nested = Vec::new();
+                            jwc_validate_class(inner, value, &path, &mut nested, failures);
+                            out.push((f.name.to_string(), jwc_ordered_record(nested)));
+                            continue;
+                        }
+                        if let J::Array(items) = value {
+                            // §11.4 — element failures accumulate with
+                            // indexed paths into the same list.
+                            let mut rows = Vec::new();
+                            for (i, item) in items.iter().enumerate() {
+                                let mut nested = Vec::new();
+                                jwc_validate_class(
+                                    inner,
+                                    item,
+                                    &format!("{}[{}]", path, i),
+                                    &mut nested,
+                                    failures,
+                                );
+                                rows.push(jwc_ordered_record(nested));
+                            }
+                            out.push((f.name.to_string(), v_arr(rows)));
+                            continue;
+                        }
+                    }
+                }
+                out.push((f.name.to_string(), v));
+            }
+            None => failures.push(jwc_field_error(
+                &path,
+                "type",
+                None,
+                &format!("{} tipi mos emas", f.name),
+            )),
+        }
+    }
+}
+
+fn jwc_coerce(f: &JwcClassField, v: &serde_json::Value) -> Option<V> {
+    use serde_json::Value as J;
+    match (f.ty, v) {
+        (_, J::Null) => Some(V::Null),
+        (JwcTy::Boolean, J::Bool(b)) => Some(V::Bool(*b)),
+        // types.md §2.3 — a bigint arrives as a JSON string *or* a number.
+        //
+        // The interpreter's `Value::Bigint` is numeric in arithmetic and a
+        // string on the JSON wire; `V` has no variant that is both, so this
+        // keeps it numeric. A validated `bigint` field echoed straight back
+        // into a response therefore serialises as a number here and as a
+        // string under `jwc serve`.
+        (JwcTy::Bigint, J::String(s)) => s.parse::<i64>().ok().map(V::Int),
+        (JwcTy::Bigint, J::Number(n)) => n.as_i64().map(V::Int),
+        (JwcTy::Int, J::Number(n)) => n.as_i64().map(V::Int),
+        (JwcTy::Numeric, J::String(s)) => s.parse::<f64>().ok().map(|_| v_str(s.clone())),
+        (JwcTy::Numeric, J::Number(n)) => Some(v_str(n.to_string())),
+        (JwcTy::Jsonb, other) => Some(V::RawJson(Cow::Owned(other.to_string()))),
+        (JwcTy::Text, J::String(s)) => Some(v_str(s.clone())),
+        (JwcTy::Class, J::Object(_)) => Some(V::Null),
+        (_, J::Array(items)) => {
+            let mut out = Vec::new();
+            for i in items {
+                out.push(jwc_coerce(f, i)?);
+            }
+            Some(v_arr(out))
+        }
+        _ => None,
+    }
+}
+
+fn jwc_check_rules(
+    f: &JwcClassField,
+    path: &str,
+    raw: &serde_json::Value,
+    value: &V,
+    failures: &mut Vec<String>,
+) {
+    for r in f.rules {
+        let ok = match r.name {
+            "required" => true,
+            "minLength" => jwc_text_len(value)
+                .is_none_or(|n| r.limit.is_none_or(|l| n >= l)),
+            "maxLength" => jwc_text_len(value)
+                .is_none_or(|n| r.limit.is_none_or(|l| n <= l)),
+            "minItems" => jwc_array_len(raw)
+                .is_none_or(|n| r.limit.is_none_or(|l| n >= l)),
+            "maxItems" => jwc_array_len(raw)
+                .is_none_or(|n| r.limit.is_none_or(|l| n <= l)),
+            "min" => jwc_numeric_value(value)
+                .is_none_or(|n| r.bound.is_none_or(|l| n >= l)),
+            "max" => jwc_numeric_value(value)
+                .is_none_or(|n| r.bound.is_none_or(|l| n <= l)),
+            "pattern" => match (r.pattern, jwc_str_view(value)) {
+                ("", _) | (_, None) => true,
+                (p, Some(s)) => jwc_regex_is_match(p, s),
+            },
+            "transient" => true,
+            _ => true,
+        };
+        if !ok {
+            failures.push(jwc_field_error(
+                path,
+                r.name,
+                r.limit,
+                &jwc_default_message(f.name, r.name, r.limit),
+            ));
+        }
+    }
+}
+
+fn jwc_default_message(field: &str, rule: &str, limit: Option<i64>) -> String {
+    match (rule, limit) {
+        ("minLength", Some(n)) => format!("{} kamida {} belgidan iborat bo'lishi kerak", field, n),
+        ("maxLength", Some(n)) => format!("{} ko'pi bilan {} belgi bo'lishi kerak", field, n),
+        ("minItems", Some(n)) => format!("{} kamida {} ta element bo'lishi kerak", field, n),
+        ("maxItems", Some(n)) => format!("{} ko'pi bilan {} ta element bo'lishi kerak", field, n),
+        ("min", Some(n)) => format!("{} kamida {} bo'lishi kerak", field, n),
+        ("max", Some(n)) => format!("{} ko'pi bilan {} bo'lishi kerak", field, n),
+        ("pattern", _) => format!("{} shakli mos emas", field),
+        ("required", _) => format!("{} kerak", field),
+        _ => format!("{} yaroqsiz", field),
+    }
+}
+
+fn jwc_numeric_value(v: &V) -> Option<f64> {
+    match v {
+        V::Int(n) => Some(*n as f64),
+        V::Float(n) => Some(*n),
+        V::Str(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn jwc_text_len(v: &V) -> Option<i64> {
+    jwc_str_view(v).map(|s| s.chars().count() as i64)
+}
+
+fn jwc_array_len(v: &serde_json::Value) -> Option<i64> {
+    match v {
+        serde_json::Value::Array(items) => Some(items.len() as i64),
+        _ => None,
+    }
+}
+
+// `jwc_regex_is_match` is a codegen shim: the real one when the program has
+// a `pattern(r"…")` rule to enforce, an always-true one when it does not, so
+// a crate with no pattern anywhere does not compile the regex engine.

@@ -139,6 +139,192 @@ async fn jwc_db_query_rows(sql: &str, params: DbParams) -> Vec<tokio_postgres::R
         .unwrap_or_else(|e| panic!("query failed: {}\nSQL: {}", e, sql))
 }
 
+// --- transactions (writes.md §5) ---------------------------------------------
+//
+// The connection is **pinned** for the duration of the block. Every statement
+// inside reads the pin: without it the `BEGIN` lands on one pooled connection
+// and the statements on whichever others the pool hands out, so the block
+// would commit nothing and roll back nothing. `engine::TX_CONN` is the
+// interpreter's half of exactly this.
+
+type JwcTxCell = Arc<tokio::sync::Mutex<Option<deadpool_postgres::Object>>>;
+
+tokio::task_local! {
+    static JWC_TX_CONN: JwcTxCell;
+}
+
+fn jwc_tx_pin() -> Option<JwcTxCell> {
+    JWC_TX_CONN.try_with(|c| c.clone()).ok()
+}
+
+/// `BEGIN` on a connection taken out of the pool and held.
+async fn jwc_tx_begin() -> Result<JwcTxCell, JwcThrown> {
+    let conn = jwc_db_get().await;
+    if let Err(e) = conn.batch_execute("BEGIN").await {
+        panic!("BEGIN failed: {}", e);
+    }
+    Ok(Arc::new(tokio::sync::Mutex::new(Some(conn))))
+}
+
+/// `COMMIT` when the block left normally, `ROLLBACK` otherwise. The
+/// connection returns to the pool either way, when the cell drops.
+async fn jwc_tx_end(cell: JwcTxCell, commit: bool) {
+    let mut held = cell.lock().await;
+    if let Some(conn) = held.take() {
+        if commit {
+            if let Err(e) = conn.batch_execute("COMMIT").await {
+                panic!("COMMIT failed: {}", e);
+            }
+        } else {
+            let _ = conn.batch_execute("ROLLBACK").await;
+        }
+    }
+}
+
+// --- the statement boundary the two backends share ---------------------------
+//
+// `exec.rs::run_sql_with` is the interpreter's half of this. Both take the
+// same `Built` from `query_sql` — the same SQL text, the same parameter list,
+// the same shape — so the only thing that could differ is what happens to the
+// row that comes back. This is that code, transcribed.
+
+/// `sql::Shape`, flattened for codegen: 0 `None`, 1 `First`, 2 `Rows`.
+const JWC_SHAPE_NONE: u8 = 0;
+const JWC_SHAPE_FIRST: u8 = 1;
+const JWC_SHAPE_ROWS: u8 = 2;
+
+/// Run one compiled statement and shape the result exactly as
+/// `exec.rs::run_sql_with` does.
+///
+/// `record` is `false` for a query with no `as { }` projection: the text
+/// Postgres produced reaches the response verbatim, which is what keeps
+/// `Raw` raw (types.md §5.1, §5.3). `true` parses it so fields can be read —
+/// and reorders it, because a parsed object is a hash map and the projection
+/// order is what the response promises.
+async fn jwc_db_run(
+    sql: &str,
+    params: DbParams,
+    shape: u8,
+    record: bool,
+    fields: &'static [&'static str],
+) -> JwcResult {
+    if shape == JWC_SHAPE_NONE {
+        jwc_db_try_exec(sql, params).await.map_err(|e| jwc_db_error(e, sql))?;
+        return Ok(V::Null);
+    }
+    let rows = jwc_db_try_query(sql, params).await.map_err(|e| jwc_db_error(e, sql))?;
+    let text: Option<String> = match rows.first() {
+        None => None,
+        Some(row) => match row.try_get::<_, Option<String>>(0) {
+            Ok(t) => t,
+            // `exec.rs` refuses to swallow this: every statement this layer
+            // sends projects a single text column, so a non-text first column
+            // is a generator bug and reporting "no rows" would hide it.
+            Err(e) => panic!("query returned a non-text first column: {}\nSQL: {}", e, sql),
+        },
+    };
+    let wrap = |t: String| -> V {
+        if record {
+            match jwc_from_json(&t) {
+                Ok(j) => jwc_reorder(j, fields),
+                Err(_) => V::RawJson(t.into()),
+            }
+        } else {
+            V::RawJson(t.into())
+        }
+    };
+    Ok(match shape {
+        JWC_SHAPE_FIRST => match text {
+            None => V::Null,
+            Some(t) if t == "null" => V::Null,
+            Some(t) => wrap(t),
+        },
+        // JWC_SHAPE_ROWS
+        _ => wrap(text.unwrap_or_else(|| "[]".into())),
+    })
+}
+
+/// Rebuild a parsed record in projection order, recursing into arrays —
+/// `exec.rs::reorder`. A field the projection names but the document does not
+/// carry is dropped, not nulled, which is what `filter_map` does there.
+fn jwc_reorder(v: V, order: &'static [&'static str]) -> V {
+    match v {
+        V::Object(m) => {
+            let mut names: Vec<JwcStr> = Vec::with_capacity(order.len());
+            let mut values: Vec<V> = Vec::with_capacity(order.len());
+            for k in order {
+                if let Some(val) = m.get(*k) {
+                    names.push(Cow::Borrowed(*k));
+                    values.push(val.clone());
+                }
+            }
+            v_record(Arc::new(names), values)
+        }
+        V::Array(items) => v_arr(items.iter().cloned().map(|i| jwc_reorder(i, order)).collect()),
+        other => other,
+    }
+}
+
+/// Non-panicking `query`, so a constraint violation can become the declared
+/// error it is instead of a 500.
+async fn jwc_db_try_query(
+    sql: &str,
+    params: DbParams,
+) -> Result<Vec<tokio_postgres::Row>, tokio_postgres::Error> {
+    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        params.iter().map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+    if let Some(cell) = jwc_tx_pin() {
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.as_mut() {
+            let stmt = conn.prepare_cached(sql).await?;
+            return conn.query(&stmt, &refs).await;
+        }
+    }
+    let client = jwc_db_get().await;
+    let stmt = client.prepare_cached(sql).await?;
+    client.query(&stmt, &refs).await
+}
+
+/// constraint name -> declared message. Codegen emits this from the schema
+/// model, the same source `db::install_messages` reads.
+static JWC_CONSTRAINT_MESSAGES: &[(&str, &str)] = JWC_CONSTRAINT_MESSAGES_TABLE;
+
+/// `db::classify` + `exec::map_db_error`, together.
+///
+/// errors.md §6 — a violated constraint that carries a message becomes a
+/// declared error; one that does not stays a fault, which here means a panic
+/// and therefore a 500.
+#[cold]
+fn jwc_db_error(e: tokio_postgres::Error, sql: &str) -> JwcThrown {
+    let Some(db) = e.as_db_error() else {
+        panic!("{}\nSQL: {}", e, sql);
+    };
+    let code = db.code().code();
+    if code == "23503" {
+        return JwcThrown {
+            error: "BadRequest",
+            status: 400,
+            message: "referenced row does not exist".to_string(),
+            body: None,
+        };
+    }
+    if matches!(code, "23505" | "23514" | "23502") {
+        let name = db.constraint().unwrap_or_default();
+        if let Some((_, msg)) = JWC_CONSTRAINT_MESSAGES.iter().find(|(n, _)| *n == name) {
+            // 23505 is `unique_violation`; the other two are the author's
+            // own check / not-null, which are bad input, not a conflict.
+            let (error, status) = if code == "23505" {
+                ("Conflict", 409u16)
+            } else {
+                ("BadRequest", 400u16)
+            };
+            return JwcThrown { error, status, message: (*msg).to_string(), body: None };
+        }
+        panic!("constraint {} violated\nSQL: {}", name, sql);
+    }
+    panic!("{}\nSQL: {}", db.message(), sql);
+}
+
 async fn jwc_db_exec(sql: &str, params: DbParams) -> u64 {
     jwc_db_try_exec(sql, params)
         .await
@@ -154,6 +340,13 @@ async fn jwc_db_exec(sql: &str, params: DbParams) -> u64 {
 async fn jwc_db_try_exec(sql: &str, params: DbParams) -> Result<u64, tokio_postgres::Error> {
     let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
         params.iter().map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+    if let Some(cell) = jwc_tx_pin() {
+        let mut held = cell.lock().await;
+        if let Some(conn) = held.as_mut() {
+            let stmt = conn.prepare_cached(sql).await?;
+            return conn.execute(&stmt, &refs).await;
+        }
+    }
     let client = jwc_db_get().await;
     let stmt = client.prepare_cached(sql).await?;
     client.execute(&stmt, &refs).await
@@ -718,9 +911,62 @@ async fn jwc_log_flush(pending: Vec<JwcLogRow>) {
 // Registered only when the program has no `/metrics` route of its own —
 // mirrors `server.rs::route_owned_by_user`, so a user endpoint always wins.
 
+/// `serve.rs::metrics_text`, gauge for gauge and in the same order — the
+/// two backends have to answer `/metrics` alike or a dashboard built
+/// against one silently loses series against the other.
+///
+/// Gauges only. A counter would need per-request bookkeeping on the hot
+/// path, and what the soak criterion asks about is the pool.
 fn jwc_metrics_body() -> String {
     let mut out = String::new();
 
+    if let Some(pool) = DB_POOL.get() {
+        let st = pool.status();
+        out.push_str(
+            "# HELP jwc_db_pool_size Connections the pool currently holds.\n\
+             # TYPE jwc_db_pool_size gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_size {}\n", st.size));
+        out.push_str(
+            "# HELP jwc_db_pool_available Connections idle and checkout-ready.\n\
+             # TYPE jwc_db_pool_available gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_available {}\n", st.available));
+        out.push_str(
+            "# HELP jwc_db_pool_max_size Ceiling from JWC_DB_POOL_SIZE.\n\
+             # TYPE jwc_db_pool_max_size gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_max_size {}\n", st.max_size));
+        // The leak signal. A pool that never returns a connection shows up
+        // here as `available` pinned at 0 while `waiting` climbs, which is
+        // exactly the shape `soak/analyze.py` is looking for.
+        out.push_str(
+            "# HELP jwc_db_pool_waiting Tasks blocked waiting for a connection.\n\
+             # TYPE jwc_db_pool_waiting gauge\n",
+        );
+        out.push_str(&format!("jwc_db_pool_waiting {}\n", st.waiting));
+    }
+
+    // Redis lives in its own prelude, which is only concatenated for
+    // programs that call a `redis_*` built-in. Codegen emits
+    // `jwc_redis_metrics_hook` either way — forwarding to the real thing
+    // when that prelude is present, returning empty when it is not.
+    //
+    // Without this the endpoint reported `jwc_db_pool_*` and silently
+    // nothing for Redis, which is worse than not reporting at all: the
+    // absence reads as "Redis is not configured" when it may just be
+    // unimplemented. That misreading cost a production debugging session.
+    out.push_str(&jwc_redis_metrics_hook());
+
+    out.push_str(
+        "# HELP jwc_routes Declared routes.\n\
+         # TYPE jwc_routes gauge\n",
+    );
+    out.push_str(&format!("jwc_routes {}\n", JWC_ROUTE_COUNT));
+
+    // Native-only, and absent unless a log writer is actually running: the
+    // buffered writer has no interpreter counterpart, so emitting these
+    // unconditionally would be a series the other backend never produces.
     if let Some(s) = jwc_log_stats() {
         out.push_str("# HELP jwc_log_queue_depth Rows queued for the buffered log writer.\n");
         out.push_str("# TYPE jwc_log_queue_depth gauge\n");
@@ -740,27 +986,6 @@ fn jwc_metrics_body() -> String {
         out.push_str("# HELP jwc_log_batches_total Batch INSERTs issued by the log writer.\n");
         out.push_str("# TYPE jwc_log_batches_total counter\n");
         out.push_str(&format!("jwc_log_batches_total {}\n", s.batches));
-    }
-
-    // Redis lives in its own prelude, which is only concatenated for
-    // programs that call a `redis_*` built-in. Codegen emits
-    // `jwc_redis_metrics_hook` either way — forwarding to the real thing
-    // when that prelude is present, returning empty when it is not.
-    //
-    // Without this the endpoint reported `jwc_log_*` and `jwc_db_pool_*` and
-    // silently nothing for Redis, which is worse than not reporting at all:
-    // the absence reads as "Redis is not configured" when it may just be
-    // unimplemented. That misreading cost a production debugging session.
-    out.push_str(&jwc_redis_metrics_hook());
-
-    if let Some(pool) = DB_POOL.get() {
-        let st = pool.status();
-        out.push_str("# HELP jwc_db_pool_size Connections held by the deadpool-postgres pool.\n");
-        out.push_str("# TYPE jwc_db_pool_size gauge\n");
-        out.push_str(&format!("jwc_db_pool_size {}\n", st.size));
-        out.push_str("# HELP jwc_db_pool_available Idle connections immediately checkout-able.\n");
-        out.push_str("# TYPE jwc_db_pool_available gauge\n");
-        out.push_str(&format!("jwc_db_pool_available {}\n", st.available));
     }
 
     out
