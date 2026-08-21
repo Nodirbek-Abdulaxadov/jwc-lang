@@ -123,16 +123,16 @@ the constraint. Routes do not build error responses by hand.
 | Section | What it covers |
 |---|---|
 | [Getting started](./getting-started/install) | Install, a first project, the layout, editor setup |
-| [Tutorial](./tutorial/zero-to-crud) | Zero to a running CRUD service |
-| [Language](./language/syntax) | Vocabulary, types, control flow, services |
+| [Tutorial](./tutorial/) | A link bin: four endpoints, a real database |
+| [Language](./language/syntax) | Vocabulary, types, control flow, functions |
 | [Data](./data/schema) | Tables, queries, writes, migrations |
-| [Backend](./backend/routes) | Routes, middleware, errors, `server { }` |
-| [Standard library](./stdlib/builtins) | Every built-in, by namespace |
-| [Packages](./packages/) | The manifest, imports, publishing |
-| [CLI](./cli/overview) | Every `jwc` subcommand |
-| [Deployment](./deployment/docker) | Docker, Kubernetes, environment |
+| [Backend](./backend/routing) | Routes, middleware, errors, validation, `server { }` |
+| [Standard library](./stdlib/builtins) | Every built-in, by group |
+| [Packages](./packages/index.md) | The manifest, imports, publishing |
+| [CLI](./cli/index.md) | Every `jwc` subcommand |
+| [Deployment](./deployment/index.md) | Docker, the native build, probes |
 | [Security](./security) | What the language enforces, and what it does not |
-| [Reference](./reference/error-codes) | Diagnostic codes, and the 0.9.x → 1.0 map |
+| [Reference](./reference/removed) | What 0.9.x had that 1.0 does not |
 
 ## Status
 

@@ -1,41 +1,51 @@
-# The 1.0 documentation site — work in progress
+# The documentation site
 
-This tree is **not built yet**. `docusaurus.config.ts` still points at
-`archive-0.9`, so nothing here is served.
+This tree is what jwc.1kb.uz serves. `docusaurus.config.ts` points at it.
 
-## Why it exists
+## Layout
 
-jwc.1kb.uz serves `archive-0.9/`, which teaches a language this compiler
-does not implement: `dbcontext`, `entity`, `pk autoincrement`, `validate
-body`, top-level `route`. Every code sample on the live site fails to lex.
-
-## What is here
-
-| Page | State |
+| Path | |
 |---|---|
-| `intro.md` | written |
-| `getting-started/install.md` | written |
-| `getting-started/hello-world.md` | written |
-| `getting-started/project-structure.md` | written |
-| `getting-started/editor-setup.md` | written |
-| `language/syntax.md` | written |
-| `language/types.md` | written |
-| `language/control-flow.md` | written |
-| `language/functions.md` | written |
-| `data/*`, `backend/*`, `stdlib/*`, `packages/*`, `cli/*`, `deployment/*`, `tutorial/*`, `reference/*`, `security.md` | not written |
+| `intro.md` | the homepage, slug `/` |
+| `getting-started/` | install, hello world, project layout, editors |
+| `tutorial/` | a link bin — four endpoints, a real database |
+| `language/` | syntax, types, control flow, functions |
+| `data/` | schema, queries, writes, migrations |
+| `backend/` | routing, middleware, errors, validation, config |
+| `stdlib/` | every built-in |
+| `packages/`, `cli/`, `deployment/` | one page each |
+| `security.md` | what the language enforces, and what it does not |
+| `reference/removed.md` | what 0.9.x had that 1.0 does not |
 
-`intro.md` links to three pages that do not exist yet — `packages/`,
-`security`, `reference/removed`. **Do not point the site at this tree
-until they do**, or the build will fail on the broken links.
+## The rules this tree is held to
 
-## A correction to the plan
+**Every ```` ```jwc ```` block is compiled** by `tests/docs_parse.rs`. A
+block that is prose rather than a program — an operator table, a `{ … }`
+elision — is marked ```` ```jwc no-compile ````, and the marker sits in
+the fence's info string, which the site ignores.
 
-An earlier plan for this rewrite was to drop the pages for the native AOT
-build, the background queue, WebSocket/SSE and the in-process cache, on the
-grounds that 1.0 does not have them. That was wrong twice over: those
-capabilities were deleted from the compiler without the maintainer's
-agreement, and deleting their documentation as well would have made the
-loss invisible instead of visible.
+**The spec is normative, this is not.** `docs/spec/v1/` is where the rules
+are decided. Where a page here disagrees with it, the page is wrong.
 
-They are being restored (`src/native/`). The pages stay, and they say what
-the state actually is.
+**Transcripts are copied from runs.** The tutorial's responses were
+produced by running the program in it, not typed out.
+
+## `archive-0.9/`
+
+The 0.9.x documentation, kept and no longer served. It describes the
+language deployed 0.9.x binaries implement — `dbcontext`, `entity`,
+`pk autoincrement`, `validate body` — every sample of which fails to lex
+against this compiler.
+
+It stays in the repository because it is the only description of what
+those binaries do. `reference/removed.md` is the bridge for a reader
+arriving from it.
+
+## Building
+
+```bash
+npm install
+npm run build      # fails on a broken link, deliberately
+npm run serve      # check the build locally
+npm start          # dev server with hot reload
+```
