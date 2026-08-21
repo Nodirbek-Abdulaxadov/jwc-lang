@@ -344,3 +344,83 @@ fn jwc_redis_metrics() -> String {
     out.push_str(&format!("jwc_redis_pool_waiting {}\n", st.waiting));
     out
 }
+
+// ── the 1.0 `redis.*` surface (builtins.md §8) ──────────────────────────────
+
+/// One `INCR` and, on the first hit only, one `EXPIRE` — in a single script,
+/// so a caller that dies between the two cannot leave a key with no TTL.
+/// Same script the interpreter runs, so the two backends share a keyspace.
+const JWC_RATE_LIMIT_SCRIPT: &str = "local n = redis.call('INCR', KEYS[1]) \
+                                     if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end \
+                                     return n";
+
+/// `redis.rate_limit(key, limit, window_secs)` — true while the bucket has
+/// room. Atomic: `INCR` then `EXPIRE` as two round-trips races, and the loser
+/// gets a key that never expires.
+async fn jwc_b_redis_rate_limit(key: V, limit: V, window: V) -> V {
+    let limit = jwc_to_int(&limit).unwrap_or(0);
+    let window = jwc_to_int(&window).unwrap_or(0);
+    let hits = jwc_b_redis_eval(
+        v_str(JWC_RATE_LIMIT_SCRIPT),
+        v_str(jwc_to_json(&v_arr(vec![key]))),
+        v_str(jwc_to_json(&v_arr(vec![v_str(window.to_string())]))),
+    )
+    .await;
+    // A reply the script cannot have produced means something is wrong with
+    // the server, and the safe reading of "wrong" is "over the limit".
+    let hits = jwc_to_int(&hits).unwrap_or(i64::MAX);
+    V::Bool(hits <= limit)
+}
+
+/// `redis.*` needs a server. The interpreter faults rather than pretending
+/// the call succeeded, and says what to set; a native binary that quietly
+/// answered `null` would let a rate limiter allow everything.
+fn jwc_redis_require(name: &str) {
+    if jwc_redis_pool().is_none() {
+        panic!(
+            "`redis.{}(...)` needs a Redis server: set `JWC_REDIS_URL`. \
+             `redis.enabled()` is what to branch on when the call is optional.",
+            name
+        );
+    }
+}
+
+async fn jwc_b_v1_redis_get(key: V) -> V {
+    jwc_redis_require("get");
+    jwc_b_redis_get(key).await
+}
+
+async fn jwc_b_v1_redis_set(key: V, value: V, ttl: V) -> V {
+    jwc_redis_require("set");
+    // A negative TTL is not "expire in the past" — it is a caller mistake,
+    // and 0 already means "no expiry". Clamping keeps a sign error from
+    // deleting the key it was meant to write.
+    let ttl = V::Int(jwc_to_int(&ttl).unwrap_or(0).max(0));
+    jwc_b_redis_set(key, value, ttl).await
+}
+
+async fn jwc_b_v1_redis_del(key: V) -> V {
+    jwc_redis_require("del");
+    jwc_b_redis_del(key).await
+}
+
+async fn jwc_b_v1_redis_incr(key: V) -> V {
+    jwc_redis_require("incr");
+    jwc_b_redis_incr(key).await
+}
+
+async fn jwc_b_v1_redis_expire(key: V, ttl: V) -> V {
+    jwc_redis_require("expire");
+    jwc_b_redis_expire(key, ttl).await
+}
+
+async fn jwc_b_v1_redis_rate_limit(key: V, limit: V, window: V) -> V {
+    jwc_redis_require("rate_limit");
+    jwc_b_redis_rate_limit(key, limit, window).await
+}
+
+/// The one call that works without a server, because branching on it is how
+/// a program makes the rest optional.
+async fn jwc_b_v1_redis_enabled() -> V {
+    V::Bool(jwc_redis_pool().is_some())
+}

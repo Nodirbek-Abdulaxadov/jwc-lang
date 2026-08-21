@@ -32,6 +32,13 @@ use crate::workspace::Workspace;
 /// yields a future where a `V` was wanted, so the list is derived from
 /// the prelude rather than guessed.
 const ASYNC_BUILTINS: &[&str] = &[
+    "jwc_b_v1_redis_del",
+    "jwc_b_v1_redis_enabled",
+    "jwc_b_v1_redis_expire",
+    "jwc_b_v1_redis_get",
+    "jwc_b_v1_redis_incr",
+    "jwc_b_v1_redis_rate_limit",
+    "jwc_b_v1_redis_set",
     "jwc_b_console_read",
     "jwc_b_directory_create",
     "jwc_b_directory_delete",
@@ -131,9 +138,63 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "response.add_header" => "jwc_b_response_add_header",
         "request.route" => "jwc_b_request_route",
 
-        // Coercions and the environment.
-        "int" => "jwc_b_int",
+        // Coercions and the environment — builtins.md §2.
+        "int" => "jwc_b_v1_int",
+        "bigint" => "jwc_b_v1_bigint",
+        "numeric" => "jwc_b_v1_numeric",
+        "boolean" => "jwc_b_v1_boolean",
+        "uuid" => "jwc_b_v1_uuid",
+        "timestamptz" => "jwc_b_v1_timestamptz",
+        "enum" => "jwc_b_v1_enum",
         "env" => "jwc_b_env",
+
+        // Date — builtins.md §3.
+        "date.now" => "jwc_b_v1_date_now",
+        "date.today" => "jwc_b_v1_date_today",
+        "date.days" => "jwc_b_v1_date_days",
+        "date.hours" => "jwc_b_v1_date_hours",
+        "date.minutes" => "jwc_b_v1_date_minutes",
+        "date.seconds" => "jwc_b_v1_date_seconds",
+        "date.parse" => "jwc_b_v1_date_parse",
+        "date.format" => "jwc_b_v1_date_format",
+
+        // The rest of text — builtins.md §4.
+        "string.of" => "jwc_b_v1_string_of",
+        "string.slice" => "jwc_b_v1_string_slice",
+        "string.pad_left" => "jwc_b_v1_string_pad_left",
+        "string.pad_right" => "jwc_b_v1_string_pad_right",
+        "string.matches" => "jwc_b_v1_string_matches",
+        "string.split_csv" => "jwc_b_v1_string_split_csv",
+        "string.strip_prefix" => "jwc_b_v1_string_strip_prefix",
+
+        // The rest of arrays — builtins.md §5.
+        "array.is_empty" => "jwc_b_v1_array_is_empty",
+        "array.sum" => "jwc_b_v1_array_sum",
+        "array.sum_product" => "jwc_b_v1_array_sum_product",
+        "array.min" => "jwc_b_v1_array_min",
+        "array.max" => "jwc_b_v1_array_max",
+        "array.pluck" => "jwc_b_v1_array_pluck",
+        "array.sorted" => "jwc_b_v1_array_sorted",
+
+        // The rest of hashing — builtins.md §6.
+        "hash.verify" => "jwc_b_v1_hash_verify",
+        "hash.hmac_verify" => "jwc_b_v1_hmac_verify",
+        "crypto.token" => "jwc_b_v1_crypto_token",
+        "crypto.constant_time_eq" => "jwc_b_v1_constant_time_eq",
+
+        // Redis — builtins.md §8.
+        "redis.get" => "jwc_b_v1_redis_get",
+        "redis.set" => "jwc_b_v1_redis_set",
+        "redis.del" => "jwc_b_v1_redis_del",
+        "redis.incr" => "jwc_b_v1_redis_incr",
+        "redis.expire" => "jwc_b_v1_redis_expire",
+        "redis.rate_limit" => "jwc_b_v1_redis_rate_limit",
+        "redis.enabled" => "jwc_b_v1_redis_enabled",
+
+        // The rest of the request — builtins.md §7.
+        "request.query_all" => "jwc_b_v1_request_query_all",
+        "request.peer_ip" => "jwc_b_v1_request_peer_ip",
+        "debug.dump" => "jwc_b_v1_debug_dump",
 
         _ => return None,
     })
@@ -145,45 +206,13 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
 /// worklist rather than a shrug. Each is a prelude addition, not a codegen
 /// problem.
 const PRELUDE_GAPS: &[&str] = &[
-    "string.of",
-    "string.slice",
-    "string.pad_left",
-    "string.pad_right",
-    "string.matches",
-    "string.split_csv",
-    "string.strip_prefix",
-    "array.is_empty",
-    "array.sum",
-    "array.sum_product",
-    "array.min",
-    "array.max",
-    "array.pluck",
-    "array.sorted",
-    "date.now",
-    "date.today",
-    "date.days",
-    "date.hours",
-    "date.minutes",
-    "date.seconds",
+    // Typed by the checker (`check.rs`), implemented by neither backend:
+    // `exec_call.rs` has no arm for it either, so `jwc serve` does not run
+    // this one. Named here so the refusal is honest about which it is.
     "date.add",
-    "date.parse",
-    "date.format",
-    "hash.verify",
-    "hash.hmac_verify",
-    "crypto.token",
-    "crypto.constant_time_eq",
-    "cookie",
-    "bigint",
-    "numeric",
-    "boolean",
-    "uuid",
-    "timestamptz",
-    "enum",
+    // A query construct: `raw(sql, …)` runs SQL, which this pass reaches
+    // through `query_sql` rather than through the built-in table.
     "raw",
-    "request.body",
-    "request.query_all",
-    "request.peer_ip",
-    "debug.dump",
 ];
 
 /// Refuse a program this pass cannot lower, naming the construct.
@@ -469,7 +498,9 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // shims are the seam — forwarding when the prelude is present, honest
     // about its absence when it is not.
     out.push_str("\n// ── operational shims ──\n");
-    out.push_str(if uses_regex && ctx.uses_validation {
+    let needs_regex = (uses_regex && ctx.uses_validation)
+        || ctx.used.contains("jwc_b_v1_string_matches");
+    out.push_str(if needs_regex {
         "fn jwc_regex_is_match(pattern: &str, s: &str) -> bool {\n\
          \x20   // A rule whose regex does not compile passes rather than\n\
          \x20   // failing every request — `validate.rs` makes the same\n\
@@ -478,6 +509,15 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
          \x20   regex::Regex::new(pattern).map(|r: regex::Regex| r.is_match(s)).unwrap_or(true)\n}\n"
     } else {
         "fn jwc_regex_is_match(_pattern: &str, _s: &str) -> bool { true }\n"
+    });
+    // `string.matches` is the caller's own argument, so a pattern that does
+    // not compile is `false` — where a `pattern()` rule the checker accepted
+    // passes rather than failing every request.
+    out.push_str(if needs_regex {
+        "fn jwc_regex_is_match_strict(pattern: &str, s: &str) -> bool {\n\
+         \x20   regex::Regex::new(pattern).map(|r: regex::Regex| r.is_match(s)).unwrap_or(false)\n}\n"
+    } else {
+        "fn jwc_regex_is_match_strict(_pattern: &str, _s: &str) -> bool { false }\n"
     });
     out.push_str(if needs_redis {
         "fn jwc_redis_metrics_hook() -> String { jwc_redis_metrics() }\n"
@@ -526,6 +566,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
 
     let mut source = String::new();
     source.push_str(super::PRELUDE_BASE);
+    source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);
     }
@@ -549,10 +590,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         needs_http_client,
         needs_crypto,
         needs_redis,
-        // A `pattern(r"…")` rule on any class the program can validate
-        // against. Gated on `uses_validation` because a class the program
-        // never casts to is never checked.
-        needs_regex: uses_regex && ctx.uses_validation,
+        needs_regex,
     })
 }
 
@@ -1196,6 +1234,24 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
                 return Ok(format!(
                     "jwc_b_query_param({}, V::Null)",
                     parts.first().cloned().unwrap_or_else(|| "V::Null".into())
+                ));
+            }
+            // `int(s)` and `bigint(s)` raise `BadRequest` on a value that
+            // is not a number (types.md §7.2), so they return a `Result`
+            // and the call site propagates.
+            if matches!(name.as_str(), "int" | "bigint") {
+                ctx.used.insert(format!("jwc_b_v1_{name}"));
+                return Ok(format!(
+                    "jwc_b_v1_{name}({})?",
+                    parts.first().cloned().unwrap_or_else(|| "V::Null".into())
+                ));
+            }
+            // `enum(E, x)` names a type first; the type is not a value.
+            if name == "enum" {
+                ctx.used.insert("jwc_b_v1_enum".to_string());
+                return Ok(format!(
+                    "jwc_b_v1_enum({})",
+                    parts.get(1).cloned().unwrap_or_else(|| "V::Null".into())
                 ));
             }
             if let Some(f) = prelude_fn(&name) {

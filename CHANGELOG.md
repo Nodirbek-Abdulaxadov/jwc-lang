@@ -97,6 +97,33 @@ parameter `Bind::Expr` over a placeholder expression and
 `ExprKind::Null` — bound null for each. Postgres reported it as a
 not-null violation on a column the program had plainly set.
 
+### What running the real application found
+
+The differential above uses a program written to exercise the tier. Then
+jwc-shortener — 10 routes, three HTML pages, an SVG, Swagger, Redis rate
+limiting — was built and diffed the same way, and found three more:
+
+- **`crypto.token`, `string.of`, `string.slice`, `string.strip_prefix`,
+  `date.hours`.** The restored prelude predates the 1.0 vocabulary, so it
+  had no counterpart for the built-ins 1.0 introduced. `jwc build` refused
+  on the first one and named it, which is the right failure — but it is
+  still a refusal. All of `builtins.md` §2–§8 is now implemented, except
+  `date.add`, which `exec_call.rs` has no arm for either: `jwc serve` does
+  not run that one, and the message says so.
+- **`redis.*`.** 1.0 spells the Redis surface as a built-in namespace with
+  `get`/`set`/`del`/`incr`/`expire`/`rate_limit`/`enabled`. The prelude had
+  the 0.9 `redis_*` names, no `rate_limit`, and answered rather than
+  faulting when no server was configured — which would let a rate limiter
+  allow everything.
+- **The router took the first match, not the most specific.** The
+  interpreter scores candidates by literal-segment count. jwc-shortener
+  declares `/{code}` for its redirects beside `/docs`, `/openapi.json`,
+  `/robots.txt`, `/sitemap.xml` and `/og.svg`; the native binary gave all
+  five to the redirect handler and answered 404.
+- **`env(name)` answered `""` for an unset variable, not null.** `??` only
+  fires on null, so `env("PUBLIC_BASE_URL") ?? "https://1kb.uz"` produced
+  the empty string and the short links came out as `/abc1234` with no host.
+
 ### Which prelude a program gets
 
 Read off the prelude sources rather than a hand-kept list: codegen records

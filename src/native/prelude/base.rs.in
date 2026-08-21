@@ -1501,12 +1501,21 @@ fn jwc_b_json_stringify(v: V) -> V {
     v_str(jwc_to_json(&v))
 }
 
+/// `env(name)` — the value, or **null** when the variable is not set.
+///
+/// Not the empty string. `env("PUBLIC_BASE_URL") ?? "https://1kb.uz"` is the
+/// shape every program uses this in, and `??` only fires on null: answering
+/// `""` made the default unreachable and jwc-shortener built its short links
+/// as `/abc1234` with no host.
 fn jwc_b_env(name: V) -> V {
     let n = match name {
         V::Str(s) => s,
-        _ => return v_str(""),
+        _ => return V::Null,
     };
-    v_str(std::env::var(n.as_ref()).unwrap_or_default())
+    match std::env::var(n.as_ref()) {
+        Ok(v) => v_str(v),
+        Err(_) => V::Null,
+    }
 }
 
 /// Mirror of the interpreter's `int(v)` — see the note on the `"int"` arm in
@@ -2486,27 +2495,43 @@ impl Router {
         method: &str,
         path: &str,
     ) -> Option<(RouteKind, RouteFn, String, BTreeMap<String, String>, Vec<(String, String)>)> {
-        let req_segs: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        let req_segs: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        // routing.md §4.2 — the winner is the candidate with the most
+        // **literal** segments, not the first one registered. jwc-shortener
+        // declares `/{code}` for its redirects and `/docs`, `/openapi.json`,
+        // `/robots.txt`, `/sitemap.xml` and `/og.svg` beside it; first-match
+        // gave every one of those the redirect handler and a 404.
+        let mut best: Option<(&RouteEntry, BTreeMap<String, String>, Vec<(String, String)>, usize)> =
+            None;
         for entry in &self.entries {
             if entry.method != method { continue; }
             if entry.segments.len() != req_segs.len() { continue; }
             let mut params = BTreeMap::new();
             let mut types: Vec<(String, String)> = Vec::new();
+            let mut literals = 0usize;
             let mut ok = true;
             for (seg, req) in entry.segments.iter().zip(req_segs.iter()) {
                 match seg {
-                    PathSeg::Literal(lit) => if lit != req { ok = false; break; },
+                    PathSeg::Literal(lit) => {
+                        if lit == req {
+                            literals += 1;
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
                     PathSeg::Param { name, ty } => {
                         params.insert(name.clone(), (*req).to_string());
                         types.push((name.clone(), ty.clone()));
                     }
                 }
             }
-            if ok {
-                return Some((entry.kind, entry.handler, entry.pattern.clone(), params, types));
+            if !ok { continue; }
+            if best.as_ref().is_none_or(|(_, _, _, n)| literals > *n) {
+                best = Some((entry, params, types, literals));
             }
         }
-        None
+        best.map(|(e, params, types, _)| (e.kind, e.handler, e.pattern.clone(), params, types))
     }
 
     /// Verbs declared on a path that a request's own method didn't match.
@@ -3452,3 +3477,8 @@ fn jwc_array_len(v: &serde_json::Value) -> Option<i64> {
 // `jwc_regex_is_match` is a codegen shim: the real one when the program has
 // a `pattern(r"…")` rule to enforce, an always-true one when it does not, so
 // a crate with no pattern anywhere does not compile the regex engine.
+
+// `string.matches(s, pattern)`. Codegen emits the body when the program has a
+// regex to run and a `false` stub when it does not — the same shim treatment
+// `jwc_regex_is_match` gets, and for the same reason: a crate with no regex
+// anywhere should not compile the engine.

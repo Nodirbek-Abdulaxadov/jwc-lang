@@ -1,0 +1,352 @@
+
+// ── the 1.0 built-ins the 0.9 prelude predates ──────────────────────────────
+//
+// The restored runtime was written against the 0.9 vocabulary, so it has
+// `jwc_b_lower` where 1.0 has `string.lower` — that is a naming difference and
+// `prelude_fn` maps it. These are different: built-ins 1.0 introduced, with no
+// 0.9 counterpart to rename. Each is `exec_call.rs`'s arm, transcribed.
+//
+// The interpreter's `Value` has variants `V` does not — `Numeric`,
+// `Timestamptz`, `Interval` all carry text and all serialise as JSON strings,
+// so `v_str` is the faithful representation here. `Bigint` is the one that
+// does not fit: it is numeric in arithmetic and a string on the wire, and `V`
+// has no variant that is both. Where the interpreter builds one, this keeps
+// the wire form, because that is what the response promises (types.md §2.3).
+
+fn jwc_v1_text(v: &V) -> String {
+    match v {
+        V::Str(s) | V::RawJson(s) => s.to_string(),
+        V::Int(n) => n.to_string(),
+        V::Float(n) => n.to_string(),
+        V::Bool(b) => b.to_string(),
+        V::Null => String::new(),
+        other => jwc_to_json(other),
+    }
+}
+
+fn jwc_v1_items(v: &V) -> Vec<V> {
+    match v {
+        V::Array(xs) => (**xs).clone(),
+        // `Raw` is an unparsed JSON fragment: an array built-in over one has
+        // to parse it, which is the only place raw stops being raw.
+        V::RawJson(s) => match jwc_from_json(s) {
+            Ok(V::Array(xs)) => (*xs).clone(),
+            _ => Vec::new(),
+        },
+        V::Null => Vec::new(),
+        other => vec![other.clone()],
+    }
+}
+
+fn jwc_v1_numeric(v: &V) -> Option<f64> {
+    match v {
+        V::Int(n) => Some(*n as f64),
+        V::Float(n) => Some(*n),
+        V::Str(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// `exec_call::trim_decimal` — six places, then the trailing zeros go. Money
+/// never reaches the wire as `0.30000000000000004`.
+fn jwc_v1_trim_decimal(v: f64) -> String {
+    let s = format!("{:.6}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+fn jwc_v1_field(v: &V, name: &str) -> Option<V> {
+    match jwc_get_field(v, name) {
+        V::Null => None,
+        other => Some(other),
+    }
+}
+
+// ---- coercions (types.md §7.2) ---------------------------------------------
+
+/// `int(s)` and `bigint(s)` raise `BadRequest` on a value that is not a
+/// number. The failure class depends on where the value came from; the
+/// checker decided that statically, and the runtime raises the
+/// client-facing one because every reachable call site is request-shaped.
+fn jwc_v1_parse_int(v: V) -> JwcResult {
+    let raw = jwc_v1_text(&v);
+    match raw.trim().parse::<i64>() {
+        Ok(n) => Ok(V::Int(n)),
+        Err(_) => Err(JwcThrown {
+            error: "BadRequest",
+            status: 400,
+            message: format!("`{}` is not a number", raw),
+            body: None,
+        }),
+    }
+}
+
+fn jwc_b_v1_int(v: V) -> JwcResult {
+    jwc_v1_parse_int(v)
+}
+
+fn jwc_b_v1_bigint(v: V) -> JwcResult {
+    jwc_v1_parse_int(v)
+}
+
+fn jwc_b_v1_numeric(v: V) -> V {
+    v_str(jwc_v1_text(&v))
+}
+
+fn jwc_b_v1_boolean(v: V) -> V {
+    V::Bool(matches!(jwc_v1_text(&v).as_str(), "true" | "1"))
+}
+
+/// `uuid(s)` and `timestamptz(s)` are assertions the checker already made;
+/// at run time they are the identity on the text.
+fn jwc_b_v1_uuid(v: V) -> V {
+    v_str(jwc_v1_text(&v))
+}
+
+fn jwc_b_v1_timestamptz(v: V) -> V {
+    v_str(jwc_v1_text(&v))
+}
+
+/// `enum(E, x)` — the type name is not a value, so codegen drops it and
+/// passes only `x` (builtins.md §2).
+fn jwc_b_v1_enum(v: V) -> V {
+    if matches!(v, V::Null) {
+        V::Null
+    } else {
+        v_str(jwc_v1_text(&v))
+    }
+}
+
+// ---- date (builtins.md §3) --------------------------------------------------
+
+fn jwc_b_v1_date_now() -> V {
+    v_str(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+}
+
+fn jwc_b_v1_date_today() -> V {
+    v_str(chrono::Utc::now().date_naive().to_string())
+}
+
+// ISO-8601 durations, which is what Postgres accepts for an interval.
+fn jwc_b_v1_date_days(v: V) -> V {
+    v_str(format!("P{}D", jwc_to_int(&v).unwrap_or(0)))
+}
+
+fn jwc_b_v1_date_hours(v: V) -> V {
+    v_str(format!("PT{}H", jwc_to_int(&v).unwrap_or(0)))
+}
+
+fn jwc_b_v1_date_minutes(v: V) -> V {
+    v_str(format!("PT{}M", jwc_to_int(&v).unwrap_or(0)))
+}
+
+fn jwc_b_v1_date_seconds(v: V) -> V {
+    v_str(format!("PT{}S", jwc_to_int(&v).unwrap_or(0)))
+}
+
+fn jwc_b_v1_date_parse(v: V) -> V {
+    v_str(jwc_v1_text(&v))
+}
+
+fn jwc_b_v1_date_format(v: V, _fmt: V) -> V {
+    v_str(jwc_v1_text(&v))
+}
+
+// ---- text (builtins.md §4) --------------------------------------------------
+
+fn jwc_b_v1_string_of(v: V) -> V {
+    v_str(jwc_v1_text(&v))
+}
+
+fn jwc_b_v1_string_slice(s: V, from: V, len: V) -> V {
+    let base = jwc_v1_text(&s);
+    let from = jwc_to_int(&from).unwrap_or(0).max(0) as usize;
+    let len = jwc_to_int(&len).unwrap_or(0).max(0) as usize;
+    v_str(base.chars().skip(from).take(len).collect::<String>())
+}
+
+fn jwc_b_v1_string_pad_left(s: V, width: V, pad: V) -> V {
+    let base = jwc_v1_text(&s);
+    let width = jwc_to_int(&width).unwrap_or(0).max(0) as usize;
+    let pad = jwc_v1_text(&pad);
+    let mut out = String::new();
+    while out.chars().count() + base.chars().count() < width && !pad.is_empty() {
+        out.push_str(&pad);
+    }
+    v_str(format!("{}{}", out, base))
+}
+
+fn jwc_b_v1_string_pad_right(s: V, width: V, pad: V) -> V {
+    let mut out = jwc_v1_text(&s);
+    let width = jwc_to_int(&width).unwrap_or(0).max(0) as usize;
+    let pad = jwc_v1_text(&pad);
+    while out.chars().count() < width && !pad.is_empty() {
+        out.push_str(&pad);
+    }
+    v_str(out)
+}
+
+fn jwc_b_v1_string_matches(s: V, pattern: V) -> V {
+    V::Bool(jwc_regex_is_match_strict(
+        &jwc_v1_text(&pattern),
+        &jwc_v1_text(&s),
+    ))
+}
+
+/// The correct spelling of `string.replace(h, "Bearer ", "")`, which also
+/// stripped the literal from the middle of a token.
+fn jwc_b_v1_string_strip_prefix(s: V, prefix: V) -> V {
+    let base = jwc_v1_text(&s);
+    let prefix = jwc_v1_text(&prefix);
+    v_str(base.strip_prefix(&prefix).unwrap_or(&base).to_string())
+}
+
+fn jwc_b_v1_string_split_csv(s: V) -> V {
+    v_arr(
+        jwc_v1_text(&s)
+            .split(',')
+            .map(|p| v_str(p.trim().to_string()))
+            .filter(|p| !matches!(p, V::Str(t) if t.is_empty()))
+            .collect(),
+    )
+}
+
+// ---- arrays (builtins.md §5) — the lambda replacement -----------------------
+
+fn jwc_b_v1_array_is_empty(v: V) -> V {
+    V::Bool(jwc_v1_items(&v).is_empty())
+}
+
+fn jwc_b_v1_array_sum(v: V, field: V) -> V {
+    let f = jwc_v1_text(&field);
+    let total: f64 = jwc_v1_items(&v)
+        .iter()
+        .filter_map(|r| jwc_v1_field(r, &f).as_ref().and_then(jwc_v1_numeric))
+        .sum();
+    v_str(jwc_v1_trim_decimal(total))
+}
+
+fn jwc_b_v1_array_sum_product(v: V, a: V, b: V) -> V {
+    let (fa, fb) = (jwc_v1_text(&a), jwc_v1_text(&b));
+    let total: f64 = jwc_v1_items(&v)
+        .iter()
+        .filter_map(|r| {
+            Some(
+                jwc_v1_field(r, &fa).as_ref().and_then(jwc_v1_numeric)?
+                    * jwc_v1_field(r, &fb).as_ref().and_then(jwc_v1_numeric)?,
+            )
+        })
+        .sum();
+    v_str(jwc_v1_trim_decimal(total))
+}
+
+fn jwc_v1_extreme(v: V, field: V, want_min: bool) -> V {
+    let f = jwc_v1_text(&field);
+    let mut vals: Vec<f64> = jwc_v1_items(&v)
+        .iter()
+        .filter_map(|r| jwc_v1_field(r, &f).as_ref().and_then(jwc_v1_numeric))
+        .collect();
+    vals.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    match if want_min { vals.first() } else { vals.last() } {
+        Some(n) => v_str(jwc_v1_trim_decimal(*n)),
+        None => V::Null,
+    }
+}
+
+fn jwc_b_v1_array_min(v: V, field: V) -> V {
+    jwc_v1_extreme(v, field, true)
+}
+
+fn jwc_b_v1_array_max(v: V, field: V) -> V {
+    jwc_v1_extreme(v, field, false)
+}
+
+fn jwc_b_v1_array_pluck(v: V, field: V) -> V {
+    let f = jwc_v1_text(&field);
+    v_arr(
+        jwc_v1_items(&v)
+            .iter()
+            .map(|r| jwc_v1_field(r, &f).unwrap_or(V::Null))
+            .collect(),
+    )
+}
+
+fn jwc_b_v1_array_sorted(v: V, field: V) -> V {
+    let f = jwc_v1_text(&field);
+    let mut xs = jwc_v1_items(&v);
+    xs.sort_by(|p, q| {
+        let a = jwc_v1_field(p, &f)
+            .as_ref()
+            .and_then(jwc_v1_numeric)
+            .unwrap_or(0.0);
+        let b = jwc_v1_field(q, &f)
+            .as_ref()
+            .and_then(jwc_v1_numeric)
+            .unwrap_or(0.0);
+        a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    v_arr(xs)
+}
+
+// ---- the request (builtins.md §7) -------------------------------------------
+
+/// routing.md §5.3 — repeated keys, in order. The native `Request` keeps a
+/// `BTreeMap`, which cannot hold a repeat, so this answers the single value
+/// as a one-element list rather than pretending it saw more.
+fn jwc_b_v1_request_query_all(name: V) -> V {
+    let k = jwc_v1_text(&name);
+    with_current_request(|req| match req.query.get(&k) {
+        Some(v) => v_arr(vec![v_str(v.clone())]),
+        None => v_arr(Vec::new()),
+    })
+}
+
+fn jwc_b_v1_request_peer_ip() -> V {
+    // The socket peer, not the forwarded chain — `request.client_ip()` is
+    // the one that walks `X-Forwarded-For`.
+    with_current_request(|req| {
+        req.headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.split(',').next_back())
+            .map(|s| v_str(s.trim().to_string()))
+            .unwrap_or(V::Null)
+    })
+}
+
+/// Returns its argument unchanged, so wrapping a subexpression in it changes
+/// nothing but what is printed. Outside `--dev` it prints nothing at all: a
+/// debug statement that survived review should not take an endpoint down.
+fn jwc_b_v1_debug_dump(v: V) -> V {
+    if std::env::var("JWC_DEV").is_ok() {
+        eprintln!("[dump] {}", jwc_to_json(&v));
+    }
+    v
+}
+
+// ---- cookies (routing.md §6.3) ----------------------------------------------
+
+/// `<response> cookie(name, value)` — attaches to the response it decorates,
+/// so it survives being nested in `created(...)`.
+fn jwc_b_v1_cookie(resp: V, name: V, value: V) -> V {
+    let pair = format!("{}={}; Path=/", jwc_v1_text(&name), jwc_v1_text(&value));
+    let mut m = match resp {
+        V::Object(o) if matches!(o.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) => (*o).clone(),
+        // Not a response: the interpreter queues the header on the request
+        // instead, and the dispatcher merges it.
+        other => {
+            jwc_b_response_add_header(v_str("set-cookie"), v_str(pair));
+            return other;
+        }
+    };
+    let mut headers = match m.get("headers") {
+        Some(V::Object(h)) => (**h).clone(),
+        _ => JwcObj::default(),
+    };
+    headers.insert("set-cookie".to_string(), v_str(pair));
+    m.insert("headers".to_string(), v_obj(headers));
+    v_obj(m)
+}

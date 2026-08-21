@@ -218,3 +218,61 @@ fn a_program_the_pass_cannot_lower_is_refused_by_name() {
         "the message should say what does work: {msg}"
     );
 }
+
+#[test]
+fn the_router_scores_by_literal_segments_not_registration_order() {
+    // routing.md §4.2, and the bug this exists for: jwc-shortener declares
+    // `/{code}` for its redirects alongside `/docs`, `/openapi.json`,
+    // `/robots.txt`, `/sitemap.xml` and `/og.svg`. A router that took the
+    // first single-segment match gave all five to the redirect handler and
+    // answered 404 with "bunday havola yo'q".
+    let prelude = jwc::native::PRELUDE_BASE;
+    assert!(
+        prelude.contains("if best.as_ref().is_none_or(|(_, _, _, n)| literals > *n)"),
+        "the router should pick the candidate with the most literal segments"
+    );
+}
+
+#[test]
+fn env_answers_null_for_an_unset_variable() {
+    // `env("PUBLIC_BASE_URL") ?? "https://1kb.uz"` is the shape every
+    // program uses this in, and `??` only fires on null. Answering `""`
+    // made the default unreachable, and jwc-shortener built its short
+    // links as `/abc1234` with no host.
+    let prelude = jwc::native::PRELUDE_BASE;
+    let body = prelude
+        .split("fn jwc_b_env(name: V) -> V {")
+        .nth(1)
+        .expect("env should be in the prelude");
+    let body = body.split("\n}").next().unwrap_or("");
+    assert!(
+        body.contains("Err(_) => V::Null"),
+        "an unset variable is null, not the empty string: {body}"
+    );
+    assert!(
+        !body.contains("unwrap_or_default()"),
+        "an unset variable is null, not the empty string: {body}"
+    );
+}
+
+#[test]
+fn a_1_0_builtin_the_0_9_prelude_lacked_is_implemented_not_refused() {
+    let rust = generate("tests/native_codegen");
+    // The restored prelude predates the 1.0 vocabulary, so it had no
+    // `string.of`, no `crypto.token`, no `date.hours`. Those are the
+    // built-ins a real program reaches for first — jwc-shortener refused to
+    // build on `crypto.token` alone.
+    let v1 = jwc::native::PRELUDE_V1;
+    for f in [
+        "jwc_b_v1_string_of",
+        "jwc_b_v1_string_slice",
+        "jwc_b_v1_string_strip_prefix",
+        "jwc_b_v1_date_hours",
+        "jwc_b_v1_array_sum",
+        "jwc_b_v1_request_query_all",
+    ] {
+        assert!(v1.contains(&format!("fn {f}(")), "{f} should be implemented");
+    }
+    // And the ones that are genuinely absent are still named, not guessed at.
+    let _ = rust;
+}

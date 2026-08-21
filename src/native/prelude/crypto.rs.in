@@ -662,3 +662,46 @@ fn jwc_b_jwt_verify(token: V, secret: V) -> V {
         Err(e) => panic!("{}", e),
     }
 }
+
+// ── the 1.0 crypto built-ins ────────────────────────────────────────────────
+
+/// `crypto.constant_time_eq(a, b)` — `cursor::constant_time_eq`. Length is
+/// compared first and leaks, which is deliberate: a token's length is not the
+/// secret, and a loop that ran to the longer of the two would leak more.
+fn jwc_b_v1_constant_time_eq(a: V, b: V) -> V {
+    let a = jwc_str_view(&a).unwrap_or("").as_bytes();
+    let b = jwc_str_view(&b).unwrap_or("").as_bytes();
+    if a.len() != b.len() {
+        return V::Bool(false);
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    V::Bool(diff == 0)
+}
+
+/// `crypto.token(n)` — `n` CSPRNG bytes, base64url without padding.
+fn jwc_b_v1_crypto_token(len: V) -> V {
+    use base64::Engine;
+    let n = jwc_to_int(&len).unwrap_or(32).clamp(1, 128) as usize;
+    let mut bytes = vec![0u8; n];
+    {
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut bytes);
+    }
+    v_str(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// `hash.verify(password, stored)` — Argon2id, against the stored PHC string.
+fn jwc_b_v1_hash_verify(password: V, stored: V) -> V {
+    jwc_b_verify_password(password, stored)
+}
+
+/// `hash.hmac_verify(payload, signature, secret)`. Note the argument order:
+/// `hash.hmac_sha256(payload, secret)` takes the message first, and this
+/// takes the message first too — but `jwc_b_hmac_sha256` is (key, msg).
+fn jwc_b_v1_hmac_verify(payload: V, signature: V, secret: V) -> V {
+    let expected = jwc_b_hmac_sha256(secret, payload);
+    jwc_b_v1_constant_time_eq(expected, signature)
+}

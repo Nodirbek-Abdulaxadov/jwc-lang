@@ -60,6 +60,10 @@ pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");
 pub const PRELUDE_REDIS: &str = include_str!("prelude/redis.rs.in");
 pub const PRELUDE_WS: &str = include_str!("prelude/ws.rs.in");
 pub const PRELUDE_HTTP: &str = include_str!("prelude/http.rs.in");
+/// The built-ins 1.0 introduced, which the restored 0.9 runtime has no
+/// counterpart for. Always included: they lean on nothing the base prelude
+/// does not already carry.
+pub const PRELUDE_V1: &str = include_str!("prelude/v1.rs.in");
 
 /// Suggest the closest entry in `candidates` to `target` via Levenshtein
 /// distance. Returns `None` when no candidate is within max(2, len/3) —
