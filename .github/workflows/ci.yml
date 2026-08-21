@@ -126,14 +126,14 @@ jobs:
       # `--features redis` because the sample's rate limiter is real now:
       # without the driver compiled in, `redis.rate_limit` raises and every
       # route answers 500.
-      - name: HTTP goldens and the raw valve
+      - name: HTTP goldens, the raw valve, and reserved physical names
         env:
           JWC_V1_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
           JWC_TEST_REDIS_URL: redis://127.0.0.1:6379
           CURSOR_SECRET: ci-cursor-secret
         run: >
           cargo test --features redis
-          --test http_golden --test raw_hatch -- --nocapture
+          --test http_golden --test raw_hatch --test reserved_names -- --nocapture
 
       - name: DDL applies
         env:

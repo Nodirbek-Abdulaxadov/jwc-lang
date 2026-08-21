@@ -1,0 +1,67 @@
+namespace app;
+
+--- A schema whose physical names are reserved SQL words, reached through
+--- `as "…"` — which is what a port onto an existing database needs.
+
+database App : Postgres;
+schema s of App;
+
+table Users of App.s as "user" {
+    id         bigint primary key identity;
+    email      varchar(255) unique;
+    created_at timestamptz default now();
+}
+
+--- `order` is reserved too, and it points at the reserved-named table, so
+--- this covers the foreign-key resolution as well.
+table Orders of App.s as "order" {
+    id      bigint primary key identity;
+    user_id bigint;
+    note    varchar(120);
+
+    foreign key (user_id) references App.s.Users (id) on delete cascade;
+}
+
+class NewUser {
+    email varchar(255) required;
+}
+
+service Accounts {
+    function register(req: NewUser) {
+        return insert into App.s.Users { ...$req } as { id, email };
+    }
+
+    function rename(id: bigint, email: text) {
+        return update App.s.Users
+            set email = $email
+            where id == $id
+            as { id, email }
+            first or throw NotFound("yo'q");
+    }
+
+    function remove(id: bigint) {
+        return delete from App.s.Users where id == $id as { id } first
+            or throw NotFound("yo'q");
+    }
+}
+
+routes "/accounts" {
+    route POST "" {
+        return created(json(Accounts.register(request.body() as NewUser)));
+    }
+}
+
+routes "/accounts/{id: bigint}" {
+    route PATCH "" {
+        let req = request.body() as NewUser;
+        return json(Accounts.rename(@id, $req.email));
+    }
+
+    route DELETE "" {
+        return json(Accounts.remove(@id));
+    }
+}
+
+function main() {
+    serve(8080);
+}

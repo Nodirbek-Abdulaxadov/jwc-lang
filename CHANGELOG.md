@@ -3,6 +3,54 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.901] — `as "…"` was unusable — 2026-08-21
+
+Two defects, both found porting MyWallet — a JWC backend written against
+0.9.x — to the 1.0 vocabulary. Both are on `as "physical_name"`, which
+exists so a program can keep the names a database already has, and which
+is therefore the first thing a port off an older version reaches for.
+MyWallet's four tables are `user`, `wallet`, `category` and `transaction`.
+
+### A foreign key could not name a renamed table
+
+The target's physical name was derived from the **reference** —
+`references App.public.Users` → `users` — instead of from the target,
+which had renamed itself to `user`. So the key did not resolve, and the
+diagnostic named a table the source never wrote:
+
+```
+error[E0422]: `public.users` is not a declared table
+   = help: every foreign key target must be declared in this program
+```
+
+against a program that declares exactly that table. Resolution now happens
+after every table is known, keyed on the declared name.
+
+jwc-shortener did not show this: it uses `as "…"` on both its tables and
+neither is a foreign-key target.
+
+### `RETURNING` did not quote a reserved physical name
+
+`RETURNING` exposes the target under its own name, and the projection was
+built against it unquoted:
+
+```sql
+INSERT INTO public."user" (…) RETURNING json_build_object('id', user.id)::text
+                                                          ^^^^ the USER function
+ERROR:  syntax error at or near "."
+```
+
+`user` there is the SQL `USER` function and the parser stops at the dot.
+Every read path already went through `quote_ident`; only this one did not,
+so the failure needed a write, a `RETURNING` projection and a reserved
+physical name all at once — which is an ordinary combination in a ported
+schema, and which made `POST /auth/register` a 500 that type-checked
+clean.
+
+Both are covered by `tests/reserved_names`, which drives insert, update
+and delete against a real Postgres through a table named `user` that
+another table points at.
+
 ## [0.9.9] — porting a real app to 1.0 — 2026-08-21
 
 Seven defects, all found by porting jwc-shortener — a service that has been

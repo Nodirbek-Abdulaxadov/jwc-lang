@@ -1,0 +1,50 @@
+--- A table renamed onto a reserved word — `as "user"` — through a write
+--- that returns.
+---
+--- Found porting MyWallet, whose four tables are `user`, `wallet`,
+--- `category` and `transaction`. `RETURNING` exposes the target under its
+--- own name, and the projection built `json_build_object('id', user.id)`
+--- unquoted: `user` there is the SQL `USER` function and the parser stops
+--- at the dot — "syntax error at or near `.`", on a register endpoint that
+--- type-checked clean. Every read path already quoted; only this one did
+--- not, so it needed a write, a projection and a reserved name together.
+namespace reserved_physical_name;
+
+database App : Postgres;
+schema s of App;
+
+table Users of App.s as "user" {
+    id         bigint primary key identity;
+    email      varchar(255) unique;
+    created_at timestamptz default now();
+}
+
+class NewUser {
+    email varchar(255) required;
+}
+
+service Accounts {
+    function register(req: NewUser) {
+        return insert into App.s.Users { ...$req } as { id, email, created_at };
+    }
+
+    function rename(id: bigint, req: NewUser) {
+        return update App.s.Users
+            set email = $req.email
+            where id == $id
+            as { id, email }
+            first or throw NotFound("yo'q");
+    }
+
+    function remove(id: bigint) {
+        delete from App.s.Users where id == $id as { id } first
+            or throw NotFound("yo'q");
+    }
+
+    function one(id: bigint) {
+        return select U from App.s.Users
+            where id == $id
+            as { id, email }
+            first or throw NotFound("yo'q");
+    }
+}

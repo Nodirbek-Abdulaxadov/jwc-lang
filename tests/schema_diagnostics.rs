@@ -435,3 +435,69 @@ fn env_and_the_coercions_are_allowed_in_init() {
         "`env()` and the coercions are what `init()` is for: {diags:?}"
     );
 }
+
+/// A foreign key resolves its target by **declared** name, not by the
+/// snake_case of it — schema.md §4.2 with names.md §4.2.
+///
+/// `as "…"` exists so a program can keep the physical names a database
+/// already has, which is exactly what porting an existing service needs.
+/// Deriving the target's physical name from the reference instead of from
+/// the target made that unusable: a table renamed with `as` could not be
+/// pointed at, and the diagnostic named a table the source never wrote.
+///
+/// Found porting MyWallet, whose four tables are `user`, `wallet`,
+/// `category` and `transaction` — singular, and `user` is a reserved word.
+#[test]
+fn a_foreign_key_finds_a_target_that_renamed_itself() {
+    let src = with(
+        "table Users of App.s as \"user\" {\n\
+         \x20   id bigint primary key identity;\n\
+         }\n\
+         table Wallets of App.s as \"wallet\" {\n\
+         \x20   id bigint primary key identity;\n\
+         \x20   user_id bigint;\n\
+         \x20   foreign key (user_id) references App.s.Users (id) on delete cascade;\n\
+         }\n",
+    );
+    let diags = diagnose(&src);
+    assert!(
+        !diags.iter().any(|(c, _, _)| c == "E0422"),
+        "the target is declared right there:\n{diags:#?}"
+    );
+
+    // And the emitted DDL points at the physical name, quoted because
+    // `user` is reserved.
+    let dir = std::env::temp_dir().join("jwc_v1_fk_rename");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tmp dir");
+    std::fs::write(dir.join("a.jwc"), &src).expect("write");
+    let ws = Workspace::load(&dir).expect("load");
+    let built = model::build(&ws);
+    let sql: String = jwc::ddl::emit(&built.model)
+        .iter()
+        .map(|s| s.sql.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        sql.contains("REFERENCES s.\"user\" (id)"),
+        "expected the overridden name in the reference:\n{sql}"
+    );
+}
+
+/// A target that genuinely is not declared still says so, and says it with
+/// the name the source wrote.
+#[test]
+fn e0422_names_the_undeclared_target() {
+    expect(
+        &with(
+            "table Wallets of App.s {\n\
+             \x20   id bigint primary key identity;\n\
+             \x20   user_id bigint;\n\
+             \x20   foreign key (user_id) references App.s.Users (id);\n\
+             }\n",
+        ),
+        "E0422",
+        "not a declared table",
+    );
+}

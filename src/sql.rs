@@ -522,8 +522,16 @@ impl<'a> Builder<'a> {
 impl TableObj {
     /// The alias `RETURNING` sees. Postgres exposes the target table under
     /// its own name there unless the statement aliased it.
+    ///
+    /// Quoted, because that name can be a reserved word. A table declared
+    /// `as "user"` produced `RETURNING json_build_object('id', user.id)`,
+    /// where `user` is the SQL `USER` function and the parser stops at the
+    /// dot: "syntax error at or near `.`". Every read path already went
+    /// through `quote_ident`; only this one did not, so the failure needed
+    /// a write, a `RETURNING` projection, and a reserved physical name all
+    /// at once — which is an ordinary combination for a ported schema.
     fn physical_alias(&self) -> String {
-        self.physical.clone()
+        quote_ident(&self.physical)
     }
 }
 
