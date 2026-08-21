@@ -224,12 +224,11 @@ pub fn reject_unsupported(ws: &Workspace) -> Result<()> {
     let mut blocked: Vec<String> = Vec::new();
     for file in &ws.files {
         for decl in &file.program.decls {
-            match decl {
-                // A view is a named query the model resolves like a table;
-                // `query_sql` lowers reads through it, but the DDL that
-                // creates it is `jwc migrate`'s job, not the binary's.
-                Decl::View(d) => blocked.push(format!("view `{}`", d.name.name)),
-                _ => {}
+            // A view is a named query the model resolves like a table;
+            // `query_sql` lowers reads through it, but the DDL that creates
+            // it is `jwc migrate`'s job, not the binary's.
+            if let Decl::View(d) = decl {
+                blocked.push(format!("view `{}`", d.name.name));
             }
         }
     }
@@ -483,8 +482,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     let needs_db = ctx.used.iter().any(|f| defines(super::PRELUDE_DB, f));
     // A page's cursor is HMAC-signed, and the HMAC lives in the crypto
     // prelude — so a program that pages needs it even if it hashes nothing.
-    let needs_crypto =
-        ctx.uses_page || ctx.used.iter().any(|f| defines(super::PRELUDE_CRYPTO, f));
+    let needs_crypto = ctx.uses_page || ctx.used.iter().any(|f| defines(super::PRELUDE_CRYPTO, f));
     let needs_redis = ctx.used.iter().any(|f| defines(super::PRELUDE_REDIS, f));
     let needs_http_client = ctx.used.iter().any(|f| defines(super::PRELUDE_HTTP, f));
 
@@ -516,8 +514,8 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // shims are the seam — forwarding when the prelude is present, honest
     // about its absence when it is not.
     out.push_str("\n// ── operational shims ──\n");
-    let needs_regex = (uses_regex && ctx.uses_validation)
-        || ctx.used.contains("jwc_b_v1_string_matches");
+    let needs_regex =
+        (uses_regex && ctx.uses_validation) || ctx.used.contains("jwc_b_v1_string_matches");
     out.push_str(if needs_regex {
         "fn jwc_regex_is_match(pattern: &str, s: &str) -> bool {\n\
          \x20   // A rule whose regex does not compile passes rather than\n\
@@ -663,7 +661,10 @@ fn emit_classes(out: &mut String, symbols: &crate::symbols::Symbols) -> bool {
                 _ => ("JwcTy::Text", String::new()),
             };
             out.push_str("        JwcClassField {\n");
-            out.push_str(&format!("            name: {},\n", rust_str_literal(&f.name)));
+            out.push_str(&format!(
+                "            name: {},\n",
+                rust_str_literal(&f.name)
+            ));
             out.push_str(&format!("            ty: {ty},\n"));
             out.push_str(&format!("            class: {},\n", rust_str_literal(&cls)));
             out.push_str(&format!(
@@ -731,7 +732,9 @@ fn emit_cursor_secret(out: &mut String, ws: &Workspace) {
             ExprKind::Coalesce { lhs, rhs } => {
                 let l = render(lhs)?;
                 let r = render(rhs)?;
-                Some(format!("{{ let __s = {l}; if __s.is_empty() {{ {r} }} else {{ __s }} }}"))
+                Some(format!(
+                    "{{ let __s = {l}; if __s.is_empty() {{ {r} }} else {{ __s }} }}"
+                ))
             }
             _ => None,
         }
@@ -1460,7 +1463,6 @@ fn render_block(body: &Block, indent: usize, ctx: &mut Ctx) -> Result<String> {
     Ok(out)
 }
 
-
 /// Lower a `select` to the statement the interpreter would send.
 ///
 /// `query_sql` does the work: it produces the SQL text, the parameter list
@@ -1722,19 +1724,29 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
                     sets.push((name.clone(), crate::sql::SetValue::Sql(e.clone())));
                 }
                 Assign::Bound(_, span) => {
-                    sets.push((name.clone(), crate::sql::SetValue::Bound(placeholder(*span))));
+                    sets.push((
+                        name.clone(),
+                        crate::sql::SetValue::Bound(placeholder(*span)),
+                    ));
                     preset.push(format!("__set{i}.clone()"));
                 }
                 Assign::Optional(_, span) | Assign::Spread(_, _, span) => {
                     let bit = opt_slots.iter().position(|s| *s == i).unwrap_or(0);
                     if mask & (1 << bit) != 0 {
-                        sets.push((name.clone(), crate::sql::SetValue::Bound(placeholder(*span))));
+                        sets.push((
+                            name.clone(),
+                            crate::sql::SetValue::Bound(placeholder(*span)),
+                        ));
                         preset.push(format!("__set{i}.clone()"));
                     }
                 }
             }
         }
-        let arm = if mask == variants - 1 { "_" } else { &mask.to_string() };
+        let arm = if mask == variants - 1 {
+            "_"
+        } else {
+            &mask.to_string()
+        };
         if sets.is_empty() {
             // writes.md §3.3 — every assignment skipped. The interpreter
             // falls back to selecting the row as it stands rather than

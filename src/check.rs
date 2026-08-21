@@ -2969,9 +2969,7 @@ impl<'a> Checker<'a> {
             .filter_map(|f| match f {
                 ProjField::Expr { alias, value, .. } => match &*value.kind {
                     ExprKind::Name(n) => Some((alias.name.clone(), n.name.clone())),
-                    ExprKind::Field { field, .. } => {
-                        Some((alias.name.clone(), field.name.clone()))
-                    }
+                    ExprKind::Field { field, .. } => Some((alias.name.clone(), field.name.clone())),
                     _ => None,
                 },
                 _ => None,

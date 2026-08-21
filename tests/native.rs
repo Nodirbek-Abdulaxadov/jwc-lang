@@ -271,7 +271,10 @@ fn a_1_0_builtin_the_0_9_prelude_lacked_is_implemented_not_refused() {
         "jwc_b_v1_array_sum",
         "jwc_b_v1_request_query_all",
     ] {
-        assert!(v1.contains(&format!("fn {f}(")), "{f} should be implemented");
+        assert!(
+            v1.contains(&format!("fn {f}(")),
+            "{f} should be implemented"
+        );
     }
     // And the ones that are genuinely absent are still named, not guessed at.
     let _ = rust;
