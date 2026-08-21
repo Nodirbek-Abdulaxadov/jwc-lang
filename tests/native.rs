@@ -369,3 +369,88 @@ fn a_page_reads_its_cursor_once_and_signs_the_next_one() {
         "`page` should be lowered, not refused"
     );
 }
+
+#[test]
+fn a_spread_takes_its_columns_from_the_declared_type() {
+    let dir = std::env::temp_dir().join("jwc_native_spread");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tmp");
+    std::fs::write(
+        dir.join("a.jwc"),
+        "namespace a;\n\
+         database App : Postgres;\n\
+         schema s of App;\n\
+         table Notes of App.s { id int primary key identity; title varchar(80); body text; }\n\
+         class Patch { title varchar(80); body text; }\n\
+         service NoteService {\n\
+         \x20   function update(id: int, req: Patch) {\n\
+         \x20       return update App.s.Notes set ...$req where id == $id \
+         as { id, title, body } first or throw NotFound(\"yo'q\");\n\
+         \x20   }\n\
+         }\n\
+         function main() { serve(8080); }\n",
+    )
+    .expect("write");
+
+    let ws = jwc::workspace::Workspace::load(&dir).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // types.md §9.2 — a spread sets the fields the value actually carries.
+    // Which fields it *could* carry is the source's declared type, and a
+    // typed function parameter declares one outright.
+    assert!(
+        rust.matches("UPDATE s.notes").count() == 3,
+        "two spreadable columns is three non-empty combinations: {rust}"
+    );
+    // §6.5 — absent and null are different. A spread sets a column the
+    // caller sent as null *to* null; `=?` skips it. So the presence test is
+    // "does the record carry the key", not "is the value non-null".
+    assert!(
+        rust.contains("jwc_has_field("),
+        "presence, not nullity: {rust}"
+    );
+}
+
+#[test]
+fn with_headers_replaces_rather_than_appends() {
+    let dir = std::env::temp_dir().join("jwc_native_with_headers");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tmp");
+    std::fs::write(
+        dir.join("a.jwc"),
+        "namespace a;\n\
+         routes \"/x\" {\n\
+         \x20   route GET \"\" {\n\
+         \x20       return json({ ok: true }) with { \"Cache-Control\": \"public\" };\n\
+         \x20   }\n\
+         }\n\
+         function main() { serve(8080); }\n",
+    )
+    .expect("write");
+
+    let ws = jwc::workspace::Workspace::load(&dir).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(rust.contains("jwc_with_headers("));
+    // routing.md §6.2 — replace, not append. A builder has already stamped
+    // `content-type`, and two of them is a malformed message that clients
+    // resolve inconsistently.
+    let prelude = jwc::native::PRELUDE_BASE;
+    let body = prelude
+        .split("fn jwc_with_headers(")
+        .nth(1)
+        .expect("the helper should be in the prelude");
+    assert!(
+        body.contains("headers.remove(&e)"),
+        "an existing header of the same name should be replaced"
+    );
+    assert!(
+        body.contains("content_type"),
+        "`with {{ \"Content-Type\": … }}` has to beat the builder's, which \
+         is a field of its own on the response"
+    );
+}

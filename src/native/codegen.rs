@@ -284,6 +284,11 @@ struct Ctx<'a> {
     /// Set by a `page` query. The cursor is HMAC-signed, so the crate needs
     /// the crypto prelude whether or not the program hashes anything.
     uses_page: bool,
+    /// Locals whose type is a declared `class`, from the two places the AST
+    /// says so outright: a typed function parameter, and
+    /// `let x = request.body() as C`. A `...` spread's columns come from
+    /// this, and nothing else in the pass needs a type.
+    classes_in_scope: BTreeMap<String, String>,
     mode: Mode,
     /// How many `transaction { }` blocks enclose the statement being
     /// emitted. Each one is an `async` block, so a `return` inside it has
@@ -300,6 +305,10 @@ impl Ctx<'_> {
     fn field_list_id(&mut self, fields: Vec<String>) -> usize {
         let next = self.field_lists.len();
         *self.field_lists.entry(fields).or_insert(next)
+    }
+
+    fn class_of_local(&self, name: &str) -> Option<String> {
+        self.classes_in_scope.get(name).cloned()
     }
 
     /// errors.md §4.3 — the status a declared error carries. Resolved here,
@@ -356,6 +365,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         used: std::collections::BTreeSet::new(),
         uses_validation: false,
         uses_page: false,
+        classes_in_scope: BTreeMap::new(),
         mode: Mode::Value,
         tx_depth: 0,
     };
@@ -790,11 +800,18 @@ fn emit_function(
 ) -> Result<()> {
     ctx.mode = Mode::Value;
     out.push_str(&format!("\nasync fn {}(", user_fn(name)));
+    ctx.classes_in_scope.clear();
     for (i, p) in f.params.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
         out.push_str(&format!("{}: V", local(&p.name.name)));
+        if let crate::ast::TypeKind::Named(n) = &p.ty.kind {
+            let named = n.text();
+            if ctx.symbols.classes.contains_key(&named) {
+                ctx.classes_in_scope.insert(p.name.name.clone(), named);
+            }
+        }
     }
     out.push_str(") -> JwcResult {\n");
     emit_block(out, &f.body, 1, ctx)?;
@@ -1049,6 +1066,11 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
     let pad = "    ".repeat(indent);
     match stmt {
         Stmt::Let { name, value, .. } => {
+            // The other place the AST names a local's class outright.
+            if let ExprKind::Cast { ty, .. } = &*value.kind {
+                ctx.classes_in_scope
+                    .insert(name.name.clone(), ty.name.clone());
+            }
             let v = emit_expr(value, ctx)?;
             out.push_str(&format!("{pad}let mut {} = {v};\n", local(&name.name)));
         }
@@ -1352,8 +1374,22 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
             }
         }
 
-        ExprKind::WithHeaders { .. } => {
-            bail!("native build does not cover `with {{ … }}` headers yet")
+        // routing.md §6.2 — the header suffix attaches to the response it
+        // decorates, so it survives being nested in `created(...)`.
+        ExprKind::WithHeaders { value, headers } => {
+            let v = emit_expr(value, ctx)?;
+            let mut parts = Vec::new();
+            for h in headers {
+                let ObjEntry::Field { key, value, .. } = h else {
+                    bail!("a `with {{ … }}` entry is a header name and a value")
+                };
+                let hv = emit_expr(value, ctx)?;
+                parts.push(format!(
+                    "({}.to_string(), body_string({hv}))",
+                    rust_str_literal(&key.name)
+                ));
+            }
+            format!("jwc_with_headers({v}, vec![{}])", parts.join(", "))
         }
         ExprKind::Cookie { .. } => bail!("native build does not cover `cookie(...)` yet"),
         // routing.md §5.2 — the cast is what validates.
@@ -1503,8 +1539,12 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
     enum Assign {
         Sql(Expr),
         Bound(String, crate::token::Span),
-        /// `=?` — writes.md §3.3.
+        /// `=?` — writes.md §3.3. Set unless the value is null.
         Optional(String, crate::token::Span),
+        /// A field of a `...` spread — types.md §9.2. Set when the source
+        /// **carries** the key, which is not the same as the value being
+        /// non-null: an explicit null sets the column to null.
+        Spread(String, String, crate::token::Span),
     }
 
     let mut plan: Vec<(String, Assign)> = Vec::new();
@@ -1534,17 +1574,59 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
                     },
                 ));
             }
-            SetItem::Spread { .. } => bail!(
-                "native build does not lower `...` spread in an `update` — the \
-                 assignment list depends on the value's shape at run time. \
-                 `jwc serve` runs it."
-            ),
+            // types.md §9.2 — a spread sets the fields the value actually
+            // carries. *Which* fields it could carry is the source's
+            // declared type, and that is in the AST: a function parameter
+            // declares one, and `let x = request.body() as C` names one.
+            SetItem::Spread {
+                source,
+                except,
+                span,
+            } => {
+                let Some(class) = ctx.class_of_local(&source.name) else {
+                    bail!(
+                        "native build cannot see the shape of `${}` — a `...` \
+                         spread's columns come from the value's declared type, \
+                         and this one is neither a typed parameter nor a \
+                         `request.body() as <Class>`. `jwc serve` reads the \
+                         shape at run time.",
+                        source.name
+                    );
+                };
+                let Some(sym) = ctx.symbols.classes.get(&class).cloned() else {
+                    bail!("`{class}` is not a declared class");
+                };
+                for f in &sym.fields {
+                    if except.iter().any(|x| x.name == f.name) {
+                        continue;
+                    }
+                    // A field the table has no column for is dropped by the
+                    // builder anyway; dropping it here keeps it out of the
+                    // presence mask, which is what bounds the combinations.
+                    plan.push((
+                        f.name.clone(),
+                        Assign::Spread(
+                            format!(
+                                "jwc_get_field(&{}, {})",
+                                local(&source.name),
+                                rust_str_literal(&f.name)
+                            ),
+                            format!(
+                                "jwc_has_field(&{}, {})",
+                                local(&source.name),
+                                rust_str_literal(&f.name)
+                            ),
+                            *span,
+                        ),
+                    ));
+                }
+            }
         }
     }
 
     let optional_count = plan
         .iter()
-        .filter(|(_, a)| matches!(a, Assign::Optional(..)))
+        .filter(|(_, a)| matches!(a, Assign::Optional(..) | Assign::Spread(..)))
         .count();
 
     // The ordinary case: one statement, one set of binds.
@@ -1556,7 +1638,9 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
                     name.clone(),
                     match a {
                         Assign::Sql(e) => crate::sql::SetValue::Sql(e.clone()),
-                        Assign::Bound(_, span) | Assign::Optional(_, span) => {
+                        Assign::Bound(_, span)
+                        | Assign::Optional(_, span)
+                        | Assign::Spread(_, _, span) => {
                             crate::sql::SetValue::Bound(placeholder(*span))
                         }
                     },
@@ -1583,7 +1667,7 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
     if optional_count > MAX_OPTIONAL_SETS {
         bail!(
             "native build does not lower an `update` with {optional_count} \
-             `=?` assignments — each combination is a different statement \
+             optional assignments — each combination is a different statement \
              and this compiles all of them, which stops being reasonable \
              past {MAX_OPTIONAL_SETS}. `jwc serve` builds the statement per \
              request."
@@ -1603,6 +1687,11 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
                     opt_slots.push(i);
                 }
             }
+            Assign::Spread(v, present, _) => {
+                out.push_str(&format!("    let __set{i} = {v};\n"));
+                out.push_str(&format!("    let __has{i} = {present};\n"));
+                opt_slots.push(i);
+            }
             Assign::Sql(_) => {}
         }
     }
@@ -1612,8 +1701,12 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
     // which is what the interpreter's `if *optional && v.is_null()` does.
     out.push_str("    let __mask: usize = 0");
     for (bit, slot) in opt_slots.iter().enumerate() {
+        let test = match plan.get(*slot).map(|(_, a)| a) {
+            Some(Assign::Spread(..)) => format!("__has{slot}"),
+            _ => format!("!matches!(__set{slot}, V::Null)"),
+        };
         out.push_str(&format!(
-            "\n        | if matches!(__set{slot}, V::Null) {{ 0 }} else {{ 1 << {bit} }}"
+            "\n        | if {test} {{ 1 << {bit} }} else {{ 0 }}"
         ));
     }
     out.push_str(";\n");
@@ -1632,7 +1725,7 @@ fn emit_update(u: &crate::ast::UpdateExpr, ctx: &mut Ctx) -> Result<String> {
                     sets.push((name.clone(), crate::sql::SetValue::Bound(placeholder(*span))));
                     preset.push(format!("__set{i}.clone()"));
                 }
-                Assign::Optional(_, span) => {
+                Assign::Optional(_, span) | Assign::Spread(_, _, span) => {
                     let bit = opt_slots.iter().position(|s| *s == i).unwrap_or(0);
                     if mask & (1 << bit) != 0 {
                         sets.push((name.clone(), crate::sql::SetValue::Bound(placeholder(*span))));

@@ -878,6 +878,23 @@ fn jwc_gte(a: &V, b: &V) -> bool { matches!(jwc_cmp(a, b), Some(std::cmp::Orderi
 
 // --- field / array helpers ---------------------------------------------------
 
+/// Does this value **carry** the key, as distinct from carrying null under
+/// it? types.md §6.5 — absent and null are different, and `...$req` spreads
+/// only the fields the body actually sent (§9.2): an explicit null sets the
+/// column to null, an absent key leaves it alone. `jwc_get_field` collapses
+/// the two, so the spread needs its own predicate.
+fn jwc_has_field(v: &V, k: &str) -> bool {
+    match v {
+        V::Object(m) => m.contains_key(k),
+        V::Record { field_names, .. } => field_names.iter().any(|f| f.as_ref() == k),
+        V::RawJson(s) | V::Str(s) => match jwc_from_json(s) {
+            Ok(parsed) => jwc_has_field(&parsed, k),
+            Err(_) => false,
+        },
+        _ => false,
+    }
+}
+
 fn jwc_get_field(v: &V, k: &str) -> V {
     match v {
         V::Object(m) => m.get(k).cloned().unwrap_or(V::Null),
@@ -1986,6 +2003,56 @@ fn jwc_drain_extra_headers() -> Vec<(String, String)> {
             Err(_) => Vec::new(),
         })
         .unwrap_or_default()
+}
+
+/// `<response> with { … }` — routing.md §6.2.
+///
+/// **Replace**, not append. A builder has already stamped `content-type`,
+/// and two of them is a malformed message (RFC 9110 §8.3) that clients
+/// resolve inconsistently — `with { "Content-Type": … }` has to win, or it
+/// does nothing an author can rely on. `cookie(...)` is the append form and
+/// is a separate expression.
+fn jwc_with_headers(resp: V, add: Vec<(String, String)>) -> V {
+    let mut m = match resp {
+        V::Object(o) if matches!(o.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) => (*o).clone(),
+        // Not a response: the interpreter queues the headers on the request
+        // instead, and the after-chain merges them onto whatever is sent.
+        other => {
+            for (k, v) in add {
+                jwc_b_response_set_header(v_str(k), v_str(v));
+            }
+            return other;
+        }
+    };
+    let mut headers = match m.get("headers") {
+        Some(V::Object(h)) => (**h).clone(),
+        _ => JwcObj::default(),
+    };
+    for (k, v) in add {
+        let lower = k.to_ascii_lowercase();
+        let existing: Vec<String> = headers
+            .keys()
+            .filter(|h| h.to_ascii_lowercase() == lower)
+            .cloned()
+            .collect();
+        for e in existing {
+            headers.remove(&e);
+        }
+        headers.insert(k, v_str(v));
+    }
+    // `content_type` is a field of its own on the response object and
+    // `jwc_to_response` reads it *before* the headers map, so a
+    // `with { "Content-Type": … }` that only landed in the map would be
+    // overwritten by the builder's.
+    if let Some(ct) = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.clone())
+    {
+        m.insert("content_type".to_string(), ct);
+    }
+    m.insert("headers".to_string(), v_obj(headers));
+    v_obj(m)
 }
 
 /// Merge headers onto a finished response value.

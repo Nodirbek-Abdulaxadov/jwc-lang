@@ -50,6 +50,34 @@ is emitted as the *expression*, not the value `jwc build` happened to
 read: it is almost always `env("CURSOR_SECRET")`, and baking that in
 would sign every deployment's cursors with the builder's secret.
 
+### `...` spread in an `update`, and `with { … }`
+
+Both were refused; both are lowered now, and with them all three
+applications in the ecosystem — jwc-shortener, MyWallet and task-tracker
+— build natively and answer `jwc serve` byte for byte.
+
+**The spread.** Which columns `set ...$req` writes is the fields the
+value actually carries. *Which fields it could carry* is the source's
+declared type, and the AST says that outright in the two places a spread
+source comes from: a typed function parameter, and
+`let x = request.body() as C`. No type inference — codegen reads the
+declaration and enumerates from there, the same mask the `=?` case uses.
+
+The presence test is different, though, and it matters: `=?` skips when
+the value is null, a spread skips when the key is **absent**. types.md
+§6.5 keeps the two apart and §9.2 relies on it — a body that sends
+`"note": null` clears the column, one that omits `note` leaves it. So
+the prelude grew `jwc_has_field`, which `jwc_get_field` cannot answer
+because it returns null for both.
+
+**`with { … }`** replaces a header of the same name rather than appending
+(routing.md §6.2). A builder has already stamped `content-type`, and two
+of them is a malformed message (RFC 9110 §8.3) that clients resolve
+inconsistently. `content_type` is its own field on the response object
+and `jwc_to_response` reads it before the header map, so a
+`with { "Content-Type": … }` that only landed in the map would lose to
+the builder's — it is copied across.
+
 ### Also in the native backend
 
 - `jwt.sign(claims, secret, ttl_minutes)` — the prelude had the 0.9
