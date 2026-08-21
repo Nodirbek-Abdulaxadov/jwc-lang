@@ -1,0 +1,29 @@
+namespace content_responses;
+
+-- routing.md §6.5 — the non-JSON body. The media type decides how the
+-- bytes are framed, so it is a literal and the body is `text`; neither is
+-- something a runtime value gets to choose.
+
+routes "/pages" {
+
+    route GET "ok" {
+        return content("text/html", "<h1>salom</h1>");
+    }
+
+    -- Composes with any status, because a response is a value (§6.5.4).
+    route GET "gone" {
+        return statusCode(404, content("text/plain", "yo'q"));
+    }
+
+    -- A runtime media type would let a request decide the framing.
+    route GET "computed" {
+        let m = "text/" + "html";
+        return content($m, "<h1>salom</h1>");    -- expect: E0735
+    }
+
+    -- `content` sends its body verbatim, so a record here would be sent
+    -- as nothing a client could read. `json` is the builder for that.
+    route GET "record" {
+        return content("application/json", { a: 1 });    -- expect: E0736
+    }
+}

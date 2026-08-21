@@ -1480,6 +1480,8 @@ fn collect_block<'a>(block: &'a Block, label: &str, out: &mut Vec<Site<'a>>) {
 
 fn collect_stmt<'a>(s: &'a Stmt, label: &str, out: &mut Vec<Site<'a>>) {
     match s {
+        // No expression, so no query site.
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Expr { expr: value, .. } => {
             collect_expr(value, label, out)
         }

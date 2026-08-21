@@ -127,7 +127,10 @@ middleware Audit {
 
 5.1 An `after` block runs for **every** outcome: normal response,
 short-circuit, and error — including the response the `errorHandler`
-produced. `response.status()` is therefore the status actually being sent.
+produced. `response.status()` is therefore the status actually being sent,
+and `response.duration_ms()` / `response.duration_us()` measure the whole
+request — the chain included, not just the handler. All three are `E0734`
+anywhere else, because outside an `after` block there is no response yet.
 
 5.2 `after` runs **after** the `errorHandler`, and after any transaction has
 been committed or rolled back (writes §7.2).

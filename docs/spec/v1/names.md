@@ -60,8 +60,9 @@ A reserved-word list would forbid the language's own examples.
 The words with grammatical meaning are:
 
 ```
-after     and       as        asc       by        cascade   catch     check
-class     conflict  cross     database  default   delete    desc      do
+after     and       as        asc       break     by        cascade   catch
+check     class     conflict  continue  cross     database  default   delete
+desc      do
 else      enum      error     errorHandler         except   exists    false
 first     for       foreign   from      full      function  group     having
 identity  if        ilike     import    in        index     inner     insert

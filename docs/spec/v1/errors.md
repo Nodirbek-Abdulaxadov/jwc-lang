@@ -266,6 +266,11 @@ raises `E`.
 Every path through the block must `return`, `throw`, `break` or `continue`
 (`E1020`). It cannot produce a substitute value.
 
+`break` and `continue` are what make a retry loop expressible: a conflict on
+a generated key is handled by going round again, and with only `return` and
+`throw` available the handler could not stay inside the loop. Both are
+`E0813` outside a `for` body.
+
 This is the clause that keeps the language from growing a second error
 channel: postfix `catch` handles-and-leaves, so a route cannot use it to
 build result-plumbing, and the "routes contain no logic" rule survives.

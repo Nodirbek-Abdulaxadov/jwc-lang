@@ -113,6 +113,17 @@ server rather than falling back to the default — the fallback would put the
 listener on every interface, which is the opposite of what writing the key
 was reaching for, and nothing outside the process would show it.
 
+3.2.2 The **port** is not a `server { }` key: it is the argument of
+`serve(port)` in `main()` (builtins §2). `main` is evaluated at boot, so the
+argument is an expression and not a literal —
+`serve(int(env("PORT") ?? "8080"))` is the ordinary form. A `main` that
+raises stops the boot and says so rather than listening somewhere nobody
+asked for; a program with no `main` listens on 8080.
+
+`jwc serve --port N` overrides the program's own value, for a local run that
+needs a different port than the one the program ships with. Without the flag
+the program decides.
+
 3.3 **`trusted_proxies` is the whole of the `client_ip` rule** (#15).
 Empty (the default) means `X-Forwarded-For` is ignored and
 `request.client_ip()` returns the socket peer. Non-empty means the header is
@@ -167,10 +178,17 @@ them at a known path before reading anyone's source, and a liveness probe
 that depends on the application having remembered to write one is a
 deployment that restarts for the wrong reasons.
 
-4.0.3 A **declared route wins**. The built-in answers only when routing
-found nothing, so a program that writes its own `/metrics` keeps it.
-Shadowing a declared route with a built-in would remove someone's endpoint
-in a point release, and the symptom is a dashboard that goes blank.
+4.0.3 A **declared route wins**, where declared means the path was written
+down: a program whose source contains `routes "/metrics"` keeps it.
+Shadowing that with a built-in would remove someone's endpoint in a point
+release, and the symptom is a dashboard that goes blank.
+
+A route that matches one of these names only through a **path parameter**
+does not win — the built-in answers and the route does not run. `/{code}`
+spans one segment and therefore spans `/readyz`, and a redirect service
+that declares it has not written a readiness probe; it has written a
+redirect. §4.0.2 promises an operator these three paths without reading
+the source, and a pattern nobody aimed at them must not take that away.
 
 4.0.4 `/healthz` touches no dependency. Liveness answers "should the
 supervisor kill this process", and wiring a database check into it turns a

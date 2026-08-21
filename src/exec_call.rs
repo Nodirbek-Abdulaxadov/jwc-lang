@@ -244,6 +244,24 @@ impl<'a> Vm<'a> {
                 r
             }
 
+            // routing.md §6.5 — verbatim body, declared type. Every other
+            // builder JSON-encodes, which for an HTML page means the browser
+            // is handed a quoted string.
+            "content" => Value::Response {
+                status: 200,
+                body: s(1),
+                headers: vec![("content-type".into(), crate::check::normalize_media(&s(0)))],
+            },
+
+            // The program's own statement of where it listens. `main` is
+            // evaluated at boot precisely so this runs — the argument is an
+            // expression, and `serve(int(env("PORT") ?? "8080"))` is the
+            // form the spec's sample uses.
+            "serve" => {
+                self.serve_port = Some(n(0) as u16);
+                Value::Null
+            }
+
             // ---- env and coercions (types.md §7.2)
             "env" => match std::env::var(s(0)) {
                 Ok(v) => Value::Text(v),
@@ -515,6 +533,13 @@ impl<'a> Vm<'a> {
             "request.peer_ip" => Value::Text(self.request.peer_ip.clone()),
             "request.client_ip" => Value::Text(self.request.client_ip.clone()),
             "response.status" => Value::Int(self.response_status.unwrap_or(200) as i64),
+            "response.duration_us" => Value::Bigint(self.response_micros.unwrap_or(0) as i64),
+            // Whole milliseconds, truncated. A route that answers in 400us
+            // reports 0, which is the honest answer at this resolution and
+            // is why `duration_us` exists next to it.
+            "response.duration_ms" => {
+                Value::Bigint((self.response_micros.unwrap_or(0) / 1_000) as i64)
+            }
             "response.set_header" | "response.add_header" => {
                 self.extra_headers.push((s(0), s(1)));
                 Value::Null

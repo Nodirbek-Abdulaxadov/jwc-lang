@@ -202,10 +202,12 @@ is a self-DoS. `W0602` warns on `request.path()` in a rate-limit key.
 | `tooManyRequests(m)` | 429 | `{"error": m}` |
 | `internalError()` | 500 | `{"error":"internal_error"}` |
 | `statusCode(n, v)` | `n` | `v` |
+| `content(mime, body)` | 200 | `body`, verbatim, as `mime` (§6.5) |
 
 A builder taking a message always produces `{"error": <message>}` with
-`application/json`. There is no bare-string response body; the content type
-and the shape are the same on every path.
+`application/json`. Every builder in this table except `content` JSON-encodes
+its payload, so the content type and the shape are the same on every path
+that carries data.
 
 ### 6.2 `with { }` headers (#10)
 
@@ -215,6 +217,11 @@ return created(json($invoice)) with { "Location": $url, "X-Request-Id": $rid };
 
 `with { }` is a suffix on any response expression. Keys are literal strings;
 values are `text`. A key given twice in one `with` is `E0730`.
+
+A key that the builder already set — `Content-Type` on any JSON response,
+`Location` on a `redirect` — is **replaced**, matched case-insensitively.
+Appending instead would send the header twice, which is a malformed message
+(RFC 9110 §8.3) and is resolved differently by different clients.
 
 Repeated headers (`Set-Cookie`) use a separate call, because a JSON object
 cannot carry a duplicate key:
@@ -232,6 +239,41 @@ return json($x) with { "Cache-Control": "no-store" } cookie("sid", $sid, { http_
 `response.status()` are legal only inside an `after` block
 (middleware §5).
 
+### 6.5 `content(mime, body)` — the non-JSON body
+
+```jwc
+namespace pages;
+
+function landing_page() -> text {
+    return "<!doctype html><title>1kb.uz</title>";
+}
+
+routes "/" {
+    route GET "" {
+        return content("text/html", landing_page());
+    }
+}
+```
+
+6.5.1 `body` is `text` and is sent **verbatim** — not JSON-encoded. A body
+of any other type is `E0736`; build the string first.
+
+6.5.2 `mime` is a **string literal**, so the framing of a response can never
+depend on a runtime value and `jwc openapi` can name the media type. A
+non-literal is `E0735`.
+
+6.5.3 A `text/*` media type with no `charset` gets `; charset=utf-8`
+appended. Everything else is sent exactly as written.
+
+6.5.4 `content` produces 200. Other statuses compose, because a response is
+a value (§6.1): `statusCode(404, content("text/html", not_found_page()))`.
+
+6.5.5 This is the only builder that does not answer `application/json`, and
+it exists for the endpoints a browser or a crawler reads directly — a
+landing page, `robots.txt`, `sitemap.xml`, an SVG card. An API payload is
+`json`, and `content` is not a way to hand-roll one: the compiler checks
+nothing about the bytes inside the string.
+
 ### 6.4 What a route may return
 
 A route body must end every path in `return <Response>` (`E0731`).
@@ -242,7 +284,9 @@ the mistake this catches, and the fix is `return json($account);`.
 
 ## 7. Content negotiation
 
-7.1 Every JSON response is `application/json; charset=utf-8`.
+7.1 Every JSON response is `application/json; charset=utf-8`. A
+`content(mime, body)` response (§6.5) carries the media type it declared,
+and is the only exception.
 
 7.2 A request body that is not `application/json` where a body is read is
 `415`. A body read on a method that carries none (`GET`, `HEAD`, `DELETE`
@@ -274,6 +318,8 @@ against which `E0710`/`E0711` are read.
 | `E0732` | route returns a non-`Response` |
 | `E0733` | a header value is not text |
 | `E0734` | `response.status()` outside an `after` block |
+| `E0735` | `content(...)` media type is not a string literal |
+| `E0736` | `content(...)` body is not `text` |
 | `E0900` | removed keyword (§11 below) |
 | `W0602` | `request.path()` in a rate-limit key |
 

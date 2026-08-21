@@ -42,6 +42,10 @@ pub struct RouteResponse {
     pub status: u16,
     /// The payload's type. `Ty::Void` for a bodiless response.
     pub payload: Ty,
+    /// The media type of the body, when the route pinned one with
+    /// `content(mime, body)`. `None` is `application/json` — the default
+    /// every other builder produces (routing.md §7.1).
+    pub media: Option<String>,
 }
 
 pub fn check(ws: &Workspace, sym: &Symbols, model: &crate::model::SchemaModel) -> Checked {
@@ -84,6 +88,7 @@ pub fn check_with(
         untyped_params: HashSet::new(),
         saw_private: false,
         body: BodyKind::Free,
+        loop_depth: 0,
         current_fn: None,
         returns: Vec::new(),
     };
@@ -160,6 +165,9 @@ struct Checker<'a> {
     /// Set while checking a projection; records that it named a private
     /// column.
     saw_private: bool,
+    /// How many `for` bodies enclose the statement being checked. `break`
+    /// and `continue` need one (errors.md §7.2).
+    loop_depth: u32,
     body: BodyKind,
     current_fn: Option<String>,
     returns: Vec<(Ty, Span)>,
@@ -220,11 +228,16 @@ impl<'a> Checker<'a> {
     /// tooling.md §5.2 — what this route answers, recorded where the type
     /// is already known. Outside a route there is nothing to attach it to.
     fn record_response(&mut self, status: u16, payload: Ty) {
+        self.record_response_as(status, payload, None);
+    }
+
+    fn record_response_as(&mut self, status: u16, payload: Ty, media: Option<String>) {
         let Some(route) = &self.route else { return };
         self.responses.push(RouteResponse {
             route: route.clone(),
             status,
             payload,
+            media,
         });
     }
 
@@ -594,6 +607,22 @@ impl<'a> Checker<'a> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Break { span, .. } | Stmt::Continue { span, .. } => {
+                if self.loop_depth == 0 {
+                    let word = match s {
+                        Stmt::Break { .. } => "break",
+                        _ => "continue",
+                    };
+                    self.err_note(
+                        *span,
+                        "E0813",
+                        format!("`{word}` outside a `for` loop"),
+                        "there is no loop to leave; `return` or `throw` leaves the \
+                         function",
+                        "errors.md §7.2",
+                    );
+                }
+            }
             Stmt::Let {
                 name, ty, value, ..
             } => {
@@ -737,9 +766,11 @@ impl<'a> Checker<'a> {
                 }
                 self.push_scope();
                 self.declare(&binder.name, elem, binder.span);
+                self.loop_depth += 1;
                 for s in body {
                     self.stmt(s);
                 }
+                self.loop_depth -= 1;
                 self.pop_scope();
             }
             Stmt::Return { value, span, .. } => {
@@ -2046,6 +2077,45 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Response
             }
+            // routing.md §6.5 — the one body that is not JSON. The media
+            // type is a literal so `jwc openapi` can name it and so a
+            // runtime value can never decide how a body is framed.
+            "content" => {
+                arity(self, 2);
+                let mime = match exprs.first().map(|e| &*e.kind) {
+                    Some(ExprKind::Str(m)) | Some(ExprKind::RawStr(m)) => Some(m.clone()),
+                    _ => {
+                        self.err_note(
+                            exprs.first().map(|e| e.span).unwrap_or(span),
+                            "E0735",
+                            "`content(...)` media type must be a string literal",
+                            "the media type decides how the body is framed, so it \
+                             cannot depend on a runtime value",
+                            "routing.md §6.5",
+                        );
+                        None
+                    }
+                };
+                // A record here means the author reached for `content` where
+                // `json` was meant; JSON-encoding it silently would produce a
+                // body that disagrees with the declared type.
+                let body = args.get(1).cloned().unwrap_or(Ty::Unknown);
+                let body_is_text = matches!(body, Ty::Scalar(sc) if sc.is_text());
+                if !matches!(body, Ty::Unknown) && !body_is_text {
+                    self.err_note(
+                        exprs.get(1).map(|e| e.span).unwrap_or(span),
+                        "E0736",
+                        format!("`content(...)` body is `{body}`, not `text`"),
+                        "a `content` body is sent verbatim: build the string first, \
+                         or use `json(...)` for a structured body",
+                        "routing.md §6.5",
+                    );
+                }
+                if let Some(m) = &mime {
+                    self.record_response_as(200, Ty::text(), Some(normalize_media(m)));
+                }
+                Ty::Response
+            }
             "cookie" => Ty::Response,
             "serve" => {
                 arity(self, 1);
@@ -2337,6 +2407,24 @@ impl<'a> Checker<'a> {
                 }
                 Ty::int()
             }
+            // The other half of what an `after` block exists to observe.
+            // Without it the only honest thing a telemetry row could say
+            // about latency was nothing — jwc-shortener wrote a hardcoded
+            // zero into every one of 1.48M rows, and every percentile
+            // derived from them was a zero.
+            "response.duration_ms" | "response.duration_us" => {
+                arity(self, 0);
+                if self.body != BodyKind::After {
+                    self.err_note(
+                        span,
+                        "E0734",
+                        format!("`{path}()` outside an `after` block"),
+                        "the request is not finished yet",
+                        "middleware.md §5.1",
+                    );
+                }
+                Ty::bigint()
+            }
             "response.set_header" | "response.add_header" => {
                 arity(self, 2);
                 if self.body != BodyKind::After {
@@ -2613,7 +2701,16 @@ impl<'a> Checker<'a> {
         };
 
         if s.first {
-            row.opt()
+            // A whole-table aggregate answers exactly one row — `count`
+            // of an empty table is 0, not no row — so `first` on it is not
+            // optional. Typing it `T?` forced an `or throw` on a branch
+            // that cannot be taken, which is how a real null check learns
+            // to be ignored.
+            if s.group_by.is_empty() && s.joins.is_empty() && is_whole_table_aggregate(s) {
+                row
+            } else {
+                row.opt()
+            }
         } else if s.page.is_some() {
             // queries.md §9.3 — the envelope, with `items` keeping whatever
             // the query produced.
@@ -2826,6 +2923,17 @@ impl<'a> Checker<'a> {
             return;
         }
         if s.group_by.is_empty() {
+            // queries.md §6.2 allows the whole-table aggregate: "a query
+            // that has a `group by`, **or that has exactly one binding and
+            // no non-aggregate projection fields**". Only the first half
+            // was implemented, so `as { total: count(A.id) }` — the way
+            // you ask a table how many rows it has — was rejected.
+            //
+            // A join is excluded because a bare join fans out and the
+            // count would silently be of the joined rows (§6.2, W0502).
+            if plain.is_empty() && s.joins.is_empty() {
+                return;
+            }
             self.err_note(
                 p.span,
                 "E0530",
@@ -3004,6 +3112,12 @@ impl<'a> Checker<'a> {
     /// queries.md §5.2 — `first` needs a deterministic result.
     fn check_first_determinism(&mut self, s: &SelectExpr, object: &str, span: Span) {
         if !s.order_by.is_empty() {
+            return;
+        }
+        // A whole-table aggregate returns exactly one row, so `first` on it
+        // is already deterministic and there is no ordering to add — the
+        // rule is about which of several rows you get.
+        if s.group_by.is_empty() && s.joins.is_empty() && is_whole_table_aggregate(s) {
             return;
         }
         let Some(filter) = &s.filter else {
@@ -3914,9 +4028,22 @@ fn narrowing_target(cond: &Expr, want_is_null: bool) -> Option<String> {
 
 /// Every path through the block ends in `return`, `throw`, `break` or
 /// `continue` (types.md §6.6).
+/// A projection that is entirely aggregates — `as { total: count(x) }`.
+/// Such a query answers exactly one row whatever the table holds.
+fn is_whole_table_aggregate(s: &SelectExpr) -> bool {
+    let Some(p) = &s.projection else { return false };
+    !p.fields.is_empty()
+        && p.fields.iter().all(|f| match f {
+            ProjField::Expr { value, .. } => contains_aggregate(value),
+            _ => false,
+        })
+}
+
 fn diverges(b: &Block) -> bool {
     b.iter().any(|s| match s {
-        Stmt::Return { .. } | Stmt::Throw { .. } => true,
+        Stmt::Return { .. } | Stmt::Throw { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {
+            true
+        }
         Stmt::If {
             then, otherwise, ..
         } => otherwise
@@ -3949,6 +4076,19 @@ fn untyped_path_params(path: &str) -> Vec<String> {
 /// A literal status in `statusCode(n, v)` / `redirect(n, url)`. A computed
 /// one has no single answer to document, and is left out rather than
 /// guessed.
+/// `text/*` without a charset is the one ambiguity worth closing at the
+/// language rather than leaving to each caller: a browser that guesses the
+/// encoding of an HTML page guesses wrong on the first non-ASCII byte.
+/// Everything else is passed through exactly as written.
+pub fn normalize_media(mime: &str) -> String {
+    let m = mime.trim();
+    if m.starts_with("text/") && !m.to_ascii_lowercase().contains("charset=") {
+        format!("{m}; charset=utf-8")
+    } else {
+        m.to_string()
+    }
+}
+
 fn literal_status(e: &Expr) -> Option<u16> {
     match &*e.kind {
         // The lexer keeps integer literals as text so a `bigint` never

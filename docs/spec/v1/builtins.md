@@ -40,10 +40,11 @@ middleware or `after` block.
 | `unauthorized(m)` / `forbidden(m)` / `notFound(m)` / `conflict(m)` / `tooManyRequests(m)` | `Response` | `{"error": m}` |
 | `internalError()` | `Response` | 500 |
 | `statusCode(n, v)` | `Response` | explicit status |
+| `content(mime, body)` | `Response` | 200; `body` verbatim as `mime`, routing §6.5 |
 | `cookie(name, value, opts)` | `Response` suffix | routing §6.2 |
 | `env(k)` | `text?` | process environment; read once at boot |
 | `raw(sql, …)` | `Raw[]` | writes §6 |
-| `serve(port)` | `Void` | only in `main()` |
+| `serve(port)` | `Void` | only in `main()`; the port the listener binds (config §3.2.2) |
 
 Coercions — types §7.2 decides their failure class:
 
@@ -169,6 +170,7 @@ not brute-forceable and is the standard construction.
 | `request.client_ip()` | `inet` | proxy-aware only with `trusted_proxies` |
 | `request.id()` | `text` | per-request id, also in every log line |
 | `response.status()` | `int` | `after` only |
+| `response.duration_ms()` / `response.duration_us()` | `bigint` | `after` only; whole request, middleware included |
 | `response.set_header(k, v)` | `Void` | `after` only |
 | `response.add_header(k, v)` | `Void` | `after` only |
 | `context.<key>` | declared type | middleware §6 |

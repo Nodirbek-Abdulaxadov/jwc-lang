@@ -43,6 +43,8 @@ pub enum Flow {
     Return(Value),
     /// A bare `return;` — ends an `after` block (middleware.md §5.3).
     ReturnVoid,
+    Break,
+    Continue,
 }
 
 #[derive(Debug, Clone)]
@@ -254,7 +256,16 @@ pub struct Vm<'a> {
     context: HashMap<String, Value>,
     /// Set once an `after` block is running: `response.status()` reads it.
     pub response_status: Option<u16>,
+    /// Wall time from the start of `handle` to the response being ready,
+    /// in microseconds. Set alongside `response_status`, and for the same
+    /// reason: an `after` block exists to observe the response, and how
+    /// long it took is half of what there is to observe.
+    pub response_micros: Option<u64>,
     pub extra_headers: Vec<(String, String)>,
+    /// Set by `serve(port)` in `main()`. The call is the program's own
+    /// declaration of where it listens, so `main` is evaluated at boot and
+    /// this is what it left behind.
+    pub serve_port: Option<u16>,
     depth: u32,
 }
 
@@ -269,6 +280,8 @@ impl<'a> Vm<'a> {
             params: HashMap::new(),
             context: HashMap::new(),
             response_status: None,
+            response_micros: None,
+            serve_port: None,
             extra_headers: Vec::new(),
             depth: 0,
         }
@@ -410,12 +423,17 @@ impl<'a> Vm<'a> {
                     let r = Box::pin(self.run_stmts(body)).await;
                     self.pop();
                     match r? {
-                        Flow::Normal => {}
+                        Flow::Normal | Flow::Continue => {}
+                        // The loop is what `break` leaves; anything else
+                        // is leaving the function and keeps travelling.
+                        Flow::Break => break,
                         other => return Ok(other),
                     }
                 }
                 Ok(Flow::Normal)
             }
+            Stmt::Break { .. } => Ok(Flow::Break),
+            Stmt::Continue { .. } => Ok(Flow::Continue),
             Stmt::Return { value, .. } => match value {
                 None => Ok(Flow::ReturnVoid),
                 Some(v) => {
@@ -629,6 +647,38 @@ impl<'a> Vm<'a> {
                 }
             }
 
+            // A `+` chain is folded iteratively. Recursing down it costs
+            // one nesting level per term, and a page assembled from its
+            // own lines is hundreds of terms — `MAX_DEPTH` turned the
+            // landing page of jwc-shortener into a 500. Depth is a guard
+            // against unbounded recursion, and a left-leaning chain is a
+            // loop wearing a tree's shape.
+            ExprKind::Binary {
+                op: BinOp::Add,
+                lhs,
+                rhs,
+            } => {
+                let mut terms = vec![rhs];
+                let mut node = lhs;
+                while let ExprKind::Binary {
+                    op: BinOp::Add,
+                    lhs: l,
+                    rhs: r,
+                } = &*node.kind
+                {
+                    terms.push(r);
+                    node = l;
+                }
+                let mut acc = self.eval(node).await?;
+                for t in terms.iter().rev() {
+                    let b = self.eval(t).await?;
+                    acc = add(&acc, &b).ok_or_else(|| {
+                        fault(format!("`+` is not defined here: {acc:?} + {b:?}"))
+                    })?;
+                }
+                acc
+            }
+
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs).await?,
 
             ExprKind::Ternary {
@@ -783,9 +833,27 @@ impl<'a> Vm<'a> {
                         collected.push((key.name.clone(), value_text(&hv)));
                     }
                 }
+                // Replace, not append. A builder has already stamped
+                // `content-type`, and two of them is a malformed message
+                // (RFC 9110 §8.3) that clients resolve inconsistently —
+                // `with { "Content-Type": … }` has to win, or it does
+                // nothing an author can rely on. `cookie(...)` is the
+                // append form and is a separate expression.
+                let replace_into = |headers: &mut Vec<(String, String)>| {
+                    for (k, val) in collected {
+                        let lower = k.to_ascii_lowercase();
+                        match headers
+                            .iter_mut()
+                            .find(|(h, _)| h.to_ascii_lowercase() == lower)
+                        {
+                            Some(slot) => slot.1 = val,
+                            None => headers.push((k, val)),
+                        }
+                    }
+                };
                 match &mut v {
-                    Value::Response { headers, .. } => headers.extend(collected),
-                    _ => self.extra_headers.extend(collected),
+                    Value::Response { headers, .. } => replace_into(headers),
+                    _ => replace_into(&mut self.extra_headers),
                 }
                 v
             }
@@ -867,7 +935,9 @@ impl<'a> Vm<'a> {
             }
             BinOp::Add => add(&a, &b)
                 .ok_or_else(|| fault(format!("`+` is not defined here: {a:?} + {b:?}")))?,
-            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+            BinOp::Sub => sub(&a, &b)
+                .ok_or_else(|| fault(format!("`-` is not defined here: {a:?} - {b:?}")))?,
+            BinOp::Mul | BinOp::Div | BinOp::Rem => {
                 numeric_op(op, &a, &b).ok_or_else(|| fault("arithmetic is not defined here"))?
             }
             BinOp::Like | BinOp::ILike => Value::Bool(false),
@@ -975,6 +1045,35 @@ fn add(a: &Value, b: &Value) -> Option<Value> {
     numeric_op(BinOp::Add, a, b)
 }
 
+/// types.md §12.2 — `timestamptz - interval → timestamptz` and
+/// `timestamptz - timestamptz → interval`.
+///
+/// `+` carried its timestamptz overload from the start; `-` fell straight
+/// through to `numeric_op` and faulted with "arithmetic is not defined
+/// here". The checker allowed both, so the program compiled and then
+/// answered 500 — and `date.now() - date.hours(24)` is how you ask for
+/// "the last day", which is the more common direction of the two.
+fn sub(a: &Value, b: &Value) -> Option<Value> {
+    if let (Value::Timestamptz(t), Value::Interval(i)) = (a, b) {
+        // Negated in seconds, not in the text: `parse_iso_duration` reads
+        // unsigned digits after a leading `P`, so neither `-PT24H` nor
+        // `PT-24H` would come back.
+        return Some(Value::Timestamptz(shift_secs(t, -parse_iso_duration(i)?)?));
+    }
+    if let (Value::Timestamptz(x), Value::Timestamptz(y)) = (a, b) {
+        use chrono::{DateTime, Utc};
+        let l: DateTime<Utc> = x.parse().ok()?;
+        let r: DateTime<Utc> = y.parse().ok()?;
+        // Seconds, because that is the resolution `parse_iso_duration`
+        // reads back and the only one the pair can agree on.
+        return Some(Value::Interval(format!(
+            "PT{}S",
+            l.signed_duration_since(r).num_seconds()
+        )));
+    }
+    numeric_op(BinOp::Sub, a, b)
+}
+
 fn numeric_op(op: BinOp, a: &Value, b: &Value) -> Option<Value> {
     // Integer arithmetic stays exact; anything with a decimal goes through
     // an exact decimal string so money never touches a float.
@@ -1025,10 +1124,13 @@ fn format_decimal(v: f64) -> String {
 /// `timestamptz + interval`. Intervals are carried in ISO 8601 form, which
 /// is also their wire form (types.md §2.1).
 fn shift(ts: &str, interval: &str) -> Option<String> {
+    shift_secs(ts, parse_iso_duration(interval)?)
+}
+
+fn shift_secs(ts: &str, secs: i64) -> Option<String> {
     use chrono::{DateTime, Duration, Utc};
     let base: DateTime<Utc> = ts.parse().ok()?;
-    let d = parse_iso_duration(interval)?;
-    let out = base.checked_add_signed(Duration::seconds(d))?;
+    let out = base.checked_add_signed(Duration::seconds(secs))?;
     Some(out.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
 }
 

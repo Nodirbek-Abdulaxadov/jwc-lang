@@ -1568,6 +1568,27 @@ impl Parser {
             });
         }
 
+        // Loop control. `at_word` and not a keyword check, because v1 has
+        // no reserved words (names.md §2.6): `break` is a legal column
+        // name, and only the statement position gives it this meaning.
+        if self.at_word("break") && self.peek_at(1).is(&Tok::Semi) {
+            self.bump();
+            let end = self.expect(Tok::Semi)?.span;
+            return Ok(Stmt::Break {
+                at,
+                span: start.to(end),
+            });
+        }
+
+        if self.at_word("continue") && self.peek_at(1).is(&Tok::Semi) {
+            self.bump();
+            let end = self.expect(Tok::Semi)?.span;
+            return Ok(Stmt::Continue {
+                at,
+                span: start.to(end),
+            });
+        }
+
         if self.at_word("return") {
             self.bump();
             let value = if self.at(&Tok::Semi) {

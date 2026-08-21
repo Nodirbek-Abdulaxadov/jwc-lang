@@ -567,6 +567,8 @@ impl Writer {
     fn stmt(&mut self, s: &Stmt) {
         self.attached(stmt_attached(s));
         match s {
+            Stmt::Break { .. } => self.line("break;"),
+            Stmt::Continue { .. } => self.line("continue;"),
             Stmt::Let {
                 name, ty, value, ..
             } => {
@@ -985,7 +987,9 @@ impl Writer {
 
 fn stmt_attached(s: &Stmt) -> &Attached {
     match s {
-        Stmt::Let { at, .. }
+        Stmt::Break { at, .. }
+        | Stmt::Continue { at, .. }
+        | Stmt::Let { at, .. }
         | Stmt::Assign { at, .. }
         | Stmt::If { at, .. }
         | Stmt::For { at, .. }

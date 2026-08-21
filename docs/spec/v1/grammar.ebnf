@@ -172,12 +172,15 @@ scalar_type     = "bigint" | "int" | "smallint"
 block           = "{" { statement } "}" ;
 statement       = let_stmt | assign_stmt | if_stmt | for_stmt
                 | return_stmt | throw_stmt | transaction_stmt
+                | break_stmt | continue_stmt
                 | assert_stmt | expr_stmt | block ;
 
 let_stmt        = "let" ident [ ":" type_ref ] "=" expr ";" ;
 assign_stmt     = ( local_ref | "context" "." ident ) "=" expr ";" ;
 if_stmt         = "if" "(" expr ")" block [ "else" ( if_stmt | block ) ] ;
 for_stmt        = "for" "(" ident "in" expr ")" block ;   (* binder is bare, refs use $ *)
+break_stmt      = "break" ";" ;                            (* inside for only *)
+continue_stmt   = "continue" ";" ;
 return_stmt     = "return" [ expr ] ";" ;
 throw_stmt      = "throw" ident [ "(" [ expr_list ] ")" ] ";" ;
 transaction_stmt= "transaction" block ;

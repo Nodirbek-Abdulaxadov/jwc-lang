@@ -663,11 +663,31 @@ fn with_cors(program: &Program, origin: Option<&str>, mut r: Response) -> Respon
 }
 
 async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
-    let Some((route, binds)) = match_route(&program, &incoming.method, &incoming.path) else {
-        // Only once nothing declared matched. A program that writes its own
-        // `/metrics` keeps it — the source is the authority, and silently
-        // shadowing a declared route with a built-in would be the kind of
-        // thing you find out about from a dashboard that went blank.
+    // Started before the chain, so `response.duration_*()` reports the
+    // whole request — middleware included — and not just the handler.
+    let started_at = std::time::Instant::now();
+    let matched = match_route(&program, &incoming.method, &incoming.path);
+
+    // config.md §4.0.3 — a declared route wins, and "declared" means the
+    // path was **written down**. A program that writes its own `/metrics`
+    // keeps it; a wildcard that happens to span the name does not.
+    //
+    // The difference is not academic. jwc-shortener declares `/{code}` for
+    // its redirects, which matches one segment and therefore matched
+    // `/readyz` too — so the readiness probe answered 404 with the
+    // shortener's "no such link", every pod stayed out of rotation, and
+    // nothing in the source mentioned `/readyz` for an operator to find.
+    // §4.0.2 promises these three are reachable before reading anyone's
+    // source; a pattern nobody aimed at them must not take that away.
+    let shadows_operational = matched.as_ref().is_some_and(|(_, binds)| !binds.is_empty());
+    if shadows_operational {
+        if let Some(r) = operational(&program, &incoming).await {
+            return r;
+        }
+    }
+
+    let Some((route, binds)) = matched else {
+        // Only once nothing declared matched.
         if let Some(r) = operational(&program, &incoming).await {
             return r;
         }
@@ -721,6 +741,9 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
                 break;
             }
             Ok(Flow::Normal) => {}
+            // A middleware body is not a loop; the checker rejects both
+            // before they reach here (E0813).
+            Ok(Flow::Break) | Ok(Flow::Continue) => {}
             Err(a) => {
                 raised = Some(a);
                 break;
@@ -756,6 +779,7 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
         };
         let Some(after) = &m.after else { continue };
         vm.response_status = Some(response.status);
+        vm.response_micros = Some(started_at.elapsed().as_micros() as u64);
         vm.extra_headers.clear();
         let _ = vm.run_body(after).await;
         // §5.4 — an `after` block may add headers, never change the status
@@ -916,6 +940,46 @@ fn percent_decode(s: &str) -> String {
 /// The socket is the only thing this adds: routing, path parsing, the body
 /// buffer, middleware, the error model and the after chain all live in
 /// `handle`, which is what the golden tests drive directly.
+/// The port `main()`'s `serve(...)` asked for.
+///
+/// The call had never been evaluated: `main` was parsed, type-checked for
+/// arity, and then ignored, so the listener took the CLI default and a
+/// program asking for 3000 silently got 8080. `serve(int(env("PORT") ??
+/// "8080"))` — the form the spec's own sample uses — could not work at all.
+///
+/// `main` is an ordinary body, so it runs on an ordinary Vm. A program with
+/// no `main`, or one whose `main` never reaches `serve`, keeps 8080.
+pub async fn declared_port(program: &Arc<Program>) -> Result<u16> {
+    const FALLBACK: u16 = 8080;
+    let Some(main) = program.functions.get("main") else {
+        return Ok(FALLBACK);
+    };
+
+    // `main` runs before any request exists. The synthetic one carries the
+    // shape the Vm needs and nothing a handler would read.
+    let request = Arc::new(crate::exec::Request {
+        method: "BOOT".into(),
+        path: "/".into(),
+        route: "/".into(),
+        headers: Default::default(),
+        query: Vec::new(),
+        body: String::new(),
+        peer_ip: "127.0.0.1".into(),
+        client_ip: "127.0.0.1".into(),
+        id: "boot".into(),
+    });
+    let mut vm = crate::exec::Vm::new(program, request);
+    // A `main` that raises is a boot failure and says so, rather than
+    // listening on a port nobody asked for.
+    vm.run_block(&main.body).await.map_err(|e| match e {
+        crate::exec::Abort::Thrown(t) => {
+            anyhow!("main() raised {} at boot: {}", t.error, t.message())
+        }
+        crate::exec::Abort::Fault(f) => anyhow!("main() failed at boot: {f}"),
+    })?;
+    Ok(vm.serve_port.unwrap_or(FALLBACK))
+}
+
 pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     // A `tls { }` whose `cert`/`key` did not resolve — an unset
     // `env("TLS_CERT_PATH")`, most often — must stop the boot. Reading it

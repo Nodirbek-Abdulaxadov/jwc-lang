@@ -339,6 +339,8 @@ fn ty_ref(t: &TypeRef, out: &mut Vec<(String, Span)>) {
 fn block(b: &Block, out: &mut Vec<(String, Span)>) {
     for s in b {
         match s {
+            // No expression to walk.
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Let { ty, value, .. } => {
                 if let Some(t) = ty {
                     ty_ref(t, out);

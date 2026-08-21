@@ -567,7 +567,7 @@ pub fn routes(path: PathBuf) -> Result<()> {
 }
 
 /// `jwc v1 serve <path> --port N` — run the program.
-pub fn serve(path: PathBuf, port: u16, skip_schema_check: bool, dev: bool) -> Result<()> {
+pub fn serve(path: PathBuf, port: Option<u16>, skip_schema_check: bool, dev: bool) -> Result<()> {
     let ws = crate::workspace::Workspace::load(&path)?;
     let program = std::sync::Arc::new(crate::serve::load(&ws)?);
     let snap = crate::snapshot::of(&crate::model::build(&ws).model);
@@ -611,6 +611,16 @@ pub fn serve(path: PathBuf, port: u16, skip_schema_check: bool, dev: bool) -> Re
                  this is a development switch."
             );
         }
+        // `serve(port)` in `main()` is where the program says where it
+        // listens, and until now nothing evaluated it: the listener took
+        // the CLI default and a program asking for 3000 silently got 8080.
+        // `main` is an ordinary body, so it runs on an ordinary Vm — which
+        // is also what makes `serve(int(env("PORT") ?? "8080"))`, the form
+        // the spec's own sample uses, mean anything.
+        let port = match port {
+            Some(p) => p,
+            None => crate::serve::declared_port(&program).await?,
+        };
         println!("{} routes", program.routes.len());
         crate::serve::serve(program, port).await
     })

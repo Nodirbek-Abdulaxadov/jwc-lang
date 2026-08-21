@@ -1,0 +1,42 @@
+namespace loop_control;
+
+-- errors.md §7.2 — `break` and `continue` are the two diverging forms that
+-- stay inside the loop, which is what a postfix `catch` on a retry needs.
+-- The spec named both from the start; neither existed.
+
+service Retry {
+    --- Insert under a generated key, going round again on a conflict.
+    --- With only `return` and `throw` available the handler could not stay
+    --- in the loop, and this function was not expressible.
+    function claim(name: text) -> bigint {
+        for (attempt in [1, 2, 3]) {
+            let row = insert into App.s.Orgs {
+                slug = $name + string.of($attempt),
+                name = $name
+            } as { id } catch Conflict (err) {
+                continue;
+            };
+            return $row.id;
+        }
+        throw Conflict("bo'sh slug topilmadi");
+    }
+
+    function first_live(names: text[]) -> text {
+        let found = "";
+        for (n in $names) {
+            if ($n != "") {
+                $found = $n;
+                break;
+            }
+        }
+        return $found;
+    }
+}
+
+function stray() -> int {
+    break;         -- expect: E0813
+}
+
+function stray_continue() -> int {
+    continue;      -- expect: E0813
+}

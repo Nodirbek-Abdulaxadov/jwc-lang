@@ -1,0 +1,39 @@
+namespace whole_table_aggregate;
+
+-- queries.md §6.2 — "a `group by`, **or** exactly one binding and no
+-- non-aggregate projection fields". Only the first half was implemented,
+-- so asking a table how many rows it has was `E0530`.
+
+service Counts {
+    --- No `group by`, no non-aggregate field, one binding: legal, and
+    --- `first` needs no `orderby` because the answer is one row for any
+    --- table, empty included.
+    function total() -> int {
+        let n = select O from App.s.Orgs
+            as { total: count(O.id) }
+            first;
+        return $n.total;
+    }
+
+    --- And the result is not optional: `count` of an empty table is 0, not
+    --- no row, so there is no null branch to guard. This function reading
+    --- `.total` with no `or throw` is the assertion.
+    function several() -> int {
+        let n = select M from App.s.Members
+            as {
+                rows:   count(M.account_id),
+                highest: max(M.account_id)
+            }
+            first;
+        return $n.rows;
+    }
+
+    --- A non-aggregate field alongside one still needs the `group by`,
+    --- and with it the query is no longer the one-row form, so `first`
+    --- wants an ordering again.
+    function mixed() {
+        return select O from App.s.Orgs    -- expect: E0520
+            as { slug, total: count(O.id) }    -- expect: E0530
+            first;
+    }
+}
