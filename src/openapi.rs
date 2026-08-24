@@ -40,7 +40,11 @@ pub fn document(input: &Input) -> Value {
     let mut paths: Map<String, Value> = Map::new();
     let mut used: BTreeSet<String> = BTreeSet::new();
 
-    let mut routes: Vec<&ResolvedRoute> = input.wired.routes.iter().collect();
+    // OpenAPI 3.1 has no way to describe a WebSocket, and emitting the
+    // upgrade as a `GET` that answers 200 would be a lie a client
+    // generator acts on. They are listed under `x-jwc-sockets` instead,
+    // so a reader of the document can at least see they exist.
+    let mut routes: Vec<&ResolvedRoute> = input.wired.routes.iter().filter(|r| !r.socket).collect();
     routes.sort_by(|a, b| (&a.pattern, &a.method).cmp(&(&b.pattern, &b.method)));
 
     for r in routes {
@@ -142,6 +146,25 @@ pub fn document(input: &Input) -> Value {
         json!({ "title": input.title, "version": input.version }),
     );
     doc.insert("paths".into(), Value::Object(paths));
+
+    // Not `paths`: OpenAPI cannot model them, and a reader who cannot see
+    // them at all concludes the service has no sockets.
+    let sockets: Vec<Value> = input
+        .wired
+        .routes
+        .iter()
+        .filter(|r| r.socket)
+        .map(|r| {
+            json!({
+                "path": r.pattern,
+                "middleware": r.chain.iter().collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    if !sockets.is_empty() {
+        doc.insert("x-jwc-sockets".into(), json!(sockets));
+    }
+
     if !schemas.is_empty() {
         doc.insert("components".into(), json!({ "schemas": schemas }));
     }

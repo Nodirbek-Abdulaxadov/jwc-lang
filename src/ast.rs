@@ -449,6 +449,36 @@ pub struct RoutesDecl {
     pub prefix_span: Span,
     pub uses: Vec<Ident>,
     pub routes: Vec<RouteDecl>,
+    /// `socket "…" { on open … }` — WebSocket endpoints, which share the
+    /// prefix and the `use` chain with their HTTP siblings.
+    pub sockets: Vec<SocketDecl>,
+    pub span: Span,
+}
+
+/// A WebSocket endpoint (routing.md §9).
+///
+/// The 0.9 form was `route WS "…" { … }` with a body that ran once per
+/// connection and called `ws_recv()` in a loop. 1.0 has no unbounded loop
+/// — `for` over a collection is the only iteration — and adding `while`
+/// just to serve sockets would be a worse trade than saying what a socket
+/// handler actually is: three moments in a connection's life.
+///
+/// So the body is not a loop, it is the three moments, and the runtime
+/// owns the loop. That also removes the failure mode a user-written
+/// receive loop has: one that forgets to break holds a task forever.
+#[derive(Clone, Debug)]
+pub struct SocketDecl {
+    pub at: Attached,
+    pub suffix: String,
+    pub suffix_span: Span,
+    pub uses: Vec<Ident>,
+    /// Once, after the upgrade succeeds.
+    pub on_open: Option<Block>,
+    /// Once per text frame. The binder holds the frame.
+    pub on_message: Option<(Ident, Block)>,
+    /// Once, however the connection ended — peer close, error or
+    /// `socket.close()`.
+    pub on_close: Option<Block>,
     pub span: Span,
 }
 

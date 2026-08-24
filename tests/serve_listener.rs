@@ -268,3 +268,161 @@ fn self_signed() -> Option<(String, String, tempfile::TempDir)> {
     }
     Some((cert.to_str()?.to_string(), key.to_str()?.to_string(), dir))
 }
+
+// ── sockets (routing.md §9) ────────────────────────────────────────────
+//
+// A socket is the other thing `serve::handle` cannot reach: the upgrade
+// happens in the axum layer, and everything after it is frames on a live
+// connection rather than a `Request` and a `Response`. So this speaks the
+// protocol.
+
+const SOCKET_APP: &str = "namespace s;\n\
+                          middleware NeedKey provides who: text {\n\
+                          \x20   let key = request.query(\"key\") or throw Unauthorized(\"kalit kerak\");\n\
+                          \x20   context.who = $key;\n\
+                          }\n\
+                          routes \"/live\" {\n\
+                          \x20   route GET \"health\" { return json({ ok: true }); }\n\
+                          \x20   socket \"echo/{room: text}\" use NeedKey {\n\
+                          \x20       on open { socket.send(\"salom \" + context.who + \" @\" + @room); }\n\
+                          \x20       on message (m) {\n\
+                          \x20           if ($m == \"bye\") { socket.close(); }\n\
+                          \x20           socket.send(\"echo: \" + $m);\n\
+                          \x20       }\n\
+                          \x20   }\n\
+                          }\n";
+
+/// A masked text frame, as a client must send.
+fn ws_text_frame(payload: &str) -> Vec<u8> {
+    let body = payload.as_bytes();
+    let mask = [0x37u8, 0xfa, 0x21, 0x3d];
+    let mut out = vec![0x81];
+    assert!(body.len() < 126, "test payloads stay in the short form");
+    out.push(0x80 | body.len() as u8);
+    out.extend_from_slice(&mask);
+    out.extend(body.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    out
+}
+
+/// One unmasked server frame: `(opcode, payload)`.
+fn ws_read_frame(s: &mut TcpStream) -> Option<(u8, String)> {
+    let mut head = [0u8; 2];
+    s.read_exact(&mut head).ok()?;
+    let opcode = head[0] & 0x0f;
+    let mut len = (head[1] & 0x7f) as usize;
+    if len == 126 {
+        let mut ext = [0u8; 2];
+        s.read_exact(&mut ext).ok()?;
+        len = u16::from_be_bytes(ext) as usize;
+    }
+    let mut body = vec![0u8; len];
+    s.read_exact(&mut body).ok()?;
+    Some((opcode, String::from_utf8_lossy(&body).to_string()))
+}
+
+fn upgrade(port: u16, target: &str) -> (TcpStream, String) {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    let req = format!(
+        "GET {target} HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).expect("write");
+
+    // Read exactly the head, byte at a time: anything more would eat into
+    // the first frame.
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if s.read_exact(&mut byte).is_err() {
+            break;
+        }
+        head.push(byte[0]);
+    }
+    (s, String::from_utf8_lossy(&head).to_string())
+}
+
+/// The whole point of `use` on a socket: the chain runs on the HTTP
+/// request, so a rejected client reads a status instead of getting a 101
+/// followed by an immediate close it has to guess about.
+#[test]
+fn middleware_refuses_a_socket_before_the_upgrade() {
+    let port = free_port();
+    boot(SOCKET_APP, port);
+
+    let (mut s, head) = upgrade(port, "/live/echo/lobby");
+    assert!(
+        head.starts_with("HTTP/1.1 401 "),
+        "the chain did not refuse: {head:?}"
+    );
+    let mut body = String::new();
+    let _ = s.read_to_string(&mut body);
+    assert!(body.contains("kalit kerak"), "wrong body: {body:?}");
+}
+
+#[test]
+fn a_socket_runs_open_then_message_and_close_ends_it() {
+    let port = free_port();
+    boot(SOCKET_APP, port);
+
+    let (mut s, head) = upgrade(port, "/live/echo/lobby?key=abc");
+    assert!(head.starts_with("HTTP/1.1 101 "), "no upgrade: {head:?}");
+
+    // `on open` — `context.who` from the chain and `@room` from the path.
+    assert_eq!(
+        ws_read_frame(&mut s).map(|(_, p)| p),
+        Some("salom abc @lobby".to_string())
+    );
+
+    s.write_all(&ws_text_frame("hello")).expect("write");
+    assert_eq!(
+        ws_read_frame(&mut s).map(|(_, p)| p),
+        Some("echo: hello".to_string())
+    );
+
+    // `socket.close()` runs before the `socket.send` after it, and both
+    // are queued — so the send is dropped and the close is what arrives.
+    s.write_all(&ws_text_frame("bye")).expect("write");
+    let (opcode, _) = ws_read_frame(&mut s).expect("a frame after `bye`");
+    assert_eq!(
+        opcode, 0x8,
+        "expected a close frame, got opcode {opcode:#x}"
+    );
+}
+
+/// The path exists; the request is wrong. A 404 would send the caller
+/// looking for a typo in a path that is right.
+#[test]
+fn a_plain_get_at_a_socket_path_is_a_400() {
+    let port = free_port();
+    boot(SOCKET_APP, port);
+
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    s.write_all(b"GET /live/echo/lobby?key=abc HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .expect("write");
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).expect("read");
+    assert!(
+        answer.starts_with("HTTP/1.1 400 "),
+        "expected 400: {answer:?}"
+    );
+    assert!(answer.contains("websocket"), "unhelpful body: {answer:?}");
+}
+
+/// A socket and its HTTP siblings share one `routes` block, and the
+/// sibling still answers.
+#[test]
+fn an_http_route_beside_a_socket_still_answers() {
+    let port = free_port();
+    boot(SOCKET_APP, port);
+
+    let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    s.write_all(b"GET /live/health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .expect("write");
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).expect("read");
+    assert!(answer.starts_with("HTTP/1.1 200 "), "{answer:?}");
+    assert!(answer.contains("{\"ok\":true}"), "{answer:?}");
+}

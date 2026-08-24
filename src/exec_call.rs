@@ -590,6 +590,23 @@ impl<'a> Vm<'a> {
             // `redis.*` and `mail.*` are handled ahead of this table, in
             // `redis_call` and `mail_call` — they are async. `cache.*` is
             // a mutex and a map, so it belongs here.
+            // ---- sockets (builtins.md §9). Queued, not written: the
+            // connection task owns the socket's write half, and a handler
+            // that panicked mid-frame would otherwise leave the peer
+            // reading a partial message forever.
+            "socket.send" => {
+                if let Some(out) = self.socket_out.as_mut() {
+                    out.push(crate::exec::SocketOut::Text(s(0)));
+                }
+                Value::Null
+            }
+            "socket.close" => {
+                if let Some(out) = self.socket_out.as_mut() {
+                    out.push(crate::exec::SocketOut::Close);
+                }
+                Value::Null
+            }
+
             "cache.get" => match crate::cache::get(&s(0)) {
                 Some(v) => Value::Text(v),
                 None => Value::Null,

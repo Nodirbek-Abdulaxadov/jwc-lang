@@ -305,7 +305,87 @@ against which `E0710`/`E0711` are read.
 
 ---
 
-## 9. Diagnostics introduced here
+## 9. Sockets
+
+### 9.1 Declaration
+
+A `socket` is a member of a `routes` block, beside its HTTP siblings. It
+shares the prefix and the `use` chain.
+
+```jwc no-compile
+routes "/live" use RequireAuth {
+    socket "rooms/{room: text}" use RequireMember {
+        on open {
+            socket.send("joined " + @room);
+        }
+
+        on message (text) {
+            socket.send("echo: " + $text);
+        }
+
+        on close {
+            -- released here, whatever ended the connection
+        }
+    }
+}
+```
+
+The three blocks are optional and each may appear at most once (`E0012`).
+A `socket` with none of them is `E0013`: the endpoint would accept the
+upgrade and then do nothing.
+
+The 0.9 form was `route WS "…" { … }` with one body that ran per
+connection and called `ws_recv()` in a loop. 1.0 has no unbounded loop —
+`for` over a collection is the only iteration — and adding `while` to
+serve sockets would be a worse trade than saying what a socket handler is:
+three moments in a connection's life. The runtime owns the loop, which
+also removes the failure mode a hand-written one has, where forgetting to
+break holds a task for the process's lifetime.
+
+### 9.2 Semantics
+
+| | |
+|---|---|
+| Method | the upgrade is a `GET`, so `route GET` on the same path is a duplicate (`E0710`) |
+| Middleware | runs **before** the upgrade, on the HTTP request |
+| A middleware that answers | the client gets that response; no upgrade happens |
+| `@param` | as on any route — a socket has a path |
+| `context.*` | set by the chain, readable in all three handlers, and it persists for the connection |
+| `request.route()` | the declared pattern, so §5.4's bounded cardinality still holds |
+| Locals | do not persist between handlers; `context` is what does |
+| `on message (m)` | `m : text` |
+| A binary frame | closes the connection — there is no text to bind, and `from_utf8_lossy` would hand the handler a string the peer never sent |
+| No `on message` | a text frame is dropped; a peer that speaks first is not an error |
+| A raise in a handler | ends that handler and closes the connection — there is no response to put an error in |
+| `after` blocks | do not run: an `after` block observes a response, and the response was the 101 |
+| A plain `GET` at a socket path | `400`, not `404` — the path exists, the request is wrong |
+
+Middleware running before the upgrade is the whole value of `use` on a
+socket: a rejected client reads a `401`, rather than getting a `101`
+followed by an immediate close it has to guess about.
+
+### 9.3 `socket.*`
+
+`socket.send(text)` and `socket.close()`, and only inside one of the three
+handlers (`E0225`).
+
+Both **queue**. The connection task writes what a handler produced once
+that handler returns, which is why `socket.close()` followed by
+`socket.send(...)` drops the send: the close came first. A handler that
+panics therefore cannot leave a half-written frame on the wire either.
+
+### 9.4 What is not here
+
+`OpenAPI` cannot describe a WebSocket, so `jwc openapi` lists sockets
+under `x-jwc-sockets` rather than emitting the upgrade as a `GET` that
+answers 200 — a lie a client generator would act on.
+
+Server-Sent Events are `DEFERRED-17`. 0.9 recognised `route SSE "…"`
+end-to-end in the parser and the validator and dispatched it to a stub, so
+a program could declare one, pass every check, and serve nothing. A
+half-implemented transport is worse than an absent one.
+
+## 10. Diagnostics introduced here
 
 | Code | Meaning |
 |---|---|
@@ -320,12 +400,17 @@ against which `E0710`/`E0711` are read.
 | `E0734` | `response.status()` outside an `after` block |
 | `E0735` | `content(...)` media type is not a string literal |
 | `E0736` | `content(...)` body is not `text` |
+| `E0011` | a `socket` member that is not `on open` / `on message (m)` / `on close` |
+| `E0012` | the same `on` handler declared twice |
+| `E0013` | a `socket` with no handlers at all |
+| `E0225` | `socket.*` outside a socket handler |
+| `E0811` | `return <value>` inside a socket handler |
 | `E0900` | removed keyword (§11 below) |
 | `W0602` | `request.path()` in a rate-limit key |
 
 ---
 
-## 10. `E0900` — the removed vocabulary
+## 11. `E0900` — the removed vocabulary
 
 Encountering a pre-1.0 keyword produces a dedicated diagnostic naming its
 replacement. There is no migration path and no compatibility flag; the old

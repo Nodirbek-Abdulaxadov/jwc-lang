@@ -546,12 +546,11 @@ pub fn routes(path: PathBuf) -> Result<()> {
         } else {
             r.chain.join(" → ")
         };
-        println!(
-            "{:<7} {:<width$}  {chain}",
-            r.method,
-            r.pattern,
-            width = width
-        );
+        // The upgrade is a GET on the wire, which is why the duplicate
+        // check compares it as one — but printing `GET` here would hide
+        // what the endpoint is.
+        let method = if r.socket { "WS" } else { r.method.as_str() };
+        println!("{method:<7} {:<width$}  {chain}", r.pattern, width = width);
         if !r.after.is_empty() {
             println!(
                 "{:<7} {:<width$}  after: {}",

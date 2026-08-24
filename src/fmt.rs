@@ -489,6 +489,51 @@ impl Writer {
             self.depth -= 1;
             self.line("}");
         }
+        for (i, sk) in n.sockets.iter().enumerate() {
+            if i > 0 || !n.routes.is_empty() {
+                self.blank();
+            }
+            self.attached(&sk.at);
+            let suses = if sk.uses.is_empty() {
+                String::new()
+            } else {
+                format!(" use {}", names(&sk.uses))
+            };
+            self.line(&format!("socket {}{suses} {{", quote(&sk.suffix)));
+            self.depth += 1;
+            let mut first = true;
+            if let Some(b) = &sk.on_open {
+                self.line("on open {");
+                self.depth += 1;
+                self.block(b);
+                self.depth -= 1;
+                self.line("}");
+                first = false;
+            }
+            if let Some((binder, b)) = &sk.on_message {
+                if !first {
+                    self.blank();
+                }
+                self.line(&format!("on message ({}) {{", binder.name));
+                self.depth += 1;
+                self.block(b);
+                self.depth -= 1;
+                self.line("}");
+                first = false;
+            }
+            if let Some(b) = &sk.on_close {
+                if !first {
+                    self.blank();
+                }
+                self.line("on close {");
+                self.depth += 1;
+                self.block(b);
+                self.depth -= 1;
+                self.line("}");
+            }
+            self.depth -= 1;
+            self.line("}");
+        }
         self.depth -= 1;
         self.line("}");
     }

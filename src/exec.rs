@@ -84,6 +84,29 @@ fn fault(msg: impl Into<String>) -> Abort {
 // ---------------------------------------------------------------- program
 
 /// Everything the interpreter needs, resolved once at boot.
+/// One frame a socket handler wants written, or the decision to close.
+///
+/// A channel rather than a handle on the socket itself: the `Vm` is
+/// synchronous with respect to the connection — it runs a handler to
+/// completion and the connection task drains what it produced. That keeps
+/// the socket's read half owned by exactly one task, which is what
+/// `tokio-tungstenite`'s split requires anyway, and it means a handler
+/// that panics cannot leave a half-written frame on the wire.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SocketOut {
+    Text(String),
+    Close,
+}
+
+/// The three handlers of one `socket "…" { }` (routing.md §9.1).
+#[derive(Clone, Debug, Default)]
+pub struct SocketBody {
+    pub on_open: Option<crate::ast::Block>,
+    /// The binder's name and the block. The binder holds the frame.
+    pub on_message: Option<(String, crate::ast::Block)>,
+    pub on_close: Option<crate::ast::Block>,
+}
+
 pub struct Program {
     pub model: SchemaModel,
     pub symbols: Symbols,
@@ -91,6 +114,8 @@ pub struct Program {
     pub functions: HashMap<String, FunctionDecl>,
     pub middleware: HashMap<String, MiddlewareDecl>,
     pub route_bodies: HashMap<(String, String), Block>,
+    /// Keyed by the resolved pattern; the method is always the upgrade GET.
+    pub socket_bodies: HashMap<String, SocketBody>,
     pub error_handler: Option<ErrorHandlerDecl>,
     pub errors: HashMap<String, (u16, Option<String>, Vec<String>)>,
     pub server: ServerConfig,
@@ -194,6 +219,7 @@ impl Default for ServerConfig {
 }
 
 /// Per-request state.
+#[derive(Clone)]
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -262,6 +288,10 @@ pub struct Vm<'a> {
     /// long it took is half of what there is to observe.
     pub response_micros: Option<u64>,
     pub extra_headers: Vec<(String, String)>,
+    /// Where `socket.send` / `socket.close` put their frames. `None`
+    /// outside a socket handler — the checker rejects those calls
+    /// (`E0225`), so this being `None` there is belt and braces.
+    pub socket_out: Option<Vec<SocketOut>>,
     /// Set by `serve(port)` in `main()`. The call is the program's own
     /// declaration of where it listens, so `main` is evaluated at boot and
     /// this is what it left behind.
@@ -283,12 +313,27 @@ impl<'a> Vm<'a> {
             response_micros: None,
             serve_port: None,
             extra_headers: Vec::new(),
+            socket_out: None,
             depth: 0,
         }
     }
 
     pub fn set_params(&mut self, params: HashMap<String, Value>) {
         self.params = params;
+    }
+
+    /// Everything the middleware chain left in `context`.
+    ///
+    /// The chain runs before the upgrade, on a `Vm` that cannot outlive
+    /// the handshake — `Vm<'a>` borrows the program. What a socket handler
+    /// needs from it is the bindings, so they are lifted out and handed to
+    /// the connection task, which builds its own `Vm` per event.
+    pub fn context_snapshot(&self) -> HashMap<String, Value> {
+        self.context.clone()
+    }
+
+    pub fn restore_context(&mut self, ctx: HashMap<String, Value>) {
+        self.context = ctx;
     }
 
     pub fn set_context(&mut self, key: &str, v: Value) {
@@ -307,7 +352,7 @@ impl<'a> Vm<'a> {
         self.scopes = saved;
     }
 
-    pub(super) fn bind_param(&mut self, name: &str, v: Value) {
+    pub fn bind_param(&mut self, name: &str, v: Value) {
         self.declare(name, v);
     }
 

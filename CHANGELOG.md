@@ -3,6 +3,83 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.908] — sockets — 2026-08-24
+
+`src/native/prelude/ws.rs.in` came back with the native backend and could
+not be reached: `PRELUDE_WS` was declared, concatenated into no generated
+crate, and the dispatcher answered 501. Nothing in the 1.0 grammar
+declared a socket, so nothing could.
+
+```jwc
+routes "/live" use RequireAuth {
+    socket "rooms/{room: text}" {
+        on open    { socket.send("joined " + @room); }
+        on message (text) { socket.send("echo: " + $text); }
+        on close   { }
+    }
+}
+```
+
+### Why three handlers instead of `route WS`
+
+The 0.9 form was `route WS "…" { … }` with one body that ran per
+connection and called `ws_recv()` in a loop. 1.0 has no unbounded loop —
+`for` over a collection is the only iteration — and adding `while` to
+serve sockets would have been a worse trade than saying what a socket
+handler actually is: three moments in a connection's life.
+
+The runtime owns the loop, which also removes the failure mode a
+hand-written one has, where forgetting to break holds a task for the life
+of the process.
+
+### Middleware runs before the upgrade
+
+This is the whole value of `use` on a socket. A client with no token gets
+**401 with the middleware's message**, as an ordinary HTTP response — not
+a 101 followed by an immediate close it has to guess about. Verified
+identical on both backends:
+
+```
+--- no key:    HTTP/1.1 401 Unauthorized   {"error":"kalit kerak"}
+--- with key:  HTTP/1.1 101 Switching Protocols
+               "salom, abc" / "echo: hello" / close
+```
+
+Whatever the chain puts in `context` persists for the connection; locals
+do not, because each handler runs on its own scope.
+
+### Both backends, one implementation each
+
+`serve.rs` uses axum's WebSocket support. So does the native prelude now:
+its 291 lines of hand-rolled RFC 6455 — SHA-1, base64, frame masking —
+predated the native server moving to axum and were running nowhere. Two
+hand-written WebSocket stacks is one more than the number that can be kept
+correct.
+
+`socket.send` and `socket.close` **queue** on both, and the connection
+writes what a handler produced once it returns. That is what makes
+`socket.close()` followed by `socket.send(...)` drop the send on both
+rather than on one, and it means a handler that panics cannot leave a
+half-written frame on the wire.
+
+### Along the way
+
+- A plain `GET` at a socket path answered **500** on the interpreter: the
+  route matched, no HTTP body existed for it, and the chain's
+  fall-through said "internal_error" about a client mistake. It is a 400
+  now on both — the path exists, the request is wrong.
+- `jwc routes` prints sockets as `WS`. `jwc openapi` lists them under
+  `x-jwc-sockets` rather than emitting the upgrade as a `GET` that answers
+  200, which is a lie a client generator acts on.
+- `route GET "/x"` and `socket "/x"` in one block is `E0710`: the upgrade
+  *is* a GET.
+
+### Not implemented: Server-Sent Events
+
+`DEFERRED-19`. 0.9 parsed and validated `route SSE "…"` end to end and
+dispatched it to a stub, so a program could declare one, pass every check
+and serve nothing. That is worse than not having it.
+
 ## [0.9.907] — the rest of the package CLI — 2026-08-24
 
 Of the package commands, only `jwc add` survived the cutover. The four

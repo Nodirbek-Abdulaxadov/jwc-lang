@@ -2490,6 +2490,19 @@ enum RouteKind {
     Ws,
 }
 
+/// `on open` / `on close` — no argument.
+type SocketFn = fn() -> Pin<Box<dyn Future<Output = JwcResult> + Send>>;
+/// `on message (m)` — the frame.
+type SocketMsgFn = fn(V) -> Pin<Box<dyn Future<Output = JwcResult> + Send>>;
+
+/// The three handlers of one `socket "…" { }`, all optional.
+#[derive(Clone, Copy)]
+struct JwcSocketFns {
+    on_open: Option<SocketFn>,
+    on_message: Option<SocketMsgFn>,
+    on_close: Option<SocketFn>,
+}
+
 struct RouteEntry {
     method: String,
     segments: Vec<PathSeg>,
@@ -2497,7 +2510,13 @@ struct RouteEntry {
     /// `/orgs/{org_id}`. What `request.route()` answers (routing.md §5.4).
     pattern: String,
     kind: RouteKind,
+    /// For `RouteKind::Http`, the handler. For `RouteKind::Ws`, the
+    /// *preflight*: it runs the middleware chain and answers `Some` when
+    /// the chain short-circuited, so `use RequireAuth` on a socket
+    /// produces a 401 the client can read rather than a 101 followed by
+    /// silence.
     handler: RouteFn,
+    socket: Option<JwcSocketFns>,
 }
 
 struct Router {
@@ -2508,14 +2527,24 @@ impl Router {
     fn new() -> Self { Router { entries: Vec::new() } }
 
     fn add(&mut self, method: &str, pattern: &str, handler: RouteFn) {
-        self.add_kind(method, pattern, RouteKind::Http, handler);
+        self.add_kind(method, pattern, RouteKind::Http, handler, None);
     }
 
-    fn add_ws(&mut self, pattern: &str, handler: RouteFn) {
-        self.add_kind("GET", pattern, RouteKind::Ws, handler);
+    /// The upgrade handshake is a GET on the wire, which is why it is
+    /// registered as one — a `route GET` on the same path is a genuine
+    /// collision, and `wiring` rejects the pair before we get here.
+    fn add_socket(&mut self, pattern: &str, preflight: RouteFn, fns: JwcSocketFns) {
+        self.add_kind("GET", pattern, RouteKind::Ws, preflight, Some(fns));
     }
 
-    fn add_kind(&mut self, method: &str, pattern: &str, kind: RouteKind, handler: RouteFn) {
+    fn add_kind(
+        &mut self,
+        method: &str,
+        pattern: &str,
+        kind: RouteKind,
+        handler: RouteFn,
+        socket: Option<JwcSocketFns>,
+    ) {
         let segments: Vec<PathSeg> = pattern
             .trim_start_matches('/')
             .split('/')
@@ -2554,6 +2583,7 @@ impl Router {
             pattern: rendered,
             kind,
             handler,
+            socket,
         });
     }
 
@@ -2561,7 +2591,14 @@ impl Router {
         &self,
         method: &str,
         path: &str,
-    ) -> Option<(RouteKind, RouteFn, String, BTreeMap<String, String>, Vec<(String, String)>)> {
+    ) -> Option<(
+        RouteKind,
+        RouteFn,
+        Option<JwcSocketFns>,
+        String,
+        BTreeMap<String, String>,
+        Vec<(String, String)>,
+    )> {
         let req_segs: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
         // routing.md §4.2 — the winner is the candidate with the most
         // **literal** segments, not the first one registered. jwc-shortener
@@ -2598,7 +2635,9 @@ impl Router {
                 best = Some((entry, params, types, literals));
             }
         }
-        best.map(|(e, params, types, _)| (e.kind, e.handler, e.pattern.clone(), params, types))
+        best.map(|(e, params, types, _)| {
+            (e.kind, e.handler, e.socket, e.pattern.clone(), params, types)
+        })
     }
 
     /// Verbs declared on a path that a request's own method didn't match.
@@ -2945,6 +2984,7 @@ async fn handle_axum_request(
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
+    upgrade: Option<axum::extract::ws::WebSocketUpgrade>,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     let path_str = uri.path();
@@ -2973,12 +3013,12 @@ async fn handle_axum_request(
     // reading anyone's source, so a wildcard pattern nobody aimed at them
     // must not take that away. A route that matched *without* binding a
     // path parameter was aimed here deliberately and wins.
-    if matched.as_ref().is_some_and(|(_, _, _, binds, _)| !binds.is_empty()) {
+    if matched.as_ref().is_some_and(|(_, _, _, _, binds, _)| !binds.is_empty()) {
         if let Some(r) = jwc_operational(&method_str, path_str).await {
             return r;
         }
     }
-    let (kind, handler, route_pattern, path_params, param_types) = match matched {
+    let (kind, handler, socket_fns, route_pattern, path_params, param_types) = match matched {
         Some(found) => found,
         None => {
             if let Some(r) = jwc_operational(&method_str, path_str).await {
@@ -2998,13 +3038,20 @@ async fn handle_axum_request(
         }
     };
 
-    if matches!(kind, RouteKind::Ws) {
-        return axum::response::Response::builder()
-            .status(501)
-            .header("content-type", "text/plain; charset=utf-8")
-            .body("WebSocket not supported in native build yet; use `jwc run` or `jwc build` (without --native).".into())
-            .unwrap();
-    }
+    // routing.md §9.2 — a declared `socket` upgrades. Without the header
+    // it is an ordinary GET at a path that has no HTTP handler, which is a
+    // 400 rather than a 404: the path exists, the request is wrong.
+    let socket_upgrade = match (kind, socket_fns, upgrade) {
+        (RouteKind::Ws, Some(fns), Some(up)) => Some((fns, up)),
+        (RouteKind::Ws, _, None) => {
+            return axum::response::Response::builder()
+                .status(400)
+                .header("content-type", JWC_JSON_CT)
+                .body("{\"error\":\"this path is a websocket; send an Upgrade request\"}".into())
+                .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()));
+        }
+        _ => None,
+    };
 
     // routing.md §3.2 — parsed here, ahead of the chain. A segment that is
     // not the type the route declared is a 400 that never reaches user code.
@@ -3034,6 +3081,25 @@ async fn handle_axum_request(
         extra_headers: std::sync::Mutex::new(Vec::new()),
         context: std::sync::Mutex::new(JwcObj::default()),
     });
+
+    // The chain runs on the ordinary HTTP request, before the handshake:
+    // a `throw Unauthorized` in `RequireAuth` has to be a 401 the client
+    // can read, and it can only be one while there is still a response to
+    // put it in.
+    if let Some((fns, up)) = socket_upgrade {
+        let refusal = CURRENT_REQUEST
+            .scope(req.clone(), async move { handler().await })
+            .await;
+        if !matches!(refusal, V::Null) {
+            let (status, body_str, ct, _) = jwc_to_response(refusal);
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK))
+                .header("content-type", if ct.is_empty() { JWC_JSON_CT } else { ct.as_str() })
+                .body(body_str.into())
+                .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()));
+        }
+        return up.on_upgrade(move |socket| jwc_drive_socket(socket, fns, req));
+    }
 
     // A panic is the native backend's `Abort::Fault`: the interpreter logs
     // it and answers 500. Without this guard the panic unwound into hyper

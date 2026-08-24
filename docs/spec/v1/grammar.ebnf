@@ -138,8 +138,11 @@ after_block     = "after" "{" { statement } "}" ;
 
 (* ---------- routing ---------- *)
 
-routes_decl     = "routes" string [ use_clause ] "{" { route_decl } "}" ;
+routes_decl     = "routes" string [ use_clause ] "{" { route_decl | socket_decl } "}" ;
 route_decl      = "route" http_method string [ use_clause ] block ;
+socket_decl     = "socket" string [ use_clause ] "{" { socket_handler } "}" ;
+socket_handler  = "on" ( "open" | "close" ) block
+                | "on" "message" "(" identifier ")" block ;
 http_method     = "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
                 | "HEAD" | "OPTIONS" ;
 use_clause      = "use" ident { "," ident } ;

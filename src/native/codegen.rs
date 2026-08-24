@@ -75,9 +75,6 @@ const ASYNC_BUILTINS: &[&str] = &[
     "jwc_b_setConnectionString",
     "jwc_b_set_connection_string",
     "jwc_b_sleep_ms",
-    "jwc_b_ws_close",
-    "jwc_b_ws_recv",
-    "jwc_b_ws_send",
 ];
 
 /// The prelude built-ins that return `JwcResult` rather than a bare `V`,
@@ -209,6 +206,10 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "cache.set" => "jwc_b_v1_cache_set",
         "cache.del" => "jwc_b_v1_cache_del",
         "cache.clear" => "jwc_b_v1_cache_clear",
+
+        // --- sockets (builtins.md §9)
+        "socket.send" => "jwc_b_v1_socket_send",
+        "socket.close" => "jwc_b_v1_socket_close",
 
         // --- mail (builtins.md §8)
         "mail.send" => "jwc_b_v1_mail_send",
@@ -353,6 +354,7 @@ pub struct Generated {
     pub needs_crypto: bool,
     pub needs_mail: bool,
     pub needs_redis: bool,
+    pub needs_ws: bool,
     pub needs_regex: bool,
 }
 
@@ -407,6 +409,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // `serve.rs` uses to find the body for a resolved route.
     let mut bodies: BTreeMap<(String, String), &Block> = BTreeMap::new();
     let mut middleware: BTreeMap<String, &crate::ast::MiddlewareDecl> = BTreeMap::new();
+    let mut socket_decls: BTreeMap<String, &crate::ast::SocketDecl> = BTreeMap::new();
 
     for file in &ws.files {
         for decl in &file.program.decls {
@@ -415,6 +418,10 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
                     for route in &r.routes {
                         let pattern = strip_types(&join_path(&r.prefix, &route.suffix));
                         bodies.insert((route.method.name.clone(), pattern), &route.body);
+                    }
+                    for sk in &r.sockets {
+                        let pattern = strip_types(&join_path(&r.prefix, &sk.suffix));
+                        socket_decls.insert(pattern, sk);
                     }
                 }
                 Decl::Middleware(m) => {
@@ -472,7 +479,11 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
 
     // --- routes --------------------------------------------------------------
     let mut routes: Vec<(String, String, String)> = Vec::new();
+    let mut sockets: Vec<(String, String)> = Vec::new();
     for route in &wired.routes {
+        if route.socket {
+            continue;
+        }
         let name = handler_name(&route.method, &route.pattern);
         let Some(body) = bodies.get(&(route.method.clone(), route.pattern.clone())) else {
             bail!(
@@ -499,6 +510,84 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         ));
     }
 
+    // --- sockets (routing.md §9) --------------------------------------------
+    for route in wired.routes.iter().filter(|r| r.socket) {
+        let Some(sk) = socket_decls.get(&route.pattern) else {
+            bail!(
+                "no handlers for socket {} — the router and the source disagree",
+                route.pattern
+            );
+        };
+        let name = format!("jwc_socket_{}", sanitise(&route.pattern));
+
+        // Each handler is its own `async fn`, so a `return;` in one ends
+        // that handler and nothing else — the shape `serve.rs` gets for
+        // free by running them on separate `Vm`s.
+        let emit_handler = |out: &mut String,
+                            ctx: &mut Ctx,
+                            suffix: &str,
+                            binder: Option<&str>,
+                            body: &Block|
+         -> Result<()> {
+            ctx.mode = Mode::Value;
+            match binder {
+                Some(b) => out.push_str(&format!(
+                    "\nasync fn {name}_{suffix}({}: V) -> JwcResult {{\n",
+                    local(b)
+                )),
+                None => out.push_str(&format!("\nasync fn {name}_{suffix}() -> JwcResult {{\n")),
+            }
+            emit_block(out, body, 1, ctx)?;
+            out.push_str("    Ok(V::Null)\n}\n");
+            // Same boxing reason as the HTTP handlers: an `async fn` is a
+            // fn *item* with an anonymous future type and cannot coerce to
+            // a fn pointer.
+            let arg = if binder.is_some() { "m: V" } else { "" };
+            let call = if binder.is_some() { "m" } else { "" };
+            out.push_str(&format!(
+                "\nfn {name}_{suffix}_boxed({arg}) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = JwcResult> + Send>> {{\n\
+                 \x20   Box::pin({name}_{suffix}({call}))\n}}\n"
+            ));
+            Ok(())
+        };
+
+        if let Some(b) = &sk.on_open {
+            emit_handler(&mut out, &mut ctx, "open", None, b)?;
+        }
+        if let Some((binder, b)) = &sk.on_message {
+            emit_handler(&mut out, &mut ctx, "message", Some(&binder.name), b)?;
+        }
+        if let Some(b) = &sk.on_close {
+            emit_handler(&mut out, &mut ctx, "close", None, b)?;
+        }
+
+        emit_socket_preflight(&mut out, &name, route, &middleware);
+        out.push_str(&format!(
+            "\nfn {name}_preflight() -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = V> + Send>> {{\n\
+             \x20   Box::pin({name}_preflight_impl())\n}}\n"
+        ));
+
+        let fns = format!(
+            "JwcSocketFns {{ on_open: {}, on_message: {}, on_close: {} }}",
+            if sk.on_open.is_some() {
+                format!("Some({name}_open_boxed)")
+            } else {
+                "None".into()
+            },
+            if sk.on_message.is_some() {
+                format!("Some({name}_message_boxed)")
+            } else {
+                "None".into()
+            },
+            if sk.on_close.is_some() {
+                format!("Some({name}_close_boxed)")
+            } else {
+                "None".into()
+            },
+        );
+        sockets.push((typed_pattern(route), format!("{name}_preflight, {fns}")));
+    }
+
     // Which prelude a function came from decides which cargo dependency the
     // crate needs, and the prelude source is the only honest answer to that
     // question — a second list would be one more thing to forget.
@@ -510,10 +599,14 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     let needs_mail = ctx.used.iter().any(|f| defines(super::PRELUDE_MAIL, f));
     let needs_redis = ctx.used.iter().any(|f| defines(super::PRELUDE_REDIS, f));
     let needs_http_client = ctx.used.iter().any(|f| defines(super::PRELUDE_HTTP, f));
+    // Not derived from `ctx.used`: a socket with only an `on close` calls
+    // no `socket.*` built-in at all, and the connection driver is still
+    // what runs it.
+    let needs_ws = !sockets.is_empty();
 
     emit_shapes(&mut out, &ctx);
     emit_field_lists(&mut out, &ctx);
-    emit_dispatch(&mut out, &routes);
+    emit_dispatch(&mut out, &routes, &sockets);
     let db_boot = if needs_db {
         // `serve::serve` builds the pool before it binds; a binary that
         // waited for the first query would answer `/readyz` 200 with no
@@ -624,6 +717,9 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     if needs_mail {
         source.push_str(super::PRELUDE_MAIL);
     }
+    if needs_ws {
+        source.push_str(super::PRELUDE_WS);
+    }
     if needs_redis {
         source.push_str(super::PRELUDE_REDIS);
     }
@@ -639,6 +735,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         source,
         needs_db,
         needs_mail,
+        needs_ws,
         needs_http_client,
         needs_crypto,
         needs_redis,
@@ -862,6 +959,37 @@ fn emit_function(
 
 /// The chain, the handler, the error handler and the `after` blocks — the
 /// order `serve.rs::dispatch` runs them in, unrolled for one route.
+/// The middleware chain for a socket, as an `async fn() -> V`.
+///
+/// `V::Null` means the chain fell through and the upgrade may proceed;
+/// anything else is the response that short-circuited it. There is no
+/// `after` loop: an `after` block observes a *response*, and the response
+/// here is the 101 the runtime sends after this returns — by the time
+/// there is a status to look at, the handler is already gone.
+fn emit_socket_preflight(
+    out: &mut String,
+    name: &str,
+    route: &crate::wiring::ResolvedRoute,
+    middleware: &BTreeMap<String, &crate::ast::MiddlewareDecl>,
+) {
+    out.push_str(&format!("\nasync fn {name}_preflight_impl() -> V {{\n"));
+    if route.chain.is_empty() {
+        out.push_str("    V::Null\n}\n");
+        return;
+    }
+    for m in &route.chain {
+        if !middleware.contains_key(m) {
+            continue;
+        }
+        out.push_str(&format!("    match {}().await {{\n", mw_fn(m)));
+        out.push_str("        Ok(Some(r)) => return r,\n");
+        out.push_str("        Ok(None) => {}\n");
+        out.push_str("        Err(t) => return jwc_thrown_response(t),\n");
+        out.push_str("    }\n");
+    }
+    out.push_str("    V::Null\n}\n");
+}
+
 fn emit_route_dispatch(
     out: &mut String,
     name: &str,
@@ -996,11 +1124,14 @@ fn join_path(prefix: &str, suffix: &str) -> String {
 }
 
 fn handler_name(method: &str, path: &str) -> String {
-    let mut s = format!("jwc_route_{}_", method.to_lowercase());
-    for c in path.chars() {
-        s.push(if c.is_ascii_alphanumeric() { c } else { '_' });
-    }
-    s
+    format!("jwc_route_{}_{}", method.to_lowercase(), sanitise(path))
+}
+
+/// A path as a Rust identifier fragment.
+fn sanitise(path: &str) -> String {
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 fn user_fn(name: &str) -> String {
@@ -1057,13 +1188,23 @@ fn emit_field_lists(out: &mut String, ctx: &Ctx) {
     }
 }
 
-fn emit_dispatch(out: &mut String, routes: &[(String, String, String)]) {
+fn emit_dispatch(
+    out: &mut String,
+    routes: &[(String, String, String)],
+    sockets: &[(String, String)],
+) {
     out.push_str("\nasync fn jwc_serve_impl(port: u16) {\n");
     out.push_str("    let mut router = Router::new();\n");
     for (method, path, name) in routes {
         out.push_str(&format!(
             "    router.add({}, {}, {name});\n",
             rust_str_literal(method),
+            rust_str_literal(path),
+        ));
+    }
+    for (path, args) in sockets {
+        out.push_str(&format!(
+            "    router.add_socket({}, {args});\n",
             rust_str_literal(path),
         ));
     }
@@ -1995,10 +2136,6 @@ mod tests {
             super::super::PRELUDE_MAIL,
             super::super::PRELUDE_REDIS,
             super::super::PRELUDE_HTTP,
-            // Linked into no generated crate yet — `generate` never pushes
-            // it, because nothing in the 1.0 grammar declares a socket. Its
-            // built-ins are still in ASYNC_BUILTINS, so it belongs here or
-            // the guard reads them as stale.
             super::super::PRELUDE_WS,
         ]
     }

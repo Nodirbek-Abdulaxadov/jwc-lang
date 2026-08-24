@@ -111,6 +111,13 @@ enum BodyKind {
     ErrorHandler,
     Test,
     View,
+    /// `on open` / `on message (m)` / `on close` inside a `socket`.
+    ///
+    /// One kind rather than three: the three differ in what is *bound*
+    /// (the message binder) and in nothing else. They all see the path
+    /// parameters, they all see `context`, and none of them may answer
+    /// with an HTTP response — the response was the 101 that got here.
+    Socket,
 }
 
 /// One binding inside a query: `select A from …` or `left join … B on …`.
@@ -547,6 +554,42 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        for sock in &r.sockets {
+            let pattern = crate::wiring::route_pattern(&r.prefix, &sock.suffix);
+            self.route = Some(format!("WS {pattern}"));
+            self.body = BodyKind::Socket;
+            self.params.clear();
+            self.untyped_params = untyped_path_params(&r.prefix)
+                .into_iter()
+                .chain(untyped_path_params(&sock.suffix))
+                .collect();
+            for (name, ty) in prefix_params.iter().chain(path_params(&sock.suffix).iter()) {
+                self.params.insert(name.clone(), ty.clone());
+            }
+
+            for (binder, body) in [
+                (None, sock.on_open.as_ref()),
+                (
+                    sock.on_message.as_ref().map(|(b, _)| b),
+                    sock.on_message.as_ref().map(|(_, b)| b),
+                ),
+                (None, sock.on_close.as_ref()),
+            ] {
+                let Some(body) = body else { continue };
+                self.enter_body();
+                self.push_scope();
+                // The frame, as `text`. Binary frames are not delivered
+                // here — routing.md §9.2 answers them with a close.
+                if let Some(b) = binder {
+                    self.declare(&b.name, Ty::text(), b.span);
+                }
+                self.block(body);
+                self.pop_scope();
+            }
+
+            self.untyped_params.clear();
+            self.route = None;
+        }
         self.params.clear();
         self.body = BodyKind::Free;
     }
@@ -830,6 +873,21 @@ impl<'a> Checker<'a> {
                         "middleware.md §5.3",
                     );
                 }
+                // routing.md §9.2 — the HTTP response for a socket was the
+                // 101 that got the connection here. A handler that returned
+                // one would build a response nothing sends, and the frame
+                // it meant to send would never go.
+                if self.body == BodyKind::Socket && value.is_some() {
+                    self.err_note(
+                        *span,
+                        "E0811",
+                        "`return <value>` inside a socket handler",
+                        "the HTTP response was the upgrade; write `socket.send(...)` \
+                         to answer on the connection, and bare `return;` to end the \
+                         handler",
+                        "routing.md §9.2",
+                    );
+                }
                 // routing.md §6.4 — `return $account;` is the mistake; the
                 // fix is `return json($account);`. Void is left to E0731,
                 // which is about the path not ending in a response at all.
@@ -1073,7 +1131,7 @@ impl<'a> Checker<'a> {
             ExprKind::PathParam(i) => {
                 if !matches!(
                     self.body,
-                    BodyKind::Route | BodyKind::Middleware | BodyKind::After
+                    BodyKind::Route | BodyKind::Middleware | BodyKind::After | BodyKind::Socket
                 ) {
                     self.err_note(
                         i.span,
@@ -2540,6 +2598,26 @@ impl<'a> Checker<'a> {
                 Ty::boolean()
             }
 
+            // --- sockets (builtins.md §9, routing.md §9.2)
+            //
+            // Only inside a `socket` handler: there is no connection to
+            // send on anywhere else, and a `socket.send` in a route body
+            // would typecheck and then fault at run time.
+            "socket.send" | "socket.close" => {
+                arity(self, if path == "socket.send" { 1 } else { 0 });
+                if self.body != BodyKind::Socket {
+                    self.err_note(
+                        span,
+                        "E0225",
+                        format!("`{path}(...)` outside a `socket` handler"),
+                        "`socket.*` needs a connection; it is legal in `on open`, \
+                         `on message` and `on close`",
+                        "routing.md §9.2",
+                    );
+                }
+                Ty::Void
+            }
+
             // --- process-local cache (builtins.md §8). Same shapes as the
             // `redis.*` four it mirrors, so swapping one for the other is a
             // rename and not a rewrite.
@@ -3907,6 +3985,7 @@ fn is_namespace(name: &str) -> bool {
             | "redis"
             | "cache"
             | "mail"
+            | "socket"
             | "count"
             | "App"
     )

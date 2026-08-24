@@ -34,6 +34,13 @@ pub struct ResolvedRoute {
     pub chain: Vec<String>,
     /// `after` blocks, in reverse chain order.
     pub after: Vec<String>,
+    /// A `socket "…"` rather than a `route METHOD "…"`.
+    ///
+    /// A flag rather than a second table: a socket shares the prefix, the
+    /// middleware chain, the path parser and — importantly — the
+    /// duplicate check. `route GET "/live"` and `socket "/live"` collide
+    /// on the wire, because the upgrade *is* a GET.
+    pub socket: bool,
     pub loc: Loc,
 }
 
@@ -202,9 +209,48 @@ impl<'a> Wiring<'a> {
                         params,
                         chain,
                         after,
+                        socket: false,
                         loc: Loc {
                             file: fi,
                             span: r.span,
+                        },
+                    });
+                }
+
+                for sk in &block.sockets {
+                    let raw = join_path(&block.prefix, &sk.suffix);
+                    let segments = parse_path(&raw);
+                    let pattern = render(&segments);
+                    let params = segments
+                        .iter()
+                        .filter_map(|s| match s {
+                            Segment::Param { name, ty } => Some((name.clone(), ty.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut chain = block_uses.clone();
+                    chain.extend(sk.uses.iter().map(|i| i.name.clone()));
+                    let after = chain
+                        .iter()
+                        .rev()
+                        .filter(|m| self.sym.middleware.get(*m).is_some_and(|s| s.has_after))
+                        .cloned()
+                        .collect();
+                    self.routes.push(ResolvedRoute {
+                        // The upgrade handshake is a GET, so this is the
+                        // method the duplicate check has to compare
+                        // against — a `route GET` on the same path is a
+                        // genuine collision, not a coincidence.
+                        method: "GET".to_string(),
+                        pattern,
+                        segments,
+                        params,
+                        chain,
+                        after,
+                        socket: true,
+                        loc: Loc {
+                            file: fi,
+                            span: sk.span,
                         },
                     });
                 }

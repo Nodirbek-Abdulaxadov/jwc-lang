@@ -27,6 +27,7 @@ closed; these are dated omissions.
 | `DEFERRED-16` | Background jobs, durable queue, DLQ, WebSocket, SSE, in-process cache | Not declarable in the 1.0 vocabulary. **The runtime code is not all retained** — see the note below | design.md never touched these areas. Guessing a vocabulary means writing it twice |
 | `DEFERRED-17` | Sequences as a declared object class | A counter table plus `update … first` (which emits `FOR UPDATE`) — shown in the sample's `next_invoice_number` | A sequence is a sixth DDL object class with its own diff rules, for one use in the sample. The counter-table form is correct and already specified |
 | `DEFERRED-18` | Generated columns (`GENERATED ALWAYS AS … STORED`) | Compute in application code, or a counter table | The expression would be raw SQL text inside a declaration — a hole in the DBA test, not a feature |
+| `DEFERRED-19` | Server-Sent Events | A `socket` (routing §9), or long-polling | 0.9 parsed and validated `route SSE "…"` end to end and dispatched it to a stub, so a program could declare one, pass every check and serve nothing. A transport that typechecks and does not run is worse than an absent one |
 
 ---
 
@@ -39,14 +40,15 @@ along with the 0.9.x front-end, and the queue was among them:
 | | State |
 |---|---|
 | durable queue, DLQ, `dispatch` | **deleted** at v0.25.0. `queue.rs` (1,352 lines) is at `60cc971^` and nowhere else |
-| WebSocket / SSE | the runtime half is back (`src/native/prelude/ws.rs.in`), and unreachable: the vocabulary has no way to declare one, and the native dispatcher answers 501 |
-| in-process cache | the runtime half is back (`jwc_cache_store`), and unreachable: `cache.*` is not a 1.0 built-in |
+| WebSocket | **implemented** in 0.9.908 — `socket "…" { on open / on message (m) / on close }`, routing §9, both backends |
+| SSE | still absent, now as `DEFERRED-19` rather than as part of this row. 0.9 recognised `route SSE "…"` and dispatched it to a stub |
+| in-process cache | **implemented** in 0.9.904 — `cache.get/set/del/clear`, builtins §8, both backends |
 | native AOT backend | **restored** in 0.9.901–0.9.903, and covered — see `DEFERRED-2` |
 
 "Retained but unreachable" and "deleted" are different facts, and a reader
-deciding whether to depend on 1.0 needs the second one. Restoring the queue
-is a decision that has not been taken; what has been taken is the decision
-to stop saying it is already there.
+deciding whether to depend on 1.0 needs the second one. What remains of
+this row is the queue, and that is a decision that has not been taken;
+what has been taken is the decision to stop saying it is already there.
 
 ---
 

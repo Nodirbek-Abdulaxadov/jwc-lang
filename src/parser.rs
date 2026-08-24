@@ -1236,17 +1236,28 @@ impl Parser {
         let uses = self.parse_use_clause()?;
         self.expect(Tok::LBrace)?;
         let mut routes = Vec::new();
+        let mut sockets = Vec::new();
         while !self.at(&Tok::RBrace) && !self.at_eof() {
             let before = self.i;
             let rat = self.attached();
             let rstart = self.span();
+            if self.at_word("socket") {
+                if let Ok(s) = self.parse_socket(rat, rstart) {
+                    sockets.push(s);
+                }
+                if self.i == before {
+                    self.bump();
+                }
+                continue;
+            }
             if !self.at_word("route") {
                 let found = self.peek().tok.clone();
                 self.err_note(
                     "E0008",
                     rstart,
-                    format!("expected `route`, found {found}"),
-                    "a `routes` block contains only `route` declarations; blocks do not nest",
+                    format!("expected `route` or `socket`, found {found}"),
+                    "a `routes` block contains only `route` and `socket` declarations; \
+                     blocks do not nest",
                     "routing.md §1.1",
                 );
                 self.recover_to_decl();
@@ -1266,6 +1277,114 @@ impl Parser {
             prefix_span,
             uses,
             routes,
+            sockets,
+            span: start.to(end),
+        })
+    }
+
+    /// `socket "suffix" [use M, …] { on open { } on message (m) { } on close { } }`
+    ///
+    /// All three blocks are optional and each may appear once; a socket
+    /// with none of them is an error, because the endpoint would accept an
+    /// upgrade and then do nothing at all.
+    fn parse_socket(&mut self, at: Attached, start: Span) -> PResult<SocketDecl> {
+        self.bump(); // socket
+        let (suffix, suffix_span) = self.expect_string()?;
+        let uses = self.parse_use_clause()?;
+        self.expect(Tok::LBrace)?;
+
+        let mut on_open = None;
+        let mut on_message = None;
+        let mut on_close = None;
+        let mut seen: Vec<&str> = Vec::new();
+
+        while !self.at(&Tok::RBrace) && !self.at_eof() {
+            let before = self.i;
+            let hstart = self.span();
+            if !self.eat_word("on") {
+                let found = self.peek().tok.clone();
+                self.err_note(
+                    "E0011",
+                    hstart,
+                    format!("expected `on`, found {found}"),
+                    "a `socket` block contains `on open`, `on message (m)` and `on close`",
+                    "routing.md §9.1",
+                );
+                self.recover_to_decl();
+                break;
+            }
+            let which = self.expect_ident()?;
+            if seen.contains(&which.name.as_str()) {
+                self.err_note(
+                    "E0012",
+                    which.span,
+                    format!("`on {}` is declared twice", which.name),
+                    "each of `open`, `message` and `close` may appear once",
+                    "routing.md §9.1",
+                );
+            }
+            match which.name.as_str() {
+                "open" => {
+                    seen.push("open");
+                    let (b, _) = self.parse_block()?;
+                    on_open = Some(b);
+                }
+                "close" => {
+                    seen.push("close");
+                    let (b, _) = self.parse_block()?;
+                    on_close = Some(b);
+                }
+                "message" => {
+                    seen.push("message");
+                    // The binder is mandatory: a message handler that
+                    // cannot name the message has nothing to work with,
+                    // and there is no implicit `it`.
+                    self.expect(Tok::LParen)?;
+                    let binder = self.expect_ident()?;
+                    self.expect(Tok::RParen)?;
+                    let (b, _) = self.parse_block()?;
+                    on_message = Some((binder, b));
+                }
+                other => {
+                    self.err_note(
+                        "E0011",
+                        which.span,
+                        format!("`on {other}` is not a socket event"),
+                        "one of `open`, `message`, `close`",
+                        "routing.md §9.1",
+                    );
+                    // Counted as seen, so `E0013` does not also fire: the
+                    // author wrote a handler, they wrote the wrong name,
+                    // and one diagnostic per mistake is the contract.
+                    seen.push("unknown");
+                    let _ = self.parse_block();
+                }
+            }
+            if self.i == before {
+                self.bump();
+            }
+        }
+        let end = self.expect(Tok::RBrace)?.span;
+
+        if seen.is_empty() {
+            self.err_note(
+                "E0013",
+                start.to(end),
+                "this `socket` declares no handler",
+                "add at least one of `on open`, `on message (m)`, `on close` — as it \
+                 stands the endpoint accepts the upgrade and then does nothing",
+                "routing.md §9.1",
+            );
+        }
+
+        Ok(SocketDecl {
+            at,
+            suffix,
+            suffix_span,
+            uses,
+            on_open,
+            on_message,
+            on_close,
             span: start.to(end),
         })
     }

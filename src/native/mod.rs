@@ -92,6 +92,7 @@ fn scaffold_workspace(
     needs_crypto: bool,
     needs_mail: bool,
     needs_redis: bool,
+    needs_ws: bool,
     needs_regex: bool,
 ) -> Result<PathBuf> {
     let workspace = root.join(BUILD_DIR_NAME);
@@ -110,6 +111,7 @@ fn scaffold_workspace(
             needs_crypto,
             needs_mail,
             needs_redis,
+            needs_ws,
             needs_regex,
         ),
     )
@@ -134,6 +136,7 @@ fn render_cargo_toml(
     needs_crypto: bool,
     needs_mail: bool,
     needs_redis: bool,
+    needs_ws: bool,
     needs_regex: bool,
 ) -> String {
     // `http_get` / `fetch_json` and their SSRF guards live in
@@ -166,7 +169,13 @@ fn render_cargo_toml(
         "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\", \"net\", \"time\", \"sync\", \"io-util\", \"io-std\", \"fs\", \"signal\"] }\n",
     );
     deps.push_str("futures = \"0.3\"\n");
-    deps.push_str("axum = { version = \"0.7\", features = [\"http2\"] }\n");
+    deps.push_str(if needs_ws {
+        // The `ws` feature carries the handshake and the framing, so the
+        // 291-line hand-rolled RFC 6455 the old prelude carried is gone.
+        "axum = { version = \"0.7\", features = [\"http2\", \"ws\"] }\n"
+    } else {
+        "axum = { version = \"0.7\", features = [\"http2\"] }\n"
+    });
     // Already in the tree via tokio; named explicitly so the listener can
     // clear IPV6_V6ONLY. Neither `std` nor `tokio` exposes that option, and
     // Windows defaults it to on — a native build bound `[::]` and was
@@ -518,6 +527,7 @@ pub fn compile(
         gen.needs_crypto,
         gen.needs_mail,
         gen.needs_redis,
+        gen.needs_ws,
         gen.needs_regex,
     )?;
     let bin = invoke_cargo(&cargo, &workspace, app_name, release, None)?;
