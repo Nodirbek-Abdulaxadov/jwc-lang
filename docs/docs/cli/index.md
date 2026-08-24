@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: "The `jwc` command"
-description: "Every subcommand: new, check, fmt, serve, build, migrate, test, lint, routes, explain, openapi, lsp, and the registry commands."
+description: "Every subcommand: new, check, fmt, serve, build, migrate, test, lint, routes, explain, openapi, swagger, lsp, and the registry commands."
 ---
 
 # The `jwc` command
@@ -82,6 +82,19 @@ jwc ast .                      # the parsed AST — a debugging aid
 `jwc openapi` reads the types the checker already inferred rather than
 re-deriving them. One type engine, one answer: a route returning
 `json(OrgService.get(...))` documents a shape rather than shrugging.
+
+```bash
+jwc swagger .                  # a browsable reference on http://127.0.0.1:8099
+jwc swagger . --port 9000
+jwc swagger . --out api.html   # the page as one file, instead of serving
+```
+
+`jwc swagger` renders the same document `jwc openapi` emits — there is
+one generator, not two. The page is self-contained: no CDN, no vendored
+Swagger UI, so `--out` gives you a single file that opens offline and can
+be committed or published as is. It listens on loopback only; an
+unauthenticated description of every endpoint does not belong on a
+network interface.
 
 `jwc routes` is the fastest way to answer "why is this endpoint 404" and
 "which middleware actually runs here".

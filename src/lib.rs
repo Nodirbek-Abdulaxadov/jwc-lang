@@ -44,6 +44,7 @@ pub mod registry;
 pub mod serve;
 pub mod snapshot;
 pub mod sql;
+pub mod swagger;
 pub mod symbols;
 pub mod token;
 pub mod types;

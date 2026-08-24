@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "jwc"
-version = "0.9.905"
+version = "0.9.906"
 dependencies = [
  "anyhow",
  "argon2",

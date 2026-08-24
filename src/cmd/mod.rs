@@ -925,7 +925,28 @@ fn describe_abort(a: &crate::exec::Abort) -> String {
 /// Offline. Every part of the document already exists in the compiler; this
 /// arranges them and infers nothing of its own.
 pub fn openapi(path: PathBuf, out: Option<PathBuf>, title: Option<String>) -> Result<()> {
+    let doc = openapi_document(&path, title)?;
+    let text = format!("{}\n", serde_json::to_string_pretty(&doc)?);
+    match out {
+        Some(p) => {
+            std::fs::write(&p, text)?;
+            println!("{}", display_relative(&p));
+        }
+        None => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// The OpenAPI document for a project, checked first.
+///
+/// `jwc openapi` and `jwc swagger` are the same document rendered two
+/// ways, so they share this rather than each walking the workspace. A
+/// second walk is how the JSON and the page would come to disagree — and
+/// the 0.9 `jwc swagger` was exactly that: a whole second generator, 661
+/// lines, kept in step with the first by hand.
+pub fn openapi_document(path: &Path, title: Option<String>) -> Result<serde_json::Value> {
     use crate::diag::Severity;
+    let path = path.to_path_buf();
 
     let ws = crate::workspace::Workspace::load(&path)?;
     if ws.files.is_empty() {
@@ -1013,23 +1034,40 @@ pub fn openapi(path: PathBuf, out: Option<PathBuf>, title: Option<String>) -> Re
             .clone()
             .unwrap_or_else(|| "JWC application".to_string())
     });
-    let doc = crate::openapi::document(&crate::openapi::Input {
+    Ok(crate::openapi::document(&crate::openapi::Input {
         title,
         version: "1.0.0".to_string(),
         sym: &symbols,
         wired: &wired,
         checked: &checked,
         raises,
-    });
-    let text = format!("{}\n", serde_json::to_string_pretty(&doc)?);
-    match out {
-        Some(p) => {
-            std::fs::write(&p, text)?;
-            println!("{}", display_relative(&p));
-        }
-        None => print!("{text}"),
+    }))
+}
+
+/// `jwc swagger [path] [--port N] [--out FILE]` — the OpenAPI document,
+/// rendered to read rather than to parse.
+///
+/// The 0.9 command of this name was a *second* OpenAPI generator whose
+/// output went to `openapi.json`; `jwc openapi --out openapi.json` does
+/// that today. What never existed is somewhere to read the API, so that
+/// is what this is — over the same document, from the same generator.
+pub fn swagger(
+    path: PathBuf,
+    port: u16,
+    out: Option<PathBuf>,
+    title: Option<String>,
+) -> Result<()> {
+    let doc = openapi_document(&path, title)?;
+
+    if let Some(p) = out {
+        // One file, no assets beside it: `--out` exists so the page can be
+        // committed, mailed or published without a directory around it.
+        std::fs::write(&p, crate::swagger::render(&doc))?;
+        println!("{}", display_relative(&p));
+        return Ok(());
     }
-    Ok(())
+
+    tokio::runtime::Runtime::new()?.block_on(crate::swagger::serve(doc, port))
 }
 
 fn middleware_body<'a>(

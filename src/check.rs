@@ -231,6 +231,48 @@ impl<'a> Checker<'a> {
         self.record_response_as(status, payload, None);
     }
 
+    /// `created(json($row))` — the inner `json` already recorded a 200
+    /// carrying `$row`'s type, and then `created` recorded a 201 carrying
+    /// the type of `json(...)`, which is `Response` and has no schema. So
+    /// `jwc openapi` said a POST answers 200 with the object (it does not)
+    /// and 201 with nothing (it answers 201 with the object). That is the
+    /// idiomatic form — it is in the specification's own sample and in
+    /// every template — so essentially every POST in every generated
+    /// document was wrong.
+    ///
+    /// The outer status is the real one. This hands it the inner
+    /// recording's payload and media and drops the inner entry.
+    ///
+    /// Syntactic rather than type-directed on purpose: a bare `Response`
+    /// can also arrive from a user function that built it elsewhere, and
+    /// popping *that* would delete a response the route really produces.
+    fn unwrap_nested_response(&mut self, arg: Option<&Expr>, ty: &Ty) -> (Ty, Option<String>) {
+        if !matches!(ty, Ty::Response) {
+            return (ty.clone(), None);
+        }
+        let nested = arg.is_some_and(|e| match &*e.kind {
+            ExprKind::Call { callee, .. } => {
+                callee_path(callee).is_some_and(|p| is_response_builder(&p))
+            }
+            // `created(json(x) with { … })` — the header suffix wraps the
+            // builder, so look through it.
+            ExprKind::WithHeaders { value, .. } => match &*value.kind {
+                ExprKind::Call { callee, .. } => {
+                    callee_path(callee).is_some_and(|p| is_response_builder(&p))
+                }
+                _ => false,
+            },
+            _ => false,
+        });
+        if !nested {
+            return (Ty::Unknown, None);
+        }
+        match self.responses.pop() {
+            Some(r) => (r.payload, r.media),
+            None => (Ty::Unknown, None),
+        }
+    }
+
     fn record_response_as(&mut self, status: u16, payload: Ty, media: Option<String>) {
         let Some(route) = &self.route else { return };
         self.responses.push(RouteResponse {
@@ -2028,7 +2070,8 @@ impl<'a> Checker<'a> {
                     "badRequest" => 400,
                     _ => 200,
                 };
-                self.record_response(status, a0.clone());
+                let (payload, media) = self.unwrap_nested_response(exprs.first(), &a0);
+                self.record_response_as(status, payload, media);
                 self.reject_private_response(exprs.first(), path, span);
                 // types.md §6.4 — `json(x)` with `x : T?` answers 200 null
                 // where it means 404.
@@ -2066,7 +2109,9 @@ impl<'a> Checker<'a> {
             "statusCode" => {
                 arity(self, 2);
                 if let Some(n) = exprs.first().and_then(literal_status) {
-                    self.record_response(n, args.get(1).cloned().unwrap_or(Ty::Unknown));
+                    let inner = args.get(1).cloned().unwrap_or(Ty::Unknown);
+                    let (payload, media) = self.unwrap_nested_response(exprs.get(1), &inner);
+                    self.record_response_as(n, payload, media);
                 }
                 Ty::Response
             }
@@ -4155,6 +4200,29 @@ fn path_params(path: &str) -> Vec<(String, Ty)> {
         rest = &rest[open + close + 1..];
     }
     out
+}
+
+/// The response builders of routing.md §6.1 — the calls whose whole
+/// purpose is to *be* the response, so nesting one inside another means
+/// the outer one is choosing the status for the inner one's body.
+fn is_response_builder(path: &str) -> bool {
+    matches!(
+        path,
+        "json"
+            | "created"
+            | "accepted"
+            | "badRequest"
+            | "unauthorized"
+            | "forbidden"
+            | "notFound"
+            | "conflict"
+            | "tooManyRequests"
+            | "noContent"
+            | "internalError"
+            | "statusCode"
+            | "redirect"
+            | "content"
+    )
 }
 
 fn callee_path(e: &Expr) -> Option<String> {

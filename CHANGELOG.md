@@ -3,6 +3,50 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.906] — `jwc swagger`, and the 201 that was documented as a 200 — 2026-08-24
+
+### The old `jwc swagger` was not what I said it was
+
+I listed it as a pure loss. It was not, quite. `src/swagger.rs` (661
+lines) was a **second OpenAPI generator** and the command wrote its output
+to `openapi.json` — which is `jwc openapi --out openapi.json` today.
+Restoring it verbatim would have put two generators in the tree to keep in
+step by hand, which is the mistake the native backend avoids by calling
+`query_sql` instead of reimplementing it.
+
+What never existed, in either version, is somewhere to *read* the API.
+That is what `jwc swagger` is now:
+
+```bash
+jwc swagger .                  # http://127.0.0.1:8099
+jwc swagger . --out api.html   # the page as one file
+```
+
+Same document, same generator. The page is self-contained — no CDN, no
+vendored `swagger-ui-dist` — so it opens on an air-gapped box, pins no
+third-party script into a developer's browser, and adds no megabyte of
+JavaScript to the binary. It listens on loopback: an unauthenticated
+description of every endpoint does not belong on a network interface.
+
+### Every `created(json(x))` was documented wrong
+
+Reading the rendered page is what showed it. `POST /notes` claimed two
+responses:
+
+- `200`, carrying the created object — a status the route cannot answer
+- `201`, carrying nothing — the status it does answer, with the body gone
+
+The inner `json($row)` recorded a 200 with the row's type, then the outer
+`created(...)` recorded a 201 with the type of *a response*, which has no
+schema. `created(json(x))` is the idiomatic form — the specification's
+sample uses it, every template uses it — so effectively every POST in
+every generated document was wrong, and a client generator reading one
+produced the wrong type for every created resource.
+
+The outer status now takes the inner recording's payload and drops the
+inner entry. The test asserts it over the sample: no POST documents both
+200 and 201, and every 201 carries a body.
+
 ## [0.9.905] — `jwc new` comes back, and brings three defects with it — 2026-08-24
 
 ### `jwc new` was gone; the templates were not

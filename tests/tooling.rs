@@ -456,3 +456,48 @@ fn count(text: &str) -> usize {
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or(0)
 }
+
+/// `created(json($row))` is the idiomatic 201, and it used to produce two
+/// wrong responses in the document: a `200` carrying the object (a status
+/// the route cannot answer) and a `201` carrying nothing (the status it
+/// does answer, with the body dropped). The inner `json` recorded its own
+/// 200 and the outer `created` recorded the *type of a response*, which
+/// has no schema.
+///
+/// A client generator reading that produced the wrong type for every
+/// created resource in the sample.
+#[test]
+fn a_nested_response_builder_documents_one_status_with_the_body() {
+    let path = sample();
+    let doc = jwc(&["openapi", path.to_str().expect("utf8")]);
+    assert!(
+        doc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doc.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_str(&stdout(&doc)).expect("json");
+
+    let paths = doc["paths"].as_object().expect("paths");
+    let mut checked = 0;
+    for (route, item) in paths {
+        let Some(post) = item.get("post") else {
+            continue;
+        };
+        let responses = post["responses"].as_object().expect("responses");
+        // A POST that creates something answers 201, not 200.
+        if let Some(created) = responses.get("201") {
+            checked += 1;
+            assert!(
+                !responses.contains_key("200"),
+                "POST {route} documents both 200 and 201:\n{responses:#?}"
+            );
+            assert!(
+                created
+                    .pointer("/content/application~1json/schema")
+                    .is_some(),
+                "POST {route} answers 201 with no documented body:\n{created:#?}"
+            );
+        }
+    }
+    assert!(checked > 0, "the sample has no `created(...)` route left");
+}

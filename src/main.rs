@@ -166,6 +166,24 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
     },
+    /// Serve a browsable API reference, rendered from the same document
+    /// `jwc openapi` emits.
+    ///
+    /// Self-contained: no CDN, no vendored Swagger UI. `--out` writes the
+    /// page as one HTML file instead of serving it.
+    Swagger {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Loopback port to serve on.
+        #[arg(long, default_value_t = 8099)]
+        port: u16,
+        /// Write the page to a file and exit, instead of serving.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// `info.title`. Defaults to the `database` name.
+        #[arg(long)]
+        title: Option<String>,
+    },
     /// `check`, plus the whole-program lints that are advisory.
     Lint {
         #[arg(default_value = ".")]
@@ -347,6 +365,12 @@ fn run() -> Result<()> {
         } => cmd::test(path, filter, no_rollback),
         Command::Lsp => jwc::lsp::run(),
         Command::Openapi { path, out, title } => cmd::openapi(path, out, title),
+        Command::Swagger {
+            path,
+            port,
+            out,
+            title,
+        } => cmd::swagger(path, port, out, title),
         Command::Lint {
             path,
             constraints,
