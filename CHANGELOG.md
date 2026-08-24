@@ -3,6 +3,50 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.907] — the rest of the package CLI — 2026-08-24
+
+Of the package commands, only `jwc add` survived the cutover. The four
+that did not are back, over the vendoring model 1.0 actually uses — a
+range in `jwcproj.json`, sources under `jwc_packages/`, no lockfile and no
+resolver.
+
+| | |
+|---|---|
+| `jwc install [--force]` | fetch every declared dependency that is missing |
+| `jwc update [-p name]` | move within the recorded ranges |
+| `jwc remove <name>` | drop it from the manifest and from disk |
+| `jwc tree` | declared, vendored, and at which version |
+
+`jwc install` is what a fresh clone needs: the templates gitignore
+`jwc_packages/`, so a checkout has the manifest and none of the sources
+and every package `import` fails on a line that looks correct. It fetches
+only what is missing, so it is safe in a build script, and it follows a
+package's own dependencies without looping when they are cyclic.
+
+`jwc update` respects the range the manifest records — `^0.2.1` reaches
+the newest `0.2.x` and never `0.3.0`. Crossing a major stays
+`jwc add name@version`, which is a change to the requirement and shows up
+in the diff as one. An unparseable range is an error rather than a silent
+"take the newest": a typo in a version must not quietly become whatever
+shipped today.
+
+`jwc remove` and `jwc tree` never open a socket.
+
+### `jwc update <path>` looked for a dependency called `./svc`
+
+`name: Option<String>` before `path: PathBuf` (defaulted) is ambiguous to
+a parser, and clap resolved it by reading the first positional as the
+name. So `jwc update ./svc` set `name = "./svc"`, `path = "."`, and
+answered "no dependencies declared" from whatever directory you happened
+to be in. The selector is `--package` / `-p` now, and `path` is the
+positional every other command in this CLI takes first.
+
+### Not restored: `jwc upgrade`
+
+Its rule registry was empty. The command printed "no rules registered at
+this JWC version" and returned. There is nothing in it to bring back — a
+0.9→1.0 codemod would be new work, and a large piece of it.
+
 ## [0.9.906] — `jwc swagger`, and the 201 that was documented as a 200 — 2026-08-24
 
 ### The old `jwc swagger` was not what I said it was

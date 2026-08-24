@@ -110,10 +110,34 @@ jwc lint . --constraints       # a where or orderby with no index behind it
 ## Packages
 
 ```bash
-jwc add <name>                 # fetch and record as a dependency
+jwc add <name>                 # fetch, vendor, and record as a dependency
+jwc add <name>@1.2.3           # a specific version
+jwc install                    # fetch every declared dependency that is missing
+jwc update                     # move within the recorded ranges
+jwc update -p redis            # just this one
+jwc remove <name>              # drop it from the manifest and from disk
+jwc tree                       # declared, vendored, and at which version
 jwc login --token jwc_...      # store a registry key
 jwc publish                    # upload this package
 ```
+
+Dependencies are **vendored**, under `jwc_packages/`. There is no lockfile
+and no resolver: `jwcproj.json` records a range, `jwc_packages/<name>/`
+holds the sources that range resolved to, and those sources compile with
+your program. Which of the two you commit is your call — the templates
+gitignore the directory, which is why `jwc install` exists.
+
+`jwc install` is the command a fresh clone needs, and it is safe to put in
+a build script: it fetches only what is missing, and it follows a
+package's own dependencies. `--force` re-downloads everything.
+
+`jwc update` moves within the range the manifest already records: `^0.2.1`
+reaches the newest `0.2.x` and never `0.3.0`. Crossing a major is
+`jwc add <name>@<version>` — a change to the requirement, and one that
+shows up in the diff as such. An unparseable range is an error, not a
+silent "take the newest".
+
+`jwc remove` and `jwc tree` never touch the network.
 
 ## Editors
 

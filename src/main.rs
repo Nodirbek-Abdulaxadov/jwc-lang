@@ -136,6 +136,49 @@ enum Command {
         #[arg(long, default_value_t = jwc::registry::registry_url())]
         registry: String,
     },
+    /// Fetch every declared dependency that is not already vendored.
+    ///
+    /// What a fresh clone needs: `jwc_packages/` is a build artefact for
+    /// most projects, so a checkout has the manifest and none of the
+    /// sources.
+    Install {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = jwc::registry::registry_url())]
+        registry: String,
+        /// Re-download even what is already present.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Move dependencies to the newest version their recorded range allows.
+    ///
+    /// Crossing a major is `jwc add name@version` — a change to the
+    /// requirement, and one that says so.
+    Update {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Only this dependency. Default: all of them.
+        ///
+        /// A flag rather than a second positional: `jwc update <path>` and
+        /// `jwc update <name>` are indistinguishable to a parser, and clap
+        /// resolved it by reading the path as the name — so
+        /// `jwc update ./svc` looked for a dependency called `./svc`.
+        #[arg(long, short = 'p')]
+        package: Option<String>,
+        #[arg(long, default_value_t = jwc::registry::registry_url())]
+        registry: String,
+    },
+    /// Drop a dependency from the manifest and from `jwc_packages/`.
+    Remove {
+        name: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Print the dependency tree: declared, vendored, and at which version.
+    Tree {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Run every `test` block.
     ///
     /// Each test runs in its own transaction and is rolled back, so the
@@ -358,6 +401,18 @@ fn run() -> Result<()> {
             path,
             registry,
         } => jwc::registry::add(spec, path, registry),
+        Command::Install {
+            path,
+            registry,
+            force,
+        } => jwc::registry::install(path, registry, force),
+        Command::Update {
+            path,
+            package,
+            registry,
+        } => jwc::registry::update(package, path, registry),
+        Command::Remove { name, path } => jwc::registry::remove(name, path),
+        Command::Tree { path } => jwc::registry::tree(path),
         Command::Test {
             path,
             filter,
