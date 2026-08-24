@@ -9,8 +9,8 @@ enum MemberRole of App.org { owner, admin, member, viewer }
 table Orgs of App.org {
     id         bigint primary key identity;
     --- URL-safe handle. Immutable after creation.
-    slug       varchar(40) unique : "bu slug band", pattern(r"^[a-z0-9-]{3,40}$");
-    name       varchar(120) minLength(2);
+    slug       varchar(40) unique : "bu slug band", pattern(r"^[a-z0-9-]{3,40}$") : "slug faqat kichik harf, raqam va tire";
+    name       varchar(120) minLength(2) : "nom kamida 2 ta belgi bo'lsin";
     created_at timestamptz default now();
 }
 
@@ -30,9 +30,9 @@ table Members of App.org {
 table Invites of App.org {
     id          bigint primary key identity;
     org_id      bigint;
-    email       varchar(255) pattern(r"^[^@]+@[^@]+\.[^@]+$");
+    email       varchar(255) pattern(r"^[^@]+@[^@]+\.[^@]+$") : "email manzili yaroqsiz";
     role        MemberRole default MemberRole.member;
-    token_hash  varchar(64) private, unique;
+    token_hash  varchar(64) private, unique : "bu taklifnoma allaqachon yaratilgan";
     invited_by  bigint server;
     expires_at  timestamptz;
     accepted_at timestamptz?;

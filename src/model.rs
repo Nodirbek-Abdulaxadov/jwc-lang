@@ -599,6 +599,7 @@ impl<'a> Builder<'a> {
         for c in &t.constraints {
             match c {
                 TableConstraint::PrimaryKey {
+                    at: _,
                     columns: cols,
                     span,
                 } => {
@@ -624,6 +625,7 @@ impl<'a> Builder<'a> {
                     });
                 }
                 TableConstraint::ForeignKey {
+                    at: _,
                     columns: cols,
                     target,
                     target_columns,
@@ -692,6 +694,7 @@ impl<'a> Builder<'a> {
                     });
                 }
                 TableConstraint::Unique {
+                    at: _,
                     columns: cols,
                     predicate,
                     message,
@@ -718,6 +721,7 @@ impl<'a> Builder<'a> {
                     });
                 }
                 TableConstraint::Check {
+                    at: _,
                     expr,
                     message,
                     span,
@@ -993,7 +997,10 @@ impl<'a> Builder<'a> {
         Some(CheckObj {
             name: naming::check_column(table, &col.physical, &r.name.name.to_lowercase()),
             expr,
-            message: None,
+            // `pattern(r"…") : "email shakli noto'g'ri"`. Without this a
+            // message-less column rule was a 500 and `W1302`'s advice —
+            // "add `: \"…\"`" — did not parse.
+            message: r.message.clone(),
             loc: col.loc,
         })
     }

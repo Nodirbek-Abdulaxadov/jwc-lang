@@ -515,13 +515,16 @@ impl Parser {
                 && self.word_at(1, "key")
                 && self.peek_at(2).is(&Tok::LParen)
             {
-                self.parse_pk_constraint(mspan).map(|c| constraints.push(c))
+                self.parse_pk_constraint(member_at.clone(), mspan)
+                    .map(|c| constraints.push(c))
             } else if self.at_word("foreign") {
-                self.parse_fk_constraint(mspan).map(|c| constraints.push(c))
+                self.parse_fk_constraint(member_at.clone(), mspan)
+                    .map(|c| constraints.push(c))
             } else if self.at_word("unique") && self.peek_at(1).is(&Tok::LParen) {
-                self.parse_uq_constraint(mspan).map(|c| constraints.push(c))
+                self.parse_uq_constraint(member_at.clone(), mspan)
+                    .map(|c| constraints.push(c))
             } else if self.at_word("check") && self.peek_at(1).is(&Tok::LParen) {
-                self.parse_check_constraint(mspan)
+                self.parse_check_constraint(member_at.clone(), mspan)
                     .map(|c| constraints.push(c))
             } else if self.at_word("index") && self.word_at(1, "on") {
                 self.parse_index(member_at.clone(), mspan)
@@ -574,18 +577,19 @@ impl Parser {
         Ok(out)
     }
 
-    fn parse_pk_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_pk_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // primary
         self.bump(); // key
         let columns = self.parse_ident_list_parens()?;
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::PrimaryKey {
+            at,
             columns,
             span: start.to(end),
         })
     }
 
-    fn parse_fk_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_fk_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // foreign
         self.expect_word("key")?;
         let columns = self.parse_ident_list_parens()?;
@@ -612,6 +616,7 @@ impl Parser {
         }
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::ForeignKey {
+            at,
             columns,
             target,
             target_columns,
@@ -652,7 +657,7 @@ impl Parser {
         Err(())
     }
 
-    fn parse_uq_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_uq_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // unique
         let columns = self.parse_ident_list_parens()?;
         let predicate = if self.eat_word("where") {
@@ -666,6 +671,7 @@ impl Parser {
         let message = self.parse_message()?;
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::Unique {
+            at,
             columns,
             predicate,
             message,
@@ -673,7 +679,7 @@ impl Parser {
         })
     }
 
-    fn parse_check_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_check_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // check
         self.expect(Tok::LParen)?;
         self.query_depth += 1;
@@ -684,6 +690,7 @@ impl Parser {
         let message = self.parse_message()?;
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::Check {
+            at,
             expr,
             message,
             span: start.to(end),
@@ -852,7 +859,13 @@ impl Parser {
             }
             span = span.to(self.expect(Tok::RParen)?.span);
         }
-        Ok(RuleCall { name, args, span })
+        let message = self.parse_message()?;
+        Ok(RuleCall {
+            name,
+            args,
+            message,
+            span,
+        })
     }
 
     // ------------------------------------------------------------ enum, view, class

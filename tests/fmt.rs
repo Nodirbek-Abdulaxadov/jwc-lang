@@ -244,3 +244,77 @@ fn the_sample_is_checked_in_formatted() {
         "run `cargo run --bin jwc -- v1 fmt docs/spec/v1/sample`; unformatted: {unformatted:#?}"
     );
 }
+
+/// `jwc fmt` used to **delete** the `---` doc comment above a table-level
+/// `check` or `unique`: the parser computed the attached comment for every
+/// table member and then handed it only to columns and indexes, so the
+/// constraint parsers dropped it on the floor. It survived on `index`,
+/// which is why it went unnoticed.
+///
+/// A formatter that loses documentation is worse than no formatter, and
+/// `fmt --check` in CI is exactly what pushes people to run it.
+#[test]
+fn constraint_doc_comments_survive_formatting() {
+    let src = r#"namespace a;
+
+database App : Postgres;
+
+schema s of App;
+
+table T of App.s {
+    id bigint primary key identity;
+    a  varchar(10);
+    b  varchar(10);
+
+    --- why this check exists
+    check (char_length(a) >= 2) : "qisqa";
+    --- why this unique exists
+    unique (a, b) : "band";
+    --- why this index exists
+    index on (a);
+}
+"#;
+    let out = fmt("constraint_docs.jwc", src);
+    for doc in [
+        "--- why this check exists",
+        "--- why this unique exists",
+        "--- why this index exists",
+    ] {
+        assert!(out.contains(doc), "`{doc}` was dropped:\n{out}");
+    }
+    assert_eq!(out, fmt("constraint_docs.jwc", &out), "not a fixed point");
+}
+
+/// The same for the two constraint forms that carry no message, so the
+/// fix is not accidentally specific to the ones with a `: "…"`.
+#[test]
+fn primary_and_foreign_key_doc_comments_survive_formatting() {
+    let src = r#"namespace a;
+
+database App : Postgres;
+
+schema s of App;
+
+table Parent of App.s {
+    id bigint primary key identity;
+}
+
+table Child of App.s {
+    a bigint;
+    b bigint;
+
+    --- composite, in this order, because reads are always by `a`
+    primary key (a, b);
+    --- cascade: a child row has no meaning without its parent
+    foreign key (a) references App.s.Parent (id) on delete cascade;
+}
+"#;
+    let out = fmt("key_docs.jwc", src);
+    for doc in [
+        "--- composite, in this order, because reads are always by `a`",
+        "--- cascade: a child row has no meaning without its parent",
+    ] {
+        assert!(out.contains(doc), "`{doc}` was dropped:\n{out}");
+    }
+    assert_eq!(out, fmt("key_docs.jwc", &out), "not a fixed point");
+}

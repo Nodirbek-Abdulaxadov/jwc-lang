@@ -1,0 +1,1 @@
+{ "name": "lintfx", "type": "app", "version": "0.1.0", "entry": "src/app.jwc" }

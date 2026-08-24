@@ -3,6 +3,69 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.905] — `jwc new` comes back, and brings three defects with it — 2026-08-24
+
+### `jwc new` was gone; the templates were not
+
+`src/templates.rs` went at the v0.25.0 cutover and the command with it,
+but `templates/{api,auth,jobs}/` stayed on disk — unreferenced, and
+written in a grammar the compiler had stopped accepting. Nothing noticed,
+because no test ever fed them to the compiler.
+
+Three trees now exist in the 1.0 vocabulary:
+
+| `--template` | What you get |
+|---|---|
+| `empty` (default) | one route, one schema, no tables |
+| `api` | CRUD over one table: DTOs, a service, five routes, keyset paging |
+| `auth` | accounts, Argon2id passwords, JWT sessions, `RequireAuth` |
+
+`tests/templates.rs` scaffolds each one and puts `check --deny-warnings`,
+`lint --deny-warnings`, `fmt --check`, `routes`, `openapi` and `migrate
+new` over it. A template that starts a project with a warning is a failing
+build. `jobs` is not back: it needs a queue, and the 1.0 grammar has no
+way to declare one.
+
+Writing the templates found three things.
+
+### `jwc fmt` deleted doc comments
+
+`---` above a table-level `check`, `unique`, `primary key` or `foreign
+key` was **dropped**. The parser computed the attached comment for every
+table member and handed it only to columns and indexes; the four
+constraint parsers discarded it. It survived on `index`, which is why it
+went unnoticed. A formatter that loses documentation is worse than no
+formatter, and `fmt --check` in CI is exactly what pushes people to run
+it.
+
+### `W1302` recommended syntax that did not parse
+
+> `ck_accounts__email__pattern` carries no message, so violating it is a
+> 500
+> — help: add `: "…"` to make it a declared error
+
+Only `unique` and the table-level forms took a message. On a column rule
+— `minLength(2)`, `pattern(r"…")`, `min(0)` — the advice was
+unimplementable. The specification's own sample tripped the warning
+eleven times and could not act on it.
+
+Rules take a message now, on columns and on class fields alike:
+
+```jwc
+email varchar(255) unique : "bu email band", pattern(r"^[^@]+@[^@]+$") : "email yaroqsiz";
+```
+
+On a class field it replaces the generated sentence in the
+`validation_failed` body, so the request boundary and the table can say
+the same thing. The sample lints clean for the first time.
+
+### Two lint tests depended on the sample being sloppy
+
+They asserted the sample *had* a message-less constraint, so fixing the
+sample broke them. The untidy shapes moved to `tests/lint_constraints/`,
+where they are labelled as deliberate, and the sample gained a test that
+it stays clean.
+
 ## [0.9.904] — the built-ins that were declared but not built — 2026-08-24
 
 Three things the language advertised and did not do.

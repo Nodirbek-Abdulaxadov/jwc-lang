@@ -708,7 +708,8 @@ fn emit_classes(out: &mut String, symbols: &crate::symbols::Symbols) -> bool {
                 matches!(&f.ty, Ty::Array(_))
             ));
             out.push_str("            rules: &[\n");
-            for (rule, args) in &f.rules {
+            for r in &f.rules {
+                let (rule, args) = (r.name.as_str(), &r.args);
                 if rule == "pattern" {
                     uses_regex = true;
                 }
@@ -716,7 +717,7 @@ fn emit_classes(out: &mut String, symbols: &crate::symbols::Symbols) -> bool {
                 let bound = args.first().and_then(literal_f64);
                 let pattern = args.first().and_then(literal_str).unwrap_or("");
                 out.push_str(&format!(
-                    "                JwcRule {{ name: {}, limit: {}, bound: {}, pattern: {} }},\n",
+                    "                JwcRule {{ name: {}, limit: {}, bound: {}, pattern: {}, message: {} }},\n",
                     rust_str_literal(rule),
                     match limit {
                         Some(l) => format!("Some({l})"),
@@ -729,6 +730,7 @@ fn emit_classes(out: &mut String, symbols: &crate::symbols::Symbols) -> bool {
                         None => "None".to_string(),
                     },
                     rust_str_literal(if rule == "pattern" { pattern } else { "" }),
+                    rust_str_literal(r.message.as_deref().unwrap_or("")),
                 ));
             }
             out.push_str("            ],\n");

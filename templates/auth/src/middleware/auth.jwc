@@ -1,0 +1,17 @@
+namespace middleware.auth;
+
+--- `provides account_id` is a contract: a route that uses this middleware
+--- can read `context.account_id`, and one that reads it without the
+--- middleware fails to compile (middleware.md §3.3).
+middleware RequireAuth provides account_id: bigint {
+    let header = request.header("Authorization") or throw Unauthorized("token kerak");
+
+    let token = string.strip_prefix($header, "Bearer ");
+    let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
+
+    let claims = jwt.verify($token, $secret)
+        or throw Unauthorized("token yaroqsiz yoki muddati o'tgan");
+
+    --- Not client-derived: the signature proves we minted it.
+    context.account_id = bigint($claims.sub);
+}

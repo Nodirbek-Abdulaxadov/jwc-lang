@@ -80,15 +80,25 @@ email varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan";
 unique (org_id, slug) : "bu tashkilotda bunday slug bor";
 
 check (amount > 0) : "summa musbat bo'lishi kerak";
+
+-- Column rules take one too, and a column can carry several:
+email varchar(255) unique : "bu email band", pattern(r"^[^@]+@[^@]+$") : "email yaroqsiz";
 ```
 
 The sentence after the `:` is what the client sees when the constraint is
-violated — a `409` for a unique violation, a `400` for a check. It travels
-with the constraint, so the endpoint does not need a read-then-insert to
-produce a friendly message, and the race that read opens does not exist.
+violated — a `409` for a unique violation, a `400` for a check or a rule.
+It travels with the constraint, so the endpoint does not need a
+read-then-insert to produce a friendly message, and the race that read
+opens does not exist.
+
+The same marker works on a `class` field, where it replaces the generated
+sentence in the `validation_failed` body — so the request boundary and the
+table can say the same thing.
 
 A constraint with no message stays a fault: a 500, because it means
-something the author did not anticipate.
+something the author did not anticipate. `jwc lint --constraints` lists
+every one a route can reach, so the 500-producing set is enumerable rather
+than discovered in production.
 
 ## Foreign keys
 

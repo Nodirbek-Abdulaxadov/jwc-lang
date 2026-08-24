@@ -1,0 +1,26 @@
+namespace app;
+
+database App : Postgres {
+    init() {
+        pool_size         = int(env("DB_POOL") ?? "20");
+        statement_timeout = "10s";
+        connect_timeout   = "5s";
+    }
+}
+
+schema public of App;
+
+server {
+    max_body_bytes  = 262144;
+    request_timeout = "30s";
+}
+
+routes "/" {
+    route GET "" {
+        return json({ service: "{{name}}", status: "ok" });
+    }
+}
+
+function main() {
+    serve(int(env("PORT") ?? "8080"));
+}

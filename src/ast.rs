@@ -229,16 +229,32 @@ pub enum ColumnModifier {
 pub struct RuleCall {
     pub name: Ident,
     pub args: Vec<Expr>,
+    /// `minLength(2) : "sarlavha juda qisqa"` — errors.md §6.1's promotion
+    /// marker, on a rule rather than a whole constraint.
+    ///
+    /// Without this, `W1302` pointed at a message-less `pattern(...)` and
+    /// advised `add ': "…"'` — advice that did not parse, because only
+    /// `unique` and the table-level forms took one. The specification's own
+    /// sample tripped the warning and could not act on it.
+    pub message: Option<String>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug)]
+/// Every variant carries its `at: Attached` for the reason `ColumnDef` and
+/// `IndexDef` do: the four constraint parsers used to compute the attached
+/// comment and throw it away, so `jwc fmt` **deleted** the `---` doc above
+/// a `check` or a `unique`. A formatter that loses documentation is worse
+/// than no formatter, and `fmt --check` in CI is what pushes people to run
+/// it.
 pub enum TableConstraint {
     PrimaryKey {
+        at: Attached,
         columns: Vec<Ident>,
         span: Span,
     },
     ForeignKey {
+        at: Attached,
         columns: Vec<Ident>,
         target: QualifiedTable,
         target_columns: Vec<Ident>,
@@ -247,16 +263,29 @@ pub enum TableConstraint {
         span: Span,
     },
     Unique {
+        at: Attached,
         columns: Vec<Ident>,
         predicate: Option<Expr>,
         message: Option<String>,
         span: Span,
     },
     Check {
+        at: Attached,
         expr: Expr,
         message: Option<String>,
         span: Span,
     },
+}
+
+impl TableConstraint {
+    pub fn attached(&self) -> &Attached {
+        match self {
+            TableConstraint::PrimaryKey { at, .. }
+            | TableConstraint::ForeignKey { at, .. }
+            | TableConstraint::Unique { at, .. }
+            | TableConstraint::Check { at, .. } => at,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

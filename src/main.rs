@@ -21,8 +21,39 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TemplateArg {
+    /// One route, one schema, no tables — the smallest thing that runs.
+    Empty,
+    /// CRUD over one table: DTOs, a service, five routes, keyset paging.
+    Api,
+    /// `empty` plus accounts, Argon2id passwords and JWT sessions.
+    Auth,
+}
+
+impl From<TemplateArg> for jwc::templates::TemplateKind {
+    fn from(a: TemplateArg) -> Self {
+        match a {
+            TemplateArg::Empty => jwc::templates::TemplateKind::Empty,
+            TemplateArg::Api => jwc::templates::TemplateKind::Api,
+            TemplateArg::Auth => jwc::templates::TemplateKind::Auth,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Scaffold a new project.
+    New {
+        /// Directory name and the manifest's `name`.
+        name: String,
+        /// Which starter tree. Defaults to `empty`.
+        #[arg(long, value_enum, default_value = "empty")]
+        template: TemplateArg,
+        /// Where to create it. Defaults to `./<name>`.
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Parse and check the sources under a path.
     Check {
         /// File or directory. Defaults to the current directory.
@@ -278,6 +309,11 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::New {
+            name,
+            template,
+            path,
+        } => jwc::templates::new_project(name, template.into(), path),
         Command::Check {
             path,
             quiet,

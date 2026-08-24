@@ -66,6 +66,7 @@ pub mod mail;
 pub mod observability;
 pub mod password;
 pub mod redis_engine;
+pub mod templates;
 
 use diag::{Diagnostic, Severity, SourceFile};
 use std::path::Path;

@@ -7,8 +7,8 @@ import db.org;
 table Accounts of App.auth {
     --- Surrogate key. Exposed to clients as a string (types.md §2.3).
     id             bigint primary key identity;
-    email          varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan", pattern(r"^[^@]+@[^@]+\.[^@]+$");
-    display_name   varchar(80) minLength(2);
+    email          varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan", pattern(r"^[^@]+@[^@]+\.[^@]+$") : "email manzili yaroqsiz";
+    display_name   varchar(80) minLength(2) : "ism kamida 2 ta belgi bo'lsin";
     --- Argon2id. Never leaves the database (schema.md §3.1).
     password_hash  varchar(255) private;
     email_verified boolean default false;

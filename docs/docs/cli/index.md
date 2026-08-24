@@ -1,13 +1,28 @@
 ---
 sidebar_position: 1
 title: "The `jwc` command"
-description: "Every subcommand: check, fmt, serve, build, migrate, test, lint, routes, explain, openapi, lsp, and the registry commands."
+description: "Every subcommand: new, check, fmt, serve, build, migrate, test, lint, routes, explain, openapi, lsp, and the registry commands."
 ---
 
 # The `jwc` command
 
 One binary. It is the compiler, the server, the migration tool and the
 language server.
+
+## Starting
+
+```bash
+jwc new shop                      # the smallest thing that runs
+jwc new shop --template api       # CRUD over one table, keyset-paginated
+jwc new shop --template auth      # accounts, Argon2id passwords, JWT sessions
+jwc new shop --path ./services/shop
+```
+
+The directory must be missing or empty — `jwc new` will not scaffold over
+files you wrote. Every template checks, lints and formats clean on the
+first run, and `tests/templates.rs` scaffolds each one and puts the real
+toolchain over it, so one that does not is a failing build here rather
+than a surprise for you.
 
 ## Every day
 

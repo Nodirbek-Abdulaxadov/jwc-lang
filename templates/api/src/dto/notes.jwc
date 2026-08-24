@@ -1,0 +1,17 @@
+namespace dto.notes;
+
+--- The request boundary. A `class` is the only shape `request.body()` can
+--- produce, so a field that is not declared here cannot reach a query.
+class NoteCreate {
+    title varchar(200) required, minLength(2);
+    body  text?;
+}
+
+--- Every field optional: PATCH sets what was sent and leaves the rest.
+--- `set ...$req` reads key *presence*, so omitting `body` is not the same
+--- as sending `null`.
+class NoteEdit {
+    title    varchar(200)? minLength(2);
+    body     text?;
+    archived boolean?;
+}

@@ -1,0 +1,36 @@
+namespace routes.auth;
+
+import dto.auth;
+import middleware.auth;
+import services.auth;
+
+routes "/api/v1/auth" {
+    route POST "register" {
+        let req = request.body() as Register;
+        let account = AuthService.register($req);
+
+        return created(json($account));
+    }
+
+    route POST "login" {
+        let req = request.body() as Login;
+        let session = AuthService.login($req);
+
+        return json($session);
+    }
+}
+
+routes "/api/v1/me" use RequireAuth {
+    route GET "" {
+        let account = AuthService.profile(context.account_id);
+
+        return json($account);
+    }
+
+    route PATCH "" {
+        let req = request.body() as AccountEdit;
+        let account = AuthService.update_profile(context.account_id, $req);
+
+        return json($account);
+    }
+}

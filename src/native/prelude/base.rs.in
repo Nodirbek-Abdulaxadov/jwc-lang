@@ -3331,6 +3331,9 @@ struct JwcRule {
     /// `amount numeric(14,2) min(0)` rejects `-1.00`.
     bound: Option<f64>,
     pattern: &'static str,
+    /// The declared `: "…"`. Empty falls back to the generated sentence,
+    /// so the two backends agree on both branches.
+    message: &'static str,
 }
 
 struct JwcClassField {
@@ -3570,12 +3573,13 @@ fn jwc_check_rules(
             _ => true,
         };
         if !ok {
-            failures.push(jwc_field_error(
-                path,
-                r.name,
-                r.limit,
-                &jwc_default_message(f.name, r.name, r.limit),
-            ));
+            // A declared `: "…"` wins; otherwise the generated sentence.
+            let message = if r.message.is_empty() {
+                jwc_default_message(f.name, r.name, r.limit)
+            } else {
+                r.message.to_string()
+            };
+            failures.push(jwc_field_error(path, r.name, r.limit, &message));
         }
     }
 }

@@ -187,6 +187,7 @@ impl Writer {
             self.blank();
         }
         for c in &n.constraints {
+            self.attached(c.attached());
             self.constraint(c);
         }
         if !n.indexes.is_empty() {
@@ -1030,7 +1031,7 @@ fn modifier(m: &ColumnModifier) -> String {
 }
 
 fn rule_call(r: &RuleCall) -> String {
-    if r.args.is_empty() {
+    let mut s = if r.args.is_empty() {
         r.name.name.clone()
     } else {
         format!(
@@ -1038,7 +1039,11 @@ fn rule_call(r: &RuleCall) -> String {
             r.name.name,
             r.args.iter().map(expr).collect::<Vec<_>>().join(", ")
         )
+    };
+    if let Some(m) = &r.message {
+        s.push_str(&format!(" : {}", quote(m)));
     }
+    s
 }
 
 fn index_column(c: &IndexColumn) -> String {

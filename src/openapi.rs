@@ -326,9 +326,10 @@ fn class_field_schema(sym: &Symbols, f: &crate::symbols::ClassFieldSym) -> Value
     let Some(o) = out.as_object_mut() else {
         return out;
     };
-    for (rule, args) in &f.rules {
+    for r in &f.rules {
+        let (rule, args) = (r.name.as_str(), &r.args);
         let n = args.first().and_then(number_literal);
-        match (rule.as_str(), n) {
+        match (rule, n) {
             ("minLength", Some(v)) => {
                 o.insert("minLength".into(), v);
             }

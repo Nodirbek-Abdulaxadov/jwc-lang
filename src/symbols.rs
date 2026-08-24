@@ -80,12 +80,25 @@ pub struct ClassSym {
     pub loc: Loc,
 }
 
+/// One validation rule on a class field: `minLength(2)`, and the message
+/// its violation should carry.
+///
+/// A struct rather than a `(String, Vec<Expr>)` tuple because the third
+/// member is optional and easy to misread positionally.
+#[derive(Clone, Debug)]
+pub struct ClassRule {
+    pub name: String,
+    pub args: Vec<Expr>,
+    /// `: "…"`. `None` falls back to the generated sentence.
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassFieldSym {
     pub name: String,
     pub ty: Ty,
     pub transient: bool,
-    pub rules: Vec<(String, Vec<Expr>)>,
+    pub rules: Vec<ClassRule>,
     pub loc: Loc,
 }
 
@@ -441,23 +454,27 @@ fn class_sym(
             } else {
                 base
             };
-            let rules: Vec<(String, Vec<Expr>)> = f
+            let rules: Vec<ClassRule> = f
                 .rules
                 .iter()
-                .map(|r| (r.name.name.clone(), r.args.clone()))
+                .map(|r| ClassRule {
+                    name: r.name.name.clone(),
+                    args: r.args.clone(),
+                    message: r.message.clone(),
+                })
                 .collect();
 
             // types.md §11.1: `minLength` on an array is the overload the
             // gap named; arrays use `minItems`.
             let is_array = f.ty.array_depth > 0;
-            for (name, _) in &rules {
-                match name.as_str() {
+            for r in &rules {
+                match r.name.as_str() {
                     "minLength" | "maxLength" if is_array => diags.push((
                         floc,
                         Diagnostic::error(
                             "E0360",
                             f.span,
-                            format!("`{name}` on an array field `{}`", f.name.name),
+                            format!("`{}` on an array field `{}`", r.name, f.name.name),
                         )
                         .note("arrays use `minItems` / `maxItems`")
                         .clause("types.md §11.1"),
@@ -467,7 +484,7 @@ fn class_sym(
                         Diagnostic::error(
                             "E0360",
                             f.span,
-                            format!("`{name}` on a scalar field `{}`", f.name.name),
+                            format!("`{}` on a scalar field `{}`", r.name, f.name.name),
                         )
                         .note("scalars use `minLength` / `maxLength`")
                         .clause("types.md §11.1"),
