@@ -3,6 +3,58 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.910] — buffered writes — 2026-08-24
+
+The last of the features `src/queue.rs` and its neighbours took with them
+at the cutover: a write that a request should not wait for.
+
+```jwc
+route POST "" {
+    insert buffered into App.audit.Events values {
+        actor: $user.id,
+        action: "checkout",
+        at: now(),
+    };
+    return ok();
+}
+```
+
+`insert buffered` hands the row to a background writer and returns. The
+writer holds rows briefly, then sends one multi-row `INSERT` per statement
+shape — merging is the point, because one statement per row would move the
+latency off the request and leave the database doing the same work.
+
+### What it costs you
+
+An unbuffered `insert` is part of your transaction and returns the row. A
+buffered one is neither, and the checker holds you to that:
+
+- it produces nothing, so `let $e = insert buffered …` is `E0612`;
+- it cannot be `returning`, for the same reason (`E0613`);
+- it is refused inside `transaction { }` (`E0614`), where "committed"
+  would otherwise mean two different things in one block.
+
+The buffer is bounded. When it is full the row is **dropped**, not queued
+— which is the right trade for an audit trail and the wrong one for a
+ledger. `jwc_log_dropped_total` says when that happens, and the six
+`jwc_log_*` series on `/metrics` are byte-identical across `jwc serve` and
+a native build.
+
+### Diagnostics are audited now
+
+Codes are assigned by hand and nothing checked them, so six were handed
+out twice in one afternoon — `E0811` and `E0611` already meant something
+else, and `E0011`–`E0014` are parser errors. A new guard reads every
+`"E0xxx"` in `src/` against the specs' diagnostics tables and fails on a
+code that is in two tables, in none, or in a table with nothing emitting
+it.
+
+Closing the gap it found: the 18 parser codes are now tabled individually
+in names §7.1 instead of delegated wholesale to the grammar — six of them
+state rules the EBNF does not carry, like a status code being bounded or
+`right join` having been left out on purpose — and `E0376`, `E0511`,
+`E0535`, `E0536` and `E0813` were added to the specs that own them.
+
 ## [0.9.909] — background jobs — 2026-08-24
 
 `src/queue.rs` (1 352 lines) was deleted at the v0.25.0 cutover with no

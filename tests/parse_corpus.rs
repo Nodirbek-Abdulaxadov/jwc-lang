@@ -121,6 +121,13 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
              \x20   }\n}",
         ),
         (
+            "buffered_insert",
+            "middleware Log {\n\
+             \x20   after {\n\
+             \x20       insert into App.s.Access { route = request.route() } buffered;\n\
+             \x20   }\n}",
+        ),
+        (
             "job_decl",
             "job SendWelcome(account_id: bigint, email: text) retries 3 backoff \"30s\" {\n\
              \x20   let who = $account_id;\n}",
@@ -393,13 +400,13 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
 #[test]
 fn a_malformed_socket_is_reported_at_parse_time() {
     let cases: &[(&str, &str)] = &[
-        ("E0013", r#"routes "/a" { socket "empty" { } }"#),
+        ("E0021", r#"routes "/a" { socket "empty" { } }"#),
         (
-            "E0012",
+            "E0020",
             r#"routes "/a" { socket "twice" { on open { } on open { } } }"#,
         ),
         (
-            "E0011",
+            "E0019",
             r#"routes "/a" { socket "unknown" { on error { } } }"#,
         ),
     ];

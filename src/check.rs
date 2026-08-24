@@ -79,6 +79,7 @@ pub fn check_with(
         scopes: Vec::new(),
         params: HashMap::new(),
         query: Vec::new(),
+        tx_depth: 0,
         scoped_to: None,
         tainted: HashSet::new(),
         path_keyed: HashSet::new(),
@@ -157,6 +158,10 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Ty>>,
     params: HashMap<String, Ty>,
     query: Vec<QueryScope>,
+    /// Nesting depth of `transaction { }`, so a `buffered` insert inside
+    /// one can be refused: the row is written later and on another
+    /// connection, and a rollback would not take it back.
+    tx_depth: usize,
     /// While set, an unqualified identifier resolves against this object
     /// only. Used for projections and for a join result's own
     /// `orderby`/`limit` (queries.md §6.1, §4.6).
@@ -900,7 +905,7 @@ impl<'a> Checker<'a> {
                 if self.body == BodyKind::Socket && value.is_some() {
                     self.err_note(
                         *span,
-                        "E0811",
+                        "E0814",
                         "`return <value>` inside a socket handler",
                         "the HTTP response was the upgrade; write `socket.send(...)` \
                          to answer on the connection, and bare `return;` to end the \
@@ -1104,7 +1109,9 @@ impl<'a> Checker<'a> {
                         "writes.md §7.4",
                     );
                 }
+                self.tx_depth += 1;
                 self.block(body);
+                self.tx_depth -= 1;
             }
             Stmt::Assert { kind, span, .. } => match kind {
                 AssertKind::Expr(e) => {
@@ -3488,6 +3495,48 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ writes
 
     fn insert(&mut self, i: &InsertExpr, span: Span) -> Ty {
+        if i.buffered {
+            // writes.md §7 — the row is handed to a batch writer and this
+            // returns immediately, so there is nothing to project.
+            if let Some(p) = &i.projection {
+                self.err_note(
+                    p.span,
+                    "E0614",
+                    "`as { … }` on a buffered insert",
+                    "a buffered insert answers before the row is written, so \
+                     there is no row to project — drop the `as`, or drop \
+                     `buffered`",
+                    "writes.md §7.2",
+                );
+            }
+            // The row does not take part: it is written later, on another
+            // connection, and a rollback here leaves it in the table.
+            // Silently is how a "transactional" audit row gets written for
+            // a transaction that failed.
+            if self.tx_depth > 0 {
+                self.err_note(
+                    span,
+                    "E0612",
+                    "`buffered` inside a `transaction { }`",
+                    "a buffered row is written later and on another connection, \
+                     so a rollback would not take it back — drop `buffered` if \
+                     the row belongs to the transaction",
+                    "writes.md §7.2",
+                );
+            }
+            // `on conflict` needs the statement's own outcome, which the
+            // caller never sees.
+            if let Some(c) = &i.conflict {
+                self.err_note(
+                    c.span,
+                    "E0613",
+                    "`on conflict` on a buffered insert",
+                    "a buffered insert reports nothing, so a conflict resolution \
+                     nobody observes is a row silently not written",
+                    "writes.md §7.2",
+                );
+            }
+        }
         let Some(object) = self.resolve_source(&i.table) else {
             return Ty::Unknown;
         };

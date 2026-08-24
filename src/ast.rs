@@ -985,6 +985,14 @@ pub struct InsertExpr {
     pub values: Vec<ObjEntry>,
     pub conflict: Option<ConflictClause>,
     pub projection: Option<ObjectShape>,
+    /// `insert into … { … } buffered;` — hand the row to the batch writer
+    /// and return, rather than waiting for the round trip (writes.md §7).
+    ///
+    /// A modifier on `insert` rather than a `log_insert(table, json, …)`
+    /// built-in, which is what 0.9 had: that form took the table as a
+    /// string and the row as JSON, so it bypassed the query compiler
+    /// entirely and nothing checked that the columns existed.
+    pub buffered: bool,
     pub span: Span,
 }
 

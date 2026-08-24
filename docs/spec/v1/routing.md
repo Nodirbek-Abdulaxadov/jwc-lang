@@ -400,11 +400,11 @@ half-implemented transport is worse than an absent one.
 | `E0734` | `response.status()` outside an `after` block |
 | `E0735` | `content(...)` media type is not a string literal |
 | `E0736` | `content(...)` body is not `text` |
-| `E0011` | a `socket` member that is not `on open` / `on message (m)` / `on close` |
-| `E0012` | the same `on` handler declared twice |
-| `E0013` | a `socket` with no handlers at all |
+| `E0019` | a `socket` member that is not `on open` / `on message (m)` / `on close` |
+| `E0020` | the same `on` handler declared twice |
+| `E0021` | a `socket` with no handlers at all |
 | `E0225` | `socket.*` outside a socket handler |
-| `E0811` | `return <value>` inside a socket handler |
+| `E0814` | `return <value>` inside a socket handler |
 | `E0900` | removed keyword (§11 below) |
 | `W0602` | `request.path()` in a rate-limit key |
 

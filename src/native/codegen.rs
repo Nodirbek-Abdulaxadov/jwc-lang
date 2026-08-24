@@ -553,11 +553,15 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         }
     }
     let needs_jobs = !jobs.is_empty() || ctx.used.contains("jwc_job_enqueue");
-    out.push_str("\nstatic JWC_JOBS: &[JwcJobEntry] = &[\n");
-    for (_, entry) in &jobs {
-        out.push_str(&format!("    {entry},\n"));
+    // Only when the jobs prelude is linked: `JwcJobEntry` lives there, and
+    // an empty table still names the type.
+    if needs_jobs {
+        out.push_str("\nstatic JWC_JOBS: &[JwcJobEntry] = &[\n");
+        for (_, entry) in &jobs {
+            out.push_str(&format!("    {entry},\n"));
+        }
+        out.push_str("];\n");
     }
-    out.push_str("];\n");
 
     // --- sockets (routing.md §9) --------------------------------------------
     for route in wired.routes.iter().filter(|r| r.socket) {
@@ -644,7 +648,11 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // `needs_jobs` is computed above, from the declarations rather than
     // from `ctx.used`: a job whose body touches no database still needs
     // the pool, because the *queue* is a table.
-    let needs_db = needs_jobs || ctx.used.iter().any(|f| defines(super::PRELUDE_DB, f));
+    // `insert into … buffered` is the only thing that reaches it, and it
+    // marks `jwc_log_push` used.
+    let needs_log_writer = ctx.used.contains("jwc_log_push");
+    let needs_db =
+        needs_jobs || needs_log_writer || ctx.used.iter().any(|f| defines(super::PRELUDE_DB, f));
     // A page's cursor is HMAC-signed, and the HMAC lives in the crypto
     // prelude — so a program that pages needs it even if it hashes nothing.
     //
@@ -1733,7 +1741,7 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
         }
 
         // errors.md §7 — `<expr> catch E (err) { … }`. The block must
-        // diverge, which the checker enforces (E0812), so the arm needs no
+        // diverge, which the checker enforces (E1020), so the arm needs no
         // value of its own.
         ExprKind::CatchPostfix {
             value,
@@ -1840,6 +1848,35 @@ fn emit_insert(i: &crate::ast::InsertExpr, ctx: &mut Ctx) -> Result<String> {
     let Some(built) = b.insert(i, &names) else {
         bail!("this insert is not expressible yet");
     };
+    // writes.md §7 — the same statement, handed to the batch writer
+    // instead of being awaited. `buffered` changes who sends it and when,
+    // not what is sent.
+    if i.buffered {
+        // The prelude's writer merges rows into one multi-row `INSERT`, so
+        // it takes the statement in two halves: the static
+        // `INSERT INTO "t" (cols…) VALUES ` prefix, and this row's values.
+        // `built.sql` is the whole statement, so it is cut at the `VALUES`
+        // the builder emitted.
+        let Some(cut) = built.sql.find(" VALUES ") else {
+            bail!("a buffered insert produced a statement with no VALUES clause");
+        };
+        let prefix = format!("{} VALUES ", &built.sql[..cut]);
+        // The tuple travels verbatim: its casts are what turn a text bind
+        // into the column's type, and a merged statement that rebuilt them
+        // as `($1, $2)` would be refused by the driver.
+        let tuple = &built.sql[cut + " VALUES ".len()..];
+        ctx.used.insert("jwc_log_push".to_string());
+        let params = preset
+            .iter()
+            .map(|v| format!("jwc_param_str({v})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(format!(
+            "jwc_log_push({}, {}, vec![{params}])",
+            rust_str_literal(&prefix),
+            rust_str_literal(tuple)
+        ));
+    }
     // Every parameter of an INSERT is a value the writer already computed:
     // the builder binds the placeholder `Expr`, and `exec::run_insert`
     // hands the values straight to `run_sql_with`, bypassing `bind_params`.

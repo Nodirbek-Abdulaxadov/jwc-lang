@@ -1155,7 +1155,7 @@ impl Parser {
                 let (n, span) = self.expect_int()?;
                 if !(1..=100).contains(&n) {
                     self.err_note(
-                        "E0014",
+                        "E0022",
                         span,
                         format!("`retries {n}` is outside 1..=100"),
                         "one attempt is `retries 1`; a job that needs more than a \
@@ -1376,7 +1376,7 @@ impl Parser {
             if !self.eat_word("on") {
                 let found = self.peek().tok.clone();
                 self.err_note(
-                    "E0011",
+                    "E0019",
                     hstart,
                     format!("expected `on`, found {found}"),
                     "a `socket` block contains `on open`, `on message (m)` and `on close`",
@@ -1388,7 +1388,7 @@ impl Parser {
             let which = self.expect_ident()?;
             if seen.contains(&which.name.as_str()) {
                 self.err_note(
-                    "E0012",
+                    "E0020",
                     which.span,
                     format!("`on {}` is declared twice", which.name),
                     "each of `open`, `message` and `close` may appear once",
@@ -1419,7 +1419,7 @@ impl Parser {
                 }
                 other => {
                     self.err_note(
-                        "E0011",
+                        "E0019",
                         which.span,
                         format!("`on {other}` is not a socket event"),
                         "one of `open`, `message`, `close`",
@@ -1440,7 +1440,7 @@ impl Parser {
 
         if seen.is_empty() {
             self.err_note(
-                "E0013",
+                "E0021",
                 start.to(end),
                 "this `socket` declares no handler",
                 "add at least one of `on open`, `on message (m)`, `on close` — as it \
@@ -2947,11 +2947,18 @@ impl Parser {
             } else {
                 None
             };
+            let buffered = if self.at_word("buffered") {
+                end = self.bump().span;
+                true
+            } else {
+                false
+            };
             Ok(InsertExpr {
                 table: table.clone(),
                 values,
                 conflict,
                 projection,
+                buffered,
                 span: start.to(end),
             })
         })();

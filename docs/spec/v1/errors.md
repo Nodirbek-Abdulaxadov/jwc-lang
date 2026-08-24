@@ -365,6 +365,7 @@ header.
 | `E1010` | more than one `errorHandler` |
 | `E1011` | `errorHandler` arm does not return a response |
 | `E1020` | postfix `catch` block does not diverge |
+| `E0813` | `break` or `continue` outside a `for` loop |
 | `W1001` | unreachable `errorHandler` arm |
 | `W1002` | `or throw` on a non-nullable operand |
 

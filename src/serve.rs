@@ -640,6 +640,7 @@ async fn metrics_text(program: &Program) -> String {
     if !program.jobs.is_empty() {
         out.push_str(&crate::jobs::metrics_text().await);
     }
+    out.push_str(&crate::log_writer::metrics_text());
     out.push_str(
         "# HELP jwc_routes Declared routes.\n\
          # TYPE jwc_routes gauge\n",
@@ -1534,6 +1535,9 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     // stop the HTTP half from answering — and before the accept loop, so
     // a job dispatched by the first request has a worker waiting.
     start_job_workers(job_program).await;
+    // Idempotent, and cheap when nothing buffers: the consumer parks on
+    // an empty channel.
+    crate::log_writer::start();
 
     // The accept loop `axum::serve` would otherwise own. It is written out
     // here because both of config.md §3's remaining promises live below

@@ -819,8 +819,9 @@ impl Writer {
             });
         }
 
+        let buffered = if i.buffered { " buffered" } else { "" };
         if inline.len() + head.len() <= 76 && tail.is_empty() && i.projection.is_none() {
-            self.line(&format!("{head} {{ {inline} }}{suffix}"));
+            self.line(&format!("{head} {{ {inline} }}{buffered}{suffix}"));
             return;
         }
 
@@ -848,7 +849,7 @@ impl Writer {
         //     } as { id, email, display_name, created_at };
         if tail.is_empty() {
             match &i.projection {
-                None => self.line(&format!("}}{suffix}")),
+                None => self.line(&format!("}}{buffered}{suffix}")),
                 Some(p) => {
                     let one_line = format!("}} as {}{suffix}", shape_text(p));
                     if one_line.len() + self.depth * INDENT.len() <= 88 {
@@ -1532,6 +1533,9 @@ pub fn expr(e: &Expr) -> String {
             }
             if let Some(p) = &i.projection {
                 out.push_str(&format!(" as {}", shape_text(p)));
+            }
+            if i.buffered {
+                out.push_str(" buffered");
             }
             out
         }

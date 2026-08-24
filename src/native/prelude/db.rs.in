@@ -662,8 +662,20 @@ async fn jwc_b_raw_sql(sql: V, params_json: V) -> V {
 struct JwcLogRow {
     /// Static `INSERT INTO "t" (cols...) VALUES ` half, emitted by codegen.
     prefix: &'static str,
-    /// Columns per row — how many placeholders each tuple needs.
-    ncols: usize,
+    /// One `VALUES` tuple, verbatim from the compiled statement:
+    /// `(($1::text)::varchar(200), ($2::text)::integer)`.
+    ///
+    /// Kept rather than rebuilt from a column count, because the casts are
+    /// load-bearing. Every bind this layer sends is text; the statement is
+    /// what makes it an `integer`. A merged statement emitting a bare
+    /// `($1, $2)` leaves Postgres inferring the parameter types from the
+    /// columns, and the driver then refuses to serialise a `String` into
+    /// an `int4` — "error serializing parameter", the whole batch lost.
+    ///
+    /// 0.9 got away with `ncols` because its codegen bound each column
+    /// with a *typed* `jwc_param_*` helper. The 1.0 statement binds text
+    /// and casts, so the tuple has to travel.
+    tuple: &'static str,
     params: DbParams,
 }
 
@@ -698,7 +710,7 @@ fn jwc_log_env_usize(key: &str, default: usize) -> usize {
 /// The writer starts on first use rather than at boot — `jwc_log_push` is
 /// only ever reached from inside the tokio runtime, so `tokio::spawn` is
 /// safe here and no wiring in `main` is needed.
-fn jwc_log_push(prefix: &'static str, ncols: usize, params: DbParams) -> V {
+fn jwc_log_push(prefix: &'static str, tuple: &'static str, params: DbParams) -> V {
     let w = JWC_LOG.get_or_init(|| {
         let queue = jwc_log_env_usize("JWC_LOG_QUEUE", 10_000);
         let batch = jwc_log_env_usize("JWC_LOG_BATCH", 2_000);
@@ -722,7 +734,7 @@ fn jwc_log_push(prefix: &'static str, ncols: usize, params: DbParams) -> V {
     });
     match w.tx.try_send(JwcLogRow {
         prefix,
-        ncols,
+        tuple,
         params,
     }) {
         Ok(()) => V::Bool(true),
@@ -838,6 +850,38 @@ async fn jwc_log_drain(
     }
 }
 
+/// `$1, $2` shifted by `offset`, leaving everything else alone.
+///
+/// The tuple is the compiled statement's, casts and all, so this rewrites
+/// the placeholders inside it rather than building new ones. Mirrors
+/// `log_writer::renumber`.
+fn jwc_log_renumber(tuple: &str, offset: usize) -> String {
+    let mut out = String::with_capacity(tuple.len() + 4);
+    let bytes = tuple.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end == start {
+            out.push('$');
+            i += 1;
+            continue;
+        }
+        let n: usize = tuple[start..end].parse().unwrap_or(0);
+        out.push_str(&format!("${}", n + offset));
+        i = end;
+    }
+    out
+}
+
 /// Group by statement prefix, then write one multi-row INSERT per group.
 /// Rows from two different entities cannot share a `VALUES` list, and the
 /// prefix is what distinguishes them.
@@ -845,15 +889,16 @@ async fn jwc_log_flush(pending: Vec<JwcLogRow>) {
     if pending.is_empty() {
         return;
     }
-    let mut groups: std::collections::HashMap<(&'static str, usize), Vec<DbParams>> =
+    let mut groups: std::collections::HashMap<(&'static str, &'static str), Vec<DbParams>> =
         std::collections::HashMap::new();
     for row in pending {
         groups
-            .entry((row.prefix, row.ncols))
+            .entry((row.prefix, row.tuple))
             .or_default()
             .push(row.params);
     }
-    for ((prefix, ncols), rows) in groups {
+    for ((prefix, tuple), rows) in groups {
+        let ncols = rows.first().map(|p| p.len()).unwrap_or(1);
         // Chunk to Postgres's bound-parameter ceiling. Without this,
         // `JWC_LOG_BATCH=5000` against a 20-column entity builds a 100k
         // parameter statement the server refuses, and the whole batch is
@@ -869,15 +914,8 @@ async fn jwc_log_flush(pending: Vec<JwcLogRow>) {
                 if i > 0 {
                     sql.push_str(", ");
                 }
-                sql.push('(');
-                for c in 0..ncols {
-                    if c > 0 {
-                        sql.push_str(", ");
-                    }
-                    sql.push_str(&format!("${}", next));
-                    next += 1;
-                }
-                sql.push(')');
+                sql.push_str(&jwc_log_renumber(tuple, next - 1));
+                next += ncols;
                 flat.extend(params);
             }
             sql.push(';');

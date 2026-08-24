@@ -368,14 +368,39 @@ rather than implemented as an unreachable check.)*
 | `E0214` | `let` shadows an existing binding |
 | `E0220` | `@name` outside a route or middleware |
 | `E0900` | removed keyword from the pre-1.0 language |
-
-`E0001`–`E0018` are the parser's recovery diagnostics — "expected `X`, found
-`Y`" at a position where [`grammar.ebnf`](./grammar.ebnf) admits only `X`.
-They are deliberately not tabled one by one: the grammar is their
-specification, and a table restating it would be a second thing to keep in
-step with the first. Every other code in the compiler appears in one of
-these tables, and the audit is `comm -23` over the two lists (CLAUDE.md).
 | `W0101` | case convention |
 | `W0102` | namespace does not match file path |
 | `W0103` | unused import |
 | `W0104` | comparison is always true |
+
+### 7.1 The parser's recovery diagnostics
+
+`E0001`–`E0018` are raised by the parser when the token it reads is not one
+[`grammar.ebnf`](./grammar.ebnf) admits at that position. Each names the
+construct being parsed, so the code alone says where to look; the message
+carries the token that was actually found.
+
+| Code | Raised while parsing | Meaning |
+|---|---|---|
+| `E0001` | any construct | expected a specific token, name, integer or string literal |
+| `E0002` | the top level | expected a declaration |
+| `E0003` | the top level | `route` outside a `routes` block |
+| `E0004` | a foreign key | expected `delete`/`update` after `on`, or a referential action |
+| `E0005` | an `error` declaration | expected an HTTP status code, or one outside `100..=599` |
+| `E0006` | a `service` body | expected `function` — a service holds nothing else |
+| `E0007` | a `middleware` binder | expected `@name` |
+| `E0008` | a `routes` body | expected `route` or `socket` — blocks do not nest |
+| `E0009` | a `route` header | not an HTTP method |
+| `E0010` | an `errorHandler` body | expected `catch` — a handler holds nothing else |
+| `E0011` | a type | expected a type argument, as in `varchar(120)` |
+| `E0012` | an object literal | expected `$name` after `...` |
+| `E0013` | an object literal | expected an object key, or `:`/`=` after one |
+| `E0014` | an expression | expected an expression |
+| `E0015` | a query | `select` with no binder before `from` |
+| `E0016` | a join | expected `left` or `inner` — `right`/`full`/`cross` are not grammar |
+| `E0017` | a join result | expected `one`, `many` or `group` after `as` |
+| `E0018` | a spread | `except` without a parenthesised list |
+
+Several of these state a rule the grammar does not carry — that a status
+code is bounded, that `right join` was left out on purpose — which is why
+they are tabled rather than delegated to the EBNF.

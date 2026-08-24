@@ -58,7 +58,7 @@ routes "/bad" {
     socket "returns" {
         on message (m) {
             -- The HTTP response was the 101 that got here.
-            return json({ echoed: $m });        -- expect: E0811
+            return json({ echoed: $m });        -- expect: E0814
         }
     }
 }

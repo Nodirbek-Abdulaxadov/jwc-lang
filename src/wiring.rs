@@ -1235,6 +1235,15 @@ fn collect_expr_raises(e: &Expr, sym: &Symbols, out: &mut BTreeSet<String>) {
             found.insert(error.name.clone());
         }
         ExprKind::Insert(i) => {
+            // A buffered row is written later, on another connection, with
+            // no caller left to raise to — a constraint it violates is
+            // counted in `jwc_log_failed_total`, not thrown (writes.md
+            // §7.2). This is what lets a logging `after` block exist at
+            // all: an ordinary insert there is `E0811`, because an `after`
+            // block has no handler behind it.
+            if i.buffered {
+                return;
+            }
             // `on conflict do nothing` is exactly the construct that stops a
             // unique violation being raised (writes.md §2.3).
             let suppressed = i.conflict.is_some();

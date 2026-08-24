@@ -64,6 +64,7 @@ pub mod jobs;
 pub mod jwks;
 pub mod jwt;
 pub mod locks;
+pub mod log_writer;
 pub mod mail;
 pub mod observability;
 pub mod password;

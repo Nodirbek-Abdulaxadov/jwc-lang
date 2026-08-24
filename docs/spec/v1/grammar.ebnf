@@ -225,7 +225,7 @@ limit_clause    = "limit" expr ;
 page_clause     = "page" [ "after" expr ] "size" expr [ "max" expr ] ;
 
 insert_expr     = "insert" "into" qualified_table object_literal
-                  [ conflict_clause ] [ projection ] ;
+                  [ conflict_clause ] [ projection ] [ "buffered" ] ;
 conflict_clause = "on" "conflict" [ "(" ident_list ")" ]
                   ( "do" "nothing" | "do" "update" set_clause ) ;
 

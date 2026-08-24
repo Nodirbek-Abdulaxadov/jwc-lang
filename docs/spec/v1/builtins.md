@@ -273,7 +273,7 @@ grouped query (`E0530`).
 |---|---|
 | `now()` | two clocks; write `date.now()` or `default now()` (types §2.4) |
 | `send_email` | I/O with a provider shape the language does not model. The package is §8's `mail.send(to, subject, body)`. `DEFERRED-10` |
-| `log_insert` | overlapped `insert into` for no benefit. Write the insert (middleware §5 shows the `after`-safe form) |
+| `log_insert` | not a built-in, but the capability is not absent: it is `insert into … buffered` (writes §7). This row used to read "overlapped `insert into` for no benefit" — the benefit is the round trip an `after` block otherwise puts in front of every response, and it is measurable |
 | `random_token` | ambiguous strength. `crypto.token(n)` |
 | `verify_signature` | ambiguous algorithm. `hash.hmac_verify(payload, sig, secret)` |
 | `days(n)` | `date.days(n)` |

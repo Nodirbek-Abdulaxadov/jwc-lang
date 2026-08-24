@@ -35,7 +35,7 @@ its queued rows carry, so two declarations mean two meanings for one row.
 
 | | Default | |
 |---|---|---|
-| `retries N` | 5 | total attempts, including the first. Outside `1..=100` is `E0014` |
+| `retries N` | 5 | total attempts, including the first. Outside `1..=100` is `E0022` |
 | `backoff "30s"` | 30s | the wait after a failed attempt |
 
 `retries 1` means one attempt and no retry.
@@ -172,7 +172,7 @@ A program that declares no `job` starts no workers and creates no tables.
 
 | Code | |
 |---|---|
-| `E0014` | `retries N` outside `1..=100` |
+| `E0022` | `retries N` outside `1..=100` |
 | `E0362` | a job parameter that is not a scalar or an array of scalars |
 | `E0363` | two `job`s with one name |
 | `E0364` | `dispatch` of an undeclared job |

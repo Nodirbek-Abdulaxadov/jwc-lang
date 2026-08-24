@@ -1285,6 +1285,31 @@ impl<'a> Vm<'a> {
         let built = b
             .insert(i, &fields.0)
             .ok_or_else(|| fault("this insert is not expressible yet"))?;
+
+        // writes.md §7 — the same statement the query compiler produced,
+        // handed to the batch writer instead of being awaited. There is no
+        // second insert path: `buffered` changes who sends it and when,
+        // not what is sent.
+        if i.buffered {
+            // The writer merges rows into one multi-row `INSERT`, so it
+            // takes the statement in two halves: the static
+            // `INSERT INTO "t" (cols…) VALUES ` prefix two rows must share
+            // to be merged, and this row's values.
+            let Some(cut) = built.sql.find(" VALUES ") else {
+                return Err(fault(
+                    "a buffered insert produced a statement with no VALUES clause",
+                ));
+            };
+            let prefix = format!("{} VALUES ", &built.sql[..cut]);
+            // The tuple is kept verbatim: its casts are what turn a text
+            // bind into the column's type, and a merged statement that
+            // rebuilt them as `($1, $2)` would be refused by the driver.
+            let tuple = built.sql[cut + " VALUES ".len()..].to_string();
+            let binds: Vec<Option<String>> = fields.1.iter().map(|v| v.to_bind()).collect();
+            crate::log_writer::push(&prefix, &tuple, binds);
+            return Ok(Value::Null);
+        }
+
         // The values were already evaluated, so re-evaluating a parameter
         // must not repeat a side effect: bind the computed ones.
         self.run_sql_with(built, fields.1).await
