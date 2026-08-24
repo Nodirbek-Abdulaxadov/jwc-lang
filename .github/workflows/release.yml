@@ -14,8 +14,37 @@ permissions:
   contents: write
 
 jobs:
+  # The tag names the asset; Cargo.toml names what the binary reports. Nothing
+  # tied the two together, so `git tag v0.9.910` on a tree at 0.9.913 would
+  # publish `jwc-v0.9.910-x86_64-linux.tar.gz` containing a binary that prints
+  # `jwc 0.9.913` — and the mismatch only surfaces once someone is trying to
+  # work out which version they are running.
+  #
+  # Its own job so it fails before five build matrices spend their minutes.
+  version:
+    name: Tag matches Cargo.toml
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$tag  Cargo.toml=$crate"
+          if [[ "$tag" != "$crate" ]]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate."
+            echo "::error::Bump Cargo.toml (and Cargo.lock) or retag, then push again."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    # `workflow_dispatch` skips the guard above, and a job that `needs` a
+    # skipped job is skipped too unless it says otherwise.
+    needs: version
+    if: always() && needs.version.result != 'failure'
     strategy:
       fail-fast: false
       matrix:
