@@ -68,6 +68,28 @@ jobs:
   # A service container rather than testcontainers — the runner exposes it on
   # localhost, so the suite takes it straight from JWC_TEST_DATABASE_URL and
   # there is no Docker-in-Docker to fail.
+  # Everything else here runs on ubuntu, so `#[cfg(windows)]` code is
+  # compiled out and never type-checked. The only thing that built it was
+  # the release workflow, which runs on tags — so `check_path_length` went
+  # out in v0.9.913 referencing two constants that were never declared, and
+  # the first sign of it was a failed release.
+  #
+  # `cargo check`, not build or test: this exists to compile the cfg'd-out
+  # branches, and a full Windows build costs minutes for nothing extra.
+  windows:
+    name: cfg(windows) compiles
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check (redis feature)
+        run: cargo check --workspace --all-targets --features redis
+
   postgres:
     name: against a real Postgres
     runs-on: ubuntu-latest

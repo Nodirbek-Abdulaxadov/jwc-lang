@@ -449,6 +449,20 @@ fn dirs_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
+/// Windows' classic `MAX_PATH`. Long paths can be enabled system-wide, but
+/// they are off by default and `link.exe` is one of the tools that still
+/// trips over the limit even when they are on.
+#[cfg(windows)]
+const WINDOWS_MAX_PATH: usize = 260;
+
+/// How far below the build workspace cargo's deepest artefact sits —
+/// `target\release\build\<pkg>-<hash>\out\...` and the incremental
+/// fingerprint directories are the long ones. Measured, not guessed, with
+/// headroom: the check is meant to fire before the link step, and being a
+/// little conservative costs a clear error message instead of LNK1104.
+#[cfg(windows)]
+const MAX_GENERATED_SUFFIX: usize = 120;
+
 /// Fail early, and in terms of the actual problem, when the project sits too
 /// deep for the generated cargo workspace to build on Windows.
 ///
