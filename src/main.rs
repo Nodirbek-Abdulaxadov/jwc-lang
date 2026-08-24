@@ -29,6 +29,8 @@ enum TemplateArg {
     Api,
     /// `empty` plus accounts, Argon2id passwords and JWT sessions.
     Auth,
+    /// A background `job`, its dispatch site, and the durable queue.
+    Jobs,
 }
 
 impl From<TemplateArg> for jwc::templates::TemplateKind {
@@ -37,6 +39,7 @@ impl From<TemplateArg> for jwc::templates::TemplateKind {
             TemplateArg::Empty => jwc::templates::TemplateKind::Empty,
             TemplateArg::Api => jwc::templates::TemplateKind::Api,
             TemplateArg::Auth => jwc::templates::TemplateKind::Auth,
+            TemplateArg::Jobs => jwc::templates::TemplateKind::Jobs,
         }
     }
 }

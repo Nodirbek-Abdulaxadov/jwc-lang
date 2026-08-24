@@ -113,6 +113,8 @@ pub struct Program {
     pub routes: Vec<ResolvedRoute>,
     pub functions: HashMap<String, FunctionDecl>,
     pub middleware: HashMap<String, MiddlewareDecl>,
+    /// Declared `job`s, by name.
+    pub jobs: HashMap<String, crate::ast::JobDecl>,
     pub route_bodies: HashMap<(String, String), Block>,
     /// Keyed by the resolved pattern; the method is always the upgrade GET.
     pub socket_bodies: HashMap<String, SocketBody>,
@@ -417,6 +419,39 @@ impl<'a> Vm<'a> {
 
     async fn stmt(&mut self, s: &Stmt) -> Exec<Flow> {
         match s {
+            // jobs.md §2 — the arguments are evaluated here, on the
+            // request's connection, and the row is written before the
+            // response goes out. A dispatch inside a `transaction { }` is
+            // therefore rolled back with everything else, which is what
+            // makes "enqueue the email only if the account was created"
+            // expressible at all.
+            Stmt::Dispatch { job, args, .. } => {
+                let Some(decl) = self.program.jobs.get(&job.name).cloned() else {
+                    return Err(Abort::Fault(anyhow::anyhow!(
+                        "unknown job `{}` — the checker should have caught this",
+                        job.name
+                    )));
+                };
+                let mut values: Vec<(String, Value)> = Vec::new();
+                for (name, expr) in args {
+                    let v = self.eval(expr).await?;
+                    values.push((name.name.clone(), v));
+                }
+                // An omitted optional parameter is `null`, so the handler
+                // sees a key either way and does not have to distinguish
+                // "not sent" from "sent as null" (types.md §6.5).
+                for p in &decl.params {
+                    if !values.iter().any(|(k, _)| *k == p.name.name) {
+                        values.push((p.name.name.clone(), Value::Null));
+                    }
+                }
+                let payload = crate::jobs::payload_of(&values);
+                let retries = decl.retries.unwrap_or(5);
+                crate::jobs::enqueue(&job.name, &payload, retries, 0)
+                    .await
+                    .map_err(crate::exec::map_db_error)?;
+                Ok(Flow::Normal)
+            }
             Stmt::Let { name, value, .. } => {
                 let v = self.eval(value).await?;
                 self.declare(&name.name, v);

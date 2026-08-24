@@ -71,6 +71,7 @@ pub enum Decl {
     ErrorHandler(ErrorHandlerDecl),
     Server(ServerDecl),
     Function(FunctionDecl),
+    Job(JobDecl),
     Test(TestDecl),
 }
 
@@ -88,6 +89,7 @@ impl Decl {
             Decl::Error(d) => d.span,
             Decl::Service(d) => d.span,
             Decl::Middleware(d) => d.span,
+            Decl::Job(d) => d.span,
             Decl::Routes(d) => d.span,
             Decl::ErrorHandler(d) => d.span,
             Decl::Server(d) => d.span,
@@ -109,6 +111,7 @@ impl Decl {
             Decl::Error(d) => &d.at,
             Decl::Service(d) => &d.at,
             Decl::Middleware(d) => &d.at,
+            Decl::Job(d) => &d.at,
             Decl::Routes(d) => &d.at,
             Decl::ErrorHandler(d) => &d.at,
             Decl::Server(d) => &d.at,
@@ -403,6 +406,26 @@ pub struct FunctionDecl {
     pub span: Span,
 }
 
+/// A background job (jobs.md §1).
+///
+/// Named parameters rather than an opaque payload: 0.9's `dispatch(name,
+/// payload)` took a string, so a handler that expected `{account_id}` and
+/// a caller that sent `{accountId}` typechecked, ran, and failed at 3am
+/// with a JSON parse error in a worker log. Here the dispatch site is
+/// checked against the declaration like any other call.
+#[derive(Clone, Debug)]
+pub struct JobDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub params: Vec<Param>,
+    /// `retries N;` — total attempts before the dead-letter queue.
+    pub retries: Option<i64>,
+    /// `backoff "30s";` — the wait after a failed attempt.
+    pub backoff: Option<String>,
+    pub body: Block,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub struct Param {
     pub name: Ident,
@@ -622,6 +645,19 @@ pub enum Stmt {
     Assert {
         at: Attached,
         kind: AssertKind,
+        span: Span,
+    },
+    /// `dispatch SendWelcome(account_id: $id, email: $addr);` — enqueue a
+    /// job (jobs.md §2).
+    ///
+    /// Arguments are named, not positional. A job is written once and
+    /// dispatched from several places over its life; two `bigint`s in the
+    /// wrong order is a bug no type can catch, and the names make the call
+    /// site readable without opening the declaration.
+    Dispatch {
+        at: Attached,
+        job: Ident,
+        args: Vec<(Ident, Expr)>,
         span: Span,
     },
     Expr {

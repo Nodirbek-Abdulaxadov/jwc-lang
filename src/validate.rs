@@ -108,7 +108,14 @@ fn base(t: &Ty) -> Ty {
     }
 }
 
-fn coerce(ty: &Ty, v: &J) -> Option<Value> {
+/// JSON to a `Value` of the declared type. `None` is "this JSON cannot be
+/// that type".
+///
+/// Public because the job queue needs it: a payload is JSON on the way
+/// into the table and has to come back out as the parameter types the
+/// `job` declared. Reconstructing that from the JSON alone cannot work —
+/// `7` is an `int` and a `bigint` and a `numeric`.
+pub fn coerce(ty: &Ty, v: &J) -> Option<Value> {
     use crate::types::Scalar;
     match (&base(ty), v) {
         (_, J::Null) => Some(Value::Null),

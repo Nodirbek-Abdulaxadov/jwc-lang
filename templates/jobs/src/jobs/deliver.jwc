@@ -1,0 +1,17 @@
+namespace jobs.deliver;
+
+import app;
+import db.work;
+
+--- Five attempts, thirty seconds apart, then `public._jwc_jobs_dead`.
+---
+--- The handler runs on a worker, minutes after whatever dispatched it, so
+--- it has its parameters and the database and nothing else: no request, no
+--- response, no `context`.
+---
+--- It also has to tolerate running twice. A worker that dies mid-job loses
+--- its lease and the job is redelivered — that is the at-least-once
+--- guarantee, and it is the strongest one a queue on a database can make.
+job Deliver(recipient: text, subject: text) retries 5 backoff "30s" {
+    insert into App.work.Deliveries { recipient = $recipient, subject = $subject };
+}

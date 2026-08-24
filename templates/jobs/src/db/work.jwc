@@ -1,0 +1,13 @@
+namespace db.work;
+
+--- What the job writes. The queue itself lives in `public._jwc_jobs`,
+--- which the runtime creates and owns — it is not declared here, and
+--- `jwc migrate` never sees it.
+table Deliveries of App.work {
+    id           bigint primary key identity;
+    recipient    varchar(255);
+    subject      varchar(200);
+    delivered_at timestamptz default now();
+
+    index on (delivered_at, id);
+}

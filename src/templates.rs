@@ -43,6 +43,8 @@ pub enum TemplateKind {
     Api,
     /// `Empty` plus accounts, Argon2id passwords and JWT sessions.
     Auth,
+    /// A background `job`, its dispatch site, and the durable queue.
+    Jobs,
 }
 
 impl TemplateKind {
@@ -51,12 +53,17 @@ impl TemplateKind {
             TemplateKind::Empty => "empty",
             TemplateKind::Api => "api",
             TemplateKind::Auth => "auth",
+            TemplateKind::Jobs => "jobs",
         }
     }
 
     /// Every kind, for the CLI's error message and the test sweep.
-    pub const ALL: &'static [TemplateKind] =
-        &[TemplateKind::Empty, TemplateKind::Api, TemplateKind::Auth];
+    pub const ALL: &'static [TemplateKind] = &[
+        TemplateKind::Empty,
+        TemplateKind::Api,
+        TemplateKind::Auth,
+        TemplateKind::Jobs,
+    ];
 }
 
 /// One file in a template tree.
@@ -82,6 +89,7 @@ fn template_files(kind: TemplateKind) -> &'static [TemplateFile] {
         TemplateKind::Empty => EMPTY_FILES,
         TemplateKind::Api => API_FILES,
         TemplateKind::Auth => AUTH_FILES,
+        TemplateKind::Jobs => JOBS_FILES,
     }
 }
 
@@ -116,6 +124,18 @@ const AUTH_FILES: &[TemplateFile] = &[
     tfile!("auth", ".env.example"),
     tfile!("auth", ".gitignore"),
     tfile!("auth", "README.md"),
+];
+
+const JOBS_FILES: &[TemplateFile] = &[
+    tfile!("jobs", "jwcproj.json"),
+    tfile!("jobs", "src/app.jwc"),
+    tfile!("jobs", "src/db/work.jwc"),
+    tfile!("jobs", "src/dto/work.jwc"),
+    tfile!("jobs", "src/jobs/deliver.jwc"),
+    tfile!("jobs", "src/routes/work.jwc"),
+    tfile!("jobs", ".env.example"),
+    tfile!("jobs", ".gitignore"),
+    tfile!("jobs", "README.md"),
 ];
 
 /// Write `kind`'s tree into `root`, substituting `name`.
@@ -183,6 +203,7 @@ pub fn parse_kind(s: &str) -> Result<TemplateKind> {
         "empty" => Ok(TemplateKind::Empty),
         "api" => Ok(TemplateKind::Api),
         "auth" => Ok(TemplateKind::Auth),
+        "jobs" => Ok(TemplateKind::Jobs),
         other => Err(anyhow!(
             "unknown template `{other}`. One of: {}",
             TemplateKind::ALL
@@ -243,10 +264,10 @@ mod tests {
                 kind.as_str()
             );
         }
-        let Err(e) = parse_kind("jobs") else {
-            panic!("`jobs` is not a template yet");
+        let Err(e) = parse_kind("nosuch") else {
+            panic!("`nosuch` is not a template");
         };
-        assert!(e.to_string().contains("empty, api, auth"), "{e}");
+        assert!(e.to_string().contains("empty, api, auth, jobs"), "{e}");
     }
 
     #[test]

@@ -24,7 +24,7 @@ closed; these are dated omissions.
 | `DEFERRED-13` | A real module/visibility system | Flat declaration space; `import` is a **checked, mandatory dependency declaration** that does not scope (names §6.3) | Flat + enforced imports is enough for 1.0. Visibility is a 2.0 redesign |
 | `DEFERRED-14` | Typed client SDK generation (TS/Go/Python) | `jwc openapi` | OpenAPI is the boundary; per-language SDKs are separate projects |
 | `DEFERRED-15` | Automatic inverse of destructive migrations | `migrate down` exists; destructive statements emit `-- irreversible` and stop (migrations §9.2) | After a column is dropped the data is gone. Promising reversibility is a lie |
-| `DEFERRED-16` | Background jobs, durable queue, DLQ, WebSocket, SSE, in-process cache | Not declarable in the 1.0 vocabulary. **The runtime code is not all retained** — see the note below | design.md never touched these areas. Guessing a vocabulary means writing it twice |
+| `DEFERRED-16` | ~~Background jobs, durable queue, DLQ, WebSocket, SSE, in-process cache~~ **Withdrawn** — all but SSE are implemented; see the note below | jobs.md, routing §9, builtins §8 | The reason given was "guessing a vocabulary means writing it twice". Writing it once turned out to be the cheaper half |
 | `DEFERRED-17` | Sequences as a declared object class | A counter table plus `update … first` (which emits `FOR UPDATE`) — shown in the sample's `next_invoice_number` | A sequence is a sixth DDL object class with its own diff rules, for one use in the sample. The counter-table form is correct and already specified |
 | `DEFERRED-18` | Generated columns (`GENERATED ALWAYS AS … STORED`) | Compute in application code, or a counter table | The expression would be raw SQL text inside a declaration — a hole in the DBA test, not a feature |
 | `DEFERRED-19` | Server-Sent Events | A `socket` (routing §9), or long-polling | 0.9 parsed and validated `route SSE "…"` end to end and dispatched it to a stub, so a program could declare one, pass every check and serve nothing. A transport that typechecks and does not run is worse than an absent one |
@@ -39,16 +39,15 @@ along with the 0.9.x front-end, and the queue was among them:
 
 | | State |
 |---|---|
-| durable queue, DLQ, `dispatch` | **deleted** at v0.25.0. `queue.rs` (1,352 lines) is at `60cc971^` and nowhere else |
+| durable queue, DLQ, `dispatch` | **implemented** in 0.9.909 — `job` + `dispatch`, jobs.md, both backends. Durable only: 0.9's in-memory driver was the default and lost every pending job on deploy |
 | WebSocket | **implemented** in 0.9.908 — `socket "…" { on open / on message (m) / on close }`, routing §9, both backends |
 | SSE | still absent, now as `DEFERRED-19` rather than as part of this row. 0.9 recognised `route SSE "…"` and dispatched it to a stub |
 | in-process cache | **implemented** in 0.9.904 — `cache.get/set/del/clear`, builtins §8, both backends |
 | native AOT backend | **restored** in 0.9.901–0.9.903, and covered — see `DEFERRED-2` |
 
 "Retained but unreachable" and "deleted" are different facts, and a reader
-deciding whether to depend on 1.0 needs the second one. What remains of
-this row is the queue, and that is a decision that has not been taken;
-what has been taken is the decision to stop saying it is already there.
+deciding whether to depend on 1.0 needs the second one. Nothing is left of
+this row but SSE, which moved to `DEFERRED-19` with its own reason.
 
 ---
 

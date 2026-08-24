@@ -121,6 +121,19 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
              \x20   }\n}",
         ),
         (
+            "job_decl",
+            "job SendWelcome(account_id: bigint, email: text) retries 3 backoff \"30s\" {\n\
+             \x20   let who = $account_id;\n}",
+        ),
+        (
+            "dispatch_stmt",
+            "job J(a: bigint) { let x = $a; }\n\
+             routes \"/\" { route POST \"x\" {\n\
+             \x20   dispatch J(a: 1);\n\
+             \x20   return created(json({}));\n} }",
+        ),
+        ("named_arg", "job K(a: text) { let x = $a; }"),
+        (
             "socket_handler",
             "routes \"/live\" { socket \"t\" { on open { socket.send(\"x\"); } } }",
         ),

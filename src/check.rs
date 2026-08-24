@@ -111,6 +111,9 @@ enum BodyKind {
     ErrorHandler,
     Test,
     View,
+    /// A `job` handler body. No request, no response — it runs on a
+    /// worker, minutes after whatever dispatched it.
+    Job,
     /// `on open` / `on message (m)` / `on close` inside a `socket`.
     ///
     /// One kind rather than three: the three differ in what is *bound*
@@ -376,6 +379,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Decl::Middleware(m) => self.middleware(m),
+            Decl::Job(j) => self.job(j),
             Decl::Routes(r) => self.routes(r),
             Decl::ErrorHandler(h) => self.error_handler(h),
             Decl::Test(t) => {
@@ -503,6 +507,22 @@ impl<'a> Checker<'a> {
             self.pop_scope();
         }
         self.params.clear();
+        self.body = BodyKind::Free;
+    }
+
+    /// jobs.md §1.3 — a job body is a `service` function that answers
+    /// nothing: it has parameters and a database, and no request and no
+    /// response, because by the time it runs the request is long gone.
+    fn job(&mut self, j: &JobDecl) {
+        self.body = BodyKind::Job;
+        self.enter_body();
+        self.push_scope();
+        for p in &j.params {
+            let ty = self.resolve_type(&p.ty);
+            self.declare(&p.name.name, ty, p.name.span);
+        }
+        self.block(&j.body);
+        self.pop_scope();
         self.body = BodyKind::Free;
     }
 
@@ -983,6 +1003,93 @@ impl<'a> Checker<'a> {
                                 "errors.md §1.1",
                             );
                         }
+                    }
+                }
+            }
+            Stmt::Dispatch {
+                job, args, span, ..
+            } => {
+                let Some(sym) = self.sym.jobs.get(&job.name).cloned() else {
+                    self.err_note(
+                        job.span,
+                        "E0364",
+                        format!("unknown job `{}`", job.name),
+                        "a `dispatch` names a `job` declared somewhere in the program",
+                        "jobs.md §2",
+                    );
+                    for (_, v) in args {
+                        self.expr(v);
+                    }
+                    return;
+                };
+
+                // jobs.md §2.2 — a job runs on a worker, minutes later. An
+                // `after` block has already sent its response, and a job
+                // dispatched from a *finished* request is fine; what is not
+                // fine is dispatching from a job body, which is how a
+                // runaway loop of work gets written by accident.
+                if self.body == BodyKind::Job {
+                    self.err_note(
+                        *span,
+                        "E0365",
+                        format!("`dispatch {}` inside a job", job.name),
+                        "a job that dispatches jobs has no bound on the work it \
+                         creates; do the work here, or split the route that \
+                         dispatched this one",
+                        "jobs.md §2.2",
+                    );
+                }
+
+                let mut seen: Vec<&str> = Vec::new();
+                for (name, value) in args {
+                    let got = self.expr(value);
+                    if seen.contains(&name.name.as_str()) {
+                        self.err_note(
+                            name.span,
+                            "E0366",
+                            format!("`{}` is given twice", name.name),
+                            "each parameter is named once",
+                            "jobs.md §2",
+                        );
+                    }
+                    seen.push(&name.name);
+                    match sym.params.iter().find(|(p, _)| *p == name.name) {
+                        Some((_, want)) => {
+                            if !got.assignable_to(want) {
+                                self.err_note(
+                                    value.span,
+                                    "E0367",
+                                    format!(
+                                        "`{}` takes `{want}` for `{}`, given `{got}`",
+                                        job.name, name.name
+                                    ),
+                                    "the dispatch site is checked against the \
+                                     declaration, like any other call",
+                                    "jobs.md §2",
+                                );
+                            }
+                        }
+                        None => self.err_note(
+                            name.span,
+                            "E0368",
+                            format!("`{}` has no parameter `{}`", job.name, name.name),
+                            "the parameters are named in the `job` declaration",
+                            "jobs.md §2",
+                        ),
+                    }
+                }
+                for (p, ty) in &sym.params {
+                    // An absent argument for an optional parameter is
+                    // `null`, which is what `T?` means. A required one has
+                    // no such reading.
+                    if !seen.contains(&p.as_str()) && !matches!(ty, Ty::Optional(_)) {
+                        self.err_note(
+                            *span,
+                            "E0369",
+                            format!("`{}` needs `{p}`", job.name),
+                            "every non-optional parameter is given at the dispatch site",
+                            "jobs.md §2",
+                        );
                     }
                 }
             }

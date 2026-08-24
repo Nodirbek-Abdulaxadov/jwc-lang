@@ -55,6 +55,7 @@ pub fn load(ws: &Workspace) -> Result<Program> {
     let mut middleware = HashMap::new();
     let mut route_bodies = HashMap::new();
     let mut socket_bodies = HashMap::new();
+    let mut jobs = HashMap::new();
     let mut error_handler = None;
     let mut error_defs = HashMap::new();
     let mut server = ServerConfig::default();
@@ -95,6 +96,9 @@ pub fn load(ws: &Workspace) -> Result<Program> {
                         ),
                     );
                 }
+                Decl::Job(j) => {
+                    jobs.insert(j.name.name.clone(), j.clone());
+                }
                 Decl::Server(s) => server = read_server_config(s),
                 Decl::Routes(block) => {
                     for r in &block.routes {
@@ -127,6 +131,7 @@ pub fn load(ws: &Workspace) -> Result<Program> {
         routes: wired.routes,
         functions,
         middleware,
+        jobs,
         route_bodies,
         socket_bodies,
         error_handler,
@@ -569,7 +574,7 @@ async fn operational(program: &Program, incoming: &Incoming) -> Option<Response>
                 "content-type".into(),
                 "text/plain; version=0.0.4; charset=utf-8".into(),
             )],
-            body: metrics_text(program),
+            body: metrics_text(program).await,
         }),
         _ => None,
     }
@@ -578,7 +583,7 @@ async fn operational(program: &Program, incoming: &Incoming) -> Option<Response>
 /// Prometheus text format. Gauges only — a counter would need per-request
 /// bookkeeping on the hot path, and what the soak criterion asks about is
 /// the pool.
-fn metrics_text(program: &Program) -> String {
+async fn metrics_text(program: &Program) -> String {
     let mut out = String::new();
     if let Some(s) = crate::engine::pool_status() {
         out.push_str(
@@ -630,6 +635,11 @@ fn metrics_text(program: &Program) -> String {
     // Empty unless the program actually used the cache, so a service that
     // never calls `cache.*` does not sprout four flat-zero series.
     out.push_str(&crate::cache::metrics_text());
+    // Likewise: a program with no `job` has no queue tables, and the
+    // depths query answers `None` rather than zero.
+    if !program.jobs.is_empty() {
+        out.push_str(&crate::jobs::metrics_text().await);
+    }
     out.push_str(
         "# HELP jwc_routes Declared routes.\n\
          # TYPE jwc_routes gauge\n",
@@ -1244,7 +1254,167 @@ pub async fn declared_port(program: &Arc<Program>) -> Result<u16> {
     Ok(vm.serve_port.unwrap_or(FALLBACK))
 }
 
+/// `DbError` has no `Display`: it is a domain error the response mapper
+/// turns into a status, not a string. The worker has no response to map
+/// it onto, so it says what happened in the log.
+fn db_error_text(e: &crate::db::DbError) -> String {
+    match e {
+        crate::db::DbError::Constraint { name, message, .. } => match message {
+            Some(m) => format!("constraint {name}: {m}"),
+            None => format!("constraint {name}"),
+        },
+        crate::db::DbError::ForeignKey => "foreign key violation".into(),
+        crate::db::DbError::Other(e) => format!("{e:#}"),
+    }
+}
+
+/// One job, on a worker.
+///
+/// A fresh `Vm` with a synthetic `Request`: a job runs minutes after
+/// whatever dispatched it, on a different process as often as not, so
+/// there is no request to inherit. The checker refuses `request.*` in a
+/// job body for the same reason; this exists so the `Vm` has the shape it
+/// expects, not so a handler can read it.
+async fn run_one_job(program: &Program, claim: &crate::jobs::Claim) -> Result<(), String> {
+    let Some(decl) = program.jobs.get(&claim.name) else {
+        // A job row whose declaration is gone: a rolling deploy that
+        // dropped a `job` while rows were still queued. Retrying forever
+        // would be an outage; dead-lettering says what happened.
+        return Err(format!(
+            "no `job {}` in this build — a queued row outlived its declaration",
+            claim.name
+        ));
+    };
+    let payload: serde_json::Value =
+        serde_json::from_str(&claim.payload).unwrap_or(serde_json::Value::Null);
+
+    let request = Arc::new(Request {
+        method: "JOB".into(),
+        path: format!("/job/{}", claim.name),
+        route: format!("/job/{}", claim.name),
+        headers: HashMap::new(),
+        query: Vec::new(),
+        body: String::new(),
+        peer_ip: String::new(),
+        client_ip: String::new(),
+        id: format!("{:016x}", rand_id()),
+    });
+    // The resolved types, not the syntax: `7` in the payload is an `int`
+    // and a `bigint` and a `numeric`, and only the declaration says which.
+    let Some(sym) = program.symbols.jobs.get(&claim.name) else {
+        return Err(format!("no symbol for `job {}`", claim.name));
+    };
+    let mut vm = Vm::new(program, request);
+    for (name, ty) in &sym.params {
+        let raw = payload
+            .get(name)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match crate::validate::coerce(ty, &raw) {
+            Some(v) => vm.bind_param(name, v),
+            // Not a silent null: a payload that no longer fits the
+            // declaration is a deploy that changed a job's parameters
+            // while rows were queued, and running the handler with a hole
+            // in it is how that becomes a data bug instead of an error.
+            None if raw.is_null() => vm.bind_param(name, Value::Null),
+            None => {
+                return Err(format!(
+                    "queued payload does not fit `{}`: `{name}` is not `{ty}`",
+                    claim.name
+                ))
+            }
+        }
+    }
+
+    match vm.run_body(&decl.body).await {
+        Ok(_) => Ok(()),
+        Err(Abort::Fault(e)) => Err(format!("{e:#}")),
+        Err(Abort::Thrown(t)) => Err(format!("{}: {}", t.error, t.message())),
+    }
+}
+
+/// Poll, claim, run, settle. One of these per worker.
+async fn job_worker(program: Arc<Program>) {
+    let idle = crate::jobs::poll_interval();
+    loop {
+        let claimed = match crate::jobs::claim().await {
+            Ok(c) => c,
+            Err(e) => {
+                // A database that is down is not a reason to spin: the
+                // next poll is a whole interval away either way.
+                eprintln!("[jobs] claim failed: {}", db_error_text(&e));
+                tokio::time::sleep(idle).await;
+                continue;
+            }
+        };
+        let Some(claim) = claimed else {
+            tokio::time::sleep(idle).await;
+            continue;
+        };
+
+        // A panic in a handler must not take the worker with it, or one
+        // bad job stops every job.
+        let guarded = std::panic::AssertUnwindSafe(run_one_job(&program, &claim));
+        let outcome = match futures_util::FutureExt::catch_unwind(guarded).await {
+            Ok(r) => r,
+            Err(payload) => Err(payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "panic".into())),
+        };
+
+        let settled = match &outcome {
+            Ok(()) => crate::jobs::succeed(claim.id).await,
+            Err(e) => {
+                let backoff = program
+                    .symbols
+                    .jobs
+                    .get(&claim.name)
+                    .map(|j| j.backoff_secs)
+                    .unwrap_or(30);
+                eprintln!(
+                    "[jobs] {} #{} attempt {}/{} failed: {e}",
+                    claim.name, claim.id, claim.attempts, claim.max_attempts
+                );
+                crate::jobs::fail(&claim, backoff, e).await
+            }
+        };
+        if let Err(e) = settled {
+            // The lease expires on its own, so the job runs again — which
+            // is the at-least-once contract working, not a leak.
+            eprintln!(
+                "[jobs] could not settle #{}: {}",
+                claim.id,
+                db_error_text(&e)
+            );
+        }
+    }
+}
+
+/// Create the queue tables and start the workers, when the program has
+/// any jobs. A program with none pays nothing: no tables, no tasks.
+pub async fn start_job_workers(program: Arc<Program>) {
+    if program.jobs.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::jobs::ensure_tables().await {
+        eprintln!(
+            "[jobs] could not create the queue tables: {}",
+            db_error_text(&e)
+        );
+        return;
+    }
+    let n = crate::jobs::worker_count();
+    for _ in 0..n {
+        let p = program.clone();
+        tokio::spawn(async move { job_worker(p).await });
+    }
+    println!("{n} job worker{}", if n == 1 { "" } else { "s" });
+}
+
 pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
+    let job_program = program.clone();
     // A `tls { }` whose `cert`/`key` did not resolve — an unset
     // `env("TLS_CERT_PATH")`, most often — must stop the boot. Reading it
     // as "no TLS" would serve every byte in the clear under a block that
@@ -1359,6 +1529,11 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let scheme = if acceptor.is_some() { "https" } else { "http" };
     println!("listening on {scheme}://{addr}");
+
+    // After the bind, so a queue that cannot reach the database does not
+    // stop the HTTP half from answering — and before the accept loop, so
+    // a job dispatched by the first request has a worker waiting.
+    start_job_workers(job_program).await;
 
     // The accept loop `axum::serve` would otherwise own. It is written out
     // here because both of config.md §3's remaining promises live below
@@ -1546,6 +1721,7 @@ mod route_matching {
             middleware: HashMap::new(),
             route_bodies: HashMap::new(),
             socket_bodies: HashMap::new(),
+            jobs: HashMap::new(),
             error_handler: None,
             errors: HashMap::new(),
             server: ServerConfig::default(),

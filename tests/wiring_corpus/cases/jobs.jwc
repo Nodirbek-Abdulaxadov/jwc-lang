@@ -1,0 +1,59 @@
+namespace jobs;
+
+-- jobs.md — a `job` is a handler plus a payload type. The dispatch site is
+-- checked against the declaration like any other call, which is the whole
+-- reason this is a declaration and not `dispatch("name", payload_json)`.
+
+job SendWelcome(account_id: bigint, email: text, note: text?) retries 3 backoff "10s" {
+    let who = $account_id;
+    let addr = $email;
+}
+
+job Sweep() {
+    let n = 1;
+}
+
+-- A payload is stored and replayed, so its parameters are scalars: a class
+-- is the request boundary's shape, and re-validating one on the way out of
+-- a table is a contract nothing states.
+class Big {
+    a text required;
+}
+
+job TakesAClass(body: Big) {                    -- expect: E0362
+    let a = $body;
+}
+
+job SendWelcome(x: text) {                      -- expect: E0363
+    let a = $x;
+}
+
+routes "/api" {
+    route POST "ok" {
+        dispatch SendWelcome(account_id: 1, email: "a@b.test", note: "hi");
+        -- `note` is optional, so leaving it out is `null`, not an error.
+        dispatch SendWelcome(account_id: 2, email: "c@d.test");
+        dispatch Sweep();
+
+        return created(json({}));
+    }
+
+    route POST "unknown" {
+        dispatch NoSuchJob(a: 1);               -- expect: E0364
+
+        return created(json({}));
+    }
+
+    route POST "wrong" {
+        -- The type is checked.
+        dispatch SendWelcome(account_id: "not a number", email: "a@b.test");   -- expect: E0367
+        -- The name is checked.
+        dispatch SendWelcome(account_id: 1, email: "a@b.test", nope: "x");     -- expect: E0368
+        -- And a required one cannot be left out.
+        dispatch SendWelcome(email: "a@b.test");                               -- expect: E0369
+        -- Nor given twice.
+        dispatch SendWelcome(account_id: 1, account_id: 2, email: "a@b.test"); -- expect: E0366
+
+        return created(json({}));
+    }
+}

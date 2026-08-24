@@ -352,6 +352,7 @@ pub struct Generated {
     pub needs_db: bool,
     pub needs_http_client: bool,
     pub needs_crypto: bool,
+    pub needs_jobs: bool,
     pub needs_mail: bool,
     pub needs_redis: bool,
     pub needs_ws: bool,
@@ -510,6 +511,54 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         ));
     }
 
+    // --- jobs (jobs.md) -----------------------------------------------------
+    let mut jobs: Vec<(String, String)> = Vec::new();
+    for file in &ws.files {
+        for decl in &file.program.decls {
+            let Decl::Job(j) = decl else { continue };
+            let Some(sym) = symbols.jobs.get(&j.name.name).cloned() else {
+                continue;
+            };
+            let name = format!("jwc_job_{}", j.name.name);
+            ctx.mode = Mode::Value;
+            // The handler takes the payload and binds its own parameters
+            // out of it, so the worker needs no per-job knowledge beyond
+            // the fn pointer.
+            out.push_str(&format!(
+                "\nasync fn {name}(__payload: serde_json::Value) -> JwcResult {{\n"
+            ));
+            for (pname, ty) in &sym.params {
+                out.push_str(&format!(
+                    "    let {} = jwc_job_arg(&__payload, {}, {});\n",
+                    local(pname),
+                    rust_str_literal(pname),
+                    rust_str_literal(&ty_tag(ty)),
+                ));
+            }
+            emit_block(&mut out, &j.body, 1, &mut ctx)?;
+            out.push_str("    Ok(V::Null)\n}\n");
+            out.push_str(&format!(
+                "\nfn {name}_boxed(p: serde_json::Value) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = JwcResult> + Send>> {{\n\
+                 \x20   Box::pin({name}(p))\n}}\n"
+            ));
+            jobs.push((
+                j.name.name.clone(),
+                format!(
+                    "JwcJobEntry {{ name: {}, max_attempts: {}, backoff_secs: {}, run: {name}_boxed }}",
+                    rust_str_literal(&j.name.name),
+                    sym.retries,
+                    sym.backoff_secs,
+                ),
+            ));
+        }
+    }
+    let needs_jobs = !jobs.is_empty() || ctx.used.contains("jwc_job_enqueue");
+    out.push_str("\nstatic JWC_JOBS: &[JwcJobEntry] = &[\n");
+    for (_, entry) in &jobs {
+        out.push_str(&format!("    {entry},\n"));
+    }
+    out.push_str("];\n");
+
     // --- sockets (routing.md §9) --------------------------------------------
     for route in wired.routes.iter().filter(|r| r.socket) {
         let Some(sk) = socket_decls.get(&route.pattern) else {
@@ -592,16 +641,30 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // crate needs, and the prelude source is the only honest answer to that
     // question — a second list would be one more thing to forget.
     let defines = |prelude: &str, f: &str| prelude.contains(&format!("fn {f}("));
-    let needs_db = ctx.used.iter().any(|f| defines(super::PRELUDE_DB, f));
+    // `needs_jobs` is computed above, from the declarations rather than
+    // from `ctx.used`: a job whose body touches no database still needs
+    // the pool, because the *queue* is a table.
+    let needs_db = needs_jobs || ctx.used.iter().any(|f| defines(super::PRELUDE_DB, f));
     // A page's cursor is HMAC-signed, and the HMAC lives in the crypto
     // prelude — so a program that pages needs it even if it hashes nothing.
-    let needs_crypto = ctx.uses_page || ctx.used.iter().any(|f| defines(super::PRELUDE_CRYPTO, f));
+    //
+    // `needs_db` implies it too, and that was a real bug: the db prelude
+    // carries the cursor codec whole, `jwc_cursor_encode` calls
+    // `jwc_hmac_sha256_hex`, and that lives in the crypto prelude. Any
+    // program that queried a database and never paged emitted a crate
+    // referencing an undefined function and an unlinked `base64` — it did
+    // not compile, and nothing here said why.
+    let needs_crypto =
+        needs_db || ctx.uses_page || ctx.used.iter().any(|f| defines(super::PRELUDE_CRYPTO, f));
     let needs_mail = ctx.used.iter().any(|f| defines(super::PRELUDE_MAIL, f));
     let needs_redis = ctx.used.iter().any(|f| defines(super::PRELUDE_REDIS, f));
     let needs_http_client = ctx.used.iter().any(|f| defines(super::PRELUDE_HTTP, f));
     // Not derived from `ctx.used`: a socket with only an `on close` calls
     // no `socket.*` built-in at all, and the connection driver is still
     // what runs it.
+    //
+    // The *feature* is not conditional — see `render_cargo_toml`. Only
+    // the driver is.
     let needs_ws = !sockets.is_empty();
 
     emit_shapes(&mut out, &ctx);
@@ -615,6 +678,13 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     } else {
         ""
     };
+    // After the pool, before the listener — a job dispatched by the first
+    // request has a worker waiting.
+    let jobs_boot = if needs_jobs {
+        "    jwc_start_job_workers().await;\n"
+    } else {
+        ""
+    };
     out.push_str(&format!(
         "\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {{\n\
          \x20   jwc_install_panic_hook();\n\
@@ -624,6 +694,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
          \x20   // that hardcodes its port gets that port on both backends.\n\
          \x20   let _ = jwc_user_main().await;\n\
          {db_boot}\
+         {jobs_boot}\
          \x20   jwc_serve_impl(JWC_SERVE_PORT.load(::std::sync::atomic::Ordering::SeqCst)).await;\n}}\n"
     ));
 
@@ -632,6 +703,21 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // shims are the seam — forwarding when the prelude is present, honest
     // about its absence when it is not.
     out.push_str("\n// ── operational shims ──\n");
+    // The base prelude's dispatcher calls this on an upgrade at a `socket`
+    // path. A program with no sockets registers none, so the call is
+    // unreachable — but it still has to resolve.
+    if !needs_ws {
+        out.push_str(
+            "async fn jwc_drive_socket(\n\
+             \x20   mut socket: axum::extract::ws::WebSocket,\n\
+             \x20   _fns: JwcSocketFns,\n\
+             \x20   _req: Arc<Request>,\n\
+             ) {\n\
+             \x20   // No `socket` is declared, so nothing routes here.\n\
+             \x20   let _ = socket.send(axum::extract::ws::Message::Close(None)).await;\n\
+             }\n",
+        );
+    }
     let needs_regex =
         (uses_regex && ctx.uses_validation) || ctx.used.contains("jwc_b_v1_string_matches");
     out.push_str(if needs_regex {
@@ -662,8 +748,11 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         "const JWC_ROUTE_COUNT: usize = {};\n",
         routes.len()
     ));
-    out.push_str(if needs_db {
-        "fn jwc_op_metrics() -> String { format!(\"{}{}\", jwc_metrics_body(), jwc_cache_metrics()) }\n"
+    out.push_str(if needs_jobs {
+        "async fn jwc_op_metrics() -> String {\n\
+         \x20   format!(\"{}{}{}\", jwc_metrics_body(), jwc_cache_metrics(), jwc_jobs_metrics().await)\n}\n"
+    } else if needs_db {
+        "async fn jwc_op_metrics() -> String { format!(\"{}{}\", jwc_metrics_body(), jwc_cache_metrics()) }\n"
     } else {
         // No DB prelude, so no pool gauges — but `jwc_routes` is declared
         // by the program, not by a dependency, and the interpreter reports
@@ -674,7 +763,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         // consumes no argument. Every database-free native build failed
         // to compile on "multiple unused formatting arguments", which is
         // most of the tier `jwc build` advertises.
-        "fn jwc_op_metrics() -> String {\n\
+        "async fn jwc_op_metrics() -> String {\n\
          \x20   format!(\n\
          \x20       \"{}{}# HELP jwc_routes Declared routes.\\n# TYPE jwc_routes gauge\\njwc_routes {}\\n\",\n\
          \x20       jwc_redis_metrics_hook(),\n\
@@ -714,6 +803,9 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     if needs_crypto {
         source.push_str(super::PRELUDE_CRYPTO);
     }
+    if needs_jobs {
+        source.push_str(super::PRELUDE_JOBS);
+    }
     if needs_mail {
         source.push_str(super::PRELUDE_MAIL);
     }
@@ -734,6 +826,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     Ok(Generated {
         source,
         needs_db,
+        needs_jobs,
         needs_mail,
         needs_ws,
         needs_http_client,
@@ -1127,6 +1220,12 @@ fn handler_name(method: &str, path: &str) -> String {
     format!("jwc_route_{}_{}", method.to_lowercase(), sanitise(path))
 }
 
+/// The scalar name `jwc_job_arg` switches on. Only the wire shape
+/// matters: everything that is not a number or a boolean travels as text.
+fn ty_tag(ty: &crate::types::Ty) -> String {
+    format!("{}", ty.clone().strip_opt())
+}
+
 /// A path as a Rust identifier fragment.
 fn sanitise(path: &str) -> String {
     path.chars()
@@ -1324,6 +1423,47 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
         // on any error leaving the block. The pin is what makes every
         // statement inside land on the same connection; without it the
         // block would commit nothing and roll back nothing.
+        // jobs.md §2 — evaluated on the request's connection, written
+        // before the response goes out, and rolled back with a
+        // `transaction { }` around it.
+        Stmt::Dispatch { job, args, .. } => {
+            let Some(sym) = ctx.symbols.jobs.get(&job.name).cloned() else {
+                bail!(
+                    "unknown job `{}` — the checker should have caught this",
+                    job.name
+                );
+            };
+            let mut fields: Vec<String> = Vec::new();
+            for (name, ty) in &sym.params {
+                let value = match args.iter().find(|(n, _)| n.name == *name) {
+                    Some((_, e)) => emit_expr(e, ctx)?,
+                    // An omitted optional parameter is `null`, so the
+                    // handler sees the key either way (types.md §6.5).
+                    None => "V::Null".to_string(),
+                };
+                let _ = ty;
+                fields.push(format!(
+                    "        __payload.insert({}.to_string(), jwc_to_json_value(&{value}));\n",
+                    rust_str_literal(name)
+                ));
+            }
+            ctx.used.insert("jwc_job_enqueue".to_string());
+            out.push_str(&format!("{pad}{{\n"));
+            out.push_str(&format!(
+                "{pad}    let mut __payload = serde_json::Map::new();\n"
+            ));
+            for f in &fields {
+                out.push_str(&format!("{pad}{f}"));
+            }
+            out.push_str(&format!(
+                "{pad}    jwc_job_enqueue({}, serde_json::Value::Object(__payload).to_string(), {})\n\
+                 {pad}        .await\n\
+                 {pad}        .map_err(|e| JwcThrown::new(\"internal_error\", 500, v_str(e)))?;\n",
+                rust_str_literal(&job.name),
+                sym.retries,
+            ));
+            out.push_str(&format!("{pad}}}\n"));
+        }
         Stmt::Transaction { body, .. } => {
             let d = ctx.tx_depth;
             out.push_str(&format!("{pad}{{\n"));

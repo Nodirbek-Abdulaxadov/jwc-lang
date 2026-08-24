@@ -3,6 +3,94 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.909] — background jobs — 2026-08-24
+
+`src/queue.rs` (1 352 lines) was deleted at the v0.25.0 cutover with no
+equivalent, and `DEFERRED-16` said the vocabulary would have to be guessed.
+It is written now.
+
+```jwc
+job SendWelcome(account_id: bigint, email: text) retries 5 backoff "30s" {
+    let account = select A from App.auth.Accounts
+        where id == $account_id
+        first or throw NotFound("akkaunt topilmadi");
+
+    mail.send($email, "Welcome", "<p>salom</p>");
+}
+```
+
+```jwc
+dispatch SendWelcome(account_id: $account.id, email: $account.email);
+```
+
+### A declaration, not two strings
+
+0.9's form was `dispatch(name, payload_json)`. A handler that expected
+`account_id` and a caller that sent `accountId` typechecked, ran, and
+failed at 3am with a JSON parse error in a worker log. Here the dispatch
+site is checked against the declaration like any other call: a misspelled
+name is `E0368`, a missing one `E0369`, the wrong type `E0367`.
+
+A payload is a row that outlives the process, so a parameter is a scalar
+or an array of scalars (`E0362`) — pass the id, and read the row in the
+handler, where it is current.
+
+### It is part of your transaction
+
+The row is written on the request's connection, before the response goes
+out, so a `transaction { }` around a dispatch rolls it back with
+everything else. "Send the email **only if** the account was created" is a
+sentence you can write here; against an external broker it is not.
+
+### Durable only
+
+0.9 shipped two drivers and defaulted to the wrong one:
+`JWC_QUEUE_DRIVER=memory` was the default, and every pending job died with
+the process. That is not a queue — the enqueue succeeded and the work
+never happened, with nothing anywhere to see. There is one driver, and it
+is the database the program already has.
+
+`public._jwc_jobs` and `public._jwc_jobs_dead` are created at boot like
+`_jwc_migrations`, and are deliberately not part of the declared schema:
+`jwc migrate new` would want to diff them and a snapshot would carry rows
+of pending work as if they were schema.
+
+Delivery is at-least-once — `SELECT … FOR UPDATE SKIP LOCKED`, a lease a
+dead worker loses — which is the strongest guarantee a queue on a database
+can honestly make, and jobs.md §3.3 says so where a reader will find it.
+
+An attempt that raises is retried after `backoff`; the one that exhausts
+`retries` moves to the dead-letter table with its payload and its last
+error, so it can be fixed and replayed. A queued row whose declaration is
+gone — a deploy that dropped a `job` — is dead-lettered rather than
+retried forever.
+
+`/metrics` reports `jwc_jobs_pending`, `jwc_jobs_dead`,
+`jwc_jobs_processed_total`, `jwc_jobs_failed_total`,
+`jwc_jobs_dead_total`. A program with no `job` starts no workers and
+creates no tables.
+
+Both backends, verified against a real Postgres: three jobs processed,
+three attempts on a failing one, one dead letter, same message.
+
+### `jwc new --template jobs`
+
+The template that could not exist without this.
+
+### Two defects found on the way
+
+**Any program that queried a database and never paged failed to build
+natively.** The db prelude carries the cursor codec whole,
+`jwc_cursor_encode` calls `jwc_hmac_sha256_hex`, and that lives in the
+crypto prelude — which was linked only when the program paged. The
+generated crate referenced an undefined function and an unlinked
+`base64`.
+
+**A program with no sockets stopped compiling** once the base prelude's
+request handler took an `Option<WebSocketUpgrade>`: the prelude is one
+text blob, not a template, so gating axum's `ws` feature and not the
+signature broke every other program. The feature is unconditional now.
+
 ## [0.9.908] — sockets — 2026-08-24
 
 `src/native/prelude/ws.rs.in` came back with the native backend and could

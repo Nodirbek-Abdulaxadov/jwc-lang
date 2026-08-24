@@ -138,6 +138,10 @@ after_block     = "after" "{" { statement } "}" ;
 
 (* ---------- routing ---------- *)
 
+job_decl        = "job" identifier param_list [ "retries" integer ] [ "backoff" string ] block ;
+dispatch_stmt   = "dispatch" identifier "(" [ named_arg { "," named_arg } ] ")" ";" ;
+named_arg       = identifier ":" expression ;
+
 routes_decl     = "routes" string [ use_clause ] "{" { route_decl | socket_decl } "}" ;
 route_decl      = "route" http_method string [ use_clause ] block ;
 socket_decl     = "socket" string [ use_clause ] "{" { socket_handler } "}" ;

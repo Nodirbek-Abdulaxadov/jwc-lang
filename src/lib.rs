@@ -60,6 +60,7 @@ pub mod cmd;
 pub mod config;
 pub mod engine;
 pub mod hash;
+pub mod jobs;
 pub mod jwks;
 pub mod jwt;
 pub mod locks;

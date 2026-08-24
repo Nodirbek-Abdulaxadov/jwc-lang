@@ -148,7 +148,7 @@ jobs:
       # the migration round-trip property, and the apply half of the
       # migration goldens — every claim in v0.26 and v0.28 that a golden
       # file cannot see.
-      - name: Migrations, the applier, and `jwc test`
+      - name: Migrations, the applier, `jwc test`, and the job queue
         env:
           JWC_V1_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
           JWC_V1_PG: postgres://postgres:postgres@127.0.0.1:5432/jwc_test
@@ -157,7 +157,7 @@ jobs:
         run: >
           cargo test
           --test migrate_apply --test migrate_golden
-          --test migrate_roundtrip --test jwc_test
+          --test migrate_roundtrip --test jwc_test --test jobs_queue
           -- --nocapture
 
       # The listener, which needs no database but does need a socket and

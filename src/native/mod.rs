@@ -57,6 +57,7 @@ pub struct CompileReport {
 pub const PRELUDE_BASE: &str = include_str!("prelude/base.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");
 pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");
+pub const PRELUDE_JOBS: &str = include_str!("prelude/jobs.rs.in");
 pub const PRELUDE_MAIL: &str = include_str!("prelude/mail.rs.in");
 pub const PRELUDE_REDIS: &str = include_str!("prelude/redis.rs.in");
 pub const PRELUDE_WS: &str = include_str!("prelude/ws.rs.in");
@@ -83,17 +84,29 @@ fn find_cargo() -> Result<PathBuf> {
     Err(anyhow!("cargo not found on PATH"))
 }
 
+/// Which halves of the runtime this program links.
+///
+/// A struct rather than eight `bool` parameters: they were positional,
+/// they all have the same type, and the emitted manifest is the one place
+/// where getting two of them the wrong way round produces a crate that
+/// compiles and is missing a dependency.
+#[derive(Clone, Copy)]
+pub struct Needs {
+    pub db: bool,
+    pub http_client: bool,
+    pub crypto: bool,
+    pub jobs: bool,
+    pub mail: bool,
+    pub redis: bool,
+    pub ws: bool,
+    pub regex: bool,
+}
+
 fn scaffold_workspace(
     root: &Path,
     app_name: &str,
     rust_src: &str,
-    needs_db: bool,
-    needs_http_client: bool,
-    needs_crypto: bool,
-    needs_mail: bool,
-    needs_redis: bool,
-    needs_ws: bool,
-    needs_regex: bool,
+    needs: Needs,
 ) -> Result<PathBuf> {
     let workspace = root.join(BUILD_DIR_NAME);
     check_path_length(&workspace)?;
@@ -102,20 +115,8 @@ fn scaffold_workspace(
         .with_context(|| format!("Failed to create {}", src_dir.display()))?;
 
     let cargo_toml = workspace.join("Cargo.toml");
-    std::fs::write(
-        &cargo_toml,
-        render_cargo_toml(
-            app_name,
-            needs_db,
-            needs_http_client,
-            needs_crypto,
-            needs_mail,
-            needs_redis,
-            needs_ws,
-            needs_regex,
-        ),
-    )
-    .with_context(|| format!("Failed to write {}", cargo_toml.display()))?;
+    std::fs::write(&cargo_toml, render_cargo_toml(app_name, needs))
+        .with_context(|| format!("Failed to write {}", cargo_toml.display()))?;
 
     let main_rs = src_dir.join("main.rs");
     std::fs::write(&main_rs, rust_src)
@@ -129,16 +130,22 @@ fn scaffold_workspace(
     Ok(workspace)
 }
 
-fn render_cargo_toml(
-    app_name: &str,
-    needs_db: bool,
-    needs_http_client: bool,
-    needs_crypto: bool,
-    needs_mail: bool,
-    needs_redis: bool,
-    needs_ws: bool,
-    needs_regex: bool,
-) -> String {
+fn render_cargo_toml(app_name: &str, needs: Needs) -> String {
+    let Needs {
+        db: needs_db,
+        http_client: needs_http_client,
+        crypto: needs_crypto,
+        jobs: needs_jobs,
+        mail: needs_mail,
+        redis: needs_redis,
+        ws: needs_ws,
+        regex: needs_regex,
+    } = needs;
+    // The queue is two Postgres tables, so a program with jobs needs the
+    // database dependencies whether or not any of its own queries do.
+    // `codegen` computes `needs_db` the same way; this keeps the manifest
+    // honest if that ever changes.
+    let needs_db = needs_db || needs_jobs;
     // `http_get` / `fetch_json` and their SSRF guards live in
     // `native_prelude_http.rs.in`, so `reqwest` is a dependency only of
     // programs that can reach it. Before the split the prelude carried them
@@ -169,13 +176,16 @@ fn render_cargo_toml(
         "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\", \"net\", \"time\", \"sync\", \"io-util\", \"io-std\", \"fs\", \"signal\"] }\n",
     );
     deps.push_str("futures = \"0.3\"\n");
-    deps.push_str(if needs_ws {
-        // The `ws` feature carries the handshake and the framing, so the
-        // 291-line hand-rolled RFC 6455 the old prelude carried is gone.
-        "axum = { version = \"0.7\", features = [\"http2\", \"ws\"] }\n"
-    } else {
-        "axum = { version = \"0.7\", features = [\"http2\"] }\n"
-    });
+    // `ws` unconditionally: the base prelude's request handler takes an
+    // `Option<WebSocketUpgrade>` whether or not this program declares a
+    // socket, because the prelude is one text blob and not a template.
+    // Gating the feature and not the signature is how a program without
+    // sockets stopped compiling.
+    //
+    // The feature carries axum's own handshake and framing, which is why
+    // the 291-line hand-rolled RFC 6455 the old prelude had is gone.
+    let _ = needs_ws;
+    deps.push_str("axum = { version = \"0.7\", features = [\"http2\", \"ws\"] }\n");
     // Already in the tree via tokio; named explicitly so the listener can
     // clear IPV6_V6ONLY. Neither `std` nor `tokio` exposes that option, and
     // Windows defaults it to on — a native build bound `[::]` and was
@@ -522,13 +532,16 @@ pub fn compile(
         root,
         app_name,
         &gen.source,
-        gen.needs_db,
-        gen.needs_http_client,
-        gen.needs_crypto,
-        gen.needs_mail,
-        gen.needs_redis,
-        gen.needs_ws,
-        gen.needs_regex,
+        Needs {
+            db: gen.needs_db,
+            http_client: gen.needs_http_client,
+            crypto: gen.needs_crypto,
+            jobs: gen.needs_jobs,
+            mail: gen.needs_mail,
+            redis: gen.needs_redis,
+            ws: gen.needs_ws,
+            regex: gen.needs_regex,
+        },
     )?;
     let bin = invoke_cargo(&cargo, &workspace, app_name, release, None)?;
     let binary_path = copy_to_project_bin(root, &bin, release, None)?;

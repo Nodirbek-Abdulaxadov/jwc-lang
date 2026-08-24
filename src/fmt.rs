@@ -105,6 +105,7 @@ impl Writer {
             Decl::Error(n) => self.error_decl(n),
             Decl::Service(n) => self.service(n),
             Decl::Middleware(n) => self.middleware(n),
+            Decl::Job(n) => self.job(n),
             Decl::Routes(n) => self.routes(n),
             Decl::ErrorHandler(n) => self.error_handler(n),
             Decl::Server(n) => self.server(n),
@@ -461,6 +462,21 @@ impl Writer {
         self.line("}");
     }
 
+    fn job(&mut self, n: &JobDecl) {
+        let mut head = format!("job {}({})", n.name.name, params_text(&n.params));
+        if let Some(r) = n.retries {
+            head.push_str(&format!(" retries {r}"));
+        }
+        if let Some(b) = &n.backoff {
+            head.push_str(&format!(" backoff {}", quote(b)));
+        }
+        self.line(&format!("{head} {{"));
+        self.depth += 1;
+        self.block(&n.body);
+        self.depth -= 1;
+        self.line("}");
+    }
+
     fn routes(&mut self, n: &RoutesDecl) {
         let uses = if n.uses.is_empty() {
             String::new()
@@ -678,6 +694,14 @@ impl Writer {
                 } else {
                     self.line(&format!("throw {}({a});", error.name));
                 }
+            }
+            Stmt::Dispatch { job, args, .. } => {
+                let list = args
+                    .iter()
+                    .map(|(n, v)| format!("{}: {}", n.name, expr(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!("dispatch {}({list});", job.name));
             }
             Stmt::Transaction { body, .. } => {
                 self.line("transaction {");
@@ -1033,7 +1057,8 @@ impl Writer {
 
 fn stmt_attached(s: &Stmt) -> &Attached {
     match s {
-        Stmt::Break { at, .. }
+        Stmt::Dispatch { at, .. }
+        | Stmt::Break { at, .. }
         | Stmt::Continue { at, .. }
         | Stmt::Let { at, .. }
         | Stmt::Assign { at, .. }

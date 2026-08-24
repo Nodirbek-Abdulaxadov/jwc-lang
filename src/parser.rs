@@ -186,6 +186,27 @@ impl Parser {
         }
     }
 
+    /// An integer literal. Only `retries N` needs one today.
+    fn expect_int(&mut self) -> PResult<(i64, Span)> {
+        let span = self.span();
+        match self.peek().tok.clone() {
+            Tok::Int(text) => {
+                self.bump();
+                match text.parse::<i64>() {
+                    Ok(n) => Ok((n, span)),
+                    Err(_) => {
+                        self.err("E0001", span, format!("`{text}` is not an integer"));
+                        Err(())
+                    }
+                }
+            }
+            found => {
+                self.err("E0001", span, format!("expected an integer, found {found}"));
+                Err(())
+            }
+        }
+    }
+
     fn expect_string(&mut self) -> PResult<(String, Span)> {
         let span = self.span();
         match self.peek().tok.clone() {
@@ -323,6 +344,7 @@ impl Parser {
             "errorHandler" => Decl::ErrorHandler(self.parse_error_handler(at, start)?),
             "server" => Decl::Server(self.parse_server(at, start)?),
             "function" => Decl::Function(self.parse_function(at, start)?),
+            "job" => Decl::Job(self.parse_job(at, start)?),
             "test" => Decl::Test(self.parse_test(at, start)?),
             "route" => {
                 self.err_note(
@@ -1115,6 +1137,56 @@ impl Parser {
         })
     }
 
+    /// `job Name(p: T, …) [retries N] [backoff "30s"] { … }`
+    ///
+    /// The policy is in the signature rather than in the body: it is part
+    /// of what the job *is*, and a reader deciding whether to dispatch one
+    /// needs it before the first statement, not after the last.
+    fn parse_job(&mut self, at: Attached, start: Span) -> PResult<JobDecl> {
+        self.bump(); // job
+        let name = self.expect_ident()?;
+        let params = self.parse_params()?;
+
+        let mut retries = None;
+        let mut backoff = None;
+        loop {
+            if self.at_word("retries") && retries.is_none() {
+                self.bump();
+                let (n, span) = self.expect_int()?;
+                if !(1..=100).contains(&n) {
+                    self.err_note(
+                        "E0014",
+                        span,
+                        format!("`retries {n}` is outside 1..=100"),
+                        "one attempt is `retries 1`; a job that needs more than a \
+                         hundred is not failing transiently",
+                        "jobs.md §1.2",
+                    );
+                }
+                retries = Some(n);
+                continue;
+            }
+            if self.at_word("backoff") && backoff.is_none() {
+                self.bump();
+                let (d, _) = self.expect_string()?;
+                backoff = Some(d);
+                continue;
+            }
+            break;
+        }
+
+        let (body, end) = self.parse_block()?;
+        Ok(JobDecl {
+            at,
+            name,
+            params,
+            retries,
+            backoff,
+            body,
+            span: start.to(end),
+        })
+    }
+
     // ------------------------------------------------------------ middleware
 
     fn parse_middleware(&mut self, at: Attached, start: Span) -> PResult<MiddlewareDecl> {
@@ -1754,6 +1826,33 @@ impl Parser {
             return Ok(Stmt::Throw {
                 at,
                 error,
+                args,
+                span: start.to(end),
+            });
+        }
+
+        // `dispatch Name(a: expr, …);`
+        if self.at_word("dispatch") && matches!(self.peek_at(1).tok, Tok::Ident(_)) {
+            self.bump();
+            let job = self.expect_ident()?;
+            self.expect(Tok::LParen)?;
+            let mut args = Vec::new();
+            if !self.at(&Tok::RParen) {
+                loop {
+                    let name = self.expect_ident()?;
+                    self.expect(Tok::Colon)?;
+                    let value = self.parse_expr()?;
+                    args.push((name, value));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect(Tok::RParen)?;
+            let end = self.expect(Tok::Semi)?.span;
+            return Ok(Stmt::Dispatch {
+                at,
+                job,
                 args,
                 span: start.to(end),
             });

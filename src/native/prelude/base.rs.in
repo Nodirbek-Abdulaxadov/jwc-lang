@@ -2972,7 +2972,7 @@ async fn jwc_operational(method: &str, path: &str) -> Option<axum::response::Res
             axum::response::Response::builder()
                 .status(200)
                 .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-                .body(jwc_op_metrics().into())
+                .body(jwc_op_metrics().await.into())
                 .unwrap(),
         ),
         _ => None,

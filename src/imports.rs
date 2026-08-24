@@ -239,6 +239,7 @@ fn declared_name(d: &Decl) -> Option<String> {
         Decl::Database(db) => db.name.name.clone(),
         Decl::Middleware(m) => m.name.name.clone(),
         Decl::Function(f) => f.name.name.clone(),
+        Decl::Job(j) => j.name.name.clone(),
         _ => return None,
     })
 }
@@ -286,6 +287,12 @@ fn mentioned(d: &Decl, out: &mut Vec<(String, Span)>) {
                 block(a, out);
             }
         }
+        Decl::Job(j) => {
+            for p in &j.params {
+                ty_ref(&p.ty, out);
+            }
+            block(&j.body, out);
+        }
         Decl::Routes(r) => {
             for u in &r.uses {
                 out.push((u.name.clone(), u.span));
@@ -295,6 +302,20 @@ fn mentioned(d: &Decl, out: &mut Vec<(String, Span)>) {
                     out.push((u.name.clone(), u.span));
                 }
                 block(&route.body, out);
+            }
+            for sk in &r.sockets {
+                for u in &sk.uses {
+                    out.push((u.name.clone(), u.span));
+                }
+                if let Some(b) = &sk.on_open {
+                    block(b, out);
+                }
+                if let Some((_, b)) = &sk.on_message {
+                    block(b, out);
+                }
+                if let Some(b) = &sk.on_close {
+                    block(b, out);
+                }
             }
         }
         Decl::ErrorHandler(h) => {
@@ -341,6 +362,16 @@ fn block(b: &Block, out: &mut Vec<(String, Span)>) {
         match s {
             // No expression to walk.
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            // The job's *name* is a use, and so are the arguments. Without
+            // the name, a file whose only reference to a namespace is a
+            // `dispatch` reported `W0103 unused import` for an import it
+            // could not compile without.
+            Stmt::Dispatch { job, args, .. } => {
+                out.push((job.name.clone(), job.span));
+                for (_, v) in args {
+                    expr(v, out);
+                }
+            }
             Stmt::Let { ty, value, .. } => {
                 if let Some(t) = ty {
                     ty_ref(t, out);

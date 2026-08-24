@@ -69,7 +69,7 @@ fn scaffold(kind: &str) -> Scratch {
 
 #[test]
 fn every_template_checks_lints_and_is_formatted() {
-    for kind in ["empty", "api", "auth"] {
+    for kind in ["empty", "api", "auth", "jobs"] {
         let scratch = scaffold(kind);
         let path = scratch.str();
 
@@ -87,7 +87,7 @@ fn every_template_checks_lints_and_is_formatted() {
 
 #[test]
 fn no_placeholder_survives_scaffolding() {
-    for kind in ["empty", "api", "auth"] {
+    for kind in ["empty", "api", "auth", "jobs"] {
         let scratch = scaffold(kind);
         let mut files = Vec::new();
         collect(scratch.path(), &mut files);
@@ -147,7 +147,7 @@ fn the_auth_template_puts_require_auth_only_where_it_belongs() {
 /// user cannot deploy.
 #[test]
 fn a_template_with_tables_produces_a_first_migration() {
-    for kind in ["api", "auth"] {
+    for kind in ["api", "auth", "jobs"] {
         let scratch = scaffold(kind);
         ok(&["migrate", "new", "init", scratch.str()]);
         let dir = scratch.path().join("migrations");

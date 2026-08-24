@@ -1482,6 +1482,11 @@ fn collect_stmt<'a>(s: &'a Stmt, label: &str, out: &mut Vec<Site<'a>>) {
     match s {
         // No expression, so no query site.
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Dispatch { args, .. } => {
+            for (_, v) in args {
+                collect_expr(v, label, out);
+            }
+        }
         Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Expr { expr: value, .. } => {
             collect_expr(value, label, out)
         }
