@@ -3,6 +3,44 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.914] — the Windows build nobody compiled — 2026-08-24
+
+`v0.9.913`'s release failed on `x86_64-pc-windows-msvc`, and only there.
+The four Linux targets, every CI job and every local run were green.
+
+```
+error[E0425]: cannot find value `MAX_GENERATED_SUFFIX` in this scope
+   --> src\native\mod.rs:473:18
+error[E0425]: cannot find value `WINDOWS_MAX_PATH` in this scope
+   --> src\native\mod.rs:473:41
+```
+
+Six of those, all inside `check_path_length`'s `#[cfg(windows)]` block —
+the guard that turns a `LNK1104` at link time into a sentence about
+`MAX_PATH`. Both constants were used and neither was ever declared.
+
+Nothing compiled that block. CI runs on ubuntu, where the `cfg` strips it
+out; the only job that built for Windows was the release workflow, which
+runs on tags. So the earliest possible signal was a failed release, and
+that is exactly when it arrived.
+
+CI has a `windows-latest` job now — `cargo check --workspace --all-targets
+--features redis`, no build and no tests, because its whole purpose is to
+compile the branches ubuntu discards. On `windows-latest` rather than a
+cross check from ubuntu because msvc is the target the release builds.
+
+The fix was verified against a real Windows target rather than by reading
+it: with mingw installed, `cargo check --target x86_64-pc-windows-gnu
+--features redis` is clean, and deleting the two constants again
+reproduces exactly the six `E0425`s the release reported. A cross check
+for msvc is not available here — it dies in a C dependency's build script
+looking for `lib.exe`.
+
+Note for whoever reads this next: `ci.yml` triggers on `pull_request` and
+on pushes to `main`, so a commit pushed to a branch with no open PR gets
+**no CI at all**. This commit sat green-looking and unverified for that
+reason; the local cross check above is what stands behind it.
+
 ## [0.9.913] — the test that tested itself — 2026-08-24
 
 CI had been red for three commits on a lint the local toolchain could not
