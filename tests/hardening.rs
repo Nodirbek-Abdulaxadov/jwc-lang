@@ -1163,3 +1163,129 @@ fn the_capability_page_does_not_deny_what_the_compiler_accepts() {
         );
     }
 }
+
+/// Every `jwc` subcommand appears in both CLI references.
+///
+/// The README's table presented itself as the CLI and was missing seven of
+/// twenty-two, including `jwc new` — the entry point — and `jwc build`,
+/// the native backend. A reader who trusted it did not learn the compiler
+/// could scaffold a project.
+#[test]
+fn both_cli_references_name_every_subcommand() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let main = std::fs::read_to_string(root.join("src/main.rs")).expect("main.rs");
+
+    // clap derives a subcommand's name from its variant identifier,
+    // PascalCase to kebab-case — `GenSql` is `gen-sql`. So the enum body is
+    // the list, and it needs no attribute to be authoritative.
+    let body = main
+        .split("enum Command {")
+        .nth(1)
+        .and_then(|s| s.split("\n}\n").next())
+        .expect("enum Command");
+
+    let mut names: Vec<String> = Vec::new();
+    for line in body.lines() {
+        // A variant sits at one level of indentation and starts uppercase;
+        // its fields sit deeper, and attributes and doc comments do not
+        // start with a letter.
+        let Some(ident) = line.strip_prefix("    ") else {
+            continue;
+        };
+        if ident.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let ident: String = ident
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if ident.is_empty() || !ident.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        let mut kebab = String::new();
+        for (i, c) in ident.chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                kebab.push('-');
+            }
+            kebab.push(c.to_ascii_lowercase());
+        }
+        names.push(kebab);
+    }
+    assert!(
+        names.len() >= 15,
+        "found only {names:?} — the clap attribute shape changed"
+    );
+
+    for (label, path) in [
+        ("README.md", "README.md"),
+        ("the CLI page", "docs/docs/cli/index.md"),
+    ] {
+        let text = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+        let missing: Vec<&String> = names
+            .iter()
+            .filter(|n| !text.contains(&format!("jwc {n}")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{label} presents itself as the CLI reference and never mentions {missing:?}"
+        );
+    }
+}
+
+/// The environment table in `config.md`, rendered from the registry.
+///
+/// `config.rs::REGISTRY` is what the runtime reads at boot. The page that
+/// presented itself as the environment reference listed seven of the
+/// fifty-one entries in it — every variable mail, the cache, jobs and
+/// buffered writes need was missing, along with the whole CORS, JWT, queue
+/// and retry families.
+///
+/// Rather than fix the list and watch it rot again, the table is generated
+/// here and this test is the check. `JWC_UPDATE_DOCS=1 cargo test` rewrites
+/// it; anything else compares and fails with what changed.
+#[test]
+fn the_environment_table_is_generated_from_the_registry() {
+    use std::fmt::Write as _;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let page_path = root.join("docs/docs/backend/config.md");
+    let page = std::fs::read_to_string(&page_path).expect("config.md");
+
+    const OPEN: &str = "<!-- generated:env-table -->";
+    const CLOSE: &str = "<!-- /generated:env-table -->";
+
+    let mut table = String::from("\n| Variable | Default | |\n|---|---|---|\n");
+    for v in jwc::config::REGISTRY {
+        let default = if v.default.is_empty() {
+            "—".to_string()
+        } else {
+            format!("`{}`", v.default)
+        };
+        // A pipe inside a cell would end it; nothing in the registry has
+        // one today, and escaping keeps that from becoming a silent break.
+        let doc = v.doc.replace('|', "\\|");
+        let _ = writeln!(table, "| `{}` | {default} | {doc} |", v.name);
+    }
+
+    let (before, rest) = page
+        .split_once(OPEN)
+        .unwrap_or_else(|| panic!("{OPEN} is missing from config.md"));
+    let (_, after) = rest
+        .split_once(CLOSE)
+        .unwrap_or_else(|| panic!("{CLOSE} is missing from config.md"));
+
+    let want = format!("{before}{OPEN}{table}{CLOSE}{after}");
+    if page == want {
+        return;
+    }
+    if std::env::var("JWC_UPDATE_DOCS").is_ok() {
+        std::fs::write(&page_path, &want).expect("rewrite config.md");
+        return;
+    }
+    panic!(
+        "the environment table is out of step with `config.rs::REGISTRY` \
+         ({} entries). Run `JWC_UPDATE_DOCS=1 cargo test \
+         the_environment_table_is_generated_from_the_registry` to regenerate it.",
+        jwc::config::REGISTRY.len()
+    );
+}

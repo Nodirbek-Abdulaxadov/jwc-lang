@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: "Built-ins"
-description: "Every built-in function JWC has, by group: coercions, dates, text, arrays, hashing, the request, responses and Redis."
+description: "Every built-in function JWC has, by group: coercions, dates, text, arrays, hashing, the request, responses, Redis, the cache, mail and debug."
 ---
 
 # Built-ins

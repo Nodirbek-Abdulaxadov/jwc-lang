@@ -27,6 +27,10 @@ function main() {
 A `routes` block declares a prefix; a `route` inside it declares a method
 and a suffix. Blocks do not nest.
 
+A `routes` block also holds [`socket`](./sockets) declarations, which share
+the prefix and the middleware chain — the upgrade is a `GET`, so a `route
+GET` on the same path is a duplicate.
+
 ## Path parameters are typed
 
 ```jwc no-compile

@@ -3,6 +3,49 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.917] — documentation that could not be checked — 2026-08-24
+
+Two audits of `docs/docs/` against `src/`. What they found was not a list
+of typos: three pages documented behaviour that has never existed.
+
+### Documented, never implemented
+
+| | |
+|---|---|
+| `packages/index.md` | "`jwc.lock` records the exact version and its checksum. It is committed" — there is no lockfile. No `jwc.lock` logic exists anywhere in `src/`, and `cli/index.md` said the opposite on the same site |
+| `packages/index.md` | `{"path": "../redis"}` as a dependency, "No network, no publish step" — path dependencies are not implemented. The value was read as `"*"` and fetched from the registry |
+| `packages/index.md`, `project-structure.md` | `tests/case_*.jwc` and `*_test.jwc` as test-file conventions — `jwc test` applies no filename filter at all. It runs every `test` block in the workspace, and `--filter` matches the block's name, not a path |
+
+The path-dependency case was also a defect in the compiler, not only in
+the page: `declared_dependencies` coerced any non-string requirement to
+`"*"`, so a manifest written the way the docs described failed with a 404
+about a version instead of a sentence about the manifest. It is refused
+now, with a message naming what to do instead.
+
+### Incomplete where it claimed to be complete
+
+`config.md`'s environment table listed **7 of the 51** variables
+`config.rs::REGISTRY` registers — every one that mail, the cache, jobs and
+buffered writes need was missing, along with the whole CORS, JWT, queue
+and retry families. The table is generated from the registry now and a
+test regenerates and compares it; `JWC_UPDATE_DOCS=1` rewrites it.
+
+The README's CLI table was missing 7 of 22 subcommands, `jwc new` and
+`jwc build` among them. `routing.md` enumerated what a `routes` block
+holds and left out `socket`. `intro.md` and `docs/docs/README.md` omitted
+jobs and sockets from their maps; `removed.md` said the cutover's damage
+was the native backend and listed nothing else that came back.
+
+### The tests that make it stick
+
+- every subcommand in `main.rs`'s `Command` enum appears in both CLI references
+- the environment table matches `config.rs::REGISTRY` exactly
+- the install page's platforms match `release.yml`'s build matrix, both ways
+- the capability page names no declaration the parser accepts
+
+Each of these was written because a page had already drifted. A page
+nobody can check is a page that will be wrong.
+
 ## [0.9.916] — the page that argued against its own product — 2026-08-24
 
 "What 1.0 does not have" listed background jobs, WebSocket, an in-process

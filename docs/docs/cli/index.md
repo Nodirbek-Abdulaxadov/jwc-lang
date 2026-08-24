@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: "The `jwc` command"
-description: "Every subcommand: new, check, fmt, serve, build, migrate, test, lint, routes, explain, openapi, swagger, lsp, and the registry commands."
+description: "Every subcommand: new, check, fmt, serve, build, migrate, test, lint, routes, explain, gen-sql, ast, openapi, swagger, lsp, and the registry commands."
 ---
 
 # The `jwc` command

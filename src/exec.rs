@@ -8,9 +8,10 @@
 //! yet (aggregates, a view as a source) says which release it waits for
 //! rather than producing an approximation.
 //!
-//! There is one implementation. `--native` is frozen (DEFERRED-2), so this
-//! is the reference: no second backend to keep in step while the semantics
-//! are still moving.
+//! There are two backends — this interpreter and the native AOT pass in
+//! `src/native/` — and this one is the reference. `DEFERRED-2`, which froze
+//! the native path, was withdrawn in 0.9.903; the two are held to identical
+//! responses by a differential harness rather than by one of them not running.
 
 use crate::ast::*;
 use crate::model::SchemaModel;

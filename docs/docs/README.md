@@ -11,11 +11,12 @@ This tree is what jwc.1kb.uz serves. `docusaurus.config.ts` points at it.
 | `tutorial/` | a link bin — four endpoints, a real database |
 | `language/` | syntax, types, control flow, functions |
 | `data/` | schema, queries, writes, migrations |
-| `backend/` | routing, middleware, errors, validation, config |
+| `backend/` | routing, middleware, errors, validation, sockets, jobs, config |
 | `stdlib/` | every built-in |
 | `packages/`, `cli/`, `deployment/` | one page each |
 | `security.md` | what the language enforces, and what it does not |
 | `reference/removed.md` | what 0.9.x had that 1.0 does not |
+| `reference/not-in-1-0.md` | what 1.0 does not have, and what to do instead |
 
 ## The rules this tree is held to
 
