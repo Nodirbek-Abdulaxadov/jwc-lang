@@ -87,7 +87,8 @@ error in, and closing is the only signal the protocol has.
 | A plain `GET` at a socket path | `400` — the path exists, the request is wrong |
 | A binary frame | closes the connection; `on message (m)` binds `text` |
 | A text frame with no `on message` | dropped — a peer that speaks first is not an error |
-| `after` blocks | do not run: they observe a response, and the response was the `101` |
+| `after` blocks, after a successful upgrade | do not run: they observe a response, and the response was the `101` |
+| `after` blocks, when middleware answers | run, in reverse order, for every middleware that started — the client got an ordinary response, and a rejected upgrade is what an access log is for |
 
 ## Tooling
 

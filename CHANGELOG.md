@@ -3,6 +3,19 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.912] — the docs half — 2026-08-24
+
+`insert buffered` shipped in 0.9.910 with a spec clause and no user
+documentation at all: `docs/docs/` did not contain the word. It has a
+section now, under Writes, with what it costs you — no `as { … }`, no
+`on conflict`, not inside `transaction { }`, and a full buffer drops the
+row rather than queueing it.
+
+`docs/docs/backend/sockets.md` still carried the `after`-block rule
+0.9.911 corrected in the spec: "do not run, the response was the 101",
+stated for the whole socket path rather than the handshake. Both halves
+are in the table now.
+
 ## [0.9.911] — what `after { }` did not see — 2026-08-24
 
 Three defects found by running the restored features together instead of

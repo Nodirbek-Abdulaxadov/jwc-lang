@@ -50,6 +50,42 @@ inserting is a race: two requests both read no row, and both insert.
 The conflict target must be a real unique constraint, and on a table with
 more than one it has to be named.
 
+### Buffered
+
+```jwc no-compile
+insert into App.audit.Events {
+    actor = context.account_id,
+    route = request.route()
+} buffered
+```
+
+`buffered` hands the row to a background writer and returns immediately.
+The writer holds rows briefly, then sends one multi-row `INSERT` per
+statement shape — merging is the point, because one statement per row
+would take the wait off the request and leave the database doing the same
+work.
+
+This is what makes a logging `after` block worth writing. An `after` block
+is awaited before the response goes out, so an ordinary insert there puts
+a database round trip in front of every response.
+
+The buffer is bounded, and a full buffer **drops** the row rather than
+queueing it — the right trade for an audit trail and the wrong one for a
+ledger. `/metrics` carries `jwc_log_dropped_total` alongside
+`jwc_log_written_total`, `jwc_log_batches_total` and the queue depth, so
+falling behind is visible before rows start disappearing.
+
+Three things a buffered insert cannot do, because it answers before the
+row exists and is not part of your transaction:
+
+| | |
+|---|---|
+| `as { … }` | there is no row to project yet |
+| `on conflict` | a resolution nobody observes is a row silently not written |
+| inside `transaction { }` | it is written later, on another connection — a rollback would not take it back |
+
+Each is a compile error, not a surprise at runtime.
+
 ## Update
 
 ```jwc no-compile
