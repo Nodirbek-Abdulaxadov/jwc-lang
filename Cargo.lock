@@ -1753,7 +1753,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "postgres-native-tls",
- "rand 0.8.7",
+ "rand 0.10.2",
  "redis",
  "regex",
  "reqwest",
