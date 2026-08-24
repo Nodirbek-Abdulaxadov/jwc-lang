@@ -26,7 +26,20 @@ that is exactly when it arrived.
 
 CI has a `windows-latest` job now — `cargo check --workspace --all-targets
 --features redis`, no build and no tests, because its whole purpose is to
-compile the branches ubuntu discards.
+compile the branches ubuntu discards. On `windows-latest` rather than a
+cross check from ubuntu because msvc is the target the release builds.
+
+The fix was verified against a real Windows target rather than by reading
+it: with mingw installed, `cargo check --target x86_64-pc-windows-gnu
+--features redis` is clean, and deleting the two constants again
+reproduces exactly the six `E0425`s the release reported. A cross check
+for msvc is not available here — it dies in a C dependency's build script
+looking for `lib.exe`.
+
+Note for whoever reads this next: `ci.yml` triggers on `pull_request` and
+on pushes to `main`, so a commit pushed to a branch with no open PR gets
+**no CI at all**. This commit sat green-looking and unverified for that
+reason; the local cross check above is what stands behind it.
 
 ## [0.9.913] — the test that tested itself — 2026-08-24
 
