@@ -35,7 +35,7 @@ pub fn validate_class(
         // the whitelist, and rejecting extras breaks every client that adds
         // a field.
         let present = map.get(&f.name);
-        let required = f.rules.iter().any(|(r, _)| r == "required");
+        let required = f.rules.iter().any(|r| r.name == "required");
 
         let value = match present {
             None | Some(J::Null) => {
@@ -108,7 +108,14 @@ fn base(t: &Ty) -> Ty {
     }
 }
 
-fn coerce(ty: &Ty, v: &J) -> Option<Value> {
+/// JSON to a `Value` of the declared type. `None` is "this JSON cannot be
+/// that type".
+///
+/// Public because the job queue needs it: a payload is JSON on the way
+/// into the table and has to come back out as the parameter types the
+/// `job` declared. Reconstructing that from the JSON alone cannot work —
+/// `7` is an `int` and a `bigint` and a `numeric`.
+pub fn coerce(ty: &Ty, v: &J) -> Option<Value> {
     use crate::types::Scalar;
     match (&base(ty), v) {
         (_, J::Null) => Some(Value::Null),
@@ -143,9 +150,10 @@ fn check_rules(
     value: &Value,
     failures: &mut Vec<Value>,
 ) {
-    for (rule, args) in &f.rules {
+    for r in &f.rules {
+        let (rule, args) = (r.name.as_str(), &r.args);
         let limit = args.first().and_then(literal_i64);
-        let ok = match rule.as_str() {
+        let ok = match rule {
             "required" => true,
             "minLength" => text_len(value).is_none_or(|n| limit.is_none_or(|l| n >= l)),
             "maxLength" => text_len(value).is_none_or(|n| limit.is_none_or(|l| n <= l)),
@@ -164,12 +172,12 @@ fn check_rules(
             _ => true,
         };
         if !ok {
-            failures.push(field_error(
-                path,
-                rule,
-                limit,
-                &default_message(&f.name, rule, limit),
-            ));
+            // A declared `: "…"` wins; otherwise the generated sentence.
+            let message = match &r.message {
+                Some(m) => m.clone(),
+                None => default_message(&f.name, rule, limit),
+            };
+            failures.push(field_error(path, rule, limit, &message));
         }
     }
 }

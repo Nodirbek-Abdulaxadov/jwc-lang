@@ -1,0 +1,150 @@
+---
+sidebar_position: 1
+title: "The `jwc` command"
+description: "Every subcommand: new, check, fmt, serve, build, migrate, test, lint, routes, explain, openapi, swagger, lsp, and the registry commands."
+---
+
+# The `jwc` command
+
+One binary. It is the compiler, the server, the migration tool and the
+language server.
+
+## Starting
+
+```bash
+jwc new shop                      # the smallest thing that runs
+jwc new shop --template api       # CRUD over one table, keyset-paginated
+jwc new shop --template auth      # accounts, Argon2id passwords, JWT sessions
+jwc new shop --path ./services/shop
+```
+
+The directory must be missing or empty — `jwc new` will not scaffold over
+files you wrote. Every template checks, lints and formats clean on the
+first run, and `tests/templates.rs` scaffolds each one and puts the real
+toolchain over it, so one that does not is a failing build here rather
+than a surprise for you.
+
+## Every day
+
+```bash
+jwc check .        # parse and type-check
+jwc serve .        # run it
+jwc fmt .          # rewrite in canonical form
+jwc test           # run every `test` block
+```
+
+`jwc check` is the one to put in a pre-commit hook. It needs no database
+and no network: the schema is in the source, so the queries are checked
+against it without connecting to anything.
+
+## Running
+
+```bash
+jwc serve .                    # the interpreter — the whole language
+jwc build .                    # a native binary at bin/debug/<name>
+jwc build . --release          # optimised
+jwc build . --emit-rust        # the generated Rust, without compiling it
+```
+
+`jwc build` produces one statically-linkable binary with no runtime
+dependency on the compiler. It needs a Rust toolchain, because that is
+what it hands the generated crate to.
+
+The two backends are held to the same answers: the release check builds
+each real application both ways, runs the same requests against both, and
+compares the responses byte for byte — status, content-type, body and
+headers.
+
+Anything `jwc build` cannot lower it **refuses**, naming the construct.
+A binary that quietly dropped a query would be a far worse outcome than
+one that will not build.
+
+## Schema
+
+```bash
+jwc migrate new <name> .       # diff against the last snapshot
+jwc migrate up .               # apply what is pending
+jwc migrate status .           # applied, pending, drifted
+jwc migrate verify .           # constraints and indexes, by name
+jwc migrate down .             # roll back, newest first
+jwc gen-sql .                  # the whole schema as DDL, to stdout
+```
+
+## Seeing what the compiler sees
+
+```bash
+jwc routes .                   # method, path, middleware chain
+jwc explain .                  # every query, with the SQL it lowers to
+jwc openapi . > openapi.json   # OpenAPI 3.1 for the route table
+jwc ast .                      # the parsed AST — a debugging aid
+```
+
+`jwc openapi` reads the types the checker already inferred rather than
+re-deriving them. One type engine, one answer: a route returning
+`json(OrgService.get(...))` documents a shape rather than shrugging.
+
+```bash
+jwc swagger .                  # a browsable reference on http://127.0.0.1:8099
+jwc swagger . --port 9000
+jwc swagger . --out api.html   # the page as one file, instead of serving
+```
+
+`jwc swagger` renders the same document `jwc openapi` emits — there is
+one generator, not two. The page is self-contained: no CDN, no vendored
+Swagger UI, so `--out` gives you a single file that opens offline and can
+be committed or published as is. It listens on loopback only; an
+unauthenticated description of every endpoint does not belong on a
+network interface.
+
+`jwc routes` is the fastest way to answer "why is this endpoint 404" and
+"which middleware actually runs here".
+
+## Lints
+
+```bash
+jwc lint .                     # check, plus the advisory whole-program lints
+jwc lint . --deny-warnings     # for CI
+jwc lint . --constraints       # a where or orderby with no index behind it
+```
+
+## Packages
+
+```bash
+jwc add <name>                 # fetch, vendor, and record as a dependency
+jwc add <name>@1.2.3           # a specific version
+jwc install                    # fetch every declared dependency that is missing
+jwc update                     # move within the recorded ranges
+jwc update -p redis            # just this one
+jwc remove <name>              # drop it from the manifest and from disk
+jwc tree                       # declared, vendored, and at which version
+jwc login --token jwc_...      # store a registry key
+jwc publish                    # upload this package
+```
+
+Dependencies are **vendored**, under `jwc_packages/`. There is no lockfile
+and no resolver: `jwcproj.json` records a range, `jwc_packages/<name>/`
+holds the sources that range resolved to, and those sources compile with
+your program. Which of the two you commit is your call — the templates
+gitignore the directory, which is why `jwc install` exists.
+
+`jwc install` is the command a fresh clone needs, and it is safe to put in
+a build script: it fetches only what is missing, and it follows a
+package's own dependencies. `--force` re-downloads everything.
+
+`jwc update` moves within the range the manifest already records: `^0.2.1`
+reaches the newest `0.2.x` and never `0.3.0`. Crossing a major is
+`jwc add <name>@<version>` — a change to the requirement, and one that
+shows up in the diff as such. An unparseable range is an error, not a
+silent "take the newest".
+
+`jwc remove` and `jwc tree` never touch the network.
+
+## Editors
+
+```bash
+jwc lsp                        # the language server, LSP over stdio
+```
+
+Diagnostics, go-to-definition, hover and completion, from the same
+front-end `jwc check` uses — so the editor and the build never disagree.
+See [Editor setup](../getting-started/editor-setup.md).

@@ -643,4 +643,5 @@ how you test nullity and is always allowed.
 | `E0373` | index is not a number |
 | `E0374` | the two branches of a conditional produce unrelated shapes |
 | `E0375` | `in` over an array whose element type does not match |
+| `E0376` | operands cannot be compared or ordered |
 | `W0301` | dead `??` |

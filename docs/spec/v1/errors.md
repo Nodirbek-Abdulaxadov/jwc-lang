@@ -198,6 +198,22 @@ A constraint carrying `: "message"` raises a declared error when violated:
 |---|---|---|
 | `unique` / partial unique | `Conflict` | 409 |
 | `check` | `BadRequest` | 400 |
+| a column rule — `minLength(2)`, `pattern(r"…")`, `min(0)`, … | `BadRequest` | 400 |
+
+The marker goes after the rule, so a column can carry several:
+
+```jwc no-compile
+email varchar(255) unique : "bu email band", pattern(r"^[^@]+@[^@]+$") : "email yaroqsiz";
+```
+
+On a **class** field the same marker replaces the generated sentence in
+the `validation_failed` body, so the two places a value is checked can say
+the same thing.
+
+The rule form was added because `W1302` pointed at a message-less
+`pattern(...)` and advised "add `: \"…\"`" — advice that did not parse,
+since only `unique` and the table-level forms took one. The specification's
+own sample tripped the warning eleven times and could not act on it.
 
 The message is the declared string. The generated constraint name
 (schema §8) is **not** carried on the raised error: `Conflict` and
@@ -349,6 +365,7 @@ header.
 | `E1010` | more than one `errorHandler` |
 | `E1011` | `errorHandler` arm does not return a response |
 | `E1020` | postfix `catch` block does not diverge |
+| `E0813` | `break` or `continue` outside a `for` loop |
 | `W1001` | unreachable `errorHandler` arm |
 | `W1002` | `or throw` on a non-nullable operand |
 

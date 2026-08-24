@@ -138,8 +138,15 @@ after_block     = "after" "{" { statement } "}" ;
 
 (* ---------- routing ---------- *)
 
-routes_decl     = "routes" string [ use_clause ] "{" { route_decl } "}" ;
+job_decl        = "job" identifier param_list [ "retries" integer ] [ "backoff" string ] block ;
+dispatch_stmt   = "dispatch" identifier "(" [ named_arg { "," named_arg } ] ")" ";" ;
+named_arg       = identifier ":" expression ;
+
+routes_decl     = "routes" string [ use_clause ] "{" { route_decl | socket_decl } "}" ;
 route_decl      = "route" http_method string [ use_clause ] block ;
+socket_decl     = "socket" string [ use_clause ] "{" { socket_handler } "}" ;
+socket_handler  = "on" ( "open" | "close" ) block
+                | "on" "message" "(" identifier ")" block ;
 http_method     = "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
                 | "HEAD" | "OPTIONS" ;
 use_clause      = "use" ident { "," ident } ;
@@ -218,7 +225,7 @@ limit_clause    = "limit" expr ;
 page_clause     = "page" [ "after" expr ] "size" expr [ "max" expr ] ;
 
 insert_expr     = "insert" "into" qualified_table object_literal
-                  [ conflict_clause ] [ projection ] ;
+                  [ conflict_clause ] [ projection ] [ "buffered" ] ;
 conflict_clause = "on" "conflict" [ "(" ident_list ")" ]
                   ( "do" "nothing" | "do" "update" set_clause ) ;
 

@@ -820,3 +820,237 @@ async fn a_literally_declared_operational_path_still_wins() {
     assert_eq!(r.status, 200);
     assert_eq!(r.body, "mine");
 }
+
+/// Every diagnostic code the compiler emits is documented, and no code is
+/// documented twice.
+///
+/// Codes are assigned by hand and nothing checked them, so six of them
+/// were handed out twice in one afternoon: `E0011`–`E0014` were parser
+/// errors when socket and job rules took them, `E0611` was "`raw` inside
+/// a view" when a buffered-insert rule did, and `E0811` was "an `after`
+/// block can raise" when a socket rule did. Each surfaced as a corpus
+/// case failing on a diagnostic that looked right and meant something
+/// else — the good outcome. Without a corpus case nearby, a duplicate
+/// reaches a user as documentation describing a different error than the
+/// one they got.
+///
+/// The registry is the specification's own "Diagnostics introduced here"
+/// tables, which is where a reader looks the code up. A code with no row
+/// there is undocumented; a code with two rows is ambiguous.
+#[test]
+fn every_diagnostic_code_is_documented_exactly_once() {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // --- what the spec documents -----------------------------------------
+    let mut documented: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let spec = root.join("docs/spec/v1");
+    for entry in std::fs::read_dir(&spec).expect("docs/spec/v1").flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        for line in text.lines() {
+            let t = line.trim();
+            // `| \`E0123\` | … |` — a row of a diagnostics table.
+            if !t.starts_with("| `E") {
+                continue;
+            }
+            let Some(code) = t.trim_start_matches("| `").split('`').next().filter(|c| {
+                c.len() == 5 && c.starts_with('E') && c[1..].chars().all(|ch| ch.is_ascii_digit())
+            }) else {
+                continue;
+            };
+            documented
+                .entry(code.to_string())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    assert!(
+        documented.len() > 50,
+        "found only {} documented codes — the table format changed",
+        documented.len()
+    );
+
+    // One code is deliberately in two tables: `E0900` is "a word from the
+    // pre-1.0 vocabulary", and both the routing spec (which has a whole
+    // section of them) and the names spec (which owns the registry row)
+    // list it. Same meaning, two readers.
+    const DOCUMENTED_TWICE_ON_PURPOSE: &[&str] = &["E0900"];
+
+    let twice: Vec<String> = documented
+        .iter()
+        .filter(|(code, _)| !DOCUMENTED_TWICE_ON_PURPOSE.contains(&code.as_str()))
+        .filter(|(_, files)| {
+            let mut f = (*files).clone();
+            f.sort();
+            f.dedup();
+            f.len() > 1
+        })
+        .map(|(code, files)| format!("{code} in {files:?}"))
+        .collect();
+    assert!(
+        twice.is_empty(),
+        "a code documented in two specs means two things:\n  {}",
+        twice.join("\n  ")
+    );
+
+    // --- what the compiler emits ------------------------------------------
+    let mut emitted: BTreeSet<String> = BTreeSet::new();
+    let src = root.join("src");
+    let mut files = Vec::new();
+    collect_rs(&src, &mut files);
+    assert!(!files.is_empty(), "no sources under src/");
+    // Every `"E0123"` literal, wherever it sits on the line. Scanning only
+    // line-leading literals would work — rustfmt puts most of them on their
+    // own line — but "most" is the problem: a short `self.err("E0537", s,
+    // "…")` stays on one line, and a scan that misses it would report the
+    // code as documented-but-unimplemented below.
+    //
+    // Matched as a whole `"E` + four digits + `"` window rather than by
+    // splitting on quotes: `lexer.rs` writes `\"` inside its own string
+    // literals, which flips the odd/even parity of a split for the rest of
+    // the file and hid three real codes when this was written that way.
+    for path in &files {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let b = text.as_bytes();
+        for i in 0..b.len().saturating_sub(6) {
+            if b[i] == b'"'
+                && b[i + 1] == b'E'
+                && b[i + 6] == b'"'
+                && b[i + 2..i + 6].iter().all(|c| c.is_ascii_digit())
+            {
+                emitted.insert(text[i + 1..i + 6].to_string());
+            }
+        }
+    }
+
+    let undocumented: Vec<&String> = emitted
+        .iter()
+        .filter(|c| !documented.contains_key(*c))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "these codes are emitted and appear in no spec's diagnostics table, \
+         so a reader who gets one has nowhere to look it up: {undocumented:?}"
+    );
+
+    // The other direction. A tabled code that nothing emits is a promise the
+    // compiler does not keep, and it reads exactly like one it does — the
+    // reader cannot tell them apart from the table.
+    //
+    // `E0711` ("route is fully shadowed") is the one deliberate entry:
+    // routing.md §4.3 makes it unreachable in 1.0 and says so in bold above
+    // the table, so the row documents a reserved code rather than a check.
+    // Anything else here is drift.
+    const RESERVED_UNIMPLEMENTED: &[&str] = &["E0711"];
+
+    let unimplemented: Vec<&String> = documented
+        .keys()
+        .filter(|c| !emitted.contains(*c))
+        .filter(|c| !RESERVED_UNIMPLEMENTED.contains(&c.as_str()))
+        .collect();
+    assert!(
+        unimplemented.is_empty(),
+        "these codes are in a diagnostics table and nothing in src/ emits them, \
+         so the spec promises a check that does not run: {unimplemented:?}"
+    );
+}
+
+fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_rs(&p, out);
+        } else if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// routing.md §9.2 — a socket route whose chain answers.
+///
+/// The upgrade itself is exempt from the `after` chain, and the reason
+/// given is that the response was the 101. When the chain answers instead,
+/// the response is an ordinary one and every middleware that started runs
+/// its `after` block (middleware.md §4.3).
+///
+/// Both backends read the exemption as covering the whole socket path, so
+/// an access log recorded rejected routes and not rejected upgrades — the
+/// connections most worth looking at, missing, with nothing to show it.
+const SOCKET_AFTER: &str = "namespace h;\n\
+                            middleware Mark {\n\
+                            \x20   after { response.set_header(\"x-after\", \"ran\"); }\n\
+                            }\n\
+                            middleware Gate {\n\
+                            \x20   let deny = request.query(\"deny\");\n\
+                            \x20   if ($deny == \"1\") { throw Unauthorized(\"no\"); }\n\
+                            }\n\
+                            routes \"/s\" use Mark, Gate {\n\
+                            \x20   socket \"ws\" { on open { socket.send(\"hi\"); } }\n\
+                            }\n";
+
+async fn preflight(deny: bool) -> Result<(), jwc::exec::Response> {
+    let program = program(SOCKET_AFTER);
+    let incoming = Incoming {
+        method: "GET".into(),
+        path: "/s/ws".into(),
+        query: if deny {
+            vec![("deny".to_string(), "1".to_string())]
+        } else {
+            Vec::new()
+        },
+        headers: HashMap::new(),
+        body: Vec::new(),
+        peer_ip: "203.0.113.7".into(),
+    };
+    let request = Arc::new(jwc::exec::Request {
+        method: "GET".to_string(),
+        path: incoming.path.clone(),
+        route: incoming.path.clone(),
+        headers: incoming.headers.clone(),
+        query: incoming.query.clone(),
+        body: String::new(),
+        peer_ip: incoming.peer_ip.clone(),
+        client_ip: incoming.peer_ip.clone(),
+        id: "0000000000000000".to_string(),
+    });
+    serve::socket_preflight(&program, &incoming, request)
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test]
+async fn a_socket_chain_that_answers_runs_the_after_blocks() {
+    let Err(response) = preflight(true).await else {
+        panic!("`Gate` throws, so the chain answers and there is no upgrade");
+    };
+    assert_eq!(response.status, 401);
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-after") && v == "ran"),
+        "`Mark` started, so its `after` block runs on the refusal: {:?}",
+        response.headers
+    );
+}
+
+#[tokio::test]
+async fn a_socket_upgrade_does_not_run_the_after_blocks() {
+    assert!(
+        preflight(false).await.is_ok(),
+        "nothing answers, so the handshake proceeds and the response is the 101"
+    );
+}

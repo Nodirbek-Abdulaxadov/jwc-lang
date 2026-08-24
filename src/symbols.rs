@@ -80,12 +80,25 @@ pub struct ClassSym {
     pub loc: Loc,
 }
 
+/// One validation rule on a class field: `minLength(2)`, and the message
+/// its violation should carry.
+///
+/// A struct rather than a `(String, Vec<Expr>)` tuple because the third
+/// member is optional and easy to misread positionally.
+#[derive(Clone, Debug)]
+pub struct ClassRule {
+    pub name: String,
+    pub args: Vec<Expr>,
+    /// `: "…"`. `None` falls back to the generated sentence.
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassFieldSym {
     pub name: String,
     pub ty: Ty,
     pub transient: bool,
-    pub rules: Vec<(String, Vec<Expr>)>,
+    pub rules: Vec<ClassRule>,
     pub loc: Loc,
 }
 
@@ -135,6 +148,18 @@ pub struct MiddlewareSym {
     pub loc: Loc,
 }
 
+/// One declared `job` (jobs.md §1).
+#[derive(Clone, Debug)]
+pub struct JobSym {
+    pub name: String,
+    pub params: Vec<(String, Ty)>,
+    /// Total attempts before the dead-letter queue. Default 5.
+    pub retries: i64,
+    /// Seconds to wait after a failed attempt. Default 30.
+    pub backoff_secs: i64,
+    pub loc: Loc,
+}
+
 #[derive(Default)]
 pub struct Symbols {
     pub tables: BTreeMap<String, TableSym>,
@@ -144,6 +169,7 @@ pub struct Symbols {
     pub errors: BTreeMap<String, ErrorSym>,
     pub functions: BTreeMap<String, FunctionSym>,
     pub middleware: BTreeMap<String, MiddlewareSym>,
+    pub jobs: BTreeMap<String, JobSym>,
     pub services: BTreeMap<String, Vec<String>>,
     /// Qualified path (`App.auth.Accounts`) -> declared table or view name.
     pub by_path: BTreeMap<String, String>,
@@ -267,6 +293,72 @@ pub fn build(ws: &Workspace, model: &SchemaModel) -> Symbols {
                 Decl::Function(f) => {
                     let sym = function_sym(f, None, &s.enums, &s.classes, loc);
                     s.functions.insert(sym.name.clone(), sym);
+                }
+                Decl::Job(j) => {
+                    let params = j
+                        .params
+                        .iter()
+                        .map(|p| (p.name.name.clone(), type_of(&p.ty, &s.enums, &s.classes)))
+                        .collect::<Vec<(String, Ty)>>();
+                    // A payload has to survive a round trip through the
+                    // queue table as JSON, so a job cannot take a class or
+                    // a record: those are the request boundary's shapes,
+                    // and re-validating one on the way out is a contract
+                    // nothing states.
+                    for (name, ty) in &params {
+                        if matches!(
+                            ty.clone().strip_opt(),
+                            Ty::Class(_) | Ty::Record(_) | Ty::Raw
+                        ) {
+                            s.diags.push((
+                                loc,
+                                Diagnostic::error(
+                                    "E0362",
+                                    j.span,
+                                    format!("job parameter `{name}` is `{ty}`"),
+                                )
+                                .note(
+                                    "a job payload is stored and replayed, so its parameters \
+                                     are scalars and arrays of scalars — pass the id, and \
+                                     read the row in the handler",
+                                )
+                                .clause("jobs.md §1.1"),
+                            ));
+                        }
+                    }
+                    if s.jobs.contains_key(&j.name.name) {
+                        s.diags.push((
+                            loc,
+                            Diagnostic::error(
+                                "E0363",
+                                j.span,
+                                format!("`job {}` is declared twice", j.name.name),
+                            )
+                            .note("a job name is the key its queued rows carry")
+                            .clause("jobs.md §1.1"),
+                        ));
+                        // The first wins. Letting the second overwrite it
+                        // would recheck every `dispatch` in the program
+                        // against the wrong signature, and bury the one
+                        // real error under a page of consequences.
+                        continue;
+                    }
+                    s.jobs.insert(
+                        j.name.name.clone(),
+                        JobSym {
+                            name: j.name.name.clone(),
+                            params,
+                            retries: j.retries.unwrap_or(5),
+                            backoff_secs: j
+                                .backoff
+                                .as_deref()
+                                .and_then(|d| {
+                                    crate::serve::parse_duration(d).map(|x| x.as_secs() as i64)
+                                })
+                                .unwrap_or(30),
+                            loc,
+                        },
+                    );
                 }
                 Decl::Service(sv) => {
                     let mut names = Vec::new();
@@ -441,23 +533,27 @@ fn class_sym(
             } else {
                 base
             };
-            let rules: Vec<(String, Vec<Expr>)> = f
+            let rules: Vec<ClassRule> = f
                 .rules
                 .iter()
-                .map(|r| (r.name.name.clone(), r.args.clone()))
+                .map(|r| ClassRule {
+                    name: r.name.name.clone(),
+                    args: r.args.clone(),
+                    message: r.message.clone(),
+                })
                 .collect();
 
             // types.md §11.1: `minLength` on an array is the overload the
             // gap named; arrays use `minItems`.
             let is_array = f.ty.array_depth > 0;
-            for (name, _) in &rules {
-                match name.as_str() {
+            for r in &rules {
+                match r.name.as_str() {
                     "minLength" | "maxLength" if is_array => diags.push((
                         floc,
                         Diagnostic::error(
                             "E0360",
                             f.span,
-                            format!("`{name}` on an array field `{}`", f.name.name),
+                            format!("`{}` on an array field `{}`", r.name, f.name.name),
                         )
                         .note("arrays use `minItems` / `maxItems`")
                         .clause("types.md §11.1"),
@@ -467,7 +563,7 @@ fn class_sym(
                         Diagnostic::error(
                             "E0360",
                             f.span,
-                            format!("`{name}` on a scalar field `{}`", f.name.name),
+                            format!("`{}` on a scalar field `{}`", r.name, f.name.name),
                         )
                         .note("scalars use `minLength` / `maxLength`")
                         .clause("types.md §11.1"),

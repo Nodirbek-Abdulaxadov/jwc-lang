@@ -1,0 +1,311 @@
+
+// --- the durable job queue (jobs.md) -----------------------------------------
+//
+// `crate::jobs` in the compiler, transcribed. The SQL is the same text: a
+// job enqueued by `jwc serve` has to be runnable by a native binary reading
+// the same table, which is the normal shape of a rolling deploy, and two
+// different `INSERT`s would be two different schemas.
+
+const JWC_JOBS_DDL: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS public._jwc_jobs (\
+        id bigserial PRIMARY KEY, name text NOT NULL, payload jsonb NOT NULL, \
+        attempts int NOT NULL DEFAULT 0, max_attempts int NOT NULL, \
+        enqueued_at timestamptz NOT NULL DEFAULT now(), \
+        run_at timestamptz NOT NULL DEFAULT now(), leased_until timestamptz)",
+    "CREATE INDEX IF NOT EXISTS _jwc_jobs_ready ON public._jwc_jobs (run_at, id)",
+    "CREATE TABLE IF NOT EXISTS public._jwc_jobs_dead (\
+        id bigserial PRIMARY KEY, job_id bigint NOT NULL, name text NOT NULL, \
+        payload jsonb NOT NULL, attempts int NOT NULL, last_error text NOT NULL, \
+        failed_at timestamptz NOT NULL DEFAULT now())",
+];
+
+static JWC_JOBS_PROCESSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static JWC_JOBS_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static JWC_JOBS_DEAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct JwcClaim {
+    id: i64,
+    name: String,
+    payload: serde_json::Value,
+    attempts: i64,
+    max_attempts: i64,
+}
+
+/// One declared job: its handler, and the policy from its declaration.
+#[derive(Clone, Copy)]
+struct JwcJobEntry {
+    name: &'static str,
+    max_attempts: i64,
+    backoff_secs: i64,
+    /// Takes the payload object; binds its own parameters out of it.
+    run: fn(serde_json::Value) -> Pin<Box<dyn Future<Output = JwcResult> + Send>>,
+}
+
+async fn jwc_jobs_ensure_tables() -> Result<(), String> {
+    for stmt in JWC_JOBS_DDL {
+        jwc_db_try_exec(stmt, vec![])
+            .await
+            .map_err(|e| format!("{e}"))?;
+    }
+    Ok(())
+}
+
+async fn jwc_job_enqueue(name: &str, payload: String, max_attempts: i64) -> Result<(), String> {
+    jwc_db_try_exec(
+        "INSERT INTO public._jwc_jobs (name, payload, max_attempts, run_at) \
+         VALUES ($1, $2::text::jsonb, $3::text::int, now())",
+        vec![
+            Box::new(Some(name.to_string())),
+            Box::new(Some(payload)),
+            Box::new(Some(max_attempts.to_string())),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("{e}"))
+}
+
+async fn jwc_job_claim() -> Result<Option<JwcClaim>, String> {
+    // The lease and the attempt counter move in the statement that claims
+    // the row: a worker that died between the two would otherwise retry
+    // forever, which is an outage rather than a retry.
+    let sql = "UPDATE public._jwc_jobs SET \
+                 leased_until = now() + make_interval(secs => 300), \
+                 attempts = attempts + 1 \
+               WHERE id = ( \
+                 SELECT id FROM public._jwc_jobs \
+                 WHERE run_at <= now() AND (leased_until IS NULL OR leased_until < now()) \
+                 ORDER BY run_at, id FOR UPDATE SKIP LOCKED LIMIT 1) \
+               RETURNING row_to_json(ROW(id, name, payload::text, attempts, max_attempts))::text";
+    let rows = jwc_db_try_query(sql, vec![])
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let text: Option<String> = row.try_get(0).map_err(|e| format!("{e}"))?;
+    let Some(text) = text else { return Ok(None) };
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    Ok(Some(JwcClaim {
+        id: n("f1"),
+        name: s("f2"),
+        payload: serde_json::from_str(&s("f3")).unwrap_or(serde_json::Value::Null),
+        attempts: n("f4"),
+        max_attempts: n("f5"),
+    }))
+}
+
+async fn jwc_job_succeed(id: i64) -> Result<(), String> {
+    JWC_JOBS_PROCESSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    jwc_db_try_exec(
+        "DELETE FROM public._jwc_jobs WHERE id = $1::text::bigint",
+        vec![Box::new(Some(id.to_string()))],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("{e}"))
+}
+
+async fn jwc_job_fail(claim: &JwcClaim, backoff_secs: i64, error: &str) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    JWC_JOBS_FAILED.fetch_add(1, Ordering::Relaxed);
+    if claim.attempts >= claim.max_attempts {
+        JWC_JOBS_DEAD.fetch_add(1, Ordering::Relaxed);
+        jwc_db_try_exec(
+            "INSERT INTO public._jwc_jobs_dead (job_id, name, payload, attempts, last_error) \
+             SELECT id, name, payload, attempts, $2 FROM public._jwc_jobs WHERE id = $1::text::bigint",
+            vec![
+                Box::new(Some(claim.id.to_string())),
+                Box::new(Some(error.to_string())),
+            ],
+        )
+        .await
+        .map_err(|e| format!("{e}"))?;
+        return jwc_db_try_exec(
+            "DELETE FROM public._jwc_jobs WHERE id = $1::text::bigint",
+            vec![Box::new(Some(claim.id.to_string()))],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("{e}"));
+    }
+    jwc_db_try_exec(
+        "UPDATE public._jwc_jobs SET leased_until = NULL, \
+           run_at = now() + make_interval(secs => $2::text::double precision) \
+         WHERE id = $1::text::bigint",
+        vec![
+            Box::new(Some(claim.id.to_string())),
+            Box::new(Some(backoff_secs.max(0).to_string())),
+        ],
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| format!("{e}"))
+}
+
+async fn jwc_jobs_metrics() -> String {
+    use std::sync::atomic::Ordering;
+    let rows = jwc_db_try_query(
+        "SELECT row_to_json(ROW( \
+           (SELECT count(*) FROM public._jwc_jobs), \
+           (SELECT count(*) FROM public._jwc_jobs_dead)))::text",
+        vec![],
+    )
+    .await;
+    let Ok(rows) = rows else { return String::new() };
+    let Some(row) = rows.first() else {
+        return String::new();
+    };
+    let text: Option<String> = row.try_get(0).unwrap_or(None);
+    let Some(text) = text else { return String::new() };
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+    let pending = v.get("f1").and_then(|x| x.as_i64()).unwrap_or(0);
+    let dead = v.get("f2").and_then(|x| x.as_i64()).unwrap_or(0);
+    format!(
+        "# HELP jwc_jobs_pending Jobs waiting or leased.\n\
+         # TYPE jwc_jobs_pending gauge\n\
+         jwc_jobs_pending {pending}\n\
+         # HELP jwc_jobs_dead Jobs that exhausted their retries.\n\
+         # TYPE jwc_jobs_dead gauge\n\
+         jwc_jobs_dead {dead}\n\
+         # HELP jwc_jobs_processed_total Jobs that ran to completion.\n\
+         # TYPE jwc_jobs_processed_total counter\n\
+         jwc_jobs_processed_total {}\n\
+         # HELP jwc_jobs_failed_total Attempts that raised, retries included.\n\
+         # TYPE jwc_jobs_failed_total counter\n\
+         jwc_jobs_failed_total {}\n\
+         # HELP jwc_jobs_dead_total Jobs moved to the dead-letter table.\n\
+         # TYPE jwc_jobs_dead_total counter\n\
+         jwc_jobs_dead_total {}\n",
+        JWC_JOBS_PROCESSED.load(Ordering::Relaxed),
+        JWC_JOBS_FAILED.load(Ordering::Relaxed),
+        JWC_JOBS_DEAD.load(Ordering::Relaxed),
+    )
+}
+
+/// Poll, claim, run, settle.
+async fn jwc_job_worker() {
+    let idle = std::time::Duration::from_millis(
+        std::env::var("JWC_JOB_POLL_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1_000),
+    );
+    loop {
+        let claimed = match jwc_job_claim().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[jobs] claim failed: {e}");
+                tokio::time::sleep(idle).await;
+                continue;
+            }
+        };
+        let Some(claim) = claimed else {
+            tokio::time::sleep(idle).await;
+            continue;
+        };
+
+        let entry = JWC_JOBS.iter().find(|j| j.name == claim.name).copied();
+        let outcome: Result<(), String> = match entry {
+            // A queued row whose declaration is gone: a rolling deploy
+            // that dropped a `job` while rows were still waiting.
+            // Retrying forever would be an outage; dead-lettering says
+            // what happened.
+            None => Err(format!(
+                "no `job {}` in this build — a queued row outlived its declaration",
+                claim.name
+            )),
+            Some(entry) => {
+                // A panic in one handler must not take the worker with
+                // it, or one bad job stops every job.
+                let guarded =
+                    std::panic::AssertUnwindSafe((entry.run)(claim.payload.clone()));
+                match futures::FutureExt::catch_unwind(guarded).await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(t)) => Err(format!("{}: {}", t.error, t.message)),
+                    Err(payload) => Err(payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                        .unwrap_or_else(|| "panic".into())),
+                }
+            }
+        };
+
+        let backoff = entry.map(|e| e.backoff_secs).unwrap_or(30);
+        let settled = match &outcome {
+            Ok(()) => jwc_job_succeed(claim.id).await,
+            Err(e) => {
+                eprintln!(
+                    "[jobs] {} #{} attempt {}/{} failed: {e}",
+                    claim.name, claim.id, claim.attempts, claim.max_attempts
+                );
+                jwc_job_fail(&claim, backoff, e).await
+            }
+        };
+        if let Err(e) = settled {
+            // The lease expires on its own, so the job runs again — the
+            // at-least-once contract working, not a leak.
+            eprintln!("[jobs] could not settle #{}: {e}", claim.id);
+        }
+    }
+}
+
+async fn jwc_start_job_workers() {
+    if JWC_JOBS.is_empty() {
+        return;
+    }
+    if let Err(e) = jwc_jobs_ensure_tables().await {
+        eprintln!("[jobs] could not create the queue tables: {e}");
+        return;
+    }
+    let n = std::env::var("JWC_JOB_WORKERS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|x| *x > 0)
+        .unwrap_or(2);
+    for _ in 0..n {
+        tokio::spawn(jwc_job_worker());
+    }
+    eprintln!("[jwc] {n} job worker{}", if n == 1 { "" } else { "s" });
+}
+
+/// A `V` as `serde_json`, for a dispatch payload.
+///
+/// Through `jwc_to_json`'s text rather than a second encoder: the payload
+/// a native binary writes has to be the payload `jwc serve` writes, and
+/// two encoders is how they come to differ on a decimal or an escape.
+fn jwc_to_json_value(v: &V) -> serde_json::Value {
+    serde_json::from_str(&jwc_to_json(v)).unwrap_or(serde_json::Value::Null)
+}
+
+/// A payload field, as the declared type. Mirrors
+/// `validate::coerce` for the scalar cases a job parameter can have —
+/// `7` is an `int` and a `bigint` and a `numeric`, and only the
+/// declaration says which.
+fn jwc_job_arg(payload: &serde_json::Value, name: &str, ty: &str) -> V {
+    let raw = payload.get(name).cloned().unwrap_or(serde_json::Value::Null);
+    if raw.is_null() {
+        return V::Null;
+    }
+    match ty {
+        "boolean" => V::Bool(raw.as_bool().unwrap_or(false)),
+        "int" | "bigint" | "smallint" => match &raw {
+            serde_json::Value::Number(n) => V::Int(n.as_i64().unwrap_or(0)),
+            serde_json::Value::String(s) => V::Int(s.parse().unwrap_or(0)),
+            _ => V::Null,
+        },
+        "numeric" | "real" | "double" => match &raw {
+            serde_json::Value::Number(n) => V::Float(n.as_f64().unwrap_or(0.0)),
+            serde_json::Value::String(s) => V::Float(s.parse().unwrap_or(0.0)),
+            _ => V::Null,
+        },
+        _ => match &raw {
+            serde_json::Value::String(s) => v_str(s.clone()),
+            other => v_str(other.to_string()),
+        },
+    }
+}

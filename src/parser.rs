@@ -186,6 +186,27 @@ impl Parser {
         }
     }
 
+    /// An integer literal. Only `retries N` needs one today.
+    fn expect_int(&mut self) -> PResult<(i64, Span)> {
+        let span = self.span();
+        match self.peek().tok.clone() {
+            Tok::Int(text) => {
+                self.bump();
+                match text.parse::<i64>() {
+                    Ok(n) => Ok((n, span)),
+                    Err(_) => {
+                        self.err("E0001", span, format!("`{text}` is not an integer"));
+                        Err(())
+                    }
+                }
+            }
+            found => {
+                self.err("E0001", span, format!("expected an integer, found {found}"));
+                Err(())
+            }
+        }
+    }
+
     fn expect_string(&mut self) -> PResult<(String, Span)> {
         let span = self.span();
         match self.peek().tok.clone() {
@@ -323,6 +344,7 @@ impl Parser {
             "errorHandler" => Decl::ErrorHandler(self.parse_error_handler(at, start)?),
             "server" => Decl::Server(self.parse_server(at, start)?),
             "function" => Decl::Function(self.parse_function(at, start)?),
+            "job" => Decl::Job(self.parse_job(at, start)?),
             "test" => Decl::Test(self.parse_test(at, start)?),
             "route" => {
                 self.err_note(
@@ -515,13 +537,16 @@ impl Parser {
                 && self.word_at(1, "key")
                 && self.peek_at(2).is(&Tok::LParen)
             {
-                self.parse_pk_constraint(mspan).map(|c| constraints.push(c))
+                self.parse_pk_constraint(member_at.clone(), mspan)
+                    .map(|c| constraints.push(c))
             } else if self.at_word("foreign") {
-                self.parse_fk_constraint(mspan).map(|c| constraints.push(c))
+                self.parse_fk_constraint(member_at.clone(), mspan)
+                    .map(|c| constraints.push(c))
             } else if self.at_word("unique") && self.peek_at(1).is(&Tok::LParen) {
-                self.parse_uq_constraint(mspan).map(|c| constraints.push(c))
+                self.parse_uq_constraint(member_at.clone(), mspan)
+                    .map(|c| constraints.push(c))
             } else if self.at_word("check") && self.peek_at(1).is(&Tok::LParen) {
-                self.parse_check_constraint(mspan)
+                self.parse_check_constraint(member_at.clone(), mspan)
                     .map(|c| constraints.push(c))
             } else if self.at_word("index") && self.word_at(1, "on") {
                 self.parse_index(member_at.clone(), mspan)
@@ -574,18 +599,19 @@ impl Parser {
         Ok(out)
     }
 
-    fn parse_pk_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_pk_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // primary
         self.bump(); // key
         let columns = self.parse_ident_list_parens()?;
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::PrimaryKey {
+            at,
             columns,
             span: start.to(end),
         })
     }
 
-    fn parse_fk_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_fk_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // foreign
         self.expect_word("key")?;
         let columns = self.parse_ident_list_parens()?;
@@ -612,6 +638,7 @@ impl Parser {
         }
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::ForeignKey {
+            at,
             columns,
             target,
             target_columns,
@@ -652,7 +679,7 @@ impl Parser {
         Err(())
     }
 
-    fn parse_uq_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_uq_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // unique
         let columns = self.parse_ident_list_parens()?;
         let predicate = if self.eat_word("where") {
@@ -666,6 +693,7 @@ impl Parser {
         let message = self.parse_message()?;
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::Unique {
+            at,
             columns,
             predicate,
             message,
@@ -673,7 +701,7 @@ impl Parser {
         })
     }
 
-    fn parse_check_constraint(&mut self, start: Span) -> PResult<TableConstraint> {
+    fn parse_check_constraint(&mut self, at: Attached, start: Span) -> PResult<TableConstraint> {
         self.bump(); // check
         self.expect(Tok::LParen)?;
         self.query_depth += 1;
@@ -684,6 +712,7 @@ impl Parser {
         let message = self.parse_message()?;
         let end = self.expect(Tok::Semi)?.span;
         Ok(TableConstraint::Check {
+            at,
             expr,
             message,
             span: start.to(end),
@@ -852,7 +881,13 @@ impl Parser {
             }
             span = span.to(self.expect(Tok::RParen)?.span);
         }
-        Ok(RuleCall { name, args, span })
+        let message = self.parse_message()?;
+        Ok(RuleCall {
+            name,
+            args,
+            message,
+            span,
+        })
     }
 
     // ------------------------------------------------------------ enum, view, class
@@ -1102,6 +1137,56 @@ impl Parser {
         })
     }
 
+    /// `job Name(p: T, …) [retries N] [backoff "30s"] { … }`
+    ///
+    /// The policy is in the signature rather than in the body: it is part
+    /// of what the job *is*, and a reader deciding whether to dispatch one
+    /// needs it before the first statement, not after the last.
+    fn parse_job(&mut self, at: Attached, start: Span) -> PResult<JobDecl> {
+        self.bump(); // job
+        let name = self.expect_ident()?;
+        let params = self.parse_params()?;
+
+        let mut retries = None;
+        let mut backoff = None;
+        loop {
+            if self.at_word("retries") && retries.is_none() {
+                self.bump();
+                let (n, span) = self.expect_int()?;
+                if !(1..=100).contains(&n) {
+                    self.err_note(
+                        "E0022",
+                        span,
+                        format!("`retries {n}` is outside 1..=100"),
+                        "one attempt is `retries 1`; a job that needs more than a \
+                         hundred is not failing transiently",
+                        "jobs.md §1.2",
+                    );
+                }
+                retries = Some(n);
+                continue;
+            }
+            if self.at_word("backoff") && backoff.is_none() {
+                self.bump();
+                let (d, _) = self.expect_string()?;
+                backoff = Some(d);
+                continue;
+            }
+            break;
+        }
+
+        let (body, end) = self.parse_block()?;
+        Ok(JobDecl {
+            at,
+            name,
+            params,
+            retries,
+            backoff,
+            body,
+            span: start.to(end),
+        })
+    }
+
     // ------------------------------------------------------------ middleware
 
     fn parse_middleware(&mut self, at: Attached, start: Span) -> PResult<MiddlewareDecl> {
@@ -1223,17 +1308,28 @@ impl Parser {
         let uses = self.parse_use_clause()?;
         self.expect(Tok::LBrace)?;
         let mut routes = Vec::new();
+        let mut sockets = Vec::new();
         while !self.at(&Tok::RBrace) && !self.at_eof() {
             let before = self.i;
             let rat = self.attached();
             let rstart = self.span();
+            if self.at_word("socket") {
+                if let Ok(s) = self.parse_socket(rat, rstart) {
+                    sockets.push(s);
+                }
+                if self.i == before {
+                    self.bump();
+                }
+                continue;
+            }
             if !self.at_word("route") {
                 let found = self.peek().tok.clone();
                 self.err_note(
                     "E0008",
                     rstart,
-                    format!("expected `route`, found {found}"),
-                    "a `routes` block contains only `route` declarations; blocks do not nest",
+                    format!("expected `route` or `socket`, found {found}"),
+                    "a `routes` block contains only `route` and `socket` declarations; \
+                     blocks do not nest",
                     "routing.md §1.1",
                 );
                 self.recover_to_decl();
@@ -1253,6 +1349,114 @@ impl Parser {
             prefix_span,
             uses,
             routes,
+            sockets,
+            span: start.to(end),
+        })
+    }
+
+    /// `socket "suffix" [use M, …] { on open { } on message (m) { } on close { } }`
+    ///
+    /// All three blocks are optional and each may appear once; a socket
+    /// with none of them is an error, because the endpoint would accept an
+    /// upgrade and then do nothing at all.
+    fn parse_socket(&mut self, at: Attached, start: Span) -> PResult<SocketDecl> {
+        self.bump(); // socket
+        let (suffix, suffix_span) = self.expect_string()?;
+        let uses = self.parse_use_clause()?;
+        self.expect(Tok::LBrace)?;
+
+        let mut on_open = None;
+        let mut on_message = None;
+        let mut on_close = None;
+        let mut seen: Vec<&str> = Vec::new();
+
+        while !self.at(&Tok::RBrace) && !self.at_eof() {
+            let before = self.i;
+            let hstart = self.span();
+            if !self.eat_word("on") {
+                let found = self.peek().tok.clone();
+                self.err_note(
+                    "E0019",
+                    hstart,
+                    format!("expected `on`, found {found}"),
+                    "a `socket` block contains `on open`, `on message (m)` and `on close`",
+                    "routing.md §9.1",
+                );
+                self.recover_to_decl();
+                break;
+            }
+            let which = self.expect_ident()?;
+            if seen.contains(&which.name.as_str()) {
+                self.err_note(
+                    "E0020",
+                    which.span,
+                    format!("`on {}` is declared twice", which.name),
+                    "each of `open`, `message` and `close` may appear once",
+                    "routing.md §9.1",
+                );
+            }
+            match which.name.as_str() {
+                "open" => {
+                    seen.push("open");
+                    let (b, _) = self.parse_block()?;
+                    on_open = Some(b);
+                }
+                "close" => {
+                    seen.push("close");
+                    let (b, _) = self.parse_block()?;
+                    on_close = Some(b);
+                }
+                "message" => {
+                    seen.push("message");
+                    // The binder is mandatory: a message handler that
+                    // cannot name the message has nothing to work with,
+                    // and there is no implicit `it`.
+                    self.expect(Tok::LParen)?;
+                    let binder = self.expect_ident()?;
+                    self.expect(Tok::RParen)?;
+                    let (b, _) = self.parse_block()?;
+                    on_message = Some((binder, b));
+                }
+                other => {
+                    self.err_note(
+                        "E0019",
+                        which.span,
+                        format!("`on {other}` is not a socket event"),
+                        "one of `open`, `message`, `close`",
+                        "routing.md §9.1",
+                    );
+                    // Counted as seen, so `E0013` does not also fire: the
+                    // author wrote a handler, they wrote the wrong name,
+                    // and one diagnostic per mistake is the contract.
+                    seen.push("unknown");
+                    let _ = self.parse_block();
+                }
+            }
+            if self.i == before {
+                self.bump();
+            }
+        }
+        let end = self.expect(Tok::RBrace)?.span;
+
+        if seen.is_empty() {
+            self.err_note(
+                "E0021",
+                start.to(end),
+                "this `socket` declares no handler",
+                "add at least one of `on open`, `on message (m)`, `on close` — as it \
+                 stands the endpoint accepts the upgrade and then does nothing",
+                "routing.md §9.1",
+            );
+        }
+
+        Ok(SocketDecl {
+            at,
+            suffix,
+            suffix_span,
+            uses,
+            on_open,
+            on_message,
+            on_close,
             span: start.to(end),
         })
     }
@@ -1622,6 +1826,33 @@ impl Parser {
             return Ok(Stmt::Throw {
                 at,
                 error,
+                args,
+                span: start.to(end),
+            });
+        }
+
+        // `dispatch Name(a: expr, …);`
+        if self.at_word("dispatch") && matches!(self.peek_at(1).tok, Tok::Ident(_)) {
+            self.bump();
+            let job = self.expect_ident()?;
+            self.expect(Tok::LParen)?;
+            let mut args = Vec::new();
+            if !self.at(&Tok::RParen) {
+                loop {
+                    let name = self.expect_ident()?;
+                    self.expect(Tok::Colon)?;
+                    let value = self.parse_expr()?;
+                    args.push((name, value));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect(Tok::RParen)?;
+            let end = self.expect(Tok::Semi)?.span;
+            return Ok(Stmt::Dispatch {
+                at,
+                job,
                 args,
                 span: start.to(end),
             });
@@ -2716,11 +2947,18 @@ impl Parser {
             } else {
                 None
             };
+            let buffered = if self.at_word("buffered") {
+                end = self.bump().span;
+                true
+            } else {
+                false
+            };
             Ok(InsertExpr {
                 table: table.clone(),
                 values,
                 conflict,
                 projection,
+                buffered,
                 span: start.to(end),
             })
         })();

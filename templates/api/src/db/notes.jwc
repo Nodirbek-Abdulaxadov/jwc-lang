@@ -1,0 +1,22 @@
+namespace db.notes;
+
+--- One note. `jwc migrate new <name>` turns this declaration into DDL;
+--- nothing here is applied to a database until you run `migrate up`.
+table Notes of App.notes {
+    id         bigint primary key identity;
+    title      varchar(200);
+    body       text?;
+    archived   boolean default false;
+    created_at timestamptz default now();
+    updated_at timestamptz default now();
+
+    --- Defence in depth: `NoteCreate` already rejects a short title at
+    --- the request boundary, and this catches anything that reaches the
+    --- table another way. The `: "…"` is what makes a violation a 400
+    --- with that sentence instead of a 500 (errors.md §6.2).
+    check (char_length(title) >= 2) : "sarlavha kamida 2 ta belgi bo'lsin";
+
+    --- Keyset pagination reads this index. Without it the list route
+    --- degrades to a sequential scan once the table is large.
+    index on (created_at, id);
+}

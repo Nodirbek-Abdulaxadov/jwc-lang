@@ -34,6 +34,7 @@ pub mod lsp;
 pub mod migrate;
 pub mod model;
 pub mod naming;
+pub mod native;
 pub mod openapi;
 pub mod packages;
 pub mod parser;
@@ -43,6 +44,7 @@ pub mod registry;
 pub mod serve;
 pub mod snapshot;
 pub mod sql;
+pub mod swagger;
 pub mod symbols;
 pub mod token;
 pub mod types;
@@ -53,16 +55,21 @@ pub mod wiring;
 pub mod workspace;
 
 // ---- infrastructure the language stands on
+pub mod cache;
 pub mod cmd;
 pub mod config;
 pub mod engine;
 pub mod hash;
+pub mod jobs;
 pub mod jwks;
 pub mod jwt;
 pub mod locks;
+pub mod log_writer;
+pub mod mail;
 pub mod observability;
 pub mod password;
 pub mod redis_engine;
+pub mod templates;
 
 use diag::{Diagnostic, Severity, SourceFile};
 use std::path::Path;

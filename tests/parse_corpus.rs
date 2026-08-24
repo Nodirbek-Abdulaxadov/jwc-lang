@@ -110,6 +110,40 @@ fn sample_declaration_counts_match_the_spec() {
 fn corpus() -> Vec<(&'static str, &'static str)> {
     vec![
         ("namespace_decl", "namespace a.b.c;"),
+        (
+            "socket_decl",
+            "routes \"/live\" use Auth {\n\
+             \x20   route GET \"health\" { return json({}); }\n\
+             \x20   socket \"rooms/{room: text}\" use Member {\n\
+             \x20       on open { socket.send(\"hi\"); }\n\
+             \x20       on message (m) { socket.send($m); }\n\
+             \x20       on close { socket.close(); }\n\
+             \x20   }\n}",
+        ),
+        (
+            "buffered_insert",
+            "middleware Log {\n\
+             \x20   after {\n\
+             \x20       insert into App.s.Access { route = request.route() } buffered;\n\
+             \x20   }\n}",
+        ),
+        (
+            "job_decl",
+            "job SendWelcome(account_id: bigint, email: text) retries 3 backoff \"30s\" {\n\
+             \x20   let who = $account_id;\n}",
+        ),
+        (
+            "dispatch_stmt",
+            "job J(a: bigint) { let x = $a; }\n\
+             routes \"/\" { route POST \"x\" {\n\
+             \x20   dispatch J(a: 1);\n\
+             \x20   return created(json({}));\n} }",
+        ),
+        ("named_arg", "job K(a: text) { let x = $a; }"),
+        (
+            "socket_handler",
+            "routes \"/live\" { socket \"t\" { on open { socket.send(\"x\"); } } }",
+        ),
         ("import_decl", "import db.org;"),
         (
             "database_decl",
@@ -357,6 +391,40 @@ fn corpus() -> Vec<(&'static str, &'static str)> {
             "routes \"/x\" { route GET \"\" { return json(1) with { \"A\": \"b\" } cookie(\"sid\", $s, { http_only: true }); } }",
         ),
     ]
+}
+
+/// The three shapes a `socket` block can get wrong, each reported once.
+///
+/// These belong here rather than in the wiring corpus: they are parse
+/// diagnostics, and that corpus requires its cases to parse.
+#[test]
+fn a_malformed_socket_is_reported_at_parse_time() {
+    let cases: &[(&str, &str)] = &[
+        ("E0021", r#"routes "/a" { socket "empty" { } }"#),
+        (
+            "E0020",
+            r#"routes "/a" { socket "twice" { on open { } on open { } } }"#,
+        ),
+        (
+            "E0019",
+            r#"routes "/a" { socket "unknown" { on error { } } }"#,
+        ),
+    ];
+    for (code, src) in cases {
+        let parsed = jwc::parse_str("<socket>", src);
+        let rendered = parsed.render_all();
+        assert!(
+            rendered.contains(code),
+            "expected {code} for `{src}`, got:\n{rendered}"
+        );
+        // One diagnostic per mistake: an unknown handler name must not
+        // *also* report "declares no handler".
+        assert_eq!(
+            rendered.matches("error[").count(),
+            1,
+            "expected exactly one diagnostic for `{src}`:\n{rendered}"
+        );
+    }
 }
 
 #[test]

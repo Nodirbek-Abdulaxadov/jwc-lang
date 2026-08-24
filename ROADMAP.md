@@ -1,3 +1,23 @@
+> ## 0.9.903 tuzatishi — native backend qaytdi
+>
+> Quyida `--native` haqida yozilgan har bir band **eskirgan**. `DEFERRED-2`
+> qaytarib olindi: `jwc build` native binary chiqaradi va tilni qoplaydi
+> (faqat `view` nomi bilan rad etiladi). `--native` degan bayroq yo'q va
+> `E0910` hech qachon mavjud bo'lmagan.
+>
+> Muzlatishning sababi — "ikkinchi backend har bir query-compiler
+> o'zgarishini ikki marta qildiradi" — 1.0 front-end'iga nisbatan
+> to'g'ri emas: `query_sql` so'rovni kompilyatsiya vaqtida SQL matniga
+> tushiradi, shuning uchun codegen query kompilyatorini *chaqiradi*,
+> qaytadan yozmaydi.
+>
+> Ikkala backend jwc-shortener, MyWallet va task-tracker ustida bayt-bayt
+> bir xil javob berishi bilan tekshiriladi.
+>
+> Shuningdek `DEFERRED-16` "0.9.x runtime kodi saqlanadi" degan edi —
+> queue uchun bu **noto'g'ri**: v0.25.0 kesuvida o'chirilgan.
+> `docs/spec/v1/DEFERRED.md` dagi tuzatishga qarang.
+
 # JWC — v1.0.0 Roadmap (qayta loyihalangan til)
 
 Bu hujjat eski `ROADMAP.md` ni **butunlay almashtiradi**. Eski reliz raqamlari

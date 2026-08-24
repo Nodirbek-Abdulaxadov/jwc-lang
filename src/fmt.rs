@@ -105,6 +105,7 @@ impl Writer {
             Decl::Error(n) => self.error_decl(n),
             Decl::Service(n) => self.service(n),
             Decl::Middleware(n) => self.middleware(n),
+            Decl::Job(n) => self.job(n),
             Decl::Routes(n) => self.routes(n),
             Decl::ErrorHandler(n) => self.error_handler(n),
             Decl::Server(n) => self.server(n),
@@ -187,6 +188,7 @@ impl Writer {
             self.blank();
         }
         for c in &n.constraints {
+            self.attached(c.attached());
             self.constraint(c);
         }
         if !n.indexes.is_empty() {
@@ -460,6 +462,21 @@ impl Writer {
         self.line("}");
     }
 
+    fn job(&mut self, n: &JobDecl) {
+        let mut head = format!("job {}({})", n.name.name, params_text(&n.params));
+        if let Some(r) = n.retries {
+            head.push_str(&format!(" retries {r}"));
+        }
+        if let Some(b) = &n.backoff {
+            head.push_str(&format!(" backoff {}", quote(b)));
+        }
+        self.line(&format!("{head} {{"));
+        self.depth += 1;
+        self.block(&n.body);
+        self.depth -= 1;
+        self.line("}");
+    }
+
     fn routes(&mut self, n: &RoutesDecl) {
         let uses = if n.uses.is_empty() {
             String::new()
@@ -485,6 +502,51 @@ impl Writer {
             ));
             self.depth += 1;
             self.block(&r.body);
+            self.depth -= 1;
+            self.line("}");
+        }
+        for (i, sk) in n.sockets.iter().enumerate() {
+            if i > 0 || !n.routes.is_empty() {
+                self.blank();
+            }
+            self.attached(&sk.at);
+            let suses = if sk.uses.is_empty() {
+                String::new()
+            } else {
+                format!(" use {}", names(&sk.uses))
+            };
+            self.line(&format!("socket {}{suses} {{", quote(&sk.suffix)));
+            self.depth += 1;
+            let mut first = true;
+            if let Some(b) = &sk.on_open {
+                self.line("on open {");
+                self.depth += 1;
+                self.block(b);
+                self.depth -= 1;
+                self.line("}");
+                first = false;
+            }
+            if let Some((binder, b)) = &sk.on_message {
+                if !first {
+                    self.blank();
+                }
+                self.line(&format!("on message ({}) {{", binder.name));
+                self.depth += 1;
+                self.block(b);
+                self.depth -= 1;
+                self.line("}");
+                first = false;
+            }
+            if let Some(b) = &sk.on_close {
+                if !first {
+                    self.blank();
+                }
+                self.line("on close {");
+                self.depth += 1;
+                self.block(b);
+                self.depth -= 1;
+                self.line("}");
+            }
             self.depth -= 1;
             self.line("}");
         }
@@ -633,6 +695,14 @@ impl Writer {
                     self.line(&format!("throw {}({a});", error.name));
                 }
             }
+            Stmt::Dispatch { job, args, .. } => {
+                let list = args
+                    .iter()
+                    .map(|(n, v)| format!("{}: {}", n.name, expr(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!("dispatch {}({list});", job.name));
+            }
             Stmt::Transaction { body, .. } => {
                 self.line("transaction {");
                 self.depth += 1;
@@ -749,8 +819,9 @@ impl Writer {
             });
         }
 
+        let buffered = if i.buffered { " buffered" } else { "" };
         if inline.len() + head.len() <= 76 && tail.is_empty() && i.projection.is_none() {
-            self.line(&format!("{head} {{ {inline} }}{suffix}"));
+            self.line(&format!("{head} {{ {inline} }}{buffered}{suffix}"));
             return;
         }
 
@@ -778,7 +849,7 @@ impl Writer {
         //     } as { id, email, display_name, created_at };
         if tail.is_empty() {
             match &i.projection {
-                None => self.line(&format!("}}{suffix}")),
+                None => self.line(&format!("}}{buffered}{suffix}")),
                 Some(p) => {
                     let one_line = format!("}} as {}{suffix}", shape_text(p));
                     if one_line.len() + self.depth * INDENT.len() <= 88 {
@@ -987,7 +1058,8 @@ impl Writer {
 
 fn stmt_attached(s: &Stmt) -> &Attached {
     match s {
-        Stmt::Break { at, .. }
+        Stmt::Dispatch { at, .. }
+        | Stmt::Break { at, .. }
         | Stmt::Continue { at, .. }
         | Stmt::Let { at, .. }
         | Stmt::Assign { at, .. }
@@ -1030,7 +1102,7 @@ fn modifier(m: &ColumnModifier) -> String {
 }
 
 fn rule_call(r: &RuleCall) -> String {
-    if r.args.is_empty() {
+    let mut s = if r.args.is_empty() {
         r.name.name.clone()
     } else {
         format!(
@@ -1038,7 +1110,11 @@ fn rule_call(r: &RuleCall) -> String {
             r.name.name,
             r.args.iter().map(expr).collect::<Vec<_>>().join(", ")
         )
+    };
+    if let Some(m) = &r.message {
+        s.push_str(&format!(" : {}", quote(m)));
     }
+    s
 }
 
 fn index_column(c: &IndexColumn) -> String {
@@ -1457,6 +1533,9 @@ pub fn expr(e: &Expr) -> String {
             }
             if let Some(p) = &i.projection {
                 out.push_str(&format!(" as {}", shape_text(p)));
+            }
+            if i.buffered {
+                out.push_str(" buffered");
             }
             out
         }

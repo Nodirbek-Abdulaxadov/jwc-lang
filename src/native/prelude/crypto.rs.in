@@ -1,0 +1,743 @@
+// --- crypto built-ins (gated by needs_crypto) --------------------------------
+// Concatenated into the generated standalone binary, so this operates on the
+// emitted `V` enum (not `crate::`). Imports are aliased to avoid any clash with
+// names already brought in by the always-on prelude; aliased trait imports
+// still bring `.update()` / `.finalize()` into scope.
+use hmac::{Hmac as JwcHmac, Mac as JwcMac};
+use sha2::{Digest as JwcDigest, Sha256 as JwcSha256};
+use sha1::Sha1 as JwcSha1;
+use md5::Md5 as JwcMd5;
+use argon2::password_hash::{
+    rand_core::OsRng as JwcOsRng, PasswordHasher as JwcPwHasher,
+    PasswordVerifier as JwcPwVerifier, SaltString as JwcSaltString,
+};
+use argon2::{Argon2 as JwcArgon2, PasswordHash as JwcPasswordHash};
+
+fn jwc_hash_to_hex(bytes: &[u8]) -> String {
+    // Direct byte → hex without going through `format!("{:02x}", b)` per
+    // byte. The old version did one tiny `String` allocation per byte
+    // (32 per SHA-256, 20 per SHA-1, 16 per MD5) — hot enough on chained
+    // hashing benchmarks to dominate request time. This version is one
+    // pre-sized String plus two table lookups per input byte.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0x0f) as usize]);
+    }
+    // SAFETY: every byte we pushed is from `HEX`, which is pure ASCII,
+    // so `out` is guaranteed to be valid UTF-8.
+    unsafe { String::from_utf8_unchecked(out) }
+}
+
+fn jwc_b_sha256(v: V) -> V {
+    match v {
+        V::Str(s) => {
+            let mut h = JwcSha256::new();
+            h.update(s.as_bytes());
+            v_str(jwc_hash_to_hex(&h.finalize()))
+        }
+        other => panic!("sha256() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_sha1(v: V) -> V {
+    match v {
+        V::Str(s) => {
+            let mut h = JwcSha1::new();
+            h.update(s.as_bytes());
+            v_str(jwc_hash_to_hex(&h.finalize()))
+        }
+        other => panic!("sha1() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_md5(v: V) -> V {
+    match v {
+        V::Str(s) => {
+            let mut h = JwcMd5::new();
+            h.update(s.as_bytes());
+            v_str(jwc_hash_to_hex(&h.finalize()))
+        }
+        other => panic!("md5() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_hmac_sha256(key: V, msg: V) -> V {
+    match (key, msg) {
+        (V::Str(k), V::Str(m)) => {
+            type H = JwcHmac<JwcSha256>;
+            let mut mac = H::new_from_slice(k.as_bytes()).expect("HMAC accepts any key length");
+            mac.update(m.as_bytes());
+            v_str(jwc_hash_to_hex(&mac.finalize().into_bytes()))
+        }
+        (a, b) => panic!("hmac_sha256() expects two strings, got {:?} / {:?}", a, b),
+    }
+}
+
+fn jwc_b_hash_password(v: V) -> V {
+    match v {
+        V::Str(pwd) => {
+            let salt = JwcSaltString::generate(&mut JwcOsRng);
+            match JwcArgon2::default().hash_password(pwd.as_bytes(), &salt) {
+                Ok(h) => v_str(h.to_string()),
+                Err(e) => panic!("hash_password failed: {}", e),
+            }
+        }
+        other => panic!("hash_password() expects a string, got {:?}", other),
+    }
+}
+
+fn jwc_b_verify_password(pwd: V, stored: V) -> V {
+    match (pwd, stored) {
+        (V::Str(p), V::Str(h)) => match JwcPasswordHash::new(h.as_ref()) {
+            Ok(parsed) => V::Bool(JwcArgon2::default().verify_password(p.as_bytes(), &parsed).is_ok()),
+            Err(e) => panic!("verify_password: malformed stored hash: {}", e),
+        },
+        (a, b) => panic!("verify_password() expects two strings, got {:?} / {:?}", a, b),
+    }
+}
+
+// --- JWT (HS256) -------------------------------------------------------------
+//
+// Native used to reject `jwt_sign` / `jwt_verify` outright, so any project
+// using Bearer auth could not be built with `--native` at all — which covers
+// most real backends and undercut the "one static binary" promise. This is a
+// port of `crate::jwt`, kept behaviourally identical: same header, same
+// `Bearer ` tolerance, same `exp` enforcement, same HS256-only restriction.
+
+fn jwc_jwt_b64_encode(bytes: &[u8]) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as JwcB64;
+    use base64::Engine as _;
+    JwcB64.encode(bytes)
+}
+
+fn jwc_jwt_b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as JwcB64;
+    use base64::Engine as _;
+    JwcB64.decode(s).map_err(|_| "invalid base64".to_string())
+}
+
+fn jwc_jwt_sign_hs256(payload_json: &str, secret: &str) -> Result<String, String> {
+    // Validate the payload is JSON so the resulting token is decodable.
+    serde_json::from_str::<serde_json::Value>(payload_json)
+        .map_err(|_| "jwt_sign: payload must be valid JSON".to_string())?;
+
+    let header_b64 = jwc_jwt_b64_encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+    let payload_b64 = jwc_jwt_b64_encode(payload_json.as_bytes());
+    let signing_input = format!("{}.{}", header_b64, payload_b64);
+
+    let mut mac = <JwcHmac<JwcSha256> as JwcMac>::new_from_slice(secret.as_bytes())
+        .map_err(|e| format!("jwt_sign: invalid secret: {}", e))?;
+    mac.update(signing_input.as_bytes());
+    let signature = mac.finalize().into_bytes();
+    Ok(format!(
+        "{}.{}",
+        signing_input,
+        jwc_jwt_b64_encode(&signature)
+    ))
+}
+
+/// Strip an optional, case-insensitive `Bearer ` prefix so an `Authorization`
+/// header value can be passed straight through.
+///
+/// `get(..7)` rather than `[..7]`: the header is attacker-controlled and a
+/// multibyte value would panic on a byte-index slice — which in a native
+/// build means `catch_unwind` turning an unauthenticated request into a
+/// 500. Mirrors `crate::jwt::strip_bearer_prefix`.
+fn jwc_jwt_strip_bearer(value: &str) -> &str {
+    let trimmed = value.trim();
+    match trimmed.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => trimmed[7..].trim_start(),
+        _ => trimmed,
+    }
+}
+
+/// Opt-in claim policy, mirroring `crate::jwt::VerifyOptions`. Read from
+/// the environment once and cached — `jwt_verify` is on the hot path of
+/// every authenticated request.
+struct JwcJwtVerifyOptions {
+    leeway_secs: i64,
+    expected_iss: Option<String>,
+    expected_aud: Option<String>,
+}
+
+fn jwc_jwt_verify_options() -> &'static JwcJwtVerifyOptions {
+    static OPTS: std::sync::OnceLock<JwcJwtVerifyOptions> = std::sync::OnceLock::new();
+    OPTS.get_or_init(|| {
+        fn non_empty(name: &str) -> Option<String> {
+            std::env::var(name)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        }
+        JwcJwtVerifyOptions {
+            leeway_secs: non_empty("JWC_JWT_LEEWAY_SECS")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|n| *n >= 0)
+                .unwrap_or(0),
+            expected_iss: non_empty("JWC_JWT_EXPECTED_ISS"),
+            expected_aud: non_empty("JWC_JWT_EXPECTED_AUD"),
+        }
+    })
+}
+
+/// Read a numeric claim, accepting integer and float encodings.
+/// `Ok(None)` means absent. Mirrors `crate::jwt::numeric_claim`.
+fn jwc_jwt_numeric_claim(
+    payload: &serde_json::Value,
+    name: &str,
+) -> Result<Option<i64>, String> {
+    match payload.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .or_else(|| value.as_f64().map(|f| f as i64))
+            .map(Some)
+            .ok_or_else(|| format!("jwt_verify: '{}' claim must be a number", name)),
+    }
+}
+
+/// `aud` is either a string or an array of strings (RFC 7519 §4.1.3).
+fn jwc_jwt_audience_matches(aud: &serde_json::Value, expected: &str) -> bool {
+    match aud {
+        serde_json::Value::String(s) => s == expected,
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| item.as_str().map(|s| s == expected).unwrap_or(false)),
+        _ => false,
+    }
+}
+
+fn jwc_jwt_verify_hs256(token: &str, secret: &str) -> Result<String, String> {
+    let token = jwc_jwt_strip_bearer(token);
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("jwt_verify: token must have 3 segments".to_string());
+    }
+
+    let header_bytes = jwc_jwt_b64_decode(parts[0])
+        .map_err(|_| "jwt_verify: invalid base64 in header".to_string())?;
+    let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .map_err(|_| "jwt_verify: header is not JSON".to_string())?;
+    let alg = header.get("alg").and_then(|v| v.as_str()).unwrap_or("none");
+    if alg != "HS256" {
+        return Err(format!("jwt_verify: only HS256 is supported, got '{}'", alg));
+    }
+
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let signature = jwc_jwt_b64_decode(parts[2])
+        .map_err(|_| "jwt_verify: invalid base64 in signature".to_string())?;
+    let mut mac = <JwcHmac<JwcSha256> as JwcMac>::new_from_slice(secret.as_bytes())
+        .map_err(|e| format!("jwt_verify: invalid secret: {}", e))?;
+    mac.update(signing_input.as_bytes());
+    mac.verify_slice(&signature)
+        .map_err(|_| "jwt_verify: signature mismatch".to_string())?;
+
+    let payload_bytes = jwc_jwt_b64_decode(parts[1])
+        .map_err(|_| "jwt_verify: invalid base64 in payload".to_string())?;
+    let payload_str = String::from_utf8(payload_bytes)
+        .map_err(|_| "jwt_verify: payload is not valid UTF-8".to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(&payload_str)
+        .map_err(|_| "jwt_verify: payload is not valid JSON".to_string())?;
+
+    jwc_jwt_validate_claims(&parsed, false)?;
+    Ok(parsed.to_string())
+}
+
+/// Registered-claim validation, shared by HS256 and RS256 so the two
+/// algorithms cannot drift on what counts as a valid token. Mirrors
+/// `crate::jwt::validate_claims`.
+///
+/// `require_exp` is off for HS256 (a token with no expiry is a deliberate
+/// long-lived machine-key shape) and on for the JWKS/RS256 path, where an
+/// OIDC access token without `exp` is anomalous and would otherwise be a
+/// credential that never expires.
+fn jwc_jwt_validate_claims(
+    parsed: &serde_json::Value,
+    require_exp: bool,
+) -> Result<(), String> {
+    let opts = jwc_jwt_verify_options();
+    let leeway = opts.leeway_secs.max(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // `exp` is enforced when present; absent `exp` stays valid so
+    // non-expiring machine-to-machine tokens keep working.
+    match jwc_jwt_numeric_claim(parsed, "exp")? {
+        Some(exp_secs) => {
+            if exp_secs.saturating_add(leeway) <= now {
+                return Err(format!(
+                    "jwt_verify: token expired (exp={}, now={})",
+                    exp_secs, now
+                ));
+            }
+        }
+        None if require_exp => {
+            return Err("jwt_verify: token has no 'exp' claim".to_string());
+        }
+        None => {}
+    }
+
+    // `nbf` — a token minted for a future activation window must not be
+    // accepted before it opens.
+    if let Some(nbf_secs) = jwc_jwt_numeric_claim(parsed, "nbf")? {
+        if nbf_secs.saturating_sub(leeway) > now {
+            return Err(format!(
+                "jwt_verify: token not yet valid (nbf={}, now={})",
+                nbf_secs, now
+            ));
+        }
+    }
+
+    // `iat` is validated but deliberately not enforced — see the
+    // interpreter side for the reasoning.
+    let _ = jwc_jwt_numeric_claim(parsed, "iat")?;
+
+    if let Some(expected) = opts.expected_iss.as_deref() {
+        match parsed.get("iss").and_then(|v| v.as_str()) {
+            Some(iss) if iss == expected => {}
+            Some(iss) => {
+                return Err(format!(
+                    "jwt_verify: issuer mismatch (expected '{}', got '{}')",
+                    expected, iss
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "jwt_verify: missing 'iss' claim (expected '{}')",
+                    expected
+                ))
+            }
+        }
+    }
+
+    if let Some(expected) = opts.expected_aud.as_deref() {
+        match parsed.get("aud") {
+            Some(aud) if jwc_jwt_audience_matches(aud, expected) => {}
+            Some(_) => {
+                return Err(format!(
+                    "jwt_verify: audience mismatch (expected '{}')",
+                    expected
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "jwt_verify: missing 'aud' claim (expected '{}')",
+                    expected
+                ))
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn jwc_b_jwt_sign(payload: V, secret: V) -> V {
+    let payload_json = jwc_to_json(&payload);
+    let secret = match secret {
+        V::Str(s) => s.to_string(),
+        other => panic!("jwt_sign(payload, secret): secret must be a string, got {:?}", other),
+    };
+    match jwc_jwt_sign_hs256(&payload_json, &secret) {
+        Ok(token) => v_str(token),
+        Err(e) => panic!("{}", e),
+    }
+}
+
+// --- RS256 + JWKS (OIDC resource-server verification) ------------------------
+//
+// Port of `crate::jwt::verify_rs256_with` + `crate::jwks`. An OIDC provider
+// signs access tokens with RS256 and publishes the public half at its
+// `jwks_uri`; a resource server picks the key by the token header's `kid`.
+// Kept behaviourally identical to the interpreter: same claim policy, same
+// cache TTL and refetch cooldown, same error strings (which is what makes
+// `catch (e: JwtError)` classify the same way in both backends).
+
+struct JwcRsaJwk {
+    kid: Option<String>,
+    n: String,
+    e: String,
+}
+
+impl Clone for JwcRsaJwk {
+    fn clone(&self) -> Self {
+        JwcRsaJwk {
+            kid: self.kid.clone(),
+            n: self.n.clone(),
+            e: self.e.clone(),
+        }
+    }
+}
+
+/// Keep only keys usable for RS256 signature verification. Encryption
+/// keys (`use: "enc"`) share the document and must never verify.
+fn jwc_jwks_parse(doc: &serde_json::Value) -> Result<Vec<JwcRsaJwk>, String> {
+    let keys = doc
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .ok_or_else(|| "jwt_verify: JWKS document has no 'keys' array".to_string())?;
+    let mut out = Vec::new();
+    for key in keys {
+        if key.get("kty").and_then(|v| v.as_str()) != Some("RSA") {
+            continue;
+        }
+        if let Some(u) = key.get("use").and_then(|v| v.as_str()) {
+            if u != "sig" {
+                continue;
+            }
+        }
+        if let Some(a) = key.get("alg").and_then(|v| v.as_str()) {
+            if a != "RS256" {
+                continue;
+            }
+        }
+        let n = key.get("n").and_then(|v| v.as_str());
+        let e = key.get("e").and_then(|v| v.as_str());
+        if let (Some(n), Some(e)) = (n, e) {
+            out.push(JwcRsaJwk {
+                kid: key.get("kid").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                n: n.to_string(),
+                e: e.to_string(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Exact `kid` match, or the sole key when the token carries no `kid`.
+/// Never try keys until one works — that is how signature-confusion bugs
+/// are born.
+fn jwc_jwks_select<'a>(keys: &'a [JwcRsaJwk], kid: Option<&str>) -> Option<&'a JwcRsaJwk> {
+    match kid {
+        Some(kid) => keys.iter().find(|k| k.kid.as_deref() == Some(kid)),
+        None => {
+            if keys.len() == 1 {
+                keys.first()
+            } else {
+                None
+            }
+        }
+    }
+}
+
+struct JwcJwksEntry {
+    keys: Vec<JwcRsaJwk>,
+    fetched_at: std::time::Instant,
+    last_forced: Option<std::time::Instant>,
+}
+
+fn jwc_jwks_env_secs(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn jwc_jwks_ttl() -> std::time::Duration {
+    static TTL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        std::time::Duration::from_secs(jwc_jwks_env_secs("JWC_JWT_JWKS_TTL_SECS", 300))
+    })
+}
+
+fn jwc_jwks_min_refetch() -> std::time::Duration {
+    static MIN: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::time::Duration::from_secs(jwc_jwks_env_secs("JWC_JWT_JWKS_MIN_REFETCH_SECS", 60))
+    })
+}
+
+fn jwc_jwks_cache(
+) -> &'static tokio::sync::Mutex<std::collections::HashMap<String, JwcJwksEntry>> {
+    static CACHE: std::sync::OnceLock<
+        tokio::sync::Mutex<std::collections::HashMap<String, JwcJwksEntry>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn jwc_jwks_fetch(url: &str) -> Result<Vec<JwcRsaJwk>, String> {
+    let resp = jwc_http_client()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("jwt_verify: JWKS fetch failed for '{}': {}", url, e))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "jwt_verify: JWKS fetch returned HTTP {} for '{}'",
+            resp.status().as_u16(),
+            url
+        ));
+    }
+    let doc: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("jwt_verify: JWKS response is not JSON for '{}': {}", url, e))?;
+    let keys = jwc_jwks_parse(&doc)?;
+    if keys.is_empty() {
+        return Err(format!(
+            "jwt_verify: JWKS at '{}' contains no usable RS256 keys",
+            url
+        ));
+    }
+    Ok(keys)
+}
+
+/// Resolve the signing key for a `kid`, fetching and caching as needed.
+///
+/// The whole lookup is under one async mutex, so concurrent misses
+/// collapse into a single outbound request. The forced refetch on an
+/// unknown `kid` is rate-limited: `kid` comes from an unauthenticated
+/// token header, so without a cooldown an attacker sending random `kid`s
+/// would turn every request into a fetch against the identity provider.
+async fn jwc_jwks_key_for(jwks_url: &str, kid: Option<&str>) -> Result<JwcRsaJwk, String> {
+    let mut guard = jwc_jwks_cache().lock().await;
+
+    let need_fetch = match guard.get(jwks_url) {
+        None => true,
+        Some(e) => e.fetched_at.elapsed() >= jwc_jwks_ttl(),
+    };
+    if need_fetch {
+        let keys = jwc_jwks_fetch(jwks_url).await?;
+        guard.insert(
+            jwks_url.to_string(),
+            JwcJwksEntry {
+                keys,
+                fetched_at: std::time::Instant::now(),
+                last_forced: None,
+            },
+        );
+    }
+
+    if let Some(entry) = guard.get(jwks_url) {
+        if let Some(k) = jwc_jwks_select(&entry.keys, kid) {
+            return Ok(k.clone());
+        }
+    }
+
+    let may_force = guard
+        .get(jwks_url)
+        .map(|e| match e.last_forced {
+            None => true,
+            Some(at) => at.elapsed() >= jwc_jwks_min_refetch(),
+        })
+        .unwrap_or(true);
+
+    if may_force {
+        let keys = jwc_jwks_fetch(jwks_url).await?;
+        let entry = JwcJwksEntry {
+            keys,
+            fetched_at: std::time::Instant::now(),
+            last_forced: Some(std::time::Instant::now()),
+        };
+        let found = jwc_jwks_select(&entry.keys, kid).cloned();
+        guard.insert(jwks_url.to_string(), entry);
+        if let Some(k) = found {
+            return Ok(k);
+        }
+    }
+
+    match kid {
+        Some(kid) => Err(format!(
+            "jwt_verify: no JWKS key matches kid '{}' at '{}'",
+            kid, jwks_url
+        )),
+        None => Err(format!(
+            "jwt_verify: token has no 'kid' and the JWKS at '{}' publishes more than one key, so the signing key is ambiguous",
+            jwks_url
+        )),
+    }
+}
+
+/// Read the JOSE header without verifying anything — this is what picks
+/// the key. Nothing from the payload is trusted until the signature has
+/// been checked.
+fn jwc_jwt_header(token: &str) -> Result<serde_json::Value, String> {
+    let token = jwc_jwt_strip_bearer(token);
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("jwt_verify: token must have 3 segments".to_string());
+    }
+    let bytes = jwc_jwt_b64_decode(parts[0])
+        .map_err(|_| "jwt_verify: invalid base64 in header".to_string())?;
+    serde_json::from_slice(&bytes).map_err(|_| "jwt_verify: header is not JSON".to_string())
+}
+
+fn jwc_jwt_verify_rs256(token: &str, n_b64: &str, e_b64: &str) -> Result<String, String> {
+    let token = jwc_jwt_strip_bearer(token);
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("jwt_verify: token must have 3 segments".to_string());
+    }
+    let header: serde_json::Value = {
+        let bytes = jwc_jwt_b64_decode(parts[0])
+            .map_err(|_| "jwt_verify: invalid base64 in header".to_string())?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| "jwt_verify: header is not JSON".to_string())?
+    };
+    // Guard against an algorithm-confusion downgrade: the caller already
+    // committed to RSA key material, so a token claiming HS256 must not
+    // be accepted here.
+    let alg = header.get("alg").and_then(|v| v.as_str()).unwrap_or("none");
+    if alg != "RS256" {
+        return Err(format!("jwt_verify: expected RS256, got '{}'", alg));
+    }
+
+    let signature = jwc_jwt_b64_decode(parts[2])
+        .map_err(|_| "jwt_verify: invalid base64 in signature".to_string())?;
+    let n = jwc_jwt_b64_decode(n_b64)
+        .map_err(|_| "jwt_verify: JWKS key has invalid base64 in 'n'".to_string())?;
+    let e = jwc_jwt_b64_decode(e_b64)
+        .map_err(|_| "jwt_verify: JWKS key has invalid base64 in 'e'".to_string())?;
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+
+    ring::signature::RsaPublicKeyComponents { n: &n, e: &e }
+        .verify(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+            signing_input.as_bytes(),
+            &signature,
+        )
+        .map_err(|_| "jwt_verify: signature mismatch".to_string())?;
+
+    let payload_bytes = jwc_jwt_b64_decode(parts[1])
+        .map_err(|_| "jwt_verify: invalid base64 in payload".to_string())?;
+    let payload_str = String::from_utf8(payload_bytes)
+        .map_err(|_| "jwt_verify: payload is not valid UTF-8".to_string())?;
+    let parsed: serde_json::Value = serde_json::from_str(&payload_str)
+        .map_err(|_| "jwt_verify: payload is not valid JSON".to_string())?;
+
+    jwc_jwt_validate_claims(&parsed, true)?;
+    Ok(parsed.to_string())
+}
+
+async fn jwc_b_jwt_verify_jwks(token: V, jwks_url: V) -> V {
+    let token = match token {
+        V::Str(s) => s.to_string(),
+        other => panic!(
+            "jwt_verify_jwks(token, jwks_url): token must be a string, got {:?}",
+            other
+        ),
+    };
+    let jwks_url = match jwks_url {
+        V::Str(s) => s.to_string(),
+        other => panic!(
+            "jwt_verify_jwks(token, jwks_url): jwks_url must be a string, got {:?}",
+            other
+        ),
+    };
+    // Same outbound gate as every other HTTP built-in. Note that an
+    // identity provider on a private network needs
+    // `JWC_HTTP_BLOCK_PRIVATE` left off, or the JWKS fetch is refused.
+    if let Err(msg) = jwc_check_outbound_url(&jwks_url) {
+        panic!("{}", msg);
+    }
+
+    let kid = match jwc_jwt_header(&token) {
+        Ok(h) => h.get("kid").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        Err(e) => panic!("{}", e),
+    };
+    let key = match jwc_jwks_key_for(&jwks_url, kid.as_deref()).await {
+        Ok(k) => k,
+        Err(e) => panic!("{}", e),
+    };
+    match jwc_jwt_verify_rs256(&token, &key.n, &key.e) {
+        Ok(payload) => v_str(payload),
+        Err(e) => panic!("{}", e),
+    }
+}
+
+fn jwc_b_jwt_verify(token: V, secret: V) -> V {
+    let token = match token {
+        V::Str(s) => s.to_string(),
+        other => panic!("jwt_verify(token, secret): token must be a string, got {:?}", other),
+    };
+    let secret = match secret {
+        V::Str(s) => s.to_string(),
+        other => panic!("jwt_verify(token, secret): secret must be a string, got {:?}", other),
+    };
+    match jwc_jwt_verify_hs256(&token, &secret) {
+        Ok(payload) => v_str(payload),
+        Err(e) => panic!("{}", e),
+    }
+}
+
+// ── the 1.0 crypto built-ins ────────────────────────────────────────────────
+
+/// `crypto.constant_time_eq(a, b)` — `cursor::constant_time_eq`. Length is
+/// compared first and leaks, which is deliberate: a token's length is not the
+/// secret, and a loop that ran to the longer of the two would leak more.
+fn jwc_b_v1_constant_time_eq(a: V, b: V) -> V {
+    let a = jwc_str_view(&a).unwrap_or("").as_bytes();
+    let b = jwc_str_view(&b).unwrap_or("").as_bytes();
+    if a.len() != b.len() {
+        return V::Bool(false);
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    V::Bool(diff == 0)
+}
+
+/// `crypto.token(n)` — `n` CSPRNG bytes, base64url without padding.
+fn jwc_b_v1_crypto_token(len: V) -> V {
+    use base64::Engine;
+    let n = jwc_to_int(&len).unwrap_or(32).clamp(1, 128) as usize;
+    let mut bytes = vec![0u8; n];
+    {
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut bytes);
+    }
+    v_str(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// `hash.verify(password, stored)` — Argon2id, against the stored PHC string.
+fn jwc_b_v1_hash_verify(password: V, stored: V) -> V {
+    jwc_b_verify_password(password, stored)
+}
+
+/// `hash.hmac_verify(payload, signature, secret)`. Note the argument order:
+/// `hash.hmac_sha256(payload, secret)` takes the message first, and this
+/// takes the message first too — but `jwc_b_hmac_sha256` is (key, msg).
+fn jwc_b_v1_hmac_verify(payload: V, signature: V, secret: V) -> V {
+    let expected = jwc_b_hmac_sha256(secret, payload);
+    jwc_b_v1_constant_time_eq(expected, signature)
+}
+
+/// `hash::hmac_sha256_hex(key, msg)` — the `&str` form the cursor codec
+/// needs. `jwc_b_hmac_sha256` is the built-in and takes `V`.
+fn jwc_hmac_sha256_hex(key: &str, msg: &str) -> String {
+    type H = JwcHmac<JwcSha256>;
+    let mut mac = H::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(msg.as_bytes());
+    jwc_hash_to_hex(&mac.finalize().into_bytes())
+}
+
+/// `jwt.sign(claims, secret, ttl_minutes)` — builtins.md §6.
+///
+/// The claim set is fixed: `sub` from the caller's record, `iat` now, `exp`
+/// `ttl_minutes` later. A caller cannot set `exp` itself, which is what
+/// stops a token from outliving the policy that issued it. Mirrors
+/// `exec_call.rs`'s `"jwt.sign"` arm exactly, down to the `max(1)` on the
+/// TTL — a zero-minute token is a caller mistake, not a request for one
+/// that has already expired.
+fn jwc_b_v1_jwt_sign(claims: V, secret: V, ttl_minutes: V) -> V {
+    let now = chrono::Utc::now().timestamp();
+    let ttl = jwc_to_int(&ttl_minutes).unwrap_or(0).max(1);
+    let sub = jwc_str_view(&jwc_get_field(&claims, "sub"))
+        .unwrap_or("")
+        .to_string();
+    let payload = serde_json::json!({
+        "sub": sub,
+        "iat": now,
+        "exp": now + ttl * 60,
+    })
+    .to_string();
+    let secret = jwc_str_view(&secret).unwrap_or("").to_string();
+    match jwc_jwt_sign_hs256(&payload, &secret) {
+        Ok(token) => v_str(token),
+        Err(e) => panic!("{}", e),
+    }
+}

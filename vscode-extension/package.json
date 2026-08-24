@@ -2,7 +2,7 @@
   "name": "jwc-lang",
   "displayName": "JWC Language",
   "description": "JWC (Just Web Code) language support \u2014 syntax highlighting, snippets, and LSP-powered diagnostics for the JWC backend language.",
-  "version": "0.9.9",
+  "version": "0.9.903",
   "publisher": "jwc-extension",
   "license": "MIT",
   "author": {

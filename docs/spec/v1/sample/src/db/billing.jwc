@@ -61,7 +61,7 @@ table Invoices of App.billing {
     org_id          bigint;
     subscription_id bigint?;
     number          varchar(20) unique : "bu hisob raqami band";
-    amount          numeric(14, 2) min(0);
+    amount          numeric(14, 2) min(0) : "summa manfiy bo'lmasin";
     currency        varchar(3) default "USD";
     status          InvoiceStatus default InvoiceStatus.draft;
     issued_at       timestamptz?;
@@ -82,9 +82,9 @@ table Invoices of App.billing {
 table InvoiceLines of App.billing {
     id          bigint primary key identity;
     invoice_id  bigint;
-    description varchar(200) minLength(1);
-    quantity    int min(1);
-    unit_price  numeric(14, 2) min(0);
+    description varchar(200) minLength(1) : "qator tavsifi bo'sh bo'lmasin";
+    quantity    int min(1) : "miqdor kamida 1 bo'lsin";
+    unit_price  numeric(14, 2) min(0) : "narx manfiy bo'lmasin";
 
     foreign key (invoice_id) references App.billing.Invoices (id) on delete cascade;
 
@@ -98,7 +98,7 @@ table Payments of App.billing {
     --- The provider's idempotency key. `on conflict do nothing` on this
     --- constraint is what makes webhook redelivery safe (writes.md §2.3).
     provider_ref varchar(120) unique : "bu to'lov allaqachon qayd etilgan";
-    amount       numeric(14, 2) min(0);
+    amount       numeric(14, 2) min(0) : "summa manfiy bo'lmasin";
     status       PaymentStatus default PaymentStatus.pending;
     failure_code varchar(60)?;
     created_at   timestamptz default now();

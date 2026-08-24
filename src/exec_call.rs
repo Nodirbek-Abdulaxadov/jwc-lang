@@ -81,6 +81,12 @@ impl<'a> Vm<'a> {
             return self.redis_call(name, &vals).await;
         }
 
+        // `mail.*` opens an SMTP session, so it is async for the same
+        // reason again.
+        if let Some(name) = path.strip_prefix("mail.") {
+            return self.mail_call(name, &vals).await;
+        }
+
         if let Some(v) = self.builtin(&path, &vals)? {
             return Ok(v);
         }
@@ -195,6 +201,40 @@ impl<'a> Vm<'a> {
             }
         };
         out.map_err(|e| fault(format!("redis.{name}: {e:#}")))
+    }
+
+    /// The `mail` package surface (builtins.md §8), over
+    /// [`crate::mail`].
+    ///
+    /// `mail.send` used to be a one-line stub in the synchronous table:
+    /// `"mail.send" => Value::Null`. It typechecked, it ran, and it
+    /// delivered nothing — a password-reset route was silently a no-op.
+    /// Like `redis.*`, an unconfigured relay raises rather than answering:
+    /// `mail.enabled()` is what to branch on when the send is optional.
+    async fn mail_call(&mut self, name: &str, a: &[Value]) -> Exec<Value> {
+        let s = |i: usize| text(a.get(i).unwrap_or(&Value::Null));
+
+        if name == "enabled" {
+            return Ok(Value::Bool(crate::mail::is_configured()));
+        }
+        if name != "send" {
+            return Err(fault(format!(
+                "unknown function `mail.{name}`. The package provides send \
+                 and enabled (builtins.md §8)."
+            )));
+        }
+        if !crate::mail::is_configured() {
+            return Err(fault(
+                "`mail.send(...)` needs an SMTP relay: set JWC_SMTP_HOST, \
+                 JWC_SMTP_USER, JWC_SMTP_PASSWORD and JWC_SMTP_FROM. \
+                 `mail.enabled()` is what to branch on when the send is \
+                 optional.",
+            ));
+        }
+        crate::mail::send(&s(0), &s(1), &s(2))
+            .await
+            .map_err(|e| fault(format!("{e:#}")))?;
+        Ok(Value::Null)
     }
 
     /// Returns `None` when the path is not a builtin, so the caller can try
@@ -547,9 +587,42 @@ impl<'a> Vm<'a> {
 
             // ---- packages (builtins.md §8)
             //
-            // `redis.*` is handled ahead of this table, in `redis_call` —
-            // it is async.
-            "mail.send" => Value::Null,
+            // `redis.*` and `mail.*` are handled ahead of this table, in
+            // `redis_call` and `mail_call` — they are async. `cache.*` is
+            // a mutex and a map, so it belongs here.
+            // ---- sockets (builtins.md §9). Queued, not written: the
+            // connection task owns the socket's write half, and a handler
+            // that panicked mid-frame would otherwise leave the peer
+            // reading a partial message forever.
+            "socket.send" => {
+                if let Some(out) = self.socket_out.as_mut() {
+                    out.push(crate::exec::SocketOut::Text(s(0)));
+                }
+                Value::Null
+            }
+            "socket.close" => {
+                if let Some(out) = self.socket_out.as_mut() {
+                    out.push(crate::exec::SocketOut::Close);
+                }
+                Value::Null
+            }
+
+            "cache.get" => match crate::cache::get(&s(0)) {
+                Some(v) => Value::Text(v),
+                None => Value::Null,
+            },
+            // A negative TTL is a caller mistake, not "expire in the past";
+            // 0 already means "no expiry". `redis.set` clamps the same way.
+            "cache.set" => {
+                let ttl = a.get(2).and_then(|v| v.as_i64()).unwrap_or(0).max(0);
+                crate::cache::set(&s(0), &s(1), ttl as u64);
+                Value::Bool(true)
+            }
+            "cache.del" => Value::Int(crate::cache::del(&s(0))),
+            "cache.clear" => {
+                crate::cache::clear();
+                Value::Null
+            }
 
             _ => return Ok(None),
         }))

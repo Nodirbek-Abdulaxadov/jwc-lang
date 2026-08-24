@@ -18,3 +18,19 @@ class Fine {
     body  text   required, minLength(1);
     note  text?  maxLength(200);
 }
+
+-- A rule may carry the message its violation reports (errors.md §6.1).
+-- `W1302` used to advise `add ": …"` on a message-less column rule and the
+-- grammar refused it, so the specification's own sample tripped a warning
+-- it could not act on.
+class WithMessages {
+    body  text   required, minLength(1) : "matn bo'sh bo'lmasin";
+    email text   required, pattern(r"^[^@]+@[^@]+$") : "email yaroqsiz";
+    lines text[] required, minItems(1) : "kamida bitta qator kerak";
+}
+
+-- The message does not change what the rule *is*, so a mistyped rule is
+-- still the same error with one attached.
+class MessageDoesNotExcuseTheRule {
+    lines text[] required, minLength(1) : "bo'sh";     -- expect: E0360
+}

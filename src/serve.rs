@@ -54,6 +54,8 @@ pub fn load(ws: &Workspace) -> Result<Program> {
     let mut functions = HashMap::new();
     let mut middleware = HashMap::new();
     let mut route_bodies = HashMap::new();
+    let mut socket_bodies = HashMap::new();
+    let mut jobs = HashMap::new();
     let mut error_handler = None;
     let mut error_defs = HashMap::new();
     let mut server = ServerConfig::default();
@@ -94,11 +96,28 @@ pub fn load(ws: &Workspace) -> Result<Program> {
                         ),
                     );
                 }
+                Decl::Job(j) => {
+                    jobs.insert(j.name.name.clone(), j.clone());
+                }
                 Decl::Server(s) => server = read_server_config(s),
                 Decl::Routes(block) => {
                     for r in &block.routes {
                         let pattern = pattern_of(&block.prefix, &r.suffix);
                         route_bodies.insert((r.method.name.clone(), pattern), r.body.clone());
+                    }
+                    for sk in &block.sockets {
+                        let pattern = pattern_of(&block.prefix, &sk.suffix);
+                        socket_bodies.insert(
+                            pattern,
+                            crate::exec::SocketBody {
+                                on_open: sk.on_open.clone(),
+                                on_message: sk
+                                    .on_message
+                                    .as_ref()
+                                    .map(|(b, body)| (b.name.clone(), body.clone())),
+                                on_close: sk.on_close.clone(),
+                            },
+                        );
                     }
                 }
                 _ => {}
@@ -112,7 +131,9 @@ pub fn load(ws: &Workspace) -> Result<Program> {
         routes: wired.routes,
         functions,
         middleware,
+        jobs,
         route_bodies,
+        socket_bodies,
         error_handler,
         errors: error_defs,
         server,
@@ -128,7 +149,7 @@ fn pattern_of(prefix: &str, suffix: &str) -> String {
     crate::wiring::render(&segments)
 }
 
-fn read_server_config(s: &ServerDecl) -> ServerConfig {
+pub(crate) fn read_server_config(s: &ServerDecl) -> ServerConfig {
     let mut c = ServerConfig::default();
     for e in &s.entries {
         let a = match e {
@@ -553,7 +574,7 @@ async fn operational(program: &Program, incoming: &Incoming) -> Option<Response>
                 "content-type".into(),
                 "text/plain; version=0.0.4; charset=utf-8".into(),
             )],
-            body: metrics_text(program),
+            body: metrics_text(program).await,
         }),
         _ => None,
     }
@@ -562,7 +583,7 @@ async fn operational(program: &Program, incoming: &Incoming) -> Option<Response>
 /// Prometheus text format. Gauges only — a counter would need per-request
 /// bookkeeping on the hot path, and what the soak criterion asks about is
 /// the pool.
-fn metrics_text(program: &Program) -> String {
+async fn metrics_text(program: &Program) -> String {
     let mut out = String::new();
     if let Some(s) = crate::engine::pool_status() {
         out.push_str(
@@ -611,6 +632,15 @@ fn metrics_text(program: &Program) -> String {
         );
         out.push_str(&format!("jwc_redis_pool_waiting {}\n", s.waiting));
     }
+    // Empty unless the program actually used the cache, so a service that
+    // never calls `cache.*` does not sprout four flat-zero series.
+    out.push_str(&crate::cache::metrics_text());
+    // Likewise: a program with no `job` has no queue tables, and the
+    // depths query answers `None` rather than zero.
+    if !program.jobs.is_empty() {
+        out.push_str(&crate::jobs::metrics_text().await);
+    }
+    out.push_str(&crate::log_writer::metrics_text());
     out.push_str(
         "# HELP jwc_routes Declared routes.\n\
          # TYPE jwc_routes gauge\n",
@@ -662,6 +692,261 @@ fn with_cors(program: &Program, origin: Option<&str>, mut r: Response) -> Respon
     r
 }
 
+/// What the middleware chain left behind, so the upgraded connection can
+/// pick it up. `Err` is the chain answering instead — a `throw
+/// Unauthorized` in `RequireAuth` has to be an HTTP 401, and it can only
+/// be one *before* the handshake completes.
+pub struct SocketPreflight {
+    pub params: HashMap<String, Value>,
+    pub context: HashMap<String, Value>,
+    pub pattern: String,
+}
+
+/// Run everything that happens before a socket upgrade: match, parse the
+/// path parameters, run the chain.
+pub async fn socket_preflight(
+    program: &Program,
+    incoming: &Incoming,
+    request: Arc<Request>,
+) -> std::result::Result<SocketPreflight, Response> {
+    let Some((route, binds)) = match_route(program, "GET", &incoming.path) else {
+        return Err(Response::message(404, "not found"));
+    };
+    if !route.socket {
+        return Err(Response::message(404, "not found"));
+    }
+    let route = route.clone();
+    let params = parse_params(&route, &binds)?;
+
+    let started_at = std::time::Instant::now();
+    let mut vm = Vm::new(program, request);
+    vm.set_params(params.clone());
+
+    // Which middleware started, so a chain that answers still runs their
+    // `after` blocks (middleware.md §4.3). routing.md §9.2 exempts the
+    // *upgrade* from the after chain, and its reason is that the response
+    // was the 101 — which is not the case here.
+    let mut started: Vec<String> = Vec::new();
+    let mut answered: Option<Response> = None;
+
+    for name in &route.chain {
+        started.push(name.clone());
+        let Some(m) = program.middleware.get(name) else {
+            continue;
+        };
+        match vm.run_body(&m.body).await {
+            // middleware.md §4.2 — a middleware that answers has answered.
+            // The upgrade does not happen, and the client sees the status
+            // it chose rather than a 101 followed by silence.
+            Ok(Flow::Return(v)) => {
+                answered = Some(as_response(v));
+                break;
+            }
+            Ok(Flow::ReturnVoid) => {
+                answered = Some(Response::empty(204));
+                break;
+            }
+            Ok(Flow::Normal) | Ok(Flow::Break) | Ok(Flow::Continue) => {}
+            Err(a) => {
+                let mut ev = Vm::new(program, vm.request.clone());
+                answered = Some(handle_error(program, &mut ev, a).await);
+                break;
+            }
+        }
+    }
+
+    if let Some(mut response) = answered {
+        run_after_chain(program, &mut vm, &started, &mut response, started_at).await;
+        return Err(response);
+    }
+
+    Ok(SocketPreflight {
+        params,
+        context: vm.context_snapshot(),
+        pattern: route.pattern,
+    })
+}
+
+/// Run one socket handler and return the frames it queued.
+///
+/// A fresh `Vm` per event rather than one held across the connection: a
+/// `Vm` borrows the program and holds a scope stack, and keeping one alive
+/// for the life of a socket would mean a handler's locals leaking into the
+/// next message. `context` is restored explicitly, which is the state that
+/// *is* meant to persist.
+pub async fn run_socket_handler(
+    program: &Program,
+    request: Arc<Request>,
+    pre: &SocketPreflight,
+    body: &Block,
+    binder: Option<(&str, String)>,
+) -> Vec<crate::exec::SocketOut> {
+    let mut vm = Vm::new(program, request);
+    vm.set_params(pre.params.clone());
+    vm.restore_context(pre.context.clone());
+    vm.socket_out = Some(Vec::new());
+    if let Some((name, text)) = binder {
+        vm.bind_param(name, Value::Text(text));
+    }
+    // A raise inside a socket handler ends that handler, not the process.
+    // There is no response to put an error in, so the connection is closed
+    // — which is the only signal the protocol has.
+    match vm.run_body(body).await {
+        Ok(_) => vm.socket_out.take().unwrap_or_default(),
+        Err(_) => {
+            let mut out = vm.socket_out.take().unwrap_or_default();
+            out.push(crate::exec::SocketOut::Close);
+            out
+        }
+    }
+}
+
+/// A `Response` as axum sees it. Shared by the HTTP path and by the
+/// socket path's pre-upgrade refusals, so a 401 from `RequireAuth` on a
+/// socket is byte-identical to a 401 from the same middleware on a route.
+fn into_axum(r: Response) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let mut b = axum::response::Response::builder()
+        .status(StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
+    for (k, v) in &r.headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    b.body(axum::body::Body::from(r.body)).unwrap_or_else(|_| {
+        // Only reachable if a header value the program produced is not
+        // a legal header value — which `Response` already normalises.
+        axum::response::Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(axum::body::Body::empty())
+            .expect("a bodiless 500 always builds")
+    })
+}
+
+/// The upgrade, and then the connection.
+///
+/// The middleware chain runs **first**, on the ordinary HTTP request. That
+/// is the whole reason `use RequireAuth` on a socket is worth anything: a
+/// rejected client gets a 401 it can read, rather than a 101 followed by
+/// an immediate close it has to guess about.
+async fn socket_dispatch(
+    program: Arc<Program>,
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+    incoming: Incoming,
+) -> axum::response::Response {
+    let client = client_ip(&program.server, &incoming.peer_ip, &incoming.headers);
+    let request = Arc::new(Request {
+        method: "GET".to_string(),
+        path: incoming.path.clone(),
+        route: incoming.path.clone(),
+        headers: incoming.headers.clone(),
+        query: incoming.query.clone(),
+        body: String::new(),
+        peer_ip: incoming.peer_ip.clone(),
+        client_ip: client,
+        id: format!("{:016x}", rand_id()),
+    });
+
+    let pre = match socket_preflight(&program, &incoming, request.clone()).await {
+        Ok(p) => p,
+        Err(r) => return into_axum(r),
+    };
+    // `request.route()` is the declared pattern, the same as on a route —
+    // §5.4's bounded-cardinality guarantee has to hold here too, or a
+    // rate-limit key built from it in `on message` fills the store.
+    let request = Arc::new(Request {
+        route: pre.pattern.clone(),
+        ..(*request).clone()
+    });
+
+    upgrade.on_upgrade(move |socket| async move {
+        drive_socket(program, request, pre, socket).await;
+    })
+}
+
+/// The connection loop. Owns the socket for its whole life, so nothing
+/// else can interleave a frame.
+async fn drive_socket(
+    program: Arc<Program>,
+    request: Arc<Request>,
+    pre: SocketPreflight,
+    mut socket: axum::extract::ws::WebSocket,
+) {
+    use crate::exec::SocketOut;
+    use axum::extract::ws::Message;
+
+    let Some(handlers) = program.socket_bodies.get(&pre.pattern).cloned() else {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
+
+    /// Write what a handler queued. `false` means it asked to close, or
+    /// the peer is gone.
+    async fn flush(socket: &mut axum::extract::ws::WebSocket, out: Vec<SocketOut>) -> bool {
+        for item in out {
+            match item {
+                SocketOut::Text(t) => {
+                    if socket.send(Message::Text(t)).await.is_err() {
+                        return false;
+                    }
+                }
+                // Frames queued before the close still go — a handler that
+                // says goodbye and then closes means both.
+                SocketOut::Close => return false,
+            }
+        }
+        true
+    }
+
+    let mut open = true;
+    if let Some(body) = &handlers.on_open {
+        let out = run_socket_handler(&program, request.clone(), &pre, body, None).await;
+        open = flush(&mut socket, out).await;
+    }
+
+    if open {
+        while let Some(msg) = socket.recv().await {
+            let Ok(msg) = msg else { break };
+            match msg {
+                Message::Text(t) => {
+                    let Some((binder, body)) = &handlers.on_message else {
+                        // A socket with no `on message` is send-only. The
+                        // frame is dropped rather than closing the
+                        // connection: the peer sending one is not an
+                        // error, it is a peer that does not know.
+                        continue;
+                    };
+                    let out = run_socket_handler(
+                        &program,
+                        request.clone(),
+                        &pre,
+                        body,
+                        Some((binder.as_str(), t)),
+                    )
+                    .await;
+                    if !flush(&mut socket, out).await {
+                        break;
+                    }
+                }
+                // routing.md §9.2 — `on message (m)` binds `text`. A binary
+                // frame has no text to bind, and coercing one through
+                // `from_utf8_lossy` would hand the handler a string the
+                // peer never sent.
+                Message::Binary(_) => break,
+                Message::Close(_) => break,
+                // axum answers pings itself.
+                Message::Ping(_) | Message::Pong(_) => {}
+            }
+        }
+    }
+
+    if let Some(body) = &handlers.on_close {
+        // Whatever it queues is dropped: the connection is over. It runs
+        // for its effects — releasing a presence row, decrementing a
+        // counter — which is the only reason to have an `on close`.
+        let _ = run_socket_handler(&program, request.clone(), &pre, body, None).await;
+    }
+    let _ = socket.send(Message::Close(None)).await;
+}
+
 async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
     // Started before the chain, so `response.duration_*()` reports the
     // whole request — middleware included — and not just the handler.
@@ -694,6 +979,17 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
         return Response::message(404, "not found");
     };
     let route = route.clone();
+
+    // routing.md §9.2 — a `socket` path reached without an upgrade. The
+    // path exists and the request is wrong, so 400 rather than 404: a 404
+    // sends the caller looking for a typo in a path that is right.
+    //
+    // Without this the route matched, no HTTP body existed for it, and the
+    // fall-through at the end of the chain answered 500 — which said
+    // "the server is broken" about a client mistake.
+    if route.socket {
+        return Response::message(400, "this path is a websocket; send an Upgrade request");
+    }
 
     // §3.2 — a value that does not parse is a 400 here, before any
     // middleware and long before Postgres.
@@ -771,8 +1067,25 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
         (None, None) => Response::message(500, "internal_error"),
     };
 
-    // §5.1–§5.2 — reverse order, every outcome, and `response.status()`
-    // sees the status actually being sent.
+    run_after_chain(&program, &mut vm, &started, &mut response, started_at).await;
+    response
+}
+
+/// §5.1–§5.2 — the `after` blocks of every middleware that started, in
+/// reverse order, with `response.status()` seeing the status actually
+/// being sent.
+///
+/// Shared with the socket preflight: a chain that answers on a socket path
+/// produces an ordinary HTTP response, and an access log that recorded
+/// rejected routes but not rejected upgrades would be missing exactly the
+/// connections worth looking at.
+async fn run_after_chain(
+    program: &Program,
+    vm: &mut Vm<'_>,
+    started: &[String],
+    response: &mut Response,
+    started_at: std::time::Instant,
+) {
     for name in started.iter().rev() {
         let Some(m) = program.middleware.get(name) else {
             continue;
@@ -788,8 +1101,6 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
             response.headers.push(h);
         }
     }
-
-    response
 }
 
 async fn handle_error(program: &Program, vm: &mut Vm<'_>, abort: Abort) -> Response {
@@ -980,7 +1291,167 @@ pub async fn declared_port(program: &Arc<Program>) -> Result<u16> {
     Ok(vm.serve_port.unwrap_or(FALLBACK))
 }
 
+/// `DbError` has no `Display`: it is a domain error the response mapper
+/// turns into a status, not a string. The worker has no response to map
+/// it onto, so it says what happened in the log.
+fn db_error_text(e: &crate::db::DbError) -> String {
+    match e {
+        crate::db::DbError::Constraint { name, message, .. } => match message {
+            Some(m) => format!("constraint {name}: {m}"),
+            None => format!("constraint {name}"),
+        },
+        crate::db::DbError::ForeignKey => "foreign key violation".into(),
+        crate::db::DbError::Other(e) => format!("{e:#}"),
+    }
+}
+
+/// One job, on a worker.
+///
+/// A fresh `Vm` with a synthetic `Request`: a job runs minutes after
+/// whatever dispatched it, on a different process as often as not, so
+/// there is no request to inherit. The checker refuses `request.*` in a
+/// job body for the same reason; this exists so the `Vm` has the shape it
+/// expects, not so a handler can read it.
+async fn run_one_job(program: &Program, claim: &crate::jobs::Claim) -> Result<(), String> {
+    let Some(decl) = program.jobs.get(&claim.name) else {
+        // A job row whose declaration is gone: a rolling deploy that
+        // dropped a `job` while rows were still queued. Retrying forever
+        // would be an outage; dead-lettering says what happened.
+        return Err(format!(
+            "no `job {}` in this build — a queued row outlived its declaration",
+            claim.name
+        ));
+    };
+    let payload: serde_json::Value =
+        serde_json::from_str(&claim.payload).unwrap_or(serde_json::Value::Null);
+
+    let request = Arc::new(Request {
+        method: "JOB".into(),
+        path: format!("/job/{}", claim.name),
+        route: format!("/job/{}", claim.name),
+        headers: HashMap::new(),
+        query: Vec::new(),
+        body: String::new(),
+        peer_ip: String::new(),
+        client_ip: String::new(),
+        id: format!("{:016x}", rand_id()),
+    });
+    // The resolved types, not the syntax: `7` in the payload is an `int`
+    // and a `bigint` and a `numeric`, and only the declaration says which.
+    let Some(sym) = program.symbols.jobs.get(&claim.name) else {
+        return Err(format!("no symbol for `job {}`", claim.name));
+    };
+    let mut vm = Vm::new(program, request);
+    for (name, ty) in &sym.params {
+        let raw = payload
+            .get(name)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match crate::validate::coerce(ty, &raw) {
+            Some(v) => vm.bind_param(name, v),
+            // Not a silent null: a payload that no longer fits the
+            // declaration is a deploy that changed a job's parameters
+            // while rows were queued, and running the handler with a hole
+            // in it is how that becomes a data bug instead of an error.
+            None if raw.is_null() => vm.bind_param(name, Value::Null),
+            None => {
+                return Err(format!(
+                    "queued payload does not fit `{}`: `{name}` is not `{ty}`",
+                    claim.name
+                ))
+            }
+        }
+    }
+
+    match vm.run_body(&decl.body).await {
+        Ok(_) => Ok(()),
+        Err(Abort::Fault(e)) => Err(format!("{e:#}")),
+        Err(Abort::Thrown(t)) => Err(format!("{}: {}", t.error, t.message())),
+    }
+}
+
+/// Poll, claim, run, settle. One of these per worker.
+async fn job_worker(program: Arc<Program>) {
+    let idle = crate::jobs::poll_interval();
+    loop {
+        let claimed = match crate::jobs::claim().await {
+            Ok(c) => c,
+            Err(e) => {
+                // A database that is down is not a reason to spin: the
+                // next poll is a whole interval away either way.
+                eprintln!("[jobs] claim failed: {}", db_error_text(&e));
+                tokio::time::sleep(idle).await;
+                continue;
+            }
+        };
+        let Some(claim) = claimed else {
+            tokio::time::sleep(idle).await;
+            continue;
+        };
+
+        // A panic in a handler must not take the worker with it, or one
+        // bad job stops every job.
+        let guarded = std::panic::AssertUnwindSafe(run_one_job(&program, &claim));
+        let outcome = match futures_util::FutureExt::catch_unwind(guarded).await {
+            Ok(r) => r,
+            Err(payload) => Err(payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "panic".into())),
+        };
+
+        let settled = match &outcome {
+            Ok(()) => crate::jobs::succeed(claim.id).await,
+            Err(e) => {
+                let backoff = program
+                    .symbols
+                    .jobs
+                    .get(&claim.name)
+                    .map(|j| j.backoff_secs)
+                    .unwrap_or(30);
+                eprintln!(
+                    "[jobs] {} #{} attempt {}/{} failed: {e}",
+                    claim.name, claim.id, claim.attempts, claim.max_attempts
+                );
+                crate::jobs::fail(&claim, backoff, e).await
+            }
+        };
+        if let Err(e) = settled {
+            // The lease expires on its own, so the job runs again — which
+            // is the at-least-once contract working, not a leak.
+            eprintln!(
+                "[jobs] could not settle #{}: {}",
+                claim.id,
+                db_error_text(&e)
+            );
+        }
+    }
+}
+
+/// Create the queue tables and start the workers, when the program has
+/// any jobs. A program with none pays nothing: no tables, no tasks.
+pub async fn start_job_workers(program: Arc<Program>) {
+    if program.jobs.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::jobs::ensure_tables().await {
+        eprintln!(
+            "[jobs] could not create the queue tables: {}",
+            db_error_text(&e)
+        );
+        return;
+    }
+    let n = crate::jobs::worker_count();
+    for _ in 0..n {
+        let p = program.clone();
+        tokio::spawn(async move { job_worker(p).await });
+    }
+    println!("{n} job worker{}", if n == 1 { "" } else { "s" });
+}
+
 pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
+    let job_program = program.clone();
     // A `tls { }` whose `cert`/`key` did not resolve — an unset
     // `env("TLS_CERT_PATH")`, most often — must stop the boot. Reading it
     // as "no TLS" would serve every byte in the clear under a block that
@@ -996,8 +1467,7 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     let grace_period = program.server.shutdown_grace;
     use axum::body::Bytes;
     use axum::extract::{ConnectInfo, State};
-    use axum::http::{HeaderMap, Method, StatusCode, Uri};
-    use axum::response::IntoResponse;
+    use axum::http::{HeaderMap, Method, Uri};
     use std::net::SocketAddr;
 
     async fn dispatch(
@@ -1006,11 +1476,12 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
         method: Method,
         uri: Uri,
         headers: HeaderMap,
+        upgrade: Option<axum::extract::ws::WebSocketUpgrade>,
         body: Bytes,
-    ) -> impl IntoResponse {
+    ) -> axum::response::Response {
         let query = uri.query().map(parse_query).unwrap_or_default();
 
-        let hdrs = headers
+        let hdrs: HashMap<String, String> = headers
             .iter()
             .filter_map(|(k, v)| {
                 v.to_str()
@@ -1018,6 +1489,30 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
                     .map(|s| (k.as_str().to_lowercase(), s.to_string()))
             })
             .collect();
+
+        // routing.md §9.2 — an upgrade request whose path is a declared
+        // `socket` takes the socket path. Everything else, upgrade header
+        // or not, is an ordinary request: a client that sends `Upgrade:
+        // websocket` at a plain route gets that route's answer, not a
+        // protocol error, because the route is what was declared.
+        if let Some(upgrade) = upgrade {
+            let is_socket = match_route(&program, "GET", uri.path()).is_some_and(|(r, _)| r.socket);
+            if is_socket {
+                return socket_dispatch(
+                    program,
+                    upgrade,
+                    Incoming {
+                        method: "GET".to_string(),
+                        path: uri.path().to_string(),
+                        query,
+                        headers: hdrs,
+                        body: Vec::new(),
+                        peer_ip: peer.ip().to_string(),
+                    },
+                )
+                .await;
+            }
+        }
 
         let limit = program.server.request_timeout;
         let r = match tokio::time::timeout(
@@ -1044,14 +1539,7 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
             Err(_) => Response::message(504, "request timed out"),
         };
 
-        let mut response = axum::response::Response::builder()
-            .status(StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
-        for (k, v) in &r.headers {
-            response = response.header(k.as_str(), v.as_str());
-        }
-        response
-            .body(axum::body::Body::from(r.body))
-            .expect("response")
+        into_axum(r)
     }
 
     let header_timeout = program.server.header_timeout;
@@ -1078,6 +1566,14 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let scheme = if acceptor.is_some() { "https" } else { "http" };
     println!("listening on {scheme}://{addr}");
+
+    // After the bind, so a queue that cannot reach the database does not
+    // stop the HTTP half from answering — and before the accept loop, so
+    // a job dispatched by the first request has a worker waiting.
+    start_job_workers(job_program).await;
+    // Idempotent, and cheap when nothing buffers: the consumer parks on
+    // an empty channel.
+    crate::log_writer::start();
 
     // The accept loop `axum::serve` would otherwise own. It is written out
     // here because both of config.md §3's remaining promises live below
@@ -1241,6 +1737,7 @@ mod route_matching {
             params: Vec::new(),
             chain: Vec::new(),
             after: Vec::new(),
+            socket: false,
             loc: crate::workspace::Loc {
                 file: 0,
                 span: crate::token::Span { start: 0, end: 0 },
@@ -1263,6 +1760,8 @@ mod route_matching {
             functions: HashMap::new(),
             middleware: HashMap::new(),
             route_bodies: HashMap::new(),
+            socket_bodies: HashMap::new(),
+            jobs: HashMap::new(),
             error_handler: None,
             errors: HashMap::new(),
             server: ServerConfig::default(),

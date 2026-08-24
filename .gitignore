@@ -5,3 +5,9 @@ examples/*/.jwc-build/
 # Claude Code session artefacts
 .claude/scheduled_tasks.lock
 .claude/worktrees/
+
+# `redis-server` writes its snapshot into whatever directory it was started
+# from, so running the redis-backed tests from the repo root drops a
+# `dump.rdb` here. It was committed once by a `git add -A`.
+dump.rdb
+*.rdb

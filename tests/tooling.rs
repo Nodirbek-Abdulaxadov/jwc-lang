@@ -16,6 +16,17 @@ fn sample() -> PathBuf {
     repo_root().join("docs/spec/v1/sample")
 }
 
+/// The `W1302` fixture.
+///
+/// These two tests used to run against the specification's sample, which
+/// made them depend on it staying sloppy: the moment its constraints got
+/// the messages `W1302` asks for, the assertions that needed a
+/// message-less one broke. A normative sample should be exemplary, so the
+/// untidy shapes moved here.
+fn lint_fixture() -> PathBuf {
+    repo_root().join("tests/lint_constraints")
+}
+
 fn jwc(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_jwc"))
         .args(args)
@@ -157,7 +168,7 @@ fn deny_warnings_is_the_ci_shape() {
 
 #[test]
 fn lint_constraints_reports_the_status_each_violation_produces() {
-    let path = sample();
+    let path = lint_fixture();
     let path = path.to_str().expect("utf8");
     let out = jwc(&["lint", path, "--constraints"]);
     assert!(
@@ -170,9 +181,7 @@ fn lint_constraints_reports_the_status_each_violation_produces() {
     // errors.md §6.1 — a unique carrying a message is a Conflict, a check
     // is a BadRequest, and a message-less one is a fault.
     assert!(
-        text.contains(
-            "uq_accounts__email               409  \"bu email allaqachon ro'yxatdan o'tgan\""
-        ),
+        text.contains("uq_owners__slug") && text.contains("409  \"bu slug band\""),
         "{text}"
     );
     assert!(text.contains("500  (no message — a fault)"), "{text}");
@@ -184,27 +193,45 @@ fn lint_constraints_reports_the_status_each_violation_produces() {
 
     // A `delete` can violate nothing on the row it removes. What it can
     // trip is a foreign key pointing *at* that row, and only where the
-    // reference is not cascaded.
-    let deleting_an_org = section(&text, "DELETE /api/v1/orgs/{org_id}");
+    // reference is not cascaded — `Notes` is not, `Items` is.
+    let deleting_an_owner = section(&text, "DELETE /owners/{id}");
     assert!(
-        deleting_an_org.contains("fk_invoices__org_id"),
-        "deleting an org with invoices is a 400: {deleting_an_org}"
+        deleting_an_owner.contains("fk_notes__owner_id"),
+        "deleting an owner with notes is a 400: {deleting_an_owner}"
     );
     assert!(
-        !deleting_an_org.contains("uq_orgs__slug"),
-        "a delete cannot violate a unique: {deleting_an_org}"
+        !deleting_an_owner.contains("fk_items__owner_id"),
+        "a cascaded reference cannot be violated: {deleting_an_owner}"
+    );
+    assert!(
+        !deleting_an_owner.contains("uq_owners__slug"),
+        "a delete cannot violate a unique: {deleting_an_owner}"
     );
 
     // A read-only route reaches nothing.
     assert!(
-        section(&text, "GET /api/v1/plans").contains("writes nothing"),
+        section(&text, "GET /items").contains("writes nothing"),
         "{text}"
+    );
+}
+
+/// The specification's sample is the counter-example: every constraint a
+/// route can reach carries a message, so it lints clean. If this fails,
+/// the sample grew a 500 nobody meant to ship.
+#[test]
+fn the_sample_has_no_message_less_constraint_left() {
+    let path = sample();
+    let out = jwc(&["lint", path.to_str().expect("utf8"), "--deny-warnings"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
 #[test]
 fn a_message_less_constraint_a_route_can_reach_is_a_warning() {
-    let path = sample();
+    let path = lint_fixture();
     let path = path.to_str().expect("utf8");
     let out = jwc(&["lint", path]);
     let err = String::from_utf8_lossy(&out.stderr);
@@ -214,14 +241,19 @@ fn a_message_less_constraint_a_route_can_reach_is_a_warning() {
     // did nothing wrong.
     assert!(err.contains("W1302"), "{err}");
     assert!(
-        err.contains("uq_invites__token_hash"),
-        "the sample's one reachable message-less unique: {err}"
+        err.contains("uq_items__sku"),
+        "the fixture's message-less unique: {err}"
     );
     assert_eq!(
-        err.matches("uq_invites__token_hash` carries no message")
-            .count(),
+        err.matches("uq_items__sku` carries no message").count(),
         1,
         "reported per route instead of per constraint"
+    );
+    // A *column rule* without a message, not just a whole constraint. The
+    // warning used to advise `add ": …"` here and the grammar refused it.
+    assert!(
+        err.contains("ck_items__name__minlength"),
+        "a message-less column rule warns too: {err}"
     );
     assert!(err.contains("reached from:"), "{err}");
 
@@ -423,4 +455,49 @@ fn count(text: &str) -> usize {
         })
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or(0)
+}
+
+/// `created(json($row))` is the idiomatic 201, and it used to produce two
+/// wrong responses in the document: a `200` carrying the object (a status
+/// the route cannot answer) and a `201` carrying nothing (the status it
+/// does answer, with the body dropped). The inner `json` recorded its own
+/// 200 and the outer `created` recorded the *type of a response*, which
+/// has no schema.
+///
+/// A client generator reading that produced the wrong type for every
+/// created resource in the sample.
+#[test]
+fn a_nested_response_builder_documents_one_status_with_the_body() {
+    let path = sample();
+    let doc = jwc(&["openapi", path.to_str().expect("utf8")]);
+    assert!(
+        doc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doc.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_str(&stdout(&doc)).expect("json");
+
+    let paths = doc["paths"].as_object().expect("paths");
+    let mut checked = 0;
+    for (route, item) in paths {
+        let Some(post) = item.get("post") else {
+            continue;
+        };
+        let responses = post["responses"].as_object().expect("responses");
+        // A POST that creates something answers 201, not 200.
+        if let Some(created) = responses.get("201") {
+            checked += 1;
+            assert!(
+                !responses.contains_key("200"),
+                "POST {route} documents both 200 and 201:\n{responses:#?}"
+            );
+            assert!(
+                created
+                    .pointer("/content/application~1json/schema")
+                    .is_some(),
+                "POST {route} answers 201 with no documented body:\n{created:#?}"
+            );
+        }
+    }
+    assert!(checked > 0, "the sample has no `created(...)` route left");
 }

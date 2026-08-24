@@ -1,0 +1,75 @@
+namespace services.auth;
+
+import app;
+import db.auth;
+import dto.auth;
+
+--- A real Argon2id encoding of a password nobody has. `login` verifies
+--- against it when the address is unknown, so a miss costs the same as a
+--- hit. A constant rather than an `env`, because a deployment that forgot
+--- to set one would lose the defence silently.
+function decoy_password_hash() -> text {
+    return "$argon2id$v=19$m=19456,t=2,p=1$2w2b+Ihc9+eswxNKyuQUfQ$td4KgFPi6UJPiI5wMj2T2NJIHxv14N7qWP5zn5X6Do4";
+}
+
+service AuthService {
+    function register(req: Register) {
+        let password_hash = hash.password($req.password);
+
+        return insert into App.auth.Accounts {
+            ...$req except (password),
+            password_hash = $password_hash
+        } as { id, email, display_name, created_at };
+    }
+
+    --- 401, not 403: the caller is not authenticated yet. The same
+    --- sentence for both failures, so the endpoint does not tell an
+    --- attacker which addresses exist.
+    ---
+    --- The same message is not enough on its own. An unknown address that
+    --- returned before hashing would answer in microseconds where a known
+    --- one takes an Argon2id verification, and the clock would say what
+    --- the sentence refuses to. So both branches verify.
+    function login(req: Login) -> { token: text, expires_in: int } {
+        let found = select A from App.auth.Accounts
+            where email == $req.email
+            as { id, password_hash }
+            first;
+
+        let stored = decoy_password_hash();
+
+        if ($found != null) {
+            $stored = $found.password_hash;
+        }
+
+        let ok = hash.verify($req.password, $stored);
+
+        let account = $found or throw Unauthorized("email yoki parol xato");
+
+        if (!$ok) {
+            throw Unauthorized("email yoki parol xato");
+        }
+
+        let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
+        let ttl_minutes = int(env("JWT_TTL_MINUTES") ?? "60");
+        let subject = string.of($account.id);
+        let token = jwt.sign({ sub: $subject }, $secret, $ttl_minutes);
+
+        return { token: $token, expires_in: $ttl_minutes * 60 };
+    }
+
+    function profile(account_id: bigint) {
+        return select A from App.auth.Accounts
+            where id == $account_id
+            as { id, email, display_name, created_at }
+            first or throw NotFound("akkaunt topilmadi");
+    }
+
+    function update_profile(account_id: bigint, req: AccountEdit) {
+        return update App.auth.Accounts
+            set ...$req
+            where id == $account_id
+            as { id, email, display_name }
+            first or throw NotFound("akkaunt topilmadi");
+    }
+}

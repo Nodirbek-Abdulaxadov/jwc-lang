@@ -34,6 +34,13 @@ pub struct ResolvedRoute {
     pub chain: Vec<String>,
     /// `after` blocks, in reverse chain order.
     pub after: Vec<String>,
+    /// A `socket "…"` rather than a `route METHOD "…"`.
+    ///
+    /// A flag rather than a second table: a socket shares the prefix, the
+    /// middleware chain, the path parser and — importantly — the
+    /// duplicate check. `route GET "/live"` and `socket "/live"` collide
+    /// on the wire, because the upgrade *is* a GET.
+    pub socket: bool,
     pub loc: Loc,
 }
 
@@ -202,9 +209,48 @@ impl<'a> Wiring<'a> {
                         params,
                         chain,
                         after,
+                        socket: false,
                         loc: Loc {
                             file: fi,
                             span: r.span,
+                        },
+                    });
+                }
+
+                for sk in &block.sockets {
+                    let raw = join_path(&block.prefix, &sk.suffix);
+                    let segments = parse_path(&raw);
+                    let pattern = render(&segments);
+                    let params = segments
+                        .iter()
+                        .filter_map(|s| match s {
+                            Segment::Param { name, ty } => Some((name.clone(), ty.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    let mut chain = block_uses.clone();
+                    chain.extend(sk.uses.iter().map(|i| i.name.clone()));
+                    let after = chain
+                        .iter()
+                        .rev()
+                        .filter(|m| self.sym.middleware.get(*m).is_some_and(|s| s.has_after))
+                        .cloned()
+                        .collect();
+                    self.routes.push(ResolvedRoute {
+                        // The upgrade handshake is a GET, so this is the
+                        // method the duplicate check has to compare
+                        // against — a `route GET` on the same path is a
+                        // genuine collision, not a coincidence.
+                        method: "GET".to_string(),
+                        pattern,
+                        segments,
+                        params,
+                        chain,
+                        after,
+                        socket: true,
+                        loc: Loc {
+                            file: fi,
+                            span: sk.span,
                         },
                     });
                 }
@@ -1043,7 +1089,8 @@ pub fn parse_path(path: &str) -> Vec<Segment> {
 
 fn stmt_span(s: &Stmt) -> Span {
     match s {
-        Stmt::Break { span, .. }
+        Stmt::Dispatch { span, .. }
+        | Stmt::Break { span, .. }
         | Stmt::Continue { span, .. }
         | Stmt::Let { span, .. }
         | Stmt::Assign { span, .. }
@@ -1188,6 +1235,15 @@ fn collect_expr_raises(e: &Expr, sym: &Symbols, out: &mut BTreeSet<String>) {
             found.insert(error.name.clone());
         }
         ExprKind::Insert(i) => {
+            // A buffered row is written later, on another connection, with
+            // no caller left to raise to — a constraint it violates is
+            // counted in `jwc_log_failed_total`, not thrown (writes.md
+            // §7.2). This is what lets a logging `after` block exist at
+            // all: an ordinary insert there is `E0811`, because an `after`
+            // block has no handler behind it.
+            if i.buffered {
+                return;
+            }
             // `on conflict do nothing` is exactly the construct that stops a
             // unique violation being raised (writes.md §2.3).
             let suppressed = i.conflict.is_some();

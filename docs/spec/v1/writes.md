@@ -190,7 +190,82 @@ feature to add next.
 
 ---
 
-## 7. `transaction` (G7)
+## 7. `buffered`
+
+### 7.1 The form
+
+```jwc no-compile
+middleware AccessLog {
+    after {
+        insert into App.audit.Requests {
+            route  = request.route(),
+            status = response.status(),
+            micros = response.duration_us()
+        } buffered;
+    }
+}
+```
+
+`buffered` hands the row to a batch writer and returns. The statement is
+the one the query compiler produced for that `insert` — `buffered` changes
+who sends it and when, not what is sent.
+
+### 7.2 Rules
+
+| | |
+|---|---|
+| `as { … }` | `E0614` — it answers before the row exists |
+| inside `transaction { }` | `E0612` — the row is written later, on another connection; a rollback would not take it back |
+| `on conflict` | `E0613` — a resolution nobody observes is a row silently not written |
+| its raise set | **empty**. There is no caller left to raise to; a constraint the row violates is counted, not thrown |
+
+That last row is what makes a logging `after` block possible at all: an
+ordinary insert there is `E0811`, because an `after` block runs once the
+response is decided and has no handler behind it.
+
+### 7.3 Why it exists
+
+An `after` block is awaited **before** the response is returned
+(middleware §5.1). So an ordinary insert there puts a database round trip
+in front of every response: every request waits for its own log row.
+
+`builtins.md` §10 listed `log_insert` as "overlapped `insert into` for no
+benefit". The benefit is that round trip. 0.9's own measurements put the
+batching at 6.0k rows/s with 500-row batches against 20.3k at 5000, with
+request throughput unchanged.
+
+### 7.4 What is given up
+
+**Durability.** Rows sit in memory until the next flush, so a crash loses
+at most `JWC_LOG_FLUSH_MS` of them, and a sustained overload drops rows
+rather than growing without bound. Drops are counted, not silent:
+`jwc_log_dropped_total`.
+
+Both are right for telemetry and wrong for anything you would bill on,
+which is why this is a word the call site writes and not what `insert`
+does by default.
+
+### 7.5 The writer
+
+Rows are grouped by statement and merged into one multi-row `INSERT`,
+chunked to Postgres's 65 535-parameter ceiling. One statement per row
+would move the latency off the request and leave the database doing the
+same work.
+
+| Env var | Default | |
+|---|---|---|
+| `JWC_LOG_QUEUE` | 10000 | channel capacity; full means rows are dropped |
+| `JWC_LOG_BATCH` | 2000 | rows per statement |
+| `JWC_LOG_FLUSH_MS` | 200 | longest a row waits, and the crash-loss bound |
+
+`/metrics`: `jwc_log_queue_depth`, `jwc_log_queue_capacity`,
+`jwc_log_dropped_total`, `jwc_log_written_total`, `jwc_log_failed_total`,
+`jwc_log_batches_total`. Depth against capacity is how the writer falling
+behind is visible before it starts dropping.
+
+---
+
+## 8. `transaction` (G7)
 
 ```jwc
 transaction {
@@ -235,7 +310,7 @@ would hold a connection across the whole request.
 
 ---
 
-## 8. Constraint violations become errors (#30)
+## 9. Constraint violations become errors (#30)
 
 A write that violates a constraint carrying a message becomes a declared
 error; one that violates a message-less constraint is a fault. The full
@@ -249,11 +324,14 @@ exhaustiveness covers it.
 
 ---
 
-## 9. Diagnostics introduced here
+## 10. Diagnostics introduced here
 
 | Code | Meaning |
 |---|---|
 | `E0601` | write targets a view |
+| `E0614` | `as { … }` on a buffered insert |
+| `E0612` | `buffered` inside a `transaction { }` |
+| `E0613` | `on conflict` on a buffered insert |
 | `E0602` | unknown column in a write |
 | `E0603` | `on conflict` columns are not a unique constraint |
 | `E0604` | `on conflict` without columns on a multi-unique table |

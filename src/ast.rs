@@ -71,6 +71,7 @@ pub enum Decl {
     ErrorHandler(ErrorHandlerDecl),
     Server(ServerDecl),
     Function(FunctionDecl),
+    Job(JobDecl),
     Test(TestDecl),
 }
 
@@ -88,6 +89,7 @@ impl Decl {
             Decl::Error(d) => d.span,
             Decl::Service(d) => d.span,
             Decl::Middleware(d) => d.span,
+            Decl::Job(d) => d.span,
             Decl::Routes(d) => d.span,
             Decl::ErrorHandler(d) => d.span,
             Decl::Server(d) => d.span,
@@ -109,6 +111,7 @@ impl Decl {
             Decl::Error(d) => &d.at,
             Decl::Service(d) => &d.at,
             Decl::Middleware(d) => &d.at,
+            Decl::Job(d) => &d.at,
             Decl::Routes(d) => &d.at,
             Decl::ErrorHandler(d) => &d.at,
             Decl::Server(d) => &d.at,
@@ -229,16 +232,32 @@ pub enum ColumnModifier {
 pub struct RuleCall {
     pub name: Ident,
     pub args: Vec<Expr>,
+    /// `minLength(2) : "sarlavha juda qisqa"` — errors.md §6.1's promotion
+    /// marker, on a rule rather than a whole constraint.
+    ///
+    /// Without this, `W1302` pointed at a message-less `pattern(...)` and
+    /// advised `add ': "…"'` — advice that did not parse, because only
+    /// `unique` and the table-level forms took one. The specification's own
+    /// sample tripped the warning and could not act on it.
+    pub message: Option<String>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug)]
+/// Every variant carries its `at: Attached` for the reason `ColumnDef` and
+/// `IndexDef` do: the four constraint parsers used to compute the attached
+/// comment and throw it away, so `jwc fmt` **deleted** the `---` doc above
+/// a `check` or a `unique`. A formatter that loses documentation is worse
+/// than no formatter, and `fmt --check` in CI is what pushes people to run
+/// it.
 pub enum TableConstraint {
     PrimaryKey {
+        at: Attached,
         columns: Vec<Ident>,
         span: Span,
     },
     ForeignKey {
+        at: Attached,
         columns: Vec<Ident>,
         target: QualifiedTable,
         target_columns: Vec<Ident>,
@@ -247,16 +266,29 @@ pub enum TableConstraint {
         span: Span,
     },
     Unique {
+        at: Attached,
         columns: Vec<Ident>,
         predicate: Option<Expr>,
         message: Option<String>,
         span: Span,
     },
     Check {
+        at: Attached,
         expr: Expr,
         message: Option<String>,
         span: Span,
     },
+}
+
+impl TableConstraint {
+    pub fn attached(&self) -> &Attached {
+        match self {
+            TableConstraint::PrimaryKey { at, .. }
+            | TableConstraint::ForeignKey { at, .. }
+            | TableConstraint::Unique { at, .. }
+            | TableConstraint::Check { at, .. } => at,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -374,6 +406,26 @@ pub struct FunctionDecl {
     pub span: Span,
 }
 
+/// A background job (jobs.md §1).
+///
+/// Named parameters rather than an opaque payload: 0.9's `dispatch(name,
+/// payload)` took a string, so a handler that expected `{account_id}` and
+/// a caller that sent `{accountId}` typechecked, ran, and failed at 3am
+/// with a JSON parse error in a worker log. Here the dispatch site is
+/// checked against the declaration like any other call.
+#[derive(Clone, Debug)]
+pub struct JobDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub params: Vec<Param>,
+    /// `retries N;` — total attempts before the dead-letter queue.
+    pub retries: Option<i64>,
+    /// `backoff "30s";` — the wait after a failed attempt.
+    pub backoff: Option<String>,
+    pub body: Block,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub struct Param {
     pub name: Ident,
@@ -420,6 +472,36 @@ pub struct RoutesDecl {
     pub prefix_span: Span,
     pub uses: Vec<Ident>,
     pub routes: Vec<RouteDecl>,
+    /// `socket "…" { on open … }` — WebSocket endpoints, which share the
+    /// prefix and the `use` chain with their HTTP siblings.
+    pub sockets: Vec<SocketDecl>,
+    pub span: Span,
+}
+
+/// A WebSocket endpoint (routing.md §9).
+///
+/// The 0.9 form was `route WS "…" { … }` with a body that ran once per
+/// connection and called `ws_recv()` in a loop. 1.0 has no unbounded loop
+/// — `for` over a collection is the only iteration — and adding `while`
+/// just to serve sockets would be a worse trade than saying what a socket
+/// handler actually is: three moments in a connection's life.
+///
+/// So the body is not a loop, it is the three moments, and the runtime
+/// owns the loop. That also removes the failure mode a user-written
+/// receive loop has: one that forgets to break holds a task forever.
+#[derive(Clone, Debug)]
+pub struct SocketDecl {
+    pub at: Attached,
+    pub suffix: String,
+    pub suffix_span: Span,
+    pub uses: Vec<Ident>,
+    /// Once, after the upgrade succeeds.
+    pub on_open: Option<Block>,
+    /// Once per text frame. The binder holds the frame.
+    pub on_message: Option<(Ident, Block)>,
+    /// Once, however the connection ended — peer close, error or
+    /// `socket.close()`.
+    pub on_close: Option<Block>,
     pub span: Span,
 }
 
@@ -563,6 +645,19 @@ pub enum Stmt {
     Assert {
         at: Attached,
         kind: AssertKind,
+        span: Span,
+    },
+    /// `dispatch SendWelcome(account_id: $id, email: $addr);` — enqueue a
+    /// job (jobs.md §2).
+    ///
+    /// Arguments are named, not positional. A job is written once and
+    /// dispatched from several places over its life; two `bigint`s in the
+    /// wrong order is a bug no type can catch, and the names make the call
+    /// site readable without opening the declaration.
+    Dispatch {
+        at: Attached,
+        job: Ident,
+        args: Vec<(Ident, Expr)>,
         span: Span,
     },
     Expr {
@@ -890,6 +985,14 @@ pub struct InsertExpr {
     pub values: Vec<ObjEntry>,
     pub conflict: Option<ConflictClause>,
     pub projection: Option<ObjectShape>,
+    /// `insert into … { … } buffered;` — hand the row to the batch writer
+    /// and return, rather than waiting for the round trip (writes.md §7).
+    ///
+    /// A modifier on `insert` rather than a `log_insert(table, json, …)`
+    /// built-in, which is what 0.9 had: that form took the table as a
+    /// string and the row as JSON, so it bypassed the query compiler
+    /// entirely and nothing checked that the columns existed.
+    pub buffered: bool,
     pub span: Span,
 }
 

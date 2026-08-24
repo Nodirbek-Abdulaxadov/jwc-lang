@@ -21,8 +21,42 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TemplateArg {
+    /// One route, one schema, no tables — the smallest thing that runs.
+    Empty,
+    /// CRUD over one table: DTOs, a service, five routes, keyset paging.
+    Api,
+    /// `empty` plus accounts, Argon2id passwords and JWT sessions.
+    Auth,
+    /// A background `job`, its dispatch site, and the durable queue.
+    Jobs,
+}
+
+impl From<TemplateArg> for jwc::templates::TemplateKind {
+    fn from(a: TemplateArg) -> Self {
+        match a {
+            TemplateArg::Empty => jwc::templates::TemplateKind::Empty,
+            TemplateArg::Api => jwc::templates::TemplateKind::Api,
+            TemplateArg::Auth => jwc::templates::TemplateKind::Auth,
+            TemplateArg::Jobs => jwc::templates::TemplateKind::Jobs,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Scaffold a new project.
+    New {
+        /// Directory name and the manifest's `name`.
+        name: String,
+        /// Which starter tree. Defaults to `empty`.
+        #[arg(long, value_enum, default_value = "empty")]
+        template: TemplateArg,
+        /// Where to create it. Defaults to `./<name>`.
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Parse and check the sources under a path.
     Check {
         /// File or directory. Defaults to the current directory.
@@ -105,6 +139,49 @@ enum Command {
         #[arg(long, default_value_t = jwc::registry::registry_url())]
         registry: String,
     },
+    /// Fetch every declared dependency that is not already vendored.
+    ///
+    /// What a fresh clone needs: `jwc_packages/` is a build artefact for
+    /// most projects, so a checkout has the manifest and none of the
+    /// sources.
+    Install {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = jwc::registry::registry_url())]
+        registry: String,
+        /// Re-download even what is already present.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Move dependencies to the newest version their recorded range allows.
+    ///
+    /// Crossing a major is `jwc add name@version` — a change to the
+    /// requirement, and one that says so.
+    Update {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Only this dependency. Default: all of them.
+        ///
+        /// A flag rather than a second positional: `jwc update <path>` and
+        /// `jwc update <name>` are indistinguishable to a parser, and clap
+        /// resolved it by reading the path as the name — so
+        /// `jwc update ./svc` looked for a dependency called `./svc`.
+        #[arg(long, short = 'p')]
+        package: Option<String>,
+        #[arg(long, default_value_t = jwc::registry::registry_url())]
+        registry: String,
+    },
+    /// Drop a dependency from the manifest and from `jwc_packages/`.
+    Remove {
+        name: String,
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Print the dependency tree: declared, vendored, and at which version.
+    Tree {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Run every `test` block.
     ///
     /// Each test runs in its own transaction and is rolled back, so the
@@ -135,6 +212,24 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
     },
+    /// Serve a browsable API reference, rendered from the same document
+    /// `jwc openapi` emits.
+    ///
+    /// Self-contained: no CDN, no vendored Swagger UI. `--out` writes the
+    /// page as one HTML file instead of serving it.
+    Swagger {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Loopback port to serve on.
+        #[arg(long, default_value_t = 8099)]
+        port: u16,
+        /// Write the page to a file and exit, instead of serving.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// `info.title`. Defaults to the `database` name.
+        #[arg(long)]
+        title: Option<String>,
+    },
     /// `check`, plus the whole-program lints that are advisory.
     Lint {
         #[arg(default_value = ".")]
@@ -151,6 +246,21 @@ enum Command {
     Routes {
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+    /// Compile the program to a native binary (AOT).
+    ///
+    /// Restored in 0.9.901. Coverage is the database-free tier; anything
+    /// outside it is refused by name rather than silently dropped, and
+    /// `jwc serve` runs the whole language.
+    Build {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Optimised build.
+        #[arg(long)]
+        release: bool,
+        /// Write the generated Rust and stop, without invoking cargo.
+        #[arg(long)]
+        emit_rust: bool,
     },
     /// Run the program.
     Serve {
@@ -263,6 +373,11 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::New {
+            name,
+            template,
+            path,
+        } => jwc::templates::new_project(name, template.into(), path),
         Command::Check {
             path,
             quiet,
@@ -289,6 +404,18 @@ fn run() -> Result<()> {
             path,
             registry,
         } => jwc::registry::add(spec, path, registry),
+        Command::Install {
+            path,
+            registry,
+            force,
+        } => jwc::registry::install(path, registry, force),
+        Command::Update {
+            path,
+            package,
+            registry,
+        } => jwc::registry::update(package, path, registry),
+        Command::Remove { name, path } => jwc::registry::remove(name, path),
+        Command::Tree { path } => jwc::registry::tree(path),
         Command::Test {
             path,
             filter,
@@ -296,6 +423,12 @@ fn run() -> Result<()> {
         } => cmd::test(path, filter, no_rollback),
         Command::Lsp => jwc::lsp::run(),
         Command::Openapi { path, out, title } => cmd::openapi(path, out, title),
+        Command::Swagger {
+            path,
+            port,
+            out,
+            title,
+        } => cmd::swagger(path, port, out, title),
         Command::Lint {
             path,
             constraints,
@@ -308,6 +441,11 @@ fn run() -> Result<()> {
             skip_schema_check,
             dev,
         } => cmd::serve(path, port, skip_schema_check, dev),
+        Command::Build {
+            path,
+            release,
+            emit_rust,
+        } => cmd::build(path, release, emit_rust),
         Command::Migrate { command } => match command {
             MigrateCommand::New {
                 name,

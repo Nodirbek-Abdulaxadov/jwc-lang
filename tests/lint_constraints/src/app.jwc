@@ -1,0 +1,93 @@
+-- Fixture for `jwc lint --constraints` and `W1302`.
+--
+-- This used to be the specification's own sample, which meant the tests
+-- depended on the sample staying sloppy: giving its constraints the
+-- messages `W1302` asks for broke two assertions that needed a
+-- message-less one to exist. A normative sample should be exemplary, so
+-- the untidy shapes live here instead — deliberately, and labelled.
+namespace app;
+
+database App : Postgres;
+
+schema s of App;
+
+table Owners of App.s {
+    id   bigint primary key identity;
+    --- With a message: violating it is a 409 carrying this sentence.
+    slug varchar(40) unique : "bu slug band";
+}
+
+table Items of App.s {
+    id       bigint primary key identity;
+    owner_id bigint;
+    --- No message, on purpose: this is the 500 `W1302` warns about.
+    sku      varchar(40) unique;
+    --- Also no message, and a column rule rather than a whole constraint —
+    --- the shape whose fix `W1302` used to recommend without the grammar
+    --- accepting it.
+    name     varchar(120) minLength(2);
+
+    --- A cascaded reference, so deleting an owner cannot trip it.
+    foreign key (owner_id) references App.s.Owners (id) on delete cascade;
+}
+
+table Notes of App.s {
+    id       bigint primary key identity;
+    owner_id bigint;
+
+    --- Not cascaded: deleting an owner that still has notes is a 400.
+    foreign key (owner_id) references App.s.Owners (id);
+}
+
+class OwnerCreate {
+    slug varchar(40) required;
+}
+
+class ItemCreate {
+    owner_id bigint required;
+    sku      varchar(40) required;
+    name     varchar(120) required, minLength(2);
+}
+
+routes "/items" {
+    route POST "" {
+        let req = request.body() as ItemCreate;
+
+        let row = insert into App.s.Items {
+            ...$req
+        } as { id, sku, name };
+
+        return created(json($row));
+    }
+
+    route GET "" {
+        let rows = select I from App.s.Items
+            as { id, sku, name }
+            limit 50;
+
+        return json($rows);
+    }
+}
+
+routes "/owners" {
+    route POST "" {
+        let req = request.body() as OwnerCreate;
+
+        let row = insert into App.s.Owners {
+            ...$req
+        } as { id, slug };
+
+        return created(json($row));
+    }
+
+    route DELETE "{id: bigint}" {
+        delete from App.s.Owners
+            where id == @id;
+
+        return noContent();
+    }
+}
+
+function main() {
+    serve(8080);
+}

@@ -1,0 +1,426 @@
+// --- Redis runtime (async) --------------------------------------------------
+//
+// Only included when the program calls a `redis_*` built-in (see
+// `program_uses_redis` in native_build.rs). Pulls `redis` +
+// `deadpool-redis` into the generated Cargo.toml.
+//
+// This is the AOT mirror of `src/redis_engine.rs`. It is deliberately a
+// *reimplementation* rather than a call into the `jwc` crate: the emitted
+// crate is standalone and depends only on third-party crates, exactly like
+// `native_prelude_db.rs.in` reimplements the Postgres layer.
+//
+// Two behavioural contracts this must keep in step with the interpreter,
+// because `tests/native_parity.rs` compares their observable output:
+//
+//   * `ttl_secs == 0` means "no expiry" on `redis_set`, matching
+//     `cache_set` so the `redis` package can fall back between them.
+//   * `redis_get` / `redis_eval` return `V::Null` for a missing key or a
+//     nil reply, never an empty string.
+//
+// Errors panic with a `RedisError[.SubKind]:` prefix rather than returning
+// an in-band value — same reasoning as `jwc_io_panic` above: an error
+// string would ship as a 200 response body, and the panic prefix is what
+// makes native `catch (e: RedisError)` work.
+
+static REDIS_POOL: std::sync::OnceLock<Option<deadpool_redis::Pool>> = std::sync::OnceLock::new();
+
+/// Build the pool once. `None` means "no `JWC_REDIS_URL`" — not an error
+/// until something actually tries to talk to Redis, so a program that only
+/// calls `redis_enabled()` on a box without Redis runs fine.
+fn jwc_redis_pool() -> &'static Option<deadpool_redis::Pool> {
+    REDIS_POOL.get_or_init(|| {
+        let url = std::env::var("JWC_REDIS_URL").ok()?;
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return None;
+        }
+        let mut cfg = deadpool_redis::Config::from_url(&url);
+        let max_size = std::env::var("JWC_REDIS_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(64);
+        cfg.pool = Some(deadpool_redis::PoolConfig::new(max_size));
+        match cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1)) {
+            Ok(p) => Some(p),
+            // A malformed URL is an operator error worth failing loudly on:
+            // they asked for Redis and mistyped the address, and every
+            // request discovering that separately is worse than one panic
+            // at first use. The URL is scrubbed — it carries a password.
+            Err(e) => panic!(
+                "RedisError: invalid JWC_REDIS_URL ({}): {}",
+                jwc_redis_scrub_url(&url),
+                e
+            ),
+        }
+    })
+}
+
+/// Mask the `user:password@` userinfo of a Redis URL before it reaches a
+/// panic message. Mirrors `engine::scrub_database_url`; kept byte-compatible
+/// with it so a scrubbed URL reads the same in both runtimes.
+fn jwc_redis_scrub_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = scheme_end + 3;
+    let rest = &url[after_scheme..];
+    let at_idx = match rest.find('@') {
+        Some(i) => i,
+        None => return url.to_string(),
+    };
+    let slash_idx = rest.find('/').unwrap_or(rest.len());
+    if at_idx >= slash_idx {
+        return url.to_string();
+    }
+    let userinfo = &rest[..at_idx];
+    let after_at = &rest[at_idx..];
+    let masked = match userinfo.find(':') {
+        Some(colon) => format!("{}:***", &userinfo[..colon]),
+        None => userinfo.to_string(),
+    };
+    format!("{}{}{}", &url[..after_scheme], masked, after_at)
+}
+
+async fn jwc_redis_conn(op: &str) -> deadpool_redis::Connection {
+    let Some(pool) = jwc_redis_pool() else {
+        panic!(
+            "RedisError: {}() needs Redis but JWC_REDIS_URL is not set. \
+             Set it (e.g. redis://127.0.0.1:6379) to enable the redis_* built-ins.",
+            op
+        );
+    };
+    match pool.get().await {
+        Ok(c) => c,
+        Err(e) => panic!("RedisError.ConnectionFailure: {}() could not get a connection: {}", op, e),
+    }
+}
+
+/// Map a `redis::RedisError` onto the `Kind.SubKind:` panic prefix that
+/// native typed-catch reads. Kept in step with `JWC_ERROR_KINDS` — a kind
+/// emitted here that isn't in that list can never be caught by name.
+#[cold]
+#[inline(never)]
+fn jwc_redis_panic(op: &str, e: redis::RedisError) -> ! {
+    let kind = if e.is_connection_dropped() || e.is_io_error() {
+        "RedisError.ConnectionFailure"
+    } else if e.is_timeout() {
+        "RedisError.TimedOut"
+    } else {
+        match e.kind() {
+            redis::ErrorKind::BusyLoadingError => "RedisError.LoadingError",
+            redis::ErrorKind::NoScriptError => "RedisError.NoScript",
+            _ => "RedisError",
+        }
+    };
+    panic!("{}: {}() failed: {}", kind, op, e);
+}
+
+fn jwc_redis_key(v: V, op: &str) -> JwcStr {
+    match v {
+        V::Str(s) => s,
+        other => panic!("{}() key must be a string, got {:?}", op, other),
+    }
+}
+
+/// TTL argument shared by `redis_set` / `redis_expire`. Negative is an
+/// error rather than a silent clamp: `cache_set` rejects it too, and a
+/// negative TTL passed to Redis `EXPIRE` deletes the key immediately —
+/// almost never what the caller meant.
+fn jwc_redis_ttl(v: V, op: &str) -> i64 {
+    match jwc_to_int(&v) {
+        Some(n) if n >= 0 => n,
+        Some(n) => panic!("{}() ttl_secs must be >= 0, got {}", op, n),
+        None => panic!("{}() ttl_secs must be an int, got {:?}", op, v),
+    }
+}
+
+/// Parse a `redis_eval` KEYS / ARGV operand — a JSON array of scalars.
+/// Mirrors `runner::builtins::parse_redis_string_array`.
+fn jwc_redis_string_array(v: V, op: &str, param: &str) -> Vec<String> {
+    let raw = match v {
+        V::Str(s) => s,
+        other => panic!("{}() {} must be a JSON array string, got {:?}", op, param, other),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw.as_ref()) {
+        Ok(p) => p,
+        Err(e) => panic!("{}() {} must be a JSON array: {}", op, param, e),
+    };
+    let serde_json::Value::Array(items) = parsed else {
+        panic!("{}() {} must be a JSON array, got {}", op, param, raw);
+    };
+    items
+        .into_iter()
+        .map(|item| match item {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            other => panic!(
+                "{}() {} entries must be string, number or bool, got {}",
+                op, param, other
+            ),
+        })
+        .collect()
+}
+
+/// Flatten a RESP reply into `V`. Lossy on purpose — JWC has no sum type to
+/// receive a RESP-typed reply into, so a script returning a table reads
+/// back as its first element. See `redis_engine::eval`.
+fn jwc_redis_value_to_v(v: &redis::Value) -> V {
+    match v {
+        redis::Value::Nil => V::Null,
+        redis::Value::Int(n) => V::Int(*n),
+        redis::Value::BulkString(bytes) => v_str(String::from_utf8_lossy(bytes).into_owned()),
+        redis::Value::SimpleString(s) => v_str(s.clone()),
+        redis::Value::Okay => v_str("OK"),
+        redis::Value::Double(d) => v_str(d.to_string()),
+        redis::Value::Boolean(b) => v_str(b.to_string()),
+        redis::Value::Array(items) | redis::Value::Set(items) => {
+            items.first().map(jwc_redis_value_to_v).unwrap_or(V::Null)
+        }
+        other => v_str(format!("{:?}", other)),
+    }
+}
+
+async fn jwc_b_redis_get(key: V) -> V {
+    let k = jwc_redis_key(key, "redis_get");
+    let mut conn = jwc_redis_conn("redis_get").await;
+    match redis::cmd("GET")
+        .arg(k.as_ref())
+        .query_async::<Option<String>>(&mut conn)
+        .await
+    {
+        Ok(Some(s)) => v_str(s),
+        Ok(None) => V::Null,
+        Err(e) => jwc_redis_panic("redis_get", e),
+    }
+}
+
+async fn jwc_b_redis_set(key: V, value: V, ttl: V) -> V {
+    let k = jwc_redis_key(key, "redis_set");
+    let val = value.to_string();
+    let ttl = jwc_redis_ttl(ttl, "redis_set");
+    let mut conn = jwc_redis_conn("redis_set").await;
+    let mut cmd = redis::cmd("SET");
+    cmd.arg(k.as_ref()).arg(val);
+    if ttl > 0 {
+        cmd.arg("EX").arg(ttl);
+    }
+    match cmd.query_async::<()>(&mut conn).await {
+        Ok(()) => V::Null,
+        Err(e) => jwc_redis_panic("redis_set", e),
+    }
+}
+
+async fn jwc_b_redis_del(key: V) -> V {
+    let k = jwc_redis_key(key, "redis_del");
+    let mut conn = jwc_redis_conn("redis_del").await;
+    match redis::cmd("DEL")
+        .arg(k.as_ref())
+        .query_async::<i64>(&mut conn)
+        .await
+    {
+        Ok(n) => V::Int(n),
+        Err(e) => jwc_redis_panic("redis_del", e),
+    }
+}
+
+async fn jwc_b_redis_exists(key: V) -> V {
+    let k = jwc_redis_key(key, "redis_exists");
+    let mut conn = jwc_redis_conn("redis_exists").await;
+    match redis::cmd("EXISTS")
+        .arg(k.as_ref())
+        .query_async::<i64>(&mut conn)
+        .await
+    {
+        Ok(n) => V::Bool(n > 0),
+        Err(e) => jwc_redis_panic("redis_exists", e),
+    }
+}
+
+async fn jwc_b_redis_incr(key: V) -> V {
+    let k = jwc_redis_key(key, "redis_incr");
+    let mut conn = jwc_redis_conn("redis_incr").await;
+    match redis::cmd("INCR")
+        .arg(k.as_ref())
+        .query_async::<i64>(&mut conn)
+        .await
+    {
+        Ok(n) => V::Int(n),
+        Err(e) => jwc_redis_panic("redis_incr", e),
+    }
+}
+
+async fn jwc_b_redis_expire(key: V, ttl: V) -> V {
+    let k = jwc_redis_key(key, "redis_expire");
+    let ttl = jwc_redis_ttl(ttl, "redis_expire");
+    let mut conn = jwc_redis_conn("redis_expire").await;
+    match redis::cmd("EXPIRE")
+        .arg(k.as_ref())
+        .arg(ttl)
+        .query_async::<i64>(&mut conn)
+        .await
+    {
+        Ok(n) => V::Bool(n == 1),
+        Err(e) => jwc_redis_panic("redis_expire", e),
+    }
+}
+
+async fn jwc_b_redis_eval(script: V, keys_json: V, args_json: V) -> V {
+    let src = match script {
+        V::Str(s) => s,
+        other => panic!("redis_eval() script must be a string, got {:?}", other),
+    };
+    let keys = jwc_redis_string_array(keys_json, "redis_eval", "keys_json");
+    let argv = jwc_redis_string_array(args_json, "redis_eval", "args_json");
+    let mut conn = jwc_redis_conn("redis_eval").await;
+    // EVALSHA with a one-shot EVAL fallback on NOSCRIPT, matching
+    // `redis_engine::eval` on the interpreter side. Plain `EVAL` re-uploads
+    // the script body on every call; a rate limiter running one script per
+    // request pays that forever. The SHA1 is computed locally per call —
+    // microseconds against a round-trip, and no unbounded cache keyed by
+    // script text.
+    let script = redis::Script::new(src.as_ref());
+    let mut invocation = script.prepare_invoke();
+    for k in &keys {
+        invocation.key(k);
+    }
+    for a in &argv {
+        invocation.arg(a);
+    }
+    match invocation.invoke_async::<redis::Value>(&mut conn).await {
+        Ok(raw) => jwc_redis_value_to_v(&raw),
+        Err(e) => jwc_redis_panic("redis_eval", e),
+    }
+}
+
+/// Reachability as a bool, so a health route can branch without `try { }`.
+/// Never panics on an unreachable server — that is the answer, not a fault.
+async fn jwc_b_redis_ping() -> V {
+    let Some(pool) = jwc_redis_pool() else {
+        return V::Bool(false);
+    };
+    let Ok(mut conn) = pool.get().await else {
+        return V::Bool(false);
+    };
+    match redis::cmd("PING").query_async::<String>(&mut conn).await {
+        Ok(reply) => V::Bool(reply.eq_ignore_ascii_case("PONG")),
+        Err(_) => V::Bool(false),
+    }
+}
+
+/// "Is Redis configured for this process" — no round-trip, cheap enough to
+/// call on every cache read, which is what the `redis` package's fallback
+/// branches on. `async` only to match its siblings' call shape in codegen.
+async fn jwc_b_redis_enabled() -> V {
+    V::Bool(jwc_redis_pool().is_some())
+}
+
+/// Prometheus text for the Redis pool, or an empty string when Redis is not
+/// configured — the same absent-rather-than-zeroed rule the other gauges
+/// follow, so "no Redis" reads differently from "Redis with an idle pool".
+///
+/// Reached from `jwc_metrics_body` through the `jwc_redis_metrics_hook`
+/// shim that codegen emits, because this file is only concatenated for
+/// programs that call a `redis_*` built-in and `jwc_metrics_body` lives in
+/// the DB prelude, which is not.
+fn jwc_redis_metrics() -> String {
+    let Some(pool) = jwc_redis_pool().as_ref() else {
+        return String::new();
+    };
+    let st = pool.status();
+    let mut out = String::new();
+    out.push_str("# HELP jwc_redis_pool_size Connections the Redis pool holds.\n");
+    out.push_str("# TYPE jwc_redis_pool_size gauge\n");
+    out.push_str(&format!("jwc_redis_pool_size {}\n", st.size));
+    out.push_str("# HELP jwc_redis_pool_available Idle Redis connections.\n");
+    out.push_str("# TYPE jwc_redis_pool_available gauge\n");
+    out.push_str(&format!("jwc_redis_pool_available {}\n", st.available));
+    out.push_str("# HELP jwc_redis_pool_max_size Ceiling from JWC_REDIS_POOL_SIZE.\n");
+    out.push_str("# TYPE jwc_redis_pool_max_size gauge\n");
+    out.push_str(&format!("jwc_redis_pool_max_size {}\n", st.max_size));
+    out.push_str("# HELP jwc_redis_pool_waiting Tasks blocked on a Redis connection.\n");
+    out.push_str("# TYPE jwc_redis_pool_waiting gauge\n");
+    out.push_str(&format!("jwc_redis_pool_waiting {}\n", st.waiting));
+    out
+}
+
+// ── the 1.0 `redis.*` surface (builtins.md §8) ──────────────────────────────
+
+/// One `INCR` and, on the first hit only, one `EXPIRE` — in a single script,
+/// so a caller that dies between the two cannot leave a key with no TTL.
+/// Same script the interpreter runs, so the two backends share a keyspace.
+const JWC_RATE_LIMIT_SCRIPT: &str = "local n = redis.call('INCR', KEYS[1]) \
+                                     if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end \
+                                     return n";
+
+/// `redis.rate_limit(key, limit, window_secs)` — true while the bucket has
+/// room. Atomic: `INCR` then `EXPIRE` as two round-trips races, and the loser
+/// gets a key that never expires.
+async fn jwc_b_redis_rate_limit(key: V, limit: V, window: V) -> V {
+    let limit = jwc_to_int(&limit).unwrap_or(0);
+    let window = jwc_to_int(&window).unwrap_or(0);
+    let hits = jwc_b_redis_eval(
+        v_str(JWC_RATE_LIMIT_SCRIPT),
+        v_str(jwc_to_json(&v_arr(vec![key]))),
+        v_str(jwc_to_json(&v_arr(vec![v_str(window.to_string())]))),
+    )
+    .await;
+    // A reply the script cannot have produced means something is wrong with
+    // the server, and the safe reading of "wrong" is "over the limit".
+    let hits = jwc_to_int(&hits).unwrap_or(i64::MAX);
+    V::Bool(hits <= limit)
+}
+
+/// `redis.*` needs a server. The interpreter faults rather than pretending
+/// the call succeeded, and says what to set; a native binary that quietly
+/// answered `null` would let a rate limiter allow everything.
+fn jwc_redis_require(name: &str) {
+    if jwc_redis_pool().is_none() {
+        panic!(
+            "`redis.{}(...)` needs a Redis server: set `JWC_REDIS_URL`. \
+             `redis.enabled()` is what to branch on when the call is optional.",
+            name
+        );
+    }
+}
+
+async fn jwc_b_v1_redis_get(key: V) -> V {
+    jwc_redis_require("get");
+    jwc_b_redis_get(key).await
+}
+
+async fn jwc_b_v1_redis_set(key: V, value: V, ttl: V) -> V {
+    jwc_redis_require("set");
+    // A negative TTL is not "expire in the past" — it is a caller mistake,
+    // and 0 already means "no expiry". Clamping keeps a sign error from
+    // deleting the key it was meant to write.
+    let ttl = V::Int(jwc_to_int(&ttl).unwrap_or(0).max(0));
+    jwc_b_redis_set(key, value, ttl).await
+}
+
+async fn jwc_b_v1_redis_del(key: V) -> V {
+    jwc_redis_require("del");
+    jwc_b_redis_del(key).await
+}
+
+async fn jwc_b_v1_redis_incr(key: V) -> V {
+    jwc_redis_require("incr");
+    jwc_b_redis_incr(key).await
+}
+
+async fn jwc_b_v1_redis_expire(key: V, ttl: V) -> V {
+    jwc_redis_require("expire");
+    jwc_b_redis_expire(key, ttl).await
+}
+
+async fn jwc_b_v1_redis_rate_limit(key: V, limit: V, window: V) -> V {
+    jwc_redis_require("rate_limit");
+    jwc_b_redis_rate_limit(key, limit, window).await
+}
+
+/// The one call that works without a server, because branching on it is how
+/// a program makes the rest optional.
+async fn jwc_b_v1_redis_enabled() -> V {
+    V::Bool(jwc_redis_pool().is_some())
+}

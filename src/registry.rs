@@ -242,39 +242,40 @@ struct VersionView {
     sha256: String,
 }
 
-pub fn add(spec: String, path: PathBuf, registry: String) -> Result<()> {
-    let (name, wanted) = match spec.split_once('@') {
-        Some((n, v)) => (n.to_string(), Some(v.to_string())),
-        None => (spec.clone(), None),
-    };
-    if !is_identifier(&name) {
-        bail!("`{name}` is not a name a program can `import`");
-    }
+/// The project root: the directory holding `jwcproj.json`, found from
+/// `path` or an ancestor of it.
+pub fn project_root(path: &Path) -> PathBuf {
+    crate::workspace::Workspace::load(path)
+        .ok()
+        .and_then(|ws| ws.manifest.map(|m| m.path))
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| path.to_path_buf())
+}
 
-    let base = registry.trim_end_matches('/');
-    let client = reqwest::blocking::Client::new();
-    let meta: PackageView = client
+/// `GET /api/v1/pkg/{name}` — the versions and their checksums.
+fn versions_of(client: &reqwest::blocking::Client, base: &str, name: &str) -> Result<PackageView> {
+    client
         .get(format!("{base}/api/v1/pkg/{name}"))
         .send()
         .with_context(|| format!("GET {base}/api/v1/pkg/{name}"))?
         .error_for_status()
-        .with_context(|| format!("no package `{name}` on {registry}"))?
+        .with_context(|| format!("no package `{name}` on {base}"))?
         .json()
-        .context("the registry's answer was not the expected JSON")?;
+        .context("the registry's answer was not the expected JSON")
+}
 
-    // The registry returns versions newest first.
-    let picked = match &wanted {
-        Some(v) => meta
-            .versions
-            .iter()
-            .find(|x| &x.version == v)
-            .with_context(|| format!("`{name}` has no version {v}"))?,
-        None => meta
-            .versions
-            .first()
-            .with_context(|| format!("`{name}` has no versions"))?,
-    };
-
+/// Download, verify and unpack one version into `<root>/jwc_packages/<name>`.
+///
+/// The checksum is `picked.sha256`, which came from the metadata request —
+/// a *separate* round trip. See the module note: verifying a download
+/// against a value the same response supplied is not integrity.
+fn vendor(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    name: &str,
+    picked: &VersionView,
+    root: &Path,
+) -> Result<PathBuf> {
     let bytes = client
         .get(format!(
             "{base}/api/v1/pkg/{name}/{}/download",
@@ -287,8 +288,6 @@ pub fn add(spec: String, path: PathBuf, registry: String) -> Result<()> {
         .bytes()
         .context("download")?;
 
-    // Against the sha256 from the *metadata* request, not from this
-    // response — see the module note.
     let got = crate::hash::sha256_hex_bytes(&bytes);
     if got != picked.sha256 {
         bail!(
@@ -298,12 +297,7 @@ pub fn add(spec: String, path: PathBuf, registry: String) -> Result<()> {
         );
     }
 
-    let root = crate::workspace::Workspace::load(&path)
-        .ok()
-        .and_then(|ws| ws.manifest.map(|m| m.path))
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or(path.clone());
-    let dest = root.join(VENDOR_DIR).join(&name);
+    let dest = root.join(VENDOR_DIR).join(name);
     if dest.exists() {
         std::fs::remove_dir_all(&dest)?;
     }
@@ -321,7 +315,62 @@ pub fn add(spec: String, path: PathBuf, registry: String) -> Result<()> {
         }
         entry.unpack(dest.join(&rel))?;
     }
+    Ok(dest)
+}
 
+/// The newest version satisfying `req`, from a newest-first list.
+///
+/// `req` is what `jwcproj.json` records: `^1.2.3`, or a bare `1.2.3`
+/// meaning exactly that. An unparseable requirement is an error rather
+/// than a silent "take the newest" — a typo in a version range must not
+/// quietly become "whatever shipped today".
+fn pick<'a>(name: &str, versions: &'a [VersionView], req: &str) -> Result<&'a VersionView> {
+    let req = req.trim();
+    if req.is_empty() || req == "*" {
+        return versions
+            .first()
+            .with_context(|| format!("`{name}` has no versions"));
+    }
+    let range = semver::VersionReq::parse(req)
+        .with_context(|| format!("`{name}`'s requirement `{req}` is not a semver range"))?;
+    versions
+        .iter()
+        .find(|v| {
+            semver::Version::parse(&v.version)
+                .map(|parsed| range.matches(&parsed))
+                .unwrap_or(false)
+        })
+        .with_context(|| format!("no version of `{name}` satisfies `{req}`"))
+}
+
+pub fn add(spec: String, path: PathBuf, registry: String) -> Result<()> {
+    let (name, wanted) = match spec.split_once('@') {
+        Some((n, v)) => (n.to_string(), Some(v.to_string())),
+        None => (spec.clone(), None),
+    };
+    if !is_identifier(&name) {
+        bail!("`{name}` is not a name a program can `import`");
+    }
+
+    let base = registry.trim_end_matches('/');
+    let client = reqwest::blocking::Client::new();
+    let meta = versions_of(&client, base, &name)?;
+
+    // The registry returns versions newest first.
+    let picked = match &wanted {
+        Some(v) => meta
+            .versions
+            .iter()
+            .find(|x| &x.version == v)
+            .with_context(|| format!("`{name}` has no version {v}"))?,
+        None => meta
+            .versions
+            .first()
+            .with_context(|| format!("`{name}` has no versions"))?,
+    };
+
+    let root = project_root(&path);
+    let dest = vendor(&client, base, &name, picked, &root)?;
     record_dependency(&root, &name, &picked.version)?;
     println!(
         "added {name} {} to {}",
@@ -329,6 +378,227 @@ pub fn add(spec: String, path: PathBuf, registry: String) -> Result<()> {
         dest.strip_prefix(&root).unwrap_or(&dest).display()
     );
     Ok(())
+}
+
+/// `jwc install` — materialise every declared dependency that is missing.
+///
+/// This is the command a fresh clone needs. `jwc_packages/` is a build
+/// artefact for most projects (the template's `.gitignore` says so), so a
+/// checkout has the manifest and none of the sources, and `jwc check`
+/// fails on imports it cannot resolve. `jwc add` per dependency would do
+/// it and would also rewrite every version in the manifest.
+///
+/// Transitive: a vendored package's own `jwcproj.json` may declare
+/// dependencies, and its `import`s resolve against them.
+pub fn install(path: PathBuf, registry: String, force: bool) -> Result<()> {
+    let root = project_root(&path);
+    let base = registry.trim_end_matches('/');
+    let client = reqwest::blocking::Client::new();
+
+    let mut pending: Vec<(String, String)> = declared_dependencies(&root.join("jwcproj.json"));
+    let mut done: std::collections::BTreeSet<String> = Default::default();
+    let mut installed = 0usize;
+    let mut kept = 0usize;
+
+    while let Some((name, req)) = pending.pop() {
+        if !done.insert(name.clone()) {
+            continue;
+        }
+        if !is_identifier(&name) {
+            bail!("`{name}` in jwcproj.json is not a name a program can `import`");
+        }
+        let dest = root.join(VENDOR_DIR).join(&name);
+        if dest.is_dir() && !force {
+            kept += 1;
+        } else {
+            let meta = versions_of(&client, base, &name)?;
+            let picked = pick(&name, &meta.versions, &req)?;
+            vendor(&client, base, &name, picked, &root)?;
+            println!("  {name} {}", picked.version);
+            installed += 1;
+        }
+        pending.extend(declared_dependencies(&dest.join("jwcproj.json")));
+    }
+
+    match (installed, kept) {
+        (0, 0) => println!("no dependencies declared"),
+        (0, k) => println!("{k} package{} already present", plural(k)),
+        (i, 0) => println!("installed {i} package{}", plural(i)),
+        (i, k) => println!("installed {i} package{}, {k} already present", plural(i)),
+    }
+    Ok(())
+}
+
+/// `jwc update [name]` — move within the recorded range.
+///
+/// Without a name, every direct dependency. The manifest's requirement is
+/// the bound: `^0.2.1` moves to the newest `0.2.x`, never to `0.3.0`. To
+/// cross a major, `jwc add name@version` — which is the request to change
+/// the requirement, and says so.
+pub fn update(name: Option<String>, path: PathBuf, registry: String) -> Result<()> {
+    let root = project_root(&path);
+    let base = registry.trim_end_matches('/');
+    let client = reqwest::blocking::Client::new();
+
+    let declared = declared_dependencies(&root.join("jwcproj.json"));
+    if declared.is_empty() {
+        println!("no dependencies declared");
+        return Ok(());
+    }
+    let targets: Vec<(String, String)> = match &name {
+        Some(n) => {
+            let found = declared
+                .iter()
+                .find(|(d, _)| d == n)
+                .with_context(|| format!("`{n}` is not a dependency in jwcproj.json"))?;
+            vec![found.clone()]
+        }
+        None => declared,
+    };
+
+    let mut moved = 0usize;
+    for (name, req) in targets {
+        let meta = versions_of(&client, base, &name)?;
+        let picked = pick(&name, &meta.versions, &req)?;
+        let before = vendored_version(&root, &name);
+        if before.as_deref() == Some(picked.version.as_str()) {
+            println!("  {name} {} (unchanged)", picked.version);
+            continue;
+        }
+        vendor(&client, base, &name, picked, &root)?;
+        // The requirement is re-recorded from the version now on disk, so
+        // `^0.2.1` becomes `^0.2.4` — the floor rises with what is
+        // actually installed, which is what makes the manifest a record of
+        // the build rather than of one past intention.
+        record_dependency(&root, &name, &picked.version)?;
+        match before {
+            Some(b) => println!("  {name} {b} -> {}", picked.version),
+            None => println!("  {name} {}", picked.version),
+        }
+        moved += 1;
+    }
+    println!("{moved} package{} updated", plural(moved));
+    Ok(())
+}
+
+/// `jwc remove <name>` — drop it from the manifest and from disk.
+///
+/// Offline: nothing here needs a registry.
+pub fn remove(name: String, path: PathBuf) -> Result<()> {
+    let root = project_root(&path);
+    let manifest = root.join("jwcproj.json");
+    let text = std::fs::read_to_string(&manifest)
+        .with_context(|| format!("no jwcproj.json at {}", root.display()))?;
+    let mut json: serde_json::Value =
+        serde_json::from_str(&text).context("jwcproj.json is not valid JSON")?;
+
+    let removed = json
+        .get_mut("dependencies")
+        .and_then(|d| d.as_object_mut())
+        .and_then(|o| o.remove(&name))
+        .is_some();
+    if !removed {
+        bail!("`{name}` is not a dependency in jwcproj.json");
+    }
+    std::fs::write(
+        &manifest,
+        format!("{}\n", serde_json::to_string_pretty(&json)?),
+    )?;
+
+    let dest = root.join(VENDOR_DIR).join(&name);
+    if dest.is_dir() {
+        std::fs::remove_dir_all(&dest)?;
+    }
+    println!("removed {name}");
+    // Not automatic: a transitive dependency this one pulled in may now be
+    // unreferenced, and deleting sources the user might still import is
+    // not something to do without being asked.
+    println!("`jwc tree` shows what is still vendored");
+    Ok(())
+}
+
+/// `jwc tree` — what is declared, what is vendored, and at which version.
+///
+/// Offline, and it reads disk rather than the registry on purpose: the
+/// question it answers is "what will actually compile", and that is the
+/// vendored tree, not the intention in the manifest.
+pub fn tree(path: PathBuf) -> Result<()> {
+    let root = project_root(&path);
+    let manifest = root.join("jwcproj.json");
+    let name = std::fs::read_to_string(&manifest)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|j| j.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "(this project)".into());
+
+    println!("{name}");
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    print_tree(&root, &manifest, "", &mut seen);
+    Ok(())
+}
+
+fn print_tree(
+    root: &Path,
+    manifest: &Path,
+    indent: &str,
+    seen: &mut std::collections::BTreeSet<String>,
+) {
+    let deps = declared_dependencies(manifest);
+    for (i, (name, req)) in deps.iter().enumerate() {
+        let last = i + 1 == deps.len();
+        let branch = if last { "└── " } else { "├── " };
+        let dest = root.join(VENDOR_DIR).join(name);
+        let state = match vendored_version(root, name) {
+            Some(v) if v == *req || format!("^{v}") == *req => v.to_string(),
+            Some(v) => format!("{v} (declared {req})"),
+            // The state `jwc install` exists to fix, and the one that
+            // makes `jwc check` fail on an import that looks correct.
+            None => format!("{req} — not installed"),
+        };
+        println!("{indent}{branch}{name} {state}");
+        if seen.insert(name.clone()) {
+            let next = format!("{indent}{}", if last { "    " } else { "│   " });
+            print_tree(root, &dest.join("jwcproj.json"), &next, seen);
+        }
+    }
+}
+
+/// `dependencies` from a manifest, as `(name, requirement)`, sorted.
+/// A missing or unreadable manifest has none — a package without one
+/// declares no dependencies, which is the truthful reading.
+fn declared_dependencies(manifest: &Path) -> Vec<(String, String)> {
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    json.get("dependencies")
+        .and_then(|d| d.as_object())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("*").to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `version` in a vendored package's own manifest.
+fn vendored_version(root: &Path, name: &str) -> Option<String> {
+    let text =
+        std::fs::read_to_string(root.join(VENDOR_DIR).join(name).join("jwcproj.json")).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 /// Add the dependency to `jwcproj.json`, preserving everything else in the

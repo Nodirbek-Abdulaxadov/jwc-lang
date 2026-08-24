@@ -1,0 +1,11 @@
+namespace db.auth;
+
+table Accounts of App.auth {
+    id            bigint primary key identity;
+    email         varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan", pattern(r"^[^@]+@[^@]+\.[^@]+$") : "email manzili yaroqsiz";
+    --- `private` keeps the column out of every projection that does not
+    --- name it, so a hash cannot leak through `as { ... }` by accident.
+    password_hash varchar(255) private;
+    display_name  varchar(80);
+    created_at    timestamptz default now();
+}

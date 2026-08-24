@@ -84,13 +84,40 @@ fn fault(msg: impl Into<String>) -> Abort {
 // ---------------------------------------------------------------- program
 
 /// Everything the interpreter needs, resolved once at boot.
+/// One frame a socket handler wants written, or the decision to close.
+///
+/// A channel rather than a handle on the socket itself: the `Vm` is
+/// synchronous with respect to the connection — it runs a handler to
+/// completion and the connection task drains what it produced. That keeps
+/// the socket's read half owned by exactly one task, which is what
+/// `tokio-tungstenite`'s split requires anyway, and it means a handler
+/// that panics cannot leave a half-written frame on the wire.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SocketOut {
+    Text(String),
+    Close,
+}
+
+/// The three handlers of one `socket "…" { }` (routing.md §9.1).
+#[derive(Clone, Debug, Default)]
+pub struct SocketBody {
+    pub on_open: Option<crate::ast::Block>,
+    /// The binder's name and the block. The binder holds the frame.
+    pub on_message: Option<(String, crate::ast::Block)>,
+    pub on_close: Option<crate::ast::Block>,
+}
+
 pub struct Program {
     pub model: SchemaModel,
     pub symbols: Symbols,
     pub routes: Vec<ResolvedRoute>,
     pub functions: HashMap<String, FunctionDecl>,
     pub middleware: HashMap<String, MiddlewareDecl>,
+    /// Declared `job`s, by name.
+    pub jobs: HashMap<String, crate::ast::JobDecl>,
     pub route_bodies: HashMap<(String, String), Block>,
+    /// Keyed by the resolved pattern; the method is always the upgrade GET.
+    pub socket_bodies: HashMap<String, SocketBody>,
     pub error_handler: Option<ErrorHandlerDecl>,
     pub errors: HashMap<String, (u16, Option<String>, Vec<String>)>,
     pub server: ServerConfig,
@@ -194,6 +221,7 @@ impl Default for ServerConfig {
 }
 
 /// Per-request state.
+#[derive(Clone)]
 pub struct Request {
     pub method: String,
     pub path: String,
@@ -262,6 +290,10 @@ pub struct Vm<'a> {
     /// long it took is half of what there is to observe.
     pub response_micros: Option<u64>,
     pub extra_headers: Vec<(String, String)>,
+    /// Where `socket.send` / `socket.close` put their frames. `None`
+    /// outside a socket handler — the checker rejects those calls
+    /// (`E0225`), so this being `None` there is belt and braces.
+    pub socket_out: Option<Vec<SocketOut>>,
     /// Set by `serve(port)` in `main()`. The call is the program's own
     /// declaration of where it listens, so `main` is evaluated at boot and
     /// this is what it left behind.
@@ -283,12 +315,27 @@ impl<'a> Vm<'a> {
             response_micros: None,
             serve_port: None,
             extra_headers: Vec::new(),
+            socket_out: None,
             depth: 0,
         }
     }
 
     pub fn set_params(&mut self, params: HashMap<String, Value>) {
         self.params = params;
+    }
+
+    /// Everything the middleware chain left in `context`.
+    ///
+    /// The chain runs before the upgrade, on a `Vm` that cannot outlive
+    /// the handshake — `Vm<'a>` borrows the program. What a socket handler
+    /// needs from it is the bindings, so they are lifted out and handed to
+    /// the connection task, which builds its own `Vm` per event.
+    pub fn context_snapshot(&self) -> HashMap<String, Value> {
+        self.context.clone()
+    }
+
+    pub fn restore_context(&mut self, ctx: HashMap<String, Value>) {
+        self.context = ctx;
     }
 
     pub fn set_context(&mut self, key: &str, v: Value) {
@@ -307,7 +354,7 @@ impl<'a> Vm<'a> {
         self.scopes = saved;
     }
 
-    pub(super) fn bind_param(&mut self, name: &str, v: Value) {
+    pub fn bind_param(&mut self, name: &str, v: Value) {
         self.declare(name, v);
     }
 
@@ -372,6 +419,39 @@ impl<'a> Vm<'a> {
 
     async fn stmt(&mut self, s: &Stmt) -> Exec<Flow> {
         match s {
+            // jobs.md §2 — the arguments are evaluated here, on the
+            // request's connection, and the row is written before the
+            // response goes out. A dispatch inside a `transaction { }` is
+            // therefore rolled back with everything else, which is what
+            // makes "enqueue the email only if the account was created"
+            // expressible at all.
+            Stmt::Dispatch { job, args, .. } => {
+                let Some(decl) = self.program.jobs.get(&job.name).cloned() else {
+                    return Err(Abort::Fault(anyhow::anyhow!(
+                        "unknown job `{}` — the checker should have caught this",
+                        job.name
+                    )));
+                };
+                let mut values: Vec<(String, Value)> = Vec::new();
+                for (name, expr) in args {
+                    let v = self.eval(expr).await?;
+                    values.push((name.name.clone(), v));
+                }
+                // An omitted optional parameter is `null`, so the handler
+                // sees a key either way and does not have to distinguish
+                // "not sent" from "sent as null" (types.md §6.5).
+                for p in &decl.params {
+                    if !values.iter().any(|(k, _)| *k == p.name.name) {
+                        values.push((p.name.name.clone(), Value::Null));
+                    }
+                }
+                let payload = crate::jobs::payload_of(&values);
+                let retries = decl.retries.unwrap_or(5);
+                crate::jobs::enqueue(&job.name, &payload, retries, 0)
+                    .await
+                    .map_err(crate::exec::map_db_error)?;
+                Ok(Flow::Normal)
+            }
             Stmt::Let { name, value, .. } => {
                 let v = self.eval(value).await?;
                 self.declare(&name.name, v);
@@ -1205,6 +1285,31 @@ impl<'a> Vm<'a> {
         let built = b
             .insert(i, &fields.0)
             .ok_or_else(|| fault("this insert is not expressible yet"))?;
+
+        // writes.md §7 — the same statement the query compiler produced,
+        // handed to the batch writer instead of being awaited. There is no
+        // second insert path: `buffered` changes who sends it and when,
+        // not what is sent.
+        if i.buffered {
+            // The writer merges rows into one multi-row `INSERT`, so it
+            // takes the statement in two halves: the static
+            // `INSERT INTO "t" (cols…) VALUES ` prefix two rows must share
+            // to be merged, and this row's values.
+            let Some(cut) = built.sql.find(" VALUES ") else {
+                return Err(fault(
+                    "a buffered insert produced a statement with no VALUES clause",
+                ));
+            };
+            let prefix = format!("{} VALUES ", &built.sql[..cut]);
+            // The tuple is kept verbatim: its casts are what turn a text
+            // bind into the column's type, and a merged statement that
+            // rebuilt them as `($1, $2)` would be refused by the driver.
+            let tuple = built.sql[cut + " VALUES ".len()..].to_string();
+            let binds: Vec<Option<String>> = fields.1.iter().map(|v| v.to_bind()).collect();
+            crate::log_writer::push(&prefix, &tuple, binds);
+            return Ok(Value::Null);
+        }
+
         // The values were already evaluated, so re-evaluating a parameter
         // must not repeat a side effect: bind the computed ones.
         self.run_sql_with(built, fields.1).await

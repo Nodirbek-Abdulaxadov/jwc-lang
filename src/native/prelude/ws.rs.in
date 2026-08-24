@@ -1,0 +1,143 @@
+
+// --- sockets (routing.md §9) -------------------------------------------------
+//
+// This replaces a hand-rolled RFC 6455 implementation — SHA-1, base64, frame
+// masking, the lot — that predated the native server moving to axum. It was
+// 291 lines of protocol nobody was running: `PRELUDE_WS` was declared in
+// `native/mod.rs` and concatenated into no generated crate, and the
+// dispatcher answered 501. Two hand-written WebSocket stacks is one more
+// than the number that can be kept correct, so the framing is axum's, the
+// same as `serve.rs`.
+//
+// The handler model is the interpreter's, exactly: `on open` once, `on
+// message (m)` per text frame, `on close` however it ended. Frames are
+// *queued* by `socket.send` and written by the connection task between
+// handler runs — see `exec::SocketOut` for why. Matching that here is what
+// makes a `socket.close()` followed by a `socket.send(...)` drop the send on
+// both backends rather than on one.
+
+#[derive(Clone, Debug, PartialEq)]
+enum JwcSocketOut {
+    Text(String),
+    Close,
+}
+
+tokio::task_local! {
+    /// What the running handler has queued. Absent outside a handler, which
+    /// is why `socket.send` there is a no-op rather than a panic — the
+    /// checker already refused it (`E0225`).
+    static JWC_SOCKET_OUT: std::sync::Mutex<Vec<JwcSocketOut>>;
+}
+
+fn jwc_socket_queue(item: JwcSocketOut) {
+    let _ = JWC_SOCKET_OUT.try_with(|q| {
+        q.lock().unwrap_or_else(|p| p.into_inner()).push(item);
+    });
+}
+
+fn jwc_b_v1_socket_send(msg: V) -> V {
+    let text = match msg {
+        V::Str(s) => s.into_owned(),
+        other => jwc_v1_text(&other),
+    };
+    jwc_socket_queue(JwcSocketOut::Text(text));
+    V::Null
+}
+
+fn jwc_b_v1_socket_close() -> V {
+    jwc_socket_queue(JwcSocketOut::Close);
+    V::Null
+}
+
+/// Run one handler inside a fresh queue and return what it asked for.
+///
+/// A raise ends the handler and closes the connection: there is no response
+/// to put an error in, and closing is the only signal the protocol has.
+/// `serve.rs::run_socket_handler` does the same.
+async fn jwc_socket_run<F, Fut>(f: F) -> Vec<JwcSocketOut>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = JwcResult>,
+{
+    let queue = std::sync::Mutex::new(Vec::new());
+    JWC_SOCKET_OUT
+        .scope(queue, async move {
+            let raised = f().await.is_err();
+            let mut out = JWC_SOCKET_OUT
+                .try_with(|q| std::mem::take(&mut *q.lock().unwrap_or_else(|p| p.into_inner())))
+                .unwrap_or_default();
+            if raised {
+                out.push(JwcSocketOut::Close);
+            }
+            out
+        })
+        .await
+}
+
+/// The connection. Owns the socket for its whole life, so nothing else can
+/// interleave a frame.
+async fn jwc_drive_socket(
+    mut socket: axum::extract::ws::WebSocket,
+    fns: JwcSocketFns,
+    req: Arc<Request>,
+) {
+    use axum::extract::ws::Message;
+
+    async fn flush(socket: &mut axum::extract::ws::WebSocket, out: Vec<JwcSocketOut>) -> bool {
+        for item in out {
+            match item {
+                JwcSocketOut::Text(t) => {
+                    if socket.send(Message::Text(t)).await.is_err() {
+                        return false;
+                    }
+                }
+                JwcSocketOut::Close => return false,
+            }
+        }
+        true
+    }
+
+    let mut open = true;
+    if let Some(f) = fns.on_open {
+        let out = CURRENT_REQUEST
+            .scope(req.clone(), jwc_socket_run(move || f()))
+            .await;
+        open = flush(&mut socket, out).await;
+    }
+
+    if open {
+        while let Some(msg) = socket.recv().await {
+            let Ok(msg) = msg else { break };
+            match msg {
+                Message::Text(t) => {
+                    let Some(f) = fns.on_message else {
+                        // Send-only socket. Dropping the frame beats
+                        // closing: a peer that speaks first is not an
+                        // error, it is a peer that does not know.
+                        continue;
+                    };
+                    let out = CURRENT_REQUEST
+                        .scope(req.clone(), jwc_socket_run(move || f(v_str(t))))
+                        .await;
+                    if !flush(&mut socket, out).await {
+                        break;
+                    }
+                }
+                // `on message (m)` binds `text`. Coercing a binary frame
+                // through `from_utf8_lossy` would hand the handler a
+                // string the peer never sent.
+                Message::Binary(_) | Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) => {}
+            }
+        }
+    }
+
+    if let Some(f) = fns.on_close {
+        // Whatever it queues is dropped — the connection is over. It runs
+        // for its effects, which is the only reason to have one.
+        let _ = CURRENT_REQUEST
+            .scope(req.clone(), jwc_socket_run(move || f()))
+            .await;
+    }
+    let _ = socket.send(Message::Close(None)).await;
+}

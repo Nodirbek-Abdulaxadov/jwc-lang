@@ -1,0 +1,48 @@
+namespace buffered;
+
+import prelude;
+
+-- writes.md §7 — `buffered` hands the row to the batch writer and returns.
+-- An `after` block is awaited before the response is sent, so an ordinary
+-- insert there puts a round trip on every request's critical path.
+
+middleware AccessLog {
+    after {
+        insert into App.s.Notes {
+            org_id = 1,
+            body = request.route()
+        } buffered;
+    }
+}
+
+service Writes {
+    function fine() {
+        insert into App.s.Notes { org_id = 1, body = "x" } buffered;
+    }
+
+    -- The row is written later and on another connection, so a rollback
+    -- would not take it back.
+    function inside_a_transaction() {
+        transaction {
+            insert into App.s.Notes { org_id = 1, body = "y" } buffered;   -- expect: E0612
+        }
+    }
+
+    -- Nothing to project: it answers before the row exists.
+    function projected() {
+        let row = insert into App.s.Notes { org_id = 1, body = "z" }
+            as { id } buffered;                                            -- expect: E0614
+    }
+
+    -- A conflict resolution nobody observes is a row silently not written.
+    function conflicting() {
+        insert into App.s.Orgs { slug = "w", name = "W" }
+            on conflict (slug) do nothing buffered;                        -- expect: E0613
+    }
+}
+
+routes "/api" use AccessLog {
+    route GET "ping" {
+        return json({ ok: true });
+    }
+}

@@ -79,6 +79,7 @@ pub fn check_with(
         scopes: Vec::new(),
         params: HashMap::new(),
         query: Vec::new(),
+        tx_depth: 0,
         scoped_to: None,
         tainted: HashSet::new(),
         path_keyed: HashSet::new(),
@@ -111,6 +112,16 @@ enum BodyKind {
     ErrorHandler,
     Test,
     View,
+    /// A `job` handler body. No request, no response — it runs on a
+    /// worker, minutes after whatever dispatched it.
+    Job,
+    /// `on open` / `on message (m)` / `on close` inside a `socket`.
+    ///
+    /// One kind rather than three: the three differ in what is *bound*
+    /// (the message binder) and in nothing else. They all see the path
+    /// parameters, they all see `context`, and none of them may answer
+    /// with an HTTP response — the response was the 101 that got here.
+    Socket,
 }
 
 /// One binding inside a query: `select A from …` or `left join … B on …`.
@@ -147,6 +158,10 @@ struct Checker<'a> {
     scopes: Vec<HashMap<String, Ty>>,
     params: HashMap<String, Ty>,
     query: Vec<QueryScope>,
+    /// Nesting depth of `transaction { }`, so a `buffered` insert inside
+    /// one can be refused: the row is written later and on another
+    /// connection, and a rollback would not take it back.
+    tx_depth: usize,
     /// While set, an unqualified identifier resolves against this object
     /// only. Used for projections and for a join result's own
     /// `orderby`/`limit` (queries.md §6.1, §4.6).
@@ -229,6 +244,48 @@ impl<'a> Checker<'a> {
     /// is already known. Outside a route there is nothing to attach it to.
     fn record_response(&mut self, status: u16, payload: Ty) {
         self.record_response_as(status, payload, None);
+    }
+
+    /// `created(json($row))` — the inner `json` already recorded a 200
+    /// carrying `$row`'s type, and then `created` recorded a 201 carrying
+    /// the type of `json(...)`, which is `Response` and has no schema. So
+    /// `jwc openapi` said a POST answers 200 with the object (it does not)
+    /// and 201 with nothing (it answers 201 with the object). That is the
+    /// idiomatic form — it is in the specification's own sample and in
+    /// every template — so essentially every POST in every generated
+    /// document was wrong.
+    ///
+    /// The outer status is the real one. This hands it the inner
+    /// recording's payload and media and drops the inner entry.
+    ///
+    /// Syntactic rather than type-directed on purpose: a bare `Response`
+    /// can also arrive from a user function that built it elsewhere, and
+    /// popping *that* would delete a response the route really produces.
+    fn unwrap_nested_response(&mut self, arg: Option<&Expr>, ty: &Ty) -> (Ty, Option<String>) {
+        if !matches!(ty, Ty::Response) {
+            return (ty.clone(), None);
+        }
+        let nested = arg.is_some_and(|e| match &*e.kind {
+            ExprKind::Call { callee, .. } => {
+                callee_path(callee).is_some_and(|p| is_response_builder(&p))
+            }
+            // `created(json(x) with { … })` — the header suffix wraps the
+            // builder, so look through it.
+            ExprKind::WithHeaders { value, .. } => match &*value.kind {
+                ExprKind::Call { callee, .. } => {
+                    callee_path(callee).is_some_and(|p| is_response_builder(&p))
+                }
+                _ => false,
+            },
+            _ => false,
+        });
+        if !nested {
+            return (Ty::Unknown, None);
+        }
+        match self.responses.pop() {
+            Some(r) => (r.payload, r.media),
+            None => (Ty::Unknown, None),
+        }
     }
 
     fn record_response_as(&mut self, status: u16, payload: Ty, media: Option<String>) {
@@ -327,6 +384,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Decl::Middleware(m) => self.middleware(m),
+            Decl::Job(j) => self.job(j),
             Decl::Routes(r) => self.routes(r),
             Decl::ErrorHandler(h) => self.error_handler(h),
             Decl::Test(t) => {
@@ -457,6 +515,22 @@ impl<'a> Checker<'a> {
         self.body = BodyKind::Free;
     }
 
+    /// jobs.md §1.3 — a job body is a `service` function that answers
+    /// nothing: it has parameters and a database, and no request and no
+    /// response, because by the time it runs the request is long gone.
+    fn job(&mut self, j: &JobDecl) {
+        self.body = BodyKind::Job;
+        self.enter_body();
+        self.push_scope();
+        for p in &j.params {
+            let ty = self.resolve_type(&p.ty);
+            self.declare(&p.name.name, ty, p.name.span);
+        }
+        self.block(&j.body);
+        self.pop_scope();
+        self.body = BodyKind::Free;
+    }
+
     fn routes(&mut self, r: &RoutesDecl) {
         let prefix_params = path_params(&r.prefix);
         for route in &r.routes {
@@ -504,6 +578,42 @@ impl<'a> Checker<'a> {
                     "routing.md §6.4",
                 );
             }
+        }
+        for sock in &r.sockets {
+            let pattern = crate::wiring::route_pattern(&r.prefix, &sock.suffix);
+            self.route = Some(format!("WS {pattern}"));
+            self.body = BodyKind::Socket;
+            self.params.clear();
+            self.untyped_params = untyped_path_params(&r.prefix)
+                .into_iter()
+                .chain(untyped_path_params(&sock.suffix))
+                .collect();
+            for (name, ty) in prefix_params.iter().chain(path_params(&sock.suffix).iter()) {
+                self.params.insert(name.clone(), ty.clone());
+            }
+
+            for (binder, body) in [
+                (None, sock.on_open.as_ref()),
+                (
+                    sock.on_message.as_ref().map(|(b, _)| b),
+                    sock.on_message.as_ref().map(|(_, b)| b),
+                ),
+                (None, sock.on_close.as_ref()),
+            ] {
+                let Some(body) = body else { continue };
+                self.enter_body();
+                self.push_scope();
+                // The frame, as `text`. Binary frames are not delivered
+                // here — routing.md §9.2 answers them with a close.
+                if let Some(b) = binder {
+                    self.declare(&b.name, Ty::text(), b.span);
+                }
+                self.block(body);
+                self.pop_scope();
+            }
+
+            self.untyped_params.clear();
+            self.route = None;
         }
         self.params.clear();
         self.body = BodyKind::Free;
@@ -788,6 +898,21 @@ impl<'a> Checker<'a> {
                         "middleware.md §5.3",
                     );
                 }
+                // routing.md §9.2 — the HTTP response for a socket was the
+                // 101 that got the connection here. A handler that returned
+                // one would build a response nothing sends, and the frame
+                // it meant to send would never go.
+                if self.body == BodyKind::Socket && value.is_some() {
+                    self.err_note(
+                        *span,
+                        "E0814",
+                        "`return <value>` inside a socket handler",
+                        "the HTTP response was the upgrade; write `socket.send(...)` \
+                         to answer on the connection, and bare `return;` to end the \
+                         handler",
+                        "routing.md §9.2",
+                    );
+                }
                 // routing.md §6.4 — `return $account;` is the mistake; the
                 // fix is `return json($account);`. Void is left to E0731,
                 // which is about the path not ending in a response at all.
@@ -886,6 +1011,93 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::Dispatch {
+                job, args, span, ..
+            } => {
+                let Some(sym) = self.sym.jobs.get(&job.name).cloned() else {
+                    self.err_note(
+                        job.span,
+                        "E0364",
+                        format!("unknown job `{}`", job.name),
+                        "a `dispatch` names a `job` declared somewhere in the program",
+                        "jobs.md §2",
+                    );
+                    for (_, v) in args {
+                        self.expr(v);
+                    }
+                    return;
+                };
+
+                // jobs.md §2.2 — a job runs on a worker, minutes later. An
+                // `after` block has already sent its response, and a job
+                // dispatched from a *finished* request is fine; what is not
+                // fine is dispatching from a job body, which is how a
+                // runaway loop of work gets written by accident.
+                if self.body == BodyKind::Job {
+                    self.err_note(
+                        *span,
+                        "E0365",
+                        format!("`dispatch {}` inside a job", job.name),
+                        "a job that dispatches jobs has no bound on the work it \
+                         creates; do the work here, or split the route that \
+                         dispatched this one",
+                        "jobs.md §2.2",
+                    );
+                }
+
+                let mut seen: Vec<&str> = Vec::new();
+                for (name, value) in args {
+                    let got = self.expr(value);
+                    if seen.contains(&name.name.as_str()) {
+                        self.err_note(
+                            name.span,
+                            "E0366",
+                            format!("`{}` is given twice", name.name),
+                            "each parameter is named once",
+                            "jobs.md §2",
+                        );
+                    }
+                    seen.push(&name.name);
+                    match sym.params.iter().find(|(p, _)| *p == name.name) {
+                        Some((_, want)) => {
+                            if !got.assignable_to(want) {
+                                self.err_note(
+                                    value.span,
+                                    "E0367",
+                                    format!(
+                                        "`{}` takes `{want}` for `{}`, given `{got}`",
+                                        job.name, name.name
+                                    ),
+                                    "the dispatch site is checked against the \
+                                     declaration, like any other call",
+                                    "jobs.md §2",
+                                );
+                            }
+                        }
+                        None => self.err_note(
+                            name.span,
+                            "E0368",
+                            format!("`{}` has no parameter `{}`", job.name, name.name),
+                            "the parameters are named in the `job` declaration",
+                            "jobs.md §2",
+                        ),
+                    }
+                }
+                for (p, ty) in &sym.params {
+                    // An absent argument for an optional parameter is
+                    // `null`, which is what `T?` means. A required one has
+                    // no such reading.
+                    if !seen.contains(&p.as_str()) && !matches!(ty, Ty::Optional(_)) {
+                        self.err_note(
+                            *span,
+                            "E0369",
+                            format!("`{}` needs `{p}`", job.name),
+                            "every non-optional parameter is given at the dispatch site",
+                            "jobs.md §2",
+                        );
+                    }
+                }
+            }
             Stmt::Transaction { body, span, .. } => {
                 if !matches!(self.body, BodyKind::Service | BodyKind::Test) {
                     self.err_note(
@@ -897,7 +1109,9 @@ impl<'a> Checker<'a> {
                         "writes.md §7.4",
                     );
                 }
+                self.tx_depth += 1;
                 self.block(body);
+                self.tx_depth -= 1;
             }
             Stmt::Assert { kind, span, .. } => match kind {
                 AssertKind::Expr(e) => {
@@ -1031,7 +1245,7 @@ impl<'a> Checker<'a> {
             ExprKind::PathParam(i) => {
                 if !matches!(
                     self.body,
-                    BodyKind::Route | BodyKind::Middleware | BodyKind::After
+                    BodyKind::Route | BodyKind::Middleware | BodyKind::After | BodyKind::Socket
                 ) {
                     self.err_note(
                         i.span,
@@ -2028,7 +2242,8 @@ impl<'a> Checker<'a> {
                     "badRequest" => 400,
                     _ => 200,
                 };
-                self.record_response(status, a0.clone());
+                let (payload, media) = self.unwrap_nested_response(exprs.first(), &a0);
+                self.record_response_as(status, payload, media);
                 self.reject_private_response(exprs.first(), path, span);
                 // types.md §6.4 — `json(x)` with `x : T?` answers 200 null
                 // where it means 404.
@@ -2066,7 +2281,9 @@ impl<'a> Checker<'a> {
             "statusCode" => {
                 arity(self, 2);
                 if let Some(n) = exprs.first().and_then(literal_status) {
-                    self.record_response(n, args.get(1).cloned().unwrap_or(Ty::Unknown));
+                    let inner = args.get(1).cloned().unwrap_or(Ty::Unknown);
+                    let (payload, media) = self.unwrap_nested_response(exprs.get(1), &inner);
+                    self.record_response_as(n, payload, media);
                 }
                 Ty::Response
             }
@@ -2488,6 +2705,50 @@ impl<'a> Checker<'a> {
             }
             "mail.send" => {
                 arity(self, 3);
+                Ty::Void
+            }
+            "mail.enabled" => {
+                arity(self, 0);
+                Ty::boolean()
+            }
+
+            // --- sockets (builtins.md §9, routing.md §9.2)
+            //
+            // Only inside a `socket` handler: there is no connection to
+            // send on anywhere else, and a `socket.send` in a route body
+            // would typecheck and then fault at run time.
+            "socket.send" | "socket.close" => {
+                arity(self, if path == "socket.send" { 1 } else { 0 });
+                if self.body != BodyKind::Socket {
+                    self.err_note(
+                        span,
+                        "E0225",
+                        format!("`{path}(...)` outside a `socket` handler"),
+                        "`socket.*` needs a connection; it is legal in `on open`, \
+                         `on message` and `on close`",
+                        "routing.md §9.2",
+                    );
+                }
+                Ty::Void
+            }
+
+            // --- process-local cache (builtins.md §8). Same shapes as the
+            // `redis.*` four it mirrors, so swapping one for the other is a
+            // rename and not a rewrite.
+            "cache.get" => {
+                arity(self, 1);
+                Ty::text().opt()
+            }
+            "cache.set" => {
+                arity(self, 3);
+                Ty::boolean()
+            }
+            "cache.del" => {
+                arity(self, 1);
+                Ty::int()
+            }
+            "cache.clear" => {
+                arity(self, 0);
                 Ty::Void
             }
 
@@ -2954,12 +3215,22 @@ impl<'a> Checker<'a> {
             })
             .collect();
         // A projection alias of a grouped column counts as grouped.
+        //
+        // `group by` above collects the *column* name from either spelling —
+        // bare `status` or qualified `C.name` — so the alias map has to read
+        // both too. It used to read only the bare one, which made
+        // `group by T.column_id, C.name` + `as { column_name: C.name }` an
+        // E0531 against a column that was plainly grouped: the alias mapped
+        // to nothing, so `column_name` was looked up as if it were the
+        // column. A projection that aliased a qualified column to its own
+        // name worked by coincidence and one that renamed it did not.
         let aliases: HashMap<String, String> = p
             .fields
             .iter()
             .filter_map(|f| match f {
                 ProjField::Expr { alias, value, .. } => match &*value.kind {
                     ExprKind::Name(n) => Some((alias.name.clone(), n.name.clone())),
+                    ExprKind::Field { field, .. } => Some((alias.name.clone(), field.name.clone())),
                     _ => None,
                 },
                 _ => None,
@@ -3224,6 +3495,48 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------ writes
 
     fn insert(&mut self, i: &InsertExpr, span: Span) -> Ty {
+        if i.buffered {
+            // writes.md §7 — the row is handed to a batch writer and this
+            // returns immediately, so there is nothing to project.
+            if let Some(p) = &i.projection {
+                self.err_note(
+                    p.span,
+                    "E0614",
+                    "`as { … }` on a buffered insert",
+                    "a buffered insert answers before the row is written, so \
+                     there is no row to project — drop the `as`, or drop \
+                     `buffered`",
+                    "writes.md §7.2",
+                );
+            }
+            // The row does not take part: it is written later, on another
+            // connection, and a rollback here leaves it in the table.
+            // Silently is how a "transactional" audit row gets written for
+            // a transaction that failed.
+            if self.tx_depth > 0 {
+                self.err_note(
+                    span,
+                    "E0612",
+                    "`buffered` inside a `transaction { }`",
+                    "a buffered row is written later and on another connection, \
+                     so a rollback would not take it back — drop `buffered` if \
+                     the row belongs to the transaction",
+                    "writes.md §7.2",
+                );
+            }
+            // `on conflict` needs the statement's own outcome, which the
+            // caller never sees.
+            if let Some(c) = &i.conflict {
+                self.err_note(
+                    c.span,
+                    "E0613",
+                    "`on conflict` on a buffered insert",
+                    "a buffered insert reports nothing, so a conflict resolution \
+                     nobody observes is a row silently not written",
+                    "writes.md §7.2",
+                );
+            }
+        }
         let Some(object) = self.resolve_source(&i.table) else {
             return Ty::Unknown;
         };
@@ -3826,7 +4139,9 @@ fn is_namespace(name: &str) -> bool {
             | "response"
             | "context"
             | "redis"
+            | "cache"
             | "mail"
+            | "socket"
             | "count"
             | "App"
     )
@@ -4120,6 +4435,29 @@ fn path_params(path: &str) -> Vec<(String, Ty)> {
         rest = &rest[open + close + 1..];
     }
     out
+}
+
+/// The response builders of routing.md §6.1 — the calls whose whole
+/// purpose is to *be* the response, so nesting one inside another means
+/// the outer one is choosing the status for the inner one's body.
+fn is_response_builder(path: &str) -> bool {
+    matches!(
+        path,
+        "json"
+            | "created"
+            | "accepted"
+            | "badRequest"
+            | "unauthorized"
+            | "forbidden"
+            | "notFound"
+            | "conflict"
+            | "tooManyRequests"
+            | "noContent"
+            | "internalError"
+            | "statusCode"
+            | "redirect"
+            | "content"
+    )
 }
 
 fn callee_path(e: &Expr) -> Option<String> {

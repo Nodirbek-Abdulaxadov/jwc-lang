@@ -1,0 +1,45 @@
+namespace services.notes;
+
+import app;
+import db.notes;
+import dto.notes;
+
+service NoteService {
+    --- Keyset pagination. The order has to be total — `created_at desc,
+    --- id desc` — and `index on (created_at, id)` in db/notes.jwc is what
+    --- keeps it off a sequential scan. The answer is
+    --- `{ items, next, has_more }`; feed `next` back as `?cursor=`.
+    function list(cursor: text?, size: int) {
+        return select N from App.notes.Notes
+            where archived == false
+            as { id, title, body, created_at }
+            orderby created_at desc, id desc
+            page after $cursor size $size max 100;
+    }
+
+    function get(id: bigint) {
+        return select N from App.notes.Notes
+            where id == $id
+            as { id, title, body, archived, created_at, updated_at }
+            first or throw NotFound("bunday eslatma yo'q");
+    }
+
+    function create(req: NoteCreate) {
+        return insert into App.notes.Notes {
+            ...$req
+        } as { id, title, body, created_at };
+    }
+
+    function edit(id: bigint, req: NoteEdit) {
+        return update App.notes.Notes
+            set ...$req, updated_at = date.now()
+            where id == $id
+            as { id, title, body, archived, updated_at }
+            first or throw NotFound("bunday eslatma yo'q");
+    }
+
+    function remove(id: bigint) {
+        delete from App.notes.Notes
+            where id == $id;
+    }
+}

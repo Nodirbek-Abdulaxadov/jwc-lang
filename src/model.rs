@@ -189,7 +189,12 @@ pub struct ForeignKeyObj {
     pub name: String,
     pub columns: Vec<String>,
     pub target_schema: String,
+    /// The target's **physical** name. Resolved after every table is known
+    /// (`resolve_foreign_key_targets`), because a table may rename itself
+    /// with `as "…"` and the reference names it as declared.
     pub target_table: String,
+    /// The target as the source wrote it — `Users`, not `user`.
+    pub target_declared: String,
     pub target_columns: Vec<String>,
     pub on_delete: Option<RefAction>,
     pub on_update: Option<RefAction>,
@@ -339,6 +344,7 @@ impl<'a> Builder<'a> {
             (&a.schema_physical, &a.physical).cmp(&(&b.schema_physical, &b.physical))
         });
 
+        self.resolve_foreign_key_targets();
         self.check_foreign_key_targets();
         self.check_physical_collisions();
     }
@@ -593,6 +599,7 @@ impl<'a> Builder<'a> {
         for c in &t.constraints {
             match c {
                 TableConstraint::PrimaryKey {
+                    at: _,
                     columns: cols,
                     span,
                 } => {
@@ -618,6 +625,7 @@ impl<'a> Builder<'a> {
                     });
                 }
                 TableConstraint::ForeignKey {
+                    at: _,
                     columns: cols,
                     target,
                     target_columns,
@@ -670,7 +678,12 @@ impl<'a> Builder<'a> {
                         name: naming::foreign_key(&physical, &phys),
                         columns: phys,
                         target_schema,
+                        // Provisional: the snake_case of the declared name is
+                        // right only when the target did not override its
+                        // physical name. `resolve_foreign_key_targets` fixes
+                        // it once every table is in the model.
                         target_table: naming::physical(&target.object.name),
+                        target_declared: target.object.name.clone(),
                         target_columns: target_columns
                             .iter()
                             .map(|i| naming::physical(&i.name))
@@ -681,6 +694,7 @@ impl<'a> Builder<'a> {
                     });
                 }
                 TableConstraint::Unique {
+                    at: _,
                     columns: cols,
                     predicate,
                     message,
@@ -707,6 +721,7 @@ impl<'a> Builder<'a> {
                     });
                 }
                 TableConstraint::Check {
+                    at: _,
                     expr,
                     message,
                     span,
@@ -982,7 +997,10 @@ impl<'a> Builder<'a> {
         Some(CheckObj {
             name: naming::check_column(table, &col.physical, &r.name.name.to_lowercase()),
             expr,
-            message: None,
+            // `pattern(r"…") : "email shakli noto'g'ri"`. Without this a
+            // message-less column rule was a 500 and `W1302`'s advice —
+            // "add `: \"…\"`" — did not parse.
+            message: r.message.clone(),
             loc: col.loc,
         })
     }
@@ -1121,6 +1139,41 @@ impl<'a> Builder<'a> {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// Point every foreign key at its target's **physical** name.
+    ///
+    /// A reference names the target as declared — `references App.public.Users`
+    /// — and the target may have renamed itself with `as "user"`. Deriving the
+    /// physical name from the reference instead of from the target made every
+    /// such key unresolvable: `E0422: public.users is not a declared table`,
+    /// against a program that declares exactly that table. `as "…"` exists so
+    /// a program can keep the physical names a database already has, which is
+    /// what a port needs, and this made it unusable on any table another one
+    /// points at.
+    fn resolve_foreign_key_targets(&mut self) {
+        use std::collections::HashMap;
+        let by_declared: HashMap<(String, String), String> = self
+            .model
+            .tables
+            .iter()
+            .map(|t| {
+                (
+                    (t.schema_physical.clone(), t.declared.clone()),
+                    t.physical.clone(),
+                )
+            })
+            .collect();
+        for t in &mut self.model.tables {
+            for fk in &mut t.foreign_keys {
+                let key = (fk.target_schema.clone(), fk.target_declared.clone());
+                if let Some(physical) = by_declared.get(&key) {
+                    fk.target_table = physical.clone();
+                }
+                // No entry means the target is not declared at all, which is
+                // `check_foreign_key_targets`'s message to give.
+            }
         }
     }
 

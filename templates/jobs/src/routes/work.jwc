@@ -1,0 +1,28 @@
+namespace routes.work;
+
+import app;
+import db.work;
+import dto.work;
+import jobs.deliver;
+
+routes "/api/v1/deliveries" {
+    route POST "" {
+        let req = request.body() as DeliveryRequest;
+
+        --- Written on this request's connection, before the response goes
+        --- out — so a `transaction { }` around it would roll the dispatch
+        --- back with everything else.
+        dispatch Deliver(recipient: $req.recipient, subject: $req.subject);
+
+        return accepted(json({ queued: true }));
+    }
+
+    route GET "" {
+        let rows = select D from App.work.Deliveries
+            as { id, recipient, subject, delivered_at }
+            orderby delivered_at desc, id desc
+            limit 50;
+
+        return json($rows);
+    }
+}

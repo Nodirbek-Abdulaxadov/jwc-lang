@@ -631,6 +631,7 @@ transaction's connection.
 | `E0502` | source is not a table or view |
 | `E0503` | `==?` on a non-nullable operand |
 | `E0510` | ambiguous join attachment — add `under <binding>` |
+| `E0511` | `under` names no binding in this query |
 | `E0520` | `first` without `orderby` on a non-unique predicate |
 | `E0521` | `orderby` on an `as many` field |
 | `E0530` | aggregate outside a grouped projection |
@@ -638,6 +639,8 @@ transaction's connection.
 | `E0532` | bare-join aggregation combined with `as many` |
 | `E0533` | aggregate filter on a non-aggregate call |
 | `E0534` | field read on a binding that is not a join result |
+| `E0535` | join does not say what it produces |
+| `E0536` | `as many` without `orderby` |
 | `E0540` | view body has no projection |
 | `E0541` | view body carries a per-query clause |
 | `E0542` | pagination pushdown cannot be proven |

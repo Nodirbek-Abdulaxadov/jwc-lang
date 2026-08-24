@@ -1,0 +1,97 @@
+namespace app;
+
+database App : Postgres;
+schema s of App;
+
+table Notes of App.s {
+    id    bigint primary key identity;
+    title varchar(200);
+}
+
+class NewNote {
+    title varchar(200) required, minLength(2);
+}
+
+middleware Guard {
+    let key = request.header("X-Key") or throw Unauthorized("kalit kerak");
+    if ($key != "secret") {
+        throw Unauthorized("kalit noto'g'ri");
+    }
+
+    after {
+        response.set_header("X-Route", request.route());
+    }
+}
+
+service Notes {
+    function rename(id: bigint, title: text) {
+        transaction {
+            update App.s.Notes
+                set title = $title
+                where id == $id;
+        }
+
+        return $title;
+    }
+}
+
+function greeting(who: text) -> text {
+    return "salom, " + $who;
+}
+
+routes "/" {
+    route GET "hello" {
+        let who = request.query("who") ?? "dunyo";
+        return json({ message: greeting($who), upper: string.upper($who) });
+    }
+
+    route GET "count" {
+        let total = 0;
+        for (n in [1, 2, 3, 4, 5]) {
+            if ($n == 3) { continue; }
+            $total = $total + $n;
+        }
+        return json({ total: $total });
+    }
+}
+
+routes "/notes" use Guard {
+    route GET "" {
+        let rows = select N from App.s.Notes as { id, title } orderby id desc limit 50;
+
+        return json($rows);
+    }
+
+    route GET "{id: bigint}" {
+        let row = select N from App.s.Notes
+            where id == @id
+            as { id, title }
+            first or throw NotFound("bunday eslatma yo'q");
+
+        return json($row);
+    }
+
+    route POST "" {
+        let body = request.body() as NewNote;
+
+        let row = insert into App.s.Notes { title = $body.title } as { id, title };
+
+        return created(json($row));
+    }
+
+    route PATCH "{id: bigint}" {
+        Notes.rename(@id, "yangi");
+
+        return noContent();
+    }
+
+    route DELETE "{id: bigint}" {
+        delete from App.s.Notes where id == @id;
+
+        return noContent();
+    }
+}
+
+function main() {
+    serve(8090);
+}

@@ -1,0 +1,6 @@
+namespace dto.work;
+
+class DeliveryRequest {
+    recipient varchar(255) required, pattern(r"^[^@]+@[^@]+\.[^@]+$") : "email manzili yaroqsiz";
+    subject   varchar(200) required, minLength(2) : "sarlavha kamida 2 ta belgi bo'lsin";
+}

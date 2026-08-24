@@ -386,3 +386,312 @@ fn only_a_package_is_published_and_only_under_a_name_a_program_can_import() {
         text(&out)
     );
 }
+
+/// Build a `.tar.gz` holding one manifest and one source, and serve it.
+fn serve_archive(stub: &Stub, manifest: &str) {
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut add = |name: &str, body: &str| {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append_data(&mut h, name, body.as_bytes())
+            .expect("append");
+    };
+    add("jwcproj.json", manifest);
+    add("main.jwc", "namespace demo;\n");
+    let bytes = {
+        let raw = tar.into_inner().expect("tar");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        use std::io::Write;
+        gz.write_all(&raw).expect("gz");
+        gz.finish().expect("gz")
+    };
+    let sha = jwc::hash::sha256_hex_bytes(&bytes);
+    stub.state.lock().expect("lock").serving = Some((bytes, sha));
+}
+
+fn app_with_deps(dir: &Path, deps: &str) {
+    std::fs::write(
+        dir.join("jwcproj.json"),
+        format!(
+            r#"{{ "name": "myapp", "version": "0.1.0", "type": "app", "dependencies": {deps} }}"#
+        ),
+    )
+    .expect("manifest");
+    std::fs::write(dir.join("main.jwc"), "namespace myapp;\n").expect("source");
+}
+
+/// `jwc install` is what a fresh clone needs: `jwc_packages/` is a build
+/// artefact for most projects, so a checkout has the manifest and none of
+/// the sources, and every package `import` fails on something that looks
+/// correct in the file.
+#[test]
+fn install_fetches_what_the_manifest_declares_and_respects_the_range() {
+    let stub = Stub::start();
+    let home = tempfile::tempdir().expect("tempdir");
+    serve_archive(
+        &stub,
+        r#"{ "name": "demo", "version": "0.1.0", "type": "pkg" }"#,
+    );
+
+    let app = tempfile::tempdir().expect("tempdir");
+    app_with_deps(app.path(), r#"{ "demo": "^0.1.0" }"#);
+    assert!(
+        !app.path().join("jwc_packages/demo/main.jwc").exists(),
+        "the fixture starts with nothing vendored"
+    );
+
+    let out = jwc(
+        &[
+            "install",
+            app.path().to_str().expect("utf8"),
+            "--registry",
+            &stub.url(),
+        ],
+        home.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        app.path().join("jwc_packages/demo/main.jwc").exists(),
+        "{}",
+        text(&out)
+    );
+    // The stub serves 0.2.0 and 0.1.0, newest first. `^0.1.0` on a 0.x
+    // version is `>=0.1.0, <0.2.0`, so taking the newest would be wrong.
+    assert!(
+        text(&out).contains("demo 0.1.0"),
+        "the range was ignored: {}",
+        text(&out)
+    );
+}
+
+/// A second run must not re-download what is already there — that is the
+/// difference between `install` and a loop of `add`, and the reason it is
+/// safe to put in a build script.
+#[test]
+fn install_leaves_a_present_package_alone_unless_forced() {
+    let stub = Stub::start();
+    let home = tempfile::tempdir().expect("tempdir");
+    serve_archive(
+        &stub,
+        r#"{ "name": "demo", "version": "0.1.0", "type": "pkg" }"#,
+    );
+
+    let app = tempfile::tempdir().expect("tempdir");
+    app_with_deps(app.path(), r#"{ "demo": "^0.1.0" }"#);
+    let args = [
+        "install",
+        app.path().to_str().expect("utf8"),
+        "--registry",
+        &stub.url(),
+    ];
+    assert!(jwc(&args, home.path()).status.success());
+
+    // A file the archive does not carry: if the second run re-unpacked, it
+    // would be gone, because unpacking clears the directory first.
+    let marker = app.path().join("jwc_packages/demo/LOCAL");
+    std::fs::write(&marker, "mine").expect("write");
+
+    let again = jwc(&args, home.path());
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(text(&again).contains("already present"), "{}", text(&again));
+    assert!(marker.exists(), "the second install re-downloaded");
+
+    let forced = jwc(
+        &[
+            "install",
+            app.path().to_str().expect("utf8"),
+            "--registry",
+            &stub.url(),
+            "--force",
+        ],
+        home.path(),
+    );
+    assert!(forced.status.success(), "{}", text(&forced));
+    assert!(!marker.exists(), "--force did not re-download");
+}
+
+/// A vendored package's own manifest may declare dependencies, and its
+/// imports resolve against them, so `install` follows them. The stub
+/// serves the same archive under every name, so this also walks a cycle —
+/// which must terminate rather than fetch forever.
+#[test]
+fn install_follows_a_packages_own_dependencies_without_looping() {
+    let stub = Stub::start();
+    let home = tempfile::tempdir().expect("tempdir");
+    serve_archive(
+        &stub,
+        r#"{ "name": "demo", "version": "0.1.0", "type": "pkg", "dependencies": { "other": "^0.1.0" } }"#,
+    );
+
+    let app = tempfile::tempdir().expect("tempdir");
+    app_with_deps(app.path(), r#"{ "demo": "^0.1.0" }"#);
+
+    let out = jwc(
+        &[
+            "install",
+            app.path().to_str().expect("utf8"),
+            "--registry",
+            &stub.url(),
+        ],
+        home.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        app.path().join("jwc_packages/demo/main.jwc").exists(),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        app.path().join("jwc_packages/other/main.jwc").exists(),
+        "a package's own dependency was not followed: {}",
+        text(&out)
+    );
+}
+
+/// `install` must not silently take whatever shipped today when the
+/// recorded range is a typo.
+#[test]
+fn an_unparseable_requirement_is_an_error_not_a_shrug() {
+    let stub = Stub::start();
+    let home = tempfile::tempdir().expect("tempdir");
+    serve_archive(
+        &stub,
+        r#"{ "name": "demo", "version": "0.1.0", "type": "pkg" }"#,
+    );
+
+    let app = tempfile::tempdir().expect("tempdir");
+    app_with_deps(app.path(), r#"{ "demo": "latest" }"#);
+
+    let out = jwc(
+        &[
+            "install",
+            app.path().to_str().expect("utf8"),
+            "--registry",
+            &stub.url(),
+        ],
+        home.path(),
+    );
+    assert!(
+        !out.status.success(),
+        "`latest` was accepted: {}",
+        text(&out)
+    );
+    assert!(text(&out).contains("semver range"), "{}", text(&out));
+    assert!(!app.path().join("jwc_packages/demo").exists());
+}
+
+/// `jwc update` moves within the recorded range and not past it. Crossing
+/// a major is `jwc add name@version` — a change to the requirement, and
+/// one that says so in the diff.
+#[test]
+fn update_moves_within_the_range_and_records_what_it_installed() {
+    let stub = Stub::start();
+    let home = tempfile::tempdir().expect("tempdir");
+    serve_archive(
+        &stub,
+        r#"{ "name": "demo", "version": "0.1.0", "type": "pkg" }"#,
+    );
+
+    let app = tempfile::tempdir().expect("tempdir");
+    app_with_deps(app.path(), r#"{ "demo": "^0.2.0" }"#);
+
+    let out = jwc(
+        &[
+            "update",
+            app.path().to_str().expect("utf8"),
+            "--registry",
+            &stub.url(),
+        ],
+        home.path(),
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("demo 0.2.0"), "{}", text(&out));
+
+    let manifest = std::fs::read_to_string(app.path().join("jwcproj.json")).expect("manifest");
+    assert!(
+        manifest.contains("\"demo\": \"^0.2.0\""),
+        "the manifest should record what was installed: {manifest}"
+    );
+
+    // A name that is not a dependency is a mistake worth naming.
+    let bad = jwc(
+        &[
+            "update",
+            app.path().to_str().expect("utf8"),
+            "--package",
+            "nosuch",
+            "--registry",
+            &stub.url(),
+        ],
+        home.path(),
+    );
+    assert!(!bad.status.success());
+    assert!(text(&bad).contains("is not a dependency"), "{}", text(&bad));
+}
+
+/// `remove` and `tree` never touch the network.
+#[test]
+fn remove_and_tree_work_offline() {
+    let stub = Stub::start();
+    let home = tempfile::tempdir().expect("tempdir");
+    serve_archive(
+        &stub,
+        r#"{ "name": "demo", "version": "0.1.0", "type": "pkg" }"#,
+    );
+
+    let app = tempfile::tempdir().expect("tempdir");
+    app_with_deps(app.path(), r#"{ "demo": "^0.1.0", "other": "^0.1.0" }"#);
+
+    // `tree` before anything is installed: it says so, which is the state
+    // `install` exists to fix.
+    let before = jwc(&["tree", app.path().to_str().expect("utf8")], home.path());
+    assert!(before.status.success(), "{}", text(&before));
+    assert!(text(&before).contains("not installed"), "{}", text(&before));
+
+    assert!(jwc(
+        &[
+            "install",
+            app.path().to_str().expect("utf8"),
+            "--registry",
+            &stub.url(),
+        ],
+        home.path(),
+    )
+    .status
+    .success());
+
+    let after = jwc(&["tree", app.path().to_str().expect("utf8")], home.path());
+    assert!(after.status.success(), "{}", text(&after));
+    assert!(text(&after).contains("myapp"), "{}", text(&after));
+    assert!(text(&after).contains("demo 0.1.0"), "{}", text(&after));
+
+    // No `--registry`, and the stub would answer if one were contacted.
+    let rm = jwc(
+        &["remove", "demo", app.path().to_str().expect("utf8")],
+        home.path(),
+    );
+    assert!(rm.status.success(), "{}", text(&rm));
+    assert!(
+        !app.path().join("jwc_packages/demo").exists(),
+        "the sources are still on disk"
+    );
+    let manifest = std::fs::read_to_string(app.path().join("jwcproj.json")).expect("manifest");
+    assert!(!manifest.contains("\"demo\""), "{manifest}");
+    assert!(
+        manifest.contains("\"other\""),
+        "it removed the wrong one: {manifest}"
+    );
+
+    let twice = jwc(
+        &["remove", "demo", app.path().to_str().expect("utf8")],
+        home.path(),
+    );
+    assert!(!twice.status.success());
+    assert!(
+        text(&twice).contains("is not a dependency"),
+        "{}",
+        text(&twice)
+    );
+}
