@@ -34,7 +34,7 @@ keeps the wire format.
 let org = select O from App.org.Orgs
     where id == $id
     as { id, name }
-    first or throw NotFound("topilmadi");
+    first or throw NotFound("not found");
 ```
 
 `first` answers `T?`, and reading a field of a `T?` is `E0320`. The
@@ -58,7 +58,7 @@ return json(select O from App.org.Orgs where id == $id first);
 let org = select O from App.org.Orgs
     where id == $id
     as { id, name, created_at }
-    first or throw NotFound("topilmadi");
+    first or throw NotFound("not found");
 return json({ id: $org.id, label: $org.name });
 ```
 

@@ -38,7 +38,7 @@ The construct that most JWC code is built out of:
 let account = select A from App.auth.Accounts
     where id == $account_id
     as { id, email }
-    first or throw NotFound("akkaunt topilmadi");
+    first or throw NotFound("account not found");
 ```
 
 `first` answers `Record?`. `or throw` turns the null into the error, and
@@ -50,7 +50,7 @@ The same shape works on anything nullable:
 
 ```jwc no-compile
 let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
-let header = request.header("Authorization") or throw Unauthorized("token kerak");
+let header = request.header("Authorization") or throw Unauthorized("a bearer token is required");
 ```
 
 ## `throw`
@@ -69,7 +69,7 @@ is no falling through to a value that was never produced.
 ```jwc no-compile
 WorkspaceService.require_member($p.workspace_id, $req.user_id)
     catch NotAMember (e) {
-        throw BadRequest("bu foydalanuvchi ish maydoni a'zosi emas");
+        throw BadRequest("that user is not a member of this workspace");
     };
 ```
 
@@ -93,7 +93,7 @@ message. The arm is for the ones that need a different body.
 Without an arm, a thrown error becomes:
 
 ```json
-{"error":"akkaunt topilmadi"}
+{"error":"account not found"}
 ```
 
 with the declared status.

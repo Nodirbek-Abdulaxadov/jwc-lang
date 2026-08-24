@@ -79,7 +79,7 @@ email varchar(255) unique : "bu email allaqachon ro'yxatdan o'tgan";
 
 unique (org_id, slug) : "bu tashkilotda bunday slug bor";
 
-check (amount > 0) : "summa musbat bo'lishi kerak";
+check (amount > 0) : "amount must be positive";
 
 -- Column rules take one too, and a column can carry several:
 email varchar(255) unique : "bu email band", pattern(r"^[^@]+@[^@]+$") : "email yaroqsiz";

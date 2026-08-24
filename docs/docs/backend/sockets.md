@@ -46,7 +46,7 @@ This is the reason `use` on a socket is worth anything:
 
 ```jwc no-compile
 middleware RequireAuth provides account_id: bigint {
-    let header = request.header("Authorization") or throw Unauthorized("token kerak");
+    let header = request.header("Authorization") or throw Unauthorized("a bearer token is required");
     -- …
 }
 ```

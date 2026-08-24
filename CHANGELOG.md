@@ -3,6 +3,44 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.916] — the page that argued against its own product — 2026-08-24
+
+"What 1.0 does not have" listed background jobs, WebSocket, an in-process
+cache and outbound email as not declarable, and had a table saying the
+queue was **deleted**, that sockets were "unreachable — nothing can
+declare one", and that "`cache.*` is not a built-in".
+
+All four were implemented across 0.9.902–0.9.910. The page is the one
+someone reads while deciding whether to adopt JWC, and it was telling them
+the compiler could not do things it does.
+
+It now says what is actually missing — SSE, sequences, generated columns,
+a 0.9→1.0 codemod — carries a note saying the earlier version was wrong so
+a reader who remembers it is corrected rather than confused, and lists the
+four as present with links.
+
+A test keys the page to the compiler: nothing in its absent section may
+name a declaration keyword the parser accepts (`job`, `socket`, …) or a
+namespace `is_namespace` resolves (`cache`, `mail`, `redis`). Restoring the
+old `job` row to the page fails it.
+
+### Uzbek in the English docs
+
+Sample code threw `NotFound("akkaunt topilmadi")`, `Unauthorized("token
+kerak")` and similar in twelve places across eight pages. Those are strings
+this repository wrote, and they are English now.
+
+The rest is not a docs bug and has not been changed: the compiler's own
+validation messages really are Uzbek — `"password kamida 10 belgidan
+iborat bo'lishi kerak"` is what a 400 body contains — so a page showing
+anything else would be describing output that does not exist. What was
+missing is that the docs never mentioned the per-rule `: "…"` override,
+which is the only way to change them. `validation.md` now states the
+default plainly and shows the override.
+
+**There is still no global language setting for those messages.** That is a
+product decision, not an oversight to fix quietly.
+
 ## [0.9.915] — the install page told you to run a 404 — 2026-08-24
 
 The first page a new user opens was wrong in four ways at once, and every

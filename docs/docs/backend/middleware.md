@@ -10,7 +10,7 @@ description: "Chains that declare what they provide and what they require, so a 
 namespace middleware.auth;
 
 middleware RequireAuth provides account_id: bigint {
-    let header = request.header("Authorization") or throw Unauthorized("token kerak");
+    let header = request.header("Authorization") or throw Unauthorized("a bearer token is required");
     let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
 
     let claims = jwt.verify($header, $secret)
