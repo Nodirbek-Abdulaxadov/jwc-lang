@@ -3,6 +3,51 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.911] — what `after { }` did not see — 2026-08-24
+
+Three defects found by running the restored features together instead of
+one at a time.
+
+### An `after` block missed every rejected socket
+
+`use RequireAuth` on a `socket` produces a `401` when the chain answers.
+That is an ordinary HTTP response, but neither backend ran the `after`
+chain for it, so an access log recorded rejected **routes** and not
+rejected **upgrades** — the connections most worth looking at, missing,
+with nothing to show they were.
+
+routing §9.2 licensed it in one line: "`after` blocks do not run: an
+`after` block observes a response, and the response was the 101." True of
+the handshake, and the implementation applied it to the whole socket path.
+The clause now states both halves — the upgrade is exempt, a chain that
+answers is not — and both backends run every started middleware's `after`
+block on the refusal, exactly as on a route (middleware §4.3).
+
+The native half had a second layer: the socket refusal called
+`jwc_to_response` and discarded its `extra_headers`, so the after blocks
+ran and their headers were dropped on the floor.
+
+### A program without `function main` could not be built
+
+`main` is optional — `jwc serve` runs a program that has none — but the
+generated `main` called `jwc_user_main()` unconditionally, so every such
+program produced a crate that failed to compile. Every template and the
+sample declare a `main`, which is why nothing hit it.
+
+`tests/native.rs` does not invoke cargo, so no test compiles a generated
+crate. It now checks the cheap half of what cargo would: every `jwc_*` the
+generated module calls is defined in it. That will not catch a type error
+or a missing `.await`, but "called and never defined" is the shape this
+bug and the `ASYNC_BUILTINS` drift both took.
+
+### The `insert buffered` codes were documented wrong
+
+0.9.910's entry gave E0612/E0613/E0614 three meanings the checker does not
+use. The codes are `as { … }` → `E0614`, `transaction { }` → `E0612`,
+`on conflict` → `E0613`, as writes §7.2 has said throughout. The new
+diagnostics guard checks that a code is documented; it cannot check that
+it is documented *correctly*.
+
 ## [0.9.910] — buffered writes — 2026-08-24
 
 The last of the features `src/queue.rs` and its neighbours took with them
@@ -29,10 +74,12 @@ latency off the request and leave the database doing the same work.
 An unbuffered `insert` is part of your transaction and returns the row. A
 buffered one is neither, and the checker holds you to that:
 
-- it produces nothing, so `let $e = insert buffered …` is `E0612`;
-- it cannot be `returning`, for the same reason (`E0613`);
-- it is refused inside `transaction { }` (`E0614`), where "committed"
-  would otherwise mean two different things in one block.
+- it answers before the row exists, so `as { … }` is `E0614`;
+- `on conflict` is `E0613` — a resolution nobody observes is a row
+  silently not written;
+- it is refused inside `transaction { }` (`E0612`), because the row is
+  written later on another connection and a rollback would not take it
+  back.
 
 The buffer is bounded. When it is full the row is **dropped**, not queued
 — which is the right trade for an audit trail and the wrong one for a

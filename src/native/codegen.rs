@@ -434,11 +434,17 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     }
 
     // --- functions, services -------------------------------------------------
+    // `function main` is optional — the interpreter serves a program that
+    // has none — so the generated `main` may have nothing to call. Emitting
+    // the call unconditionally made every such program fail to compile as
+    // a *generated* crate, which no test in this repository builds.
+    let mut has_main = false;
     for file in &ws.files {
         for decl in &file.program.decls {
             match decl {
                 Decl::Function(f) if f.name.name == "main" => {
                     ctx.mode = Mode::Value;
+                    has_main = true;
                     out.push_str("\nasync fn jwc_user_main() -> JwcResult {\n");
                     emit_block(&mut out, &f.body, 1, &mut ctx)?;
                     out.push_str("    Ok(V::Null)\n}\n");
@@ -693,14 +699,19 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     } else {
         ""
     };
+    // `main` runs, and `serve(port)` inside it records where to listen —
+    // the same order the interpreter uses, so a program that hardcodes its
+    // port gets that port on both backends.
+    let user_main = if has_main {
+        "    let _ = jwc_user_main().await;\n"
+    } else {
+        ""
+    };
     out.push_str(&format!(
         "\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {{\n\
          \x20   jwc_install_panic_hook();\n\
          \x20   jwc_load_dotenv();\n\
-         \x20   // `main` runs, and `serve(port)` inside it records where to\n\
-         \x20   // listen — the same order the interpreter uses, so a program\n\
-         \x20   // that hardcodes its port gets that port on both backends.\n\
-         \x20   let _ = jwc_user_main().await;\n\
+         {user_main}\
          {db_boot}\
          {jobs_boot}\
          \x20   jwc_serve_impl(JWC_SERVE_PORT.load(::std::sync::atomic::Ordering::SeqCst)).await;\n}}\n"
@@ -1078,17 +1089,61 @@ fn emit_socket_preflight(
         out.push_str("    V::Null\n}\n");
         return;
     }
+    // A chain that answers on a socket path produces an ordinary HTTP
+    // response, so every middleware that started runs its `after` block
+    // (middleware.md §4.3) exactly as on a route. routing.md §9.2 exempts
+    // only the upgrade itself, and its reason — "the response was the
+    // 101" — does not hold when the chain answered instead.
+    out.push_str("    let mut started = 0usize;\n");
+    out.push_str("    let mut answered: Option<V> = None;\n");
+    out.push_str("    'chain: {\n");
     for m in &route.chain {
         if !middleware.contains_key(m) {
             continue;
         }
-        out.push_str(&format!("    match {}().await {{\n", mw_fn(m)));
-        out.push_str("        Ok(Some(r)) => return r,\n");
-        out.push_str("        Ok(None) => {}\n");
-        out.push_str("        Err(t) => return jwc_thrown_response(t),\n");
+        out.push_str("        started += 1;\n");
+        out.push_str(&format!("        match {}().await {{\n", mw_fn(m)));
+        out.push_str("            Ok(Some(r)) => { answered = Some(r); break 'chain; }\n");
+        out.push_str("            Ok(None) => {}\n");
+        out.push_str(
+            "            Err(t) => { answered = Some(jwc_thrown_response(t)); break 'chain; }\n",
+        );
+        out.push_str("        }\n");
+    }
+    out.push_str("    }\n");
+    out.push_str("    let Some(mut response) = answered else { return V::Null };\n");
+    emit_after_chain(out, route, middleware);
+    out.push_str("    response\n}\n");
+}
+
+/// §5.1–§5.2 — reverse order, keyed on how many middleware started, with
+/// `response.status()` seeing the status actually being sent.
+fn emit_after_chain(
+    out: &mut String,
+    route: &crate::wiring::ResolvedRoute,
+    middleware: &BTreeMap<String, &crate::ast::MiddlewareDecl>,
+) {
+    let afters: Vec<&String> = route
+        .chain
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| middleware.get(*m).is_some_and(|d| d.after.is_some()))
+        .map(|(_, m)| m)
+        .collect();
+    if afters.is_empty() {
+        return;
+    }
+    out.push_str("    jwc_set_response_status(jwc_status_of(&response));\n");
+    for m in afters {
+        let idx = route.chain.iter().position(|x| x == m).unwrap_or(0);
+        out.push_str(&format!("    if started > {idx} {{\n"));
+        out.push_str(&format!("        let _ = {}_after().await;\n", mw_fn(m)));
+        out.push_str(
+            "        response = jwc_response_with_headers(response, jwc_drain_extra_headers());\n",
+        );
         out.push_str("    }\n");
     }
-    out.push_str("    V::Null\n}\n");
 }
 
 fn emit_route_dispatch(
@@ -1137,26 +1192,7 @@ fn emit_route_dispatch(
 
     // §5.1–§5.2 — reverse order, every outcome, and `response.status()` sees
     // the status actually being sent.
-    let afters: Vec<&String> = route
-        .chain
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(_, m)| middleware.get(*m).is_some_and(|d| d.after.is_some()))
-        .map(|(_, m)| m)
-        .collect();
-    if !afters.is_empty() {
-        out.push_str("    jwc_set_response_status(jwc_status_of(&response));\n");
-        for m in afters {
-            let idx = route.chain.iter().position(|x| x == m).unwrap_or(0);
-            out.push_str(&format!("    if started > {idx} {{\n"));
-            out.push_str(&format!("        let _ = {}_after().await;\n", mw_fn(m)));
-            out.push_str(
-                "        response = jwc_response_with_headers(response, jwc_drain_extra_headers());\n",
-            );
-            out.push_str("    }\n");
-        }
-    }
+    emit_after_chain(out, route, middleware);
     out.push_str("    response\n}\n");
 }
 

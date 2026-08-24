@@ -457,3 +457,75 @@ fn with_headers_replaces_rather_than_appends() {
          is a field of its own on the response"
     );
 }
+
+/// Every `jwc_*` the generated module calls is defined in it.
+///
+/// `function main` is optional — the interpreter serves a program without
+/// one — but the generated `main` called `jwc_user_main()` unconditionally,
+/// so every such program produced a crate that did not compile. Nothing
+/// here caught it: this file does not invoke cargo, and every template and
+/// the sample happen to declare a `main`.
+///
+/// This is the cheap half of the check cargo would do. It cannot see type
+/// errors or a missing `.await`, but "called and never defined" is the
+/// shape both this bug and the `ASYNC_BUILTINS` drift took.
+fn assert_calls_resolve(rust: &str) {
+    let defined: std::collections::BTreeSet<&str> = rust
+        .match_indices("fn jwc_")
+        .filter_map(|(i, _)| {
+            let rest = &rust[i + 3..];
+            rest.split(['(', '<', ' ']).next()
+        })
+        .collect();
+
+    let mut missing: Vec<&str> = Vec::new();
+    for (i, _) in rust.match_indices("jwc_") {
+        // A call is `name(`; a definition, a path or a type is not.
+        let rest = &rust[i..];
+        let Some(name) = rest
+            .split('(')
+            .next()
+            .filter(|n| n.len() < 80 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        else {
+            continue;
+        };
+        if rest[name.len()..].starts_with('(')
+            && !rust[..i].ends_with("fn ")
+            && !defined.contains(name)
+            && !missing.contains(&name)
+        {
+            missing.push(name);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the generated crate calls these and defines none of them, so it \
+         does not compile: {missing:?}"
+    );
+}
+
+#[test]
+fn the_generated_crate_defines_everything_it_calls() {
+    assert_calls_resolve(&generate("tests/native_codegen"));
+}
+
+#[test]
+fn a_program_without_a_main_still_generates_a_crate_that_compiles() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         routes \"/x\" {\n\
+         \x20   route GET \"\" { return json({ ok: true }); }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = Workspace::load(dir.path()).expect("load");
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+
+    assert!(
+        !rust.contains("jwc_user_main"),
+        "there is no `function main`, so nothing may call one"
+    );
+    assert_calls_resolve(&rust);
+}

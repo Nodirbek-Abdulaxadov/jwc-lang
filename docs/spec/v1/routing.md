@@ -357,7 +357,8 @@ break holds a task for the process's lifetime.
 | A binary frame | closes the connection — there is no text to bind, and `from_utf8_lossy` would hand the handler a string the peer never sent |
 | No `on message` | a text frame is dropped; a peer that speaks first is not an error |
 | A raise in a handler | ends that handler and closes the connection — there is no response to put an error in |
-| `after` blocks | do not run: an `after` block observes a response, and the response was the 101 |
+| `after` blocks, on a successful upgrade | do not run: an `after` block observes a response, and the response was the 101 |
+| `after` blocks, when the chain answers | run, in reverse order, for every middleware that started — the response is an ordinary one (middleware §4.3), and a rejected upgrade is exactly what an access log is for |
 | A plain `GET` at a socket path | `400`, not `404` — the path exists, the request is wrong |
 
 Middleware running before the upgrade is the whole value of `use` on a

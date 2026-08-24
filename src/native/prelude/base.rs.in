@@ -3091,10 +3091,18 @@ async fn handle_axum_request(
             .scope(req.clone(), async move { handler().await })
             .await;
         if !matches!(refusal, V::Null) {
-            let (status, body_str, ct, _) = jwc_to_response(refusal);
-            return axum::response::Response::builder()
+            // The chain answered, so this is an ordinary HTTP response and
+            // carries whatever the `after` blocks added (middleware.md
+            // §4.3). Dropping `extra_headers` here is what made an access
+            // log record rejected routes but not rejected upgrades.
+            let (status, body_str, ct, extra_headers) = jwc_to_response(refusal);
+            let mut builder = axum::response::Response::builder()
                 .status(axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK))
-                .header("content-type", if ct.is_empty() { JWC_JSON_CT } else { ct.as_str() })
+                .header("content-type", if ct.is_empty() { JWC_JSON_CT } else { ct.as_str() });
+            for (k, v) in extra_headers {
+                builder = jwc_push_header(builder, k, v);
+            }
+            return builder
                 .body(body_str.into())
                 .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()));
         }
@@ -3135,21 +3143,30 @@ async fn handle_axum_request(
         builder = builder.header("content-type", ct.as_str());
     }
     for (k, v) in extra_headers {
-        // Drop pairs whose name or value contain characters axum would
-        // refuse — silently, because user code rarely has the context to
-        // recover and we'd rather emit the redirect than 500. CRLF in
-        // either side is the classic response-splitting vector, so we
-        // reject it explicitly here (the interpreter path goes through
-        // `axum::http::HeaderValue::parse()` which rejects the same
-        // bytes; keep the two paths shape-equivalent).
-        let name_ok = !k.is_empty()
-            && k.bytes().all(|b| b.is_ascii() && b != b'\n' && b != b'\r' && b != 0);
-        let value_ok = v.bytes().all(|b| b != b'\n' && b != b'\r' && b != 0);
-        if name_ok && value_ok {
-            builder = builder.header(k, v);
-        }
+        builder = jwc_push_header(builder, k, v);
     }
     builder.body(body_str.into()).unwrap()
+}
+
+/// Add one `after`-block header, dropping a pair whose name or value holds
+/// bytes axum would refuse — silently, because user code rarely has the
+/// context to recover and emitting the response beats a 500. CRLF on
+/// either side is the classic response-splitting vector, so it is rejected
+/// explicitly; the interpreter path goes through `HeaderValue::parse()`,
+/// which rejects the same bytes.
+fn jwc_push_header(
+    builder: axum::http::response::Builder,
+    k: String,
+    v: String,
+) -> axum::http::response::Builder {
+    let name_ok = !k.is_empty()
+        && k.bytes().all(|b| b.is_ascii() && b != b'\n' && b != b'\r' && b != 0);
+    let value_ok = v.bytes().all(|b| b != b'\n' && b != b'\r' && b != 0);
+    if name_ok && value_ok {
+        builder.header(k, v)
+    } else {
+        builder
+    }
 }
 
 fn url_decode(s: &str) -> String {

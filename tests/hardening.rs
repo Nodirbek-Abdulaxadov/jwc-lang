@@ -978,3 +978,79 @@ fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         }
     }
 }
+
+/// routing.md §9.2 — a socket route whose chain answers.
+///
+/// The upgrade itself is exempt from the `after` chain, and the reason
+/// given is that the response was the 101. When the chain answers instead,
+/// the response is an ordinary one and every middleware that started runs
+/// its `after` block (middleware.md §4.3).
+///
+/// Both backends read the exemption as covering the whole socket path, so
+/// an access log recorded rejected routes and not rejected upgrades — the
+/// connections most worth looking at, missing, with nothing to show it.
+const SOCKET_AFTER: &str = "namespace h;\n\
+                            middleware Mark {\n\
+                            \x20   after { response.set_header(\"x-after\", \"ran\"); }\n\
+                            }\n\
+                            middleware Gate {\n\
+                            \x20   let deny = request.query(\"deny\");\n\
+                            \x20   if ($deny == \"1\") { throw Unauthorized(\"no\"); }\n\
+                            }\n\
+                            routes \"/s\" use Mark, Gate {\n\
+                            \x20   socket \"ws\" { on open { socket.send(\"hi\"); } }\n\
+                            }\n";
+
+async fn preflight(deny: bool) -> Result<(), jwc::exec::Response> {
+    let program = program(SOCKET_AFTER);
+    let incoming = Incoming {
+        method: "GET".into(),
+        path: "/s/ws".into(),
+        query: if deny {
+            vec![("deny".to_string(), "1".to_string())]
+        } else {
+            Vec::new()
+        },
+        headers: HashMap::new(),
+        body: Vec::new(),
+        peer_ip: "203.0.113.7".into(),
+    };
+    let request = Arc::new(jwc::exec::Request {
+        method: "GET".to_string(),
+        path: incoming.path.clone(),
+        route: incoming.path.clone(),
+        headers: incoming.headers.clone(),
+        query: incoming.query.clone(),
+        body: String::new(),
+        peer_ip: incoming.peer_ip.clone(),
+        client_ip: incoming.peer_ip.clone(),
+        id: "0000000000000000".to_string(),
+    });
+    serve::socket_preflight(&program, &incoming, request)
+        .await
+        .map(|_| ())
+}
+
+#[tokio::test]
+async fn a_socket_chain_that_answers_runs_the_after_blocks() {
+    let Err(response) = preflight(true).await else {
+        panic!("`Gate` throws, so the chain answers and there is no upgrade");
+    };
+    assert_eq!(response.status, 401);
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("x-after") && v == "ran"),
+        "`Mark` started, so its `after` block runs on the refusal: {:?}",
+        response.headers
+    );
+}
+
+#[tokio::test]
+async fn a_socket_upgrade_does_not_run_the_after_blocks() {
+    assert!(
+        preflight(false).await.is_ok(),
+        "nothing answers, so the handshake proceeds and the response is the 101"
+    );
+}

@@ -718,10 +718,19 @@ pub async fn socket_preflight(
     let route = route.clone();
     let params = parse_params(&route, &binds)?;
 
+    let started_at = std::time::Instant::now();
     let mut vm = Vm::new(program, request);
     vm.set_params(params.clone());
 
+    // Which middleware started, so a chain that answers still runs their
+    // `after` blocks (middleware.md §4.3). routing.md §9.2 exempts the
+    // *upgrade* from the after chain, and its reason is that the response
+    // was the 101 — which is not the case here.
+    let mut started: Vec<String> = Vec::new();
+    let mut answered: Option<Response> = None;
+
     for name in &route.chain {
+        started.push(name.clone());
         let Some(m) = program.middleware.get(name) else {
             continue;
         };
@@ -729,14 +738,26 @@ pub async fn socket_preflight(
             // middleware.md §4.2 — a middleware that answers has answered.
             // The upgrade does not happen, and the client sees the status
             // it chose rather than a 101 followed by silence.
-            Ok(Flow::Return(v)) => return Err(as_response(v)),
-            Ok(Flow::ReturnVoid) => return Err(Response::empty(204)),
+            Ok(Flow::Return(v)) => {
+                answered = Some(as_response(v));
+                break;
+            }
+            Ok(Flow::ReturnVoid) => {
+                answered = Some(Response::empty(204));
+                break;
+            }
             Ok(Flow::Normal) | Ok(Flow::Break) | Ok(Flow::Continue) => {}
             Err(a) => {
-                let mut vm = Vm::new(program, vm.request.clone());
-                return Err(handle_error(program, &mut vm, a).await);
+                let mut ev = Vm::new(program, vm.request.clone());
+                answered = Some(handle_error(program, &mut ev, a).await);
+                break;
             }
         }
+    }
+
+    if let Some(mut response) = answered {
+        run_after_chain(program, &mut vm, &started, &mut response, started_at).await;
+        return Err(response);
     }
 
     Ok(SocketPreflight {
@@ -1046,8 +1067,25 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
         (None, None) => Response::message(500, "internal_error"),
     };
 
-    // §5.1–§5.2 — reverse order, every outcome, and `response.status()`
-    // sees the status actually being sent.
+    run_after_chain(&program, &mut vm, &started, &mut response, started_at).await;
+    response
+}
+
+/// §5.1–§5.2 — the `after` blocks of every middleware that started, in
+/// reverse order, with `response.status()` seeing the status actually
+/// being sent.
+///
+/// Shared with the socket preflight: a chain that answers on a socket path
+/// produces an ordinary HTTP response, and an access log that recorded
+/// rejected routes but not rejected upgrades would be missing exactly the
+/// connections worth looking at.
+async fn run_after_chain(
+    program: &Program,
+    vm: &mut Vm<'_>,
+    started: &[String],
+    response: &mut Response,
+    started_at: std::time::Instant,
+) {
     for name in started.iter().rev() {
         let Some(m) = program.middleware.get(name) else {
             continue;
@@ -1063,8 +1101,6 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
             response.headers.push(h);
         }
     }
-
-    response
 }
 
 async fn handle_error(program: &Program, vm: &mut Vm<'_>, abort: Abort) -> Response {
