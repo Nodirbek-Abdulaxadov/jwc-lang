@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: Install
-description: "Install the jwc compiler from a release archive, and check it against a real Postgres."
+description: "Install the jwc compiler with the one-line installer on Linux or Windows, and check it against a real Postgres."
 ---
 
 # Install
@@ -9,22 +9,67 @@ description: "Install the jwc compiler from a release archive, and check it agai
 JWC ships as one binary. It needs a Postgres to talk to; it does not need a
 Rust toolchain, a package manager, or a runtime installed alongside it.
 
-## From a release archive
+## Linux
 
 ```bash
-VERSION=0.9.9
-curl -fsSL https://github.com/just-web-code/jwc-lang/releases/download/v${VERSION}/jwc-v${VERSION}-x86_64-linux.tar.gz \
-  | sudo tar -xz -C /usr/local/bin
-sudo chmod +x /usr/local/bin/jwc
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
+```
+
+## Windows
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.ps1 | iex
+```
+
+Both resolve the latest release themselves, verify the published `.sha256`
+against what they downloaded, and refuse to install on a mismatch. The
+Windows script installs to `%LOCALAPPDATA%\jwc\bin`.
+
+```bash
 jwc --version
 ```
 
-Archives are published for `x86_64-linux`, `aarch64-linux`, `x86_64-macos`
-and `aarch64-macos`. Each release also publishes a `.sha256` next to the
-archive; check it before extracting if you are scripting the install.
+### Pinning a version
 
-The Linux builds are dynamically linked against glibc 2.34 or newer. On an
-older distribution, build from source.
+```bash
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | JWC_VERSION=v0.9.914 bash
+```
+
+```powershell
+$env:JWC_VERSION = 'v0.9.914'
+iwr -useb https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.ps1 | iex
+```
+
+The variable goes before `bash`, not before `curl` — `bash` is what reads it.
+
+### Other knobs
+
+| | |
+|---|---|
+| `JWC_INSTALL_DIR` | where to put the binary |
+| `JWC_MUSL=1` | Linux only: fetch the static musl build instead of the glibc one |
+| `JWC_DOWNLOAD_BASE` | fetch from a mirror instead of GitHub Releases |
+
+## What is published
+
+| Platform | Archive |
+|---|---|
+| x86_64 Linux (glibc) | `jwc-vX.Y.Z-x86_64-linux.tar.gz` |
+| x86_64 Linux (static) | `jwc-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` |
+| aarch64 Linux (glibc) | `jwc-vX.Y.Z-aarch64-linux.tar.gz` |
+| aarch64 Linux (static) | `jwc-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz` |
+| x86_64 Windows | `jwc-vX.Y.Z-x86_64-windows.zip` |
+
+Each has a `.sha256` beside it.
+
+**There is no macOS build.** Build from source there — the section below is
+the whole procedure, and it is the same one CI runs.
+
+The glibc Linux builds are linked against glibc 2.35, which covers Ubuntu
+22.04, Debian 12, RHEL 9 and Amazon Linux 2023. On anything older, or on
+Alpine and distroless images, use the musl archive: it is fully static and
+carries no libc dependency. `install.sh` retries with it automatically when
+a glibc mismatch is what stopped the binary from starting.
 
 ## From source
 

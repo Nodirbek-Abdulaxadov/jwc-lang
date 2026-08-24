@@ -1054,3 +1054,56 @@ async fn a_socket_upgrade_does_not_run_the_after_blocks() {
         "nothing answers, so the handshake proceeds and the response is the 101"
     );
 }
+
+/// The install page's platform table against the release matrix.
+///
+/// The 1.0 page claimed archives for `x86_64-macos` and `aarch64-macos`,
+/// which have never been built, said nothing about Windows, which is
+/// built, and hardcoded `VERSION=0.9.9` — a tag that was never cut, so the
+/// one command a new user runs first answered 404. The one-line installers
+/// that do all of this correctly were not mentioned at all.
+///
+/// Both lists are here in the repository, so neither has to be trusted.
+#[test]
+fn the_install_page_lists_the_platforms_the_release_actually_builds() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let release =
+        std::fs::read_to_string(root.join(".github/workflows/release.yml")).expect("release.yml");
+    let built: std::collections::BTreeSet<String> = release
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("short:"))
+        .map(|s| s.trim().to_string())
+        .collect();
+    assert!(
+        built.len() >= 4,
+        "found only {built:?} — the matrix format changed"
+    );
+
+    let page =
+        std::fs::read_to_string(root.join("docs/docs/getting-started/install.md")).expect("page");
+
+    for short in &built {
+        assert!(
+            page.contains(short.as_str()),
+            "the release builds `{short}` and the install page never names it"
+        );
+    }
+
+    // The inverse: a platform the page promises and nothing builds. macOS is
+    // the one that was there, and `install.sh` stops with "Unsupported
+    // platform: darwin-*" on it.
+    for absent in ["x86_64-macos", "aarch64-macos"] {
+        assert!(
+            !page.contains(absent),
+            "the install page promises `{absent}` and no release job builds it"
+        );
+    }
+
+    // The installers are the documented path; a hand-rolled curl with a
+    // pinned version is what rotted.
+    assert!(
+        page.contains("install.sh") && page.contains("install.ps1"),
+        "the install page should lead with the one-line installers"
+    );
+}

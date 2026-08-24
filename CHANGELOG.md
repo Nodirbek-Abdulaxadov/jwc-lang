@@ -3,6 +3,37 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.915] — the install page told you to run a 404 — 2026-08-24
+
+The first page a new user opens was wrong in four ways at once, and every
+one of them was introduced when the 1.0 docs replaced the 0.9 ones.
+
+**It threw away the installers.** `install.sh` and `install.ps1` are in
+this repository, resolve the latest release themselves, verify the
+published `.sha256` and refuse to install on a mismatch. The 0.9 page led
+with both one-liners. The 1.0 page mentioned neither.
+
+**What it gave instead did not work.** A hand-rolled `curl` pinned to
+`VERSION=0.9.9` — a tag that was never cut. The one command a new user
+runs first answered 404.
+
+**It promised macOS.** "Archives are published for `x86_64-linux`,
+`aarch64-linux`, `x86_64-macos` and `aarch64-macos`." No macOS build has
+ever existed; `install.sh` says so itself, stopping with "Unsupported
+platform: darwin-\*". Someone on a Mac followed that sentence to a page of
+assets that were not there.
+
+**It left Windows out entirely** — which *is* built and published, as
+`jwc-vX.Y.Z-x86_64-windows.zip`, with `install.ps1` to fetch it. So did
+the README, whose only instruction was to build from source.
+
+Both now lead with the one-liner for each platform, and the page's
+platform table is checked against `release.yml`'s matrix by a test: a
+target the release builds and the page does not name fails, and so does a
+platform the page promises that nothing builds.
+
+`docs/docs/deployment/index.md` pinned the same phantom `0.9.9`.
+
 ## [0.9.914] — the Windows build nobody compiled — 2026-08-24
 
 `v0.9.913`'s release failed on `x86_64-pc-windows-msvc`, and only there.
