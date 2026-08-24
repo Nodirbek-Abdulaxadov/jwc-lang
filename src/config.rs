@@ -366,6 +366,12 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "starttls",
         doc: "TLS mode: starttls | tls | none.",
     },
+    EnvVar {
+        name: "JWC_CACHE_MAX_ENTRIES",
+        parse_kind: ParseKind::U64,
+        default: "10000",
+        doc: "Entry ceiling for the process-local `cache.*` store.",
+    },
     // --- Registry / packaging ---------------------------------------------
     EnvVar {
         name: "JWC_REGISTRY_URL",

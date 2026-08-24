@@ -32,6 +32,8 @@ use crate::workspace::Workspace;
 /// yields a future where a `V` was wanted, so the list is derived from
 /// the prelude rather than guessed.
 const ASYNC_BUILTINS: &[&str] = &[
+    "jwc_b_v1_mail_enabled",
+    "jwc_b_v1_mail_send",
     "jwc_b_v1_redis_del",
     "jwc_b_v1_redis_enabled",
     "jwc_b_v1_redis_expire",
@@ -65,6 +67,10 @@ const ASYNC_BUILTINS: &[&str] = &[
     "jwc_b_redis_get",
     "jwc_b_redis_incr",
     "jwc_b_redis_ping",
+    // Reached today only through `jwc_b_v1_redis_rate_limit`, but the
+    // list is the prelude's async surface, not the subset codegen
+    // currently emits — leaving it out is how the next mapping breaks.
+    "jwc_b_redis_rate_limit",
     "jwc_b_redis_set",
     "jwc_b_setConnectionString",
     "jwc_b_set_connection_string",
@@ -73,6 +79,13 @@ const ASYNC_BUILTINS: &[&str] = &[
     "jwc_b_ws_recv",
     "jwc_b_ws_send",
 ];
+
+/// The prelude built-ins that return `JwcResult` rather than a bare `V`,
+/// so the call site has to propagate with `?`.
+///
+/// `int` and `bigint` are fallible too but are special-cased earlier: they
+/// take a fixed single argument, not the generic argument list.
+const RESULT_BUILTINS: &[&str] = &["jwc_b_v1_mail_send"];
 
 /// The 1.0 built-in name on the left, the prelude function on the right.
 ///
@@ -190,6 +203,16 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "redis.expire" => "jwc_b_v1_redis_expire",
         "redis.rate_limit" => "jwc_b_v1_redis_rate_limit",
         "redis.enabled" => "jwc_b_v1_redis_enabled",
+
+        // --- process-local cache (builtins.md §8)
+        "cache.get" => "jwc_b_v1_cache_get",
+        "cache.set" => "jwc_b_v1_cache_set",
+        "cache.del" => "jwc_b_v1_cache_del",
+        "cache.clear" => "jwc_b_v1_cache_clear",
+
+        // --- mail (builtins.md §8)
+        "mail.send" => "jwc_b_v1_mail_send",
+        "mail.enabled" => "jwc_b_v1_mail_enabled",
 
         // The rest of the request — builtins.md §7.
         "request.query_all" => "jwc_b_v1_request_query_all",
@@ -328,6 +351,7 @@ pub struct Generated {
     pub needs_db: bool,
     pub needs_http_client: bool,
     pub needs_crypto: bool,
+    pub needs_mail: bool,
     pub needs_redis: bool,
     pub needs_regex: bool,
 }
@@ -483,6 +507,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // A page's cursor is HMAC-signed, and the HMAC lives in the crypto
     // prelude — so a program that pages needs it even if it hashes nothing.
     let needs_crypto = ctx.uses_page || ctx.used.iter().any(|f| defines(super::PRELUDE_CRYPTO, f));
+    let needs_mail = ctx.used.iter().any(|f| defines(super::PRELUDE_MAIL, f));
     let needs_redis = ctx.used.iter().any(|f| defines(super::PRELUDE_REDIS, f));
     let needs_http_client = ctx.used.iter().any(|f| defines(super::PRELUDE_HTTP, f));
 
@@ -545,15 +570,22 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         routes.len()
     ));
     out.push_str(if needs_db {
-        "fn jwc_op_metrics() -> String { jwc_metrics_body() }\n"
+        "fn jwc_op_metrics() -> String { format!(\"{}{}\", jwc_metrics_body(), jwc_cache_metrics()) }\n"
     } else {
         // No DB prelude, so no pool gauges — but `jwc_routes` is declared
         // by the program, not by a dependency, and the interpreter reports
         // it either way.
+        // The `{}` here are the *generated* program's format holes, and
+        // this is a `push_str` of a literal, not a `format!` — doubling
+        // them emitted `{{}}`, which rustc reads as an escaped brace that
+        // consumes no argument. Every database-free native build failed
+        // to compile on "multiple unused formatting arguments", which is
+        // most of the tier `jwc build` advertises.
         "fn jwc_op_metrics() -> String {\n\
          \x20   format!(\n\
-         \x20       \"{{}}# HELP jwc_routes Declared routes.\\n# TYPE jwc_routes gauge\\njwc_routes {{}}\\n\",\n\
+         \x20       \"{}{}# HELP jwc_routes Declared routes.\\n# TYPE jwc_routes gauge\\njwc_routes {}\\n\",\n\
          \x20       jwc_redis_metrics_hook(),\n\
+         \x20       jwc_cache_metrics(),\n\
          \x20       JWC_ROUTE_COUNT\n\
          \x20   )\n}\n"
     });
@@ -589,6 +621,9 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     if needs_crypto {
         source.push_str(super::PRELUDE_CRYPTO);
     }
+    if needs_mail {
+        source.push_str(super::PRELUDE_MAIL);
+    }
     if needs_redis {
         source.push_str(super::PRELUDE_REDIS);
     }
@@ -603,6 +638,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     Ok(Generated {
         source,
         needs_db,
+        needs_mail,
         needs_http_client,
         needs_crypto,
         needs_redis,
@@ -1355,12 +1391,14 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
                 // value does not compile, and a missing one yields a future
                 // where a `V` was wanted.
                 ctx.used.insert(f.to_string());
-                let call = format!("{f}({})", parts.join(", "));
+                let mut call = format!("{f}({})", parts.join(", "));
                 if ASYNC_BUILTINS.contains(&f) {
-                    format!("{call}.await")
-                } else {
-                    call
+                    call.push_str(".await");
                 }
+                if RESULT_BUILTINS.contains(&f) {
+                    call.push('?');
+                }
+                call
             } else if PRELUDE_GAPS.contains(&name.as_str()) {
                 bail!(
                     "`{name}` is a 1.0 built-in the restored prelude does not \
@@ -1938,4 +1976,139 @@ fn rust_str_literal(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every prelude source, so the guards below see the whole runtime and
+    /// not just the half a given program happens to link.
+    fn preludes() -> [&'static str; 8] {
+        [
+            super::super::PRELUDE_BASE,
+            super::super::PRELUDE_V1,
+            super::super::PRELUDE_DB,
+            super::super::PRELUDE_CRYPTO,
+            super::super::PRELUDE_MAIL,
+            super::super::PRELUDE_REDIS,
+            super::super::PRELUDE_HTTP,
+            // Linked into no generated crate yet — `generate` never pushes
+            // it, because nothing in the 1.0 grammar declares a socket. Its
+            // built-ins are still in ASYNC_BUILTINS, so it belongs here or
+            // the guard reads them as stale.
+            super::super::PRELUDE_WS,
+        ]
+    }
+
+    /// Names declared with the given `prefix`, e.g. `"async fn jwc_b_"`.
+    fn declared(prefix: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for src in preludes() {
+            for line in src.lines() {
+                let line = line.trim_start();
+                let Some(rest) = line.strip_prefix(prefix) else {
+                    continue;
+                };
+                let name: String = rest.chars().take_while(|c| *c != '(').collect();
+                if !name.is_empty() {
+                    out.push(format!(
+                        "{}{name}",
+                        prefix.rsplit(' ').next().unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// `ASYNC_BUILTINS` decides whether a call site gets `.await`. Get it
+    /// wrong in either direction and the *generated* crate fails to
+    /// compile — a failure no test in this repo would otherwise see,
+    /// because nothing here compiles the emitted source. The list's own
+    /// comment claims it is "derived from the prelude rather than
+    /// guessed"; this is what makes that true.
+    #[test]
+    fn async_builtins_matches_the_prelude() {
+        let actual = declared("async fn jwc_b_");
+        let listed: Vec<String> = ASYNC_BUILTINS.iter().map(|s| s.to_string()).collect();
+
+        let missing: Vec<&String> = actual.iter().filter(|n| !listed.contains(n)).collect();
+        assert!(
+            missing.is_empty(),
+            "the prelude declares these `async fn` built-ins that ASYNC_BUILTINS \
+             does not list — their call sites will be emitted without `.await`: \
+             {missing:?}"
+        );
+
+        let stale: Vec<&String> = listed.iter().filter(|n| !actual.contains(n)).collect();
+        assert!(
+            stale.is_empty(),
+            "ASYNC_BUILTINS lists these, but no prelude declares them `async fn` — \
+             their call sites will be emitted with a stray `.await`: {stale:?}"
+        );
+    }
+
+    /// The same argument for `?`: a built-in that answers `JwcResult` and
+    /// is called without one yields a `Result` where a `V` was wanted.
+    #[test]
+    fn result_builtins_matches_the_prelude() {
+        // `int` / `bigint` are fallible too, but they are special-cased
+        // ahead of the generic path because they take one fixed argument.
+        const SPECIAL_CASED: &[&str] = &["jwc_b_v1_int", "jwc_b_v1_bigint"];
+
+        let mut actual: Vec<String> = Vec::new();
+        for src in preludes() {
+            for line in src.lines() {
+                let line = line.trim_start();
+                if !line.contains("-> JwcResult") {
+                    continue;
+                }
+                let Some(rest) = line
+                    .strip_prefix("async fn jwc_b_")
+                    .or_else(|| line.strip_prefix("fn jwc_b_"))
+                else {
+                    continue;
+                };
+                let name: String = rest.chars().take_while(|c| *c != '(').collect();
+                actual.push(format!("jwc_b_{name}"));
+            }
+        }
+        actual.sort();
+        actual.dedup();
+
+        let listed: Vec<String> = RESULT_BUILTINS
+            .iter()
+            .chain(SPECIAL_CASED.iter())
+            .map(|s| s.to_string())
+            .collect();
+
+        let missing: Vec<&String> = actual.iter().filter(|n| !listed.contains(n)).collect();
+        assert!(
+            missing.is_empty(),
+            "these built-ins answer `JwcResult` but nothing propagates it: {missing:?}"
+        );
+
+        let stale: Vec<&&str> = RESULT_BUILTINS
+            .iter()
+            .filter(|n| !actual.iter().any(|a| a == *n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "RESULT_BUILTINS lists these, but they do not answer `JwcResult`: {stale:?}"
+        );
+    }
+
+    /// `mail.send` and `mail.enabled` reach the prelude. The stub they
+    /// replaced typechecked and did nothing, so the mapping is the part
+    /// worth pinning.
+    #[test]
+    fn mail_is_mapped_to_the_prelude() {
+        assert_eq!(prelude_fn("mail.send"), Some("jwc_b_v1_mail_send"));
+        assert_eq!(prelude_fn("mail.enabled"), Some("jwc_b_v1_mail_enabled"));
+        assert!(super::super::PRELUDE_MAIL.contains("async fn jwc_b_v1_mail_send("));
+        assert!(super::super::PRELUDE_MAIL.contains("async fn jwc_b_v1_mail_enabled("));
+    }
 }

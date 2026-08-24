@@ -1,0 +1,135 @@
+
+// ---------------------------------------------------------------- mail
+//
+// The `mail.*` surface (builtins.md §8), mirroring `crate::mail` in the
+// compiler. `mail.send` was a stub on both backends: the interpreter
+// answered `Value::Null` and the native backend refused the program by
+// name. Neither delivered mail, and only one of them said so.
+//
+// Config is read per call rather than cached: `JWC_SMTP_FROM` can change
+// without a restart, and building the transport is what caches the
+// expensive part.
+
+fn jwc_mail_env(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        _ => None,
+    }
+}
+
+fn jwc_mail_configured() -> bool {
+    ["JWC_SMTP_HOST", "JWC_SMTP_USER", "JWC_SMTP_PASSWORD", "JWC_SMTP_FROM"]
+        .iter()
+        .all(|n| jwc_mail_env(n).is_some())
+}
+
+fn jwc_mail_transport() -> Result<&'static std::sync::Mutex<lettre::SmtpTransport>, String> {
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::transport::smtp::client::{Tls, TlsParameters};
+
+    static T: std::sync::OnceLock<std::sync::Mutex<lettre::SmtpTransport>> =
+        std::sync::OnceLock::new();
+    if let Some(t) = T.get() {
+        return Ok(t);
+    }
+
+    let host = jwc_mail_env("JWC_SMTP_HOST").ok_or("mail.send: JWC_SMTP_HOST is not set")?;
+    let user = jwc_mail_env("JWC_SMTP_USER").ok_or("mail.send: JWC_SMTP_USER is not set")?;
+    let password =
+        jwc_mail_env("JWC_SMTP_PASSWORD").ok_or("mail.send: JWC_SMTP_PASSWORD is not set")?;
+    let port: u16 = match jwc_mail_env("JWC_SMTP_PORT") {
+        Some(s) => s
+            .trim()
+            .parse()
+            .map_err(|_| format!("mail.send: invalid JWC_SMTP_PORT '{s}'"))?,
+        None => 587,
+    };
+
+    let mode = jwc_mail_env("JWC_SMTP_TLS")
+        .unwrap_or_else(|| "starttls".into())
+        .trim()
+        .to_ascii_lowercase();
+    let builder = match mode.as_str() {
+        "tls" | "implicit" | "smtps" => {
+            let p = TlsParameters::new(host.clone())
+                .map_err(|e| format!("mail.send: TLS setup failed: {e}"))?;
+            lettre::SmtpTransport::builder_dangerous(&host).tls(Tls::Wrapper(p))
+        }
+        "starttls" => {
+            let p = TlsParameters::new(host.clone())
+                .map_err(|e| format!("mail.send: TLS setup failed: {e}"))?;
+            lettre::SmtpTransport::builder_dangerous(&host).tls(Tls::Required(p))
+        }
+        "none" | "plaintext" | "off" => lettre::SmtpTransport::builder_dangerous(&host),
+        other => {
+            return Err(format!(
+                "mail.send: invalid JWC_SMTP_TLS '{other}' (expected starttls|tls|none)"
+            ))
+        }
+    };
+
+    let built = builder
+        .port(port)
+        .credentials(Credentials::new(user, password))
+        .build();
+    let _ = T.set(std::sync::Mutex::new(built));
+    T.get().ok_or("mail.send: transport init raced and lost".into())
+}
+
+fn jwc_mail_send_blocking(to: &str, subject: &str, body: &str) -> Result<(), String> {
+    use lettre::message::header::ContentType;
+    use lettre::Transport;
+
+    let from = jwc_mail_env("JWC_SMTP_FROM").ok_or("mail.send: JWC_SMTP_FROM is not set")?;
+    let msg = lettre::Message::builder()
+        .from(
+            from.parse()
+                .map_err(|e| format!("mail.send: invalid JWC_SMTP_FROM '{from}': {e}"))?,
+        )
+        .to(to
+            .parse()
+            .map_err(|e| format!("mail.send: invalid recipient '{to}': {e}"))?)
+        .subject(subject)
+        .header(ContentType::TEXT_HTML)
+        .body(body.to_string())
+        .map_err(|e| format!("mail.send: could not build the message: {e}"))?;
+
+    let mailer = jwc_mail_transport()?;
+    let guard = mailer.lock().unwrap_or_else(|p| p.into_inner());
+    guard
+        .send(&msg)
+        .map_err(|e| format!("mail.send: SMTP delivery failed: {e}"))?;
+    Ok(())
+}
+
+async fn jwc_b_v1_mail_enabled() -> V {
+    V::Bool(jwc_mail_configured())
+}
+
+/// `lettre` is linked without its `tokio1` feature here, exactly as in the
+/// compiler, so the transport is blocking and the send goes to the
+/// blocking pool. Running it inline would park a runtime worker for the
+/// whole SMTP conversation.
+async fn jwc_b_v1_mail_send(to: V, subject: V, body: V) -> JwcResult {
+    if !jwc_mail_configured() {
+        return Err(JwcThrown::new(
+            "internal_error",
+            500,
+            v_str(
+                "`mail.send(...)` needs an SMTP relay: set JWC_SMTP_HOST, \
+                 JWC_SMTP_USER, JWC_SMTP_PASSWORD and JWC_SMTP_FROM. \
+                 `mail.enabled()` is what to branch on when the send is optional.",
+            ),
+        ));
+    }
+    let (to, subject, body) = (jwc_v1_text(&to), jwc_v1_text(&subject), jwc_v1_text(&body));
+    let done = tokio::task::spawn_blocking(move || jwc_mail_send_blocking(&to, &subject, &body))
+        .await
+        .map_err(|e| {
+            JwcThrown::new("internal_error", 500, v_str(format!("mail.send: worker failed: {e}")))
+        })?;
+    match done {
+        Ok(()) => Ok(V::Null),
+        Err(e) => Err(JwcThrown::new("internal_error", 500, v_str(e))),
+    }
+}

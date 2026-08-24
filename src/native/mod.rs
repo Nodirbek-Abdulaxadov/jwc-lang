@@ -57,6 +57,7 @@ pub struct CompileReport {
 pub const PRELUDE_BASE: &str = include_str!("prelude/base.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");
 pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");
+pub const PRELUDE_MAIL: &str = include_str!("prelude/mail.rs.in");
 pub const PRELUDE_REDIS: &str = include_str!("prelude/redis.rs.in");
 pub const PRELUDE_WS: &str = include_str!("prelude/ws.rs.in");
 pub const PRELUDE_HTTP: &str = include_str!("prelude/http.rs.in");
@@ -89,6 +90,7 @@ fn scaffold_workspace(
     needs_db: bool,
     needs_http_client: bool,
     needs_crypto: bool,
+    needs_mail: bool,
     needs_redis: bool,
     needs_regex: bool,
 ) -> Result<PathBuf> {
@@ -106,6 +108,7 @@ fn scaffold_workspace(
             needs_db,
             needs_http_client,
             needs_crypto,
+            needs_mail,
             needs_redis,
             needs_regex,
         ),
@@ -129,6 +132,7 @@ fn render_cargo_toml(
     needs_db: bool,
     needs_http_client: bool,
     needs_crypto: bool,
+    needs_mail: bool,
     needs_redis: bool,
     needs_regex: bool,
 ) -> String {
@@ -228,6 +232,14 @@ fn render_cargo_toml(
         // rustls-tls, but `ring::signature` is only nameable from a
         // direct dependency.
         deps.push_str("ring = \"0.17\"\n");
+    }
+    if needs_mail {
+        // Same feature set as the compiler's own Cargo.toml: no `tokio1`,
+        // so the transport is blocking and `jwc_b_v1_mail_send` puts it on
+        // the blocking pool — exactly what `crate::mail` does.
+        deps.push_str(
+            "lettre = { version = \"0.11\", default-features = false, features = [\"builder\", \"smtp-transport\", \"rustls-tls\"] }\n",
+        );
     }
     if needs_redis {
         // Must match the feature set in the compiler's own Cargo.toml, or
@@ -504,6 +516,7 @@ pub fn compile(
         gen.needs_db,
         gen.needs_http_client,
         gen.needs_crypto,
+        gen.needs_mail,
         gen.needs_redis,
         gen.needs_regex,
     )?;

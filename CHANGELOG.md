@@ -3,6 +3,60 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.904] — the built-ins that were declared but not built — 2026-08-24
+
+Three things the language advertised and did not do.
+
+### `mail.send` delivered nothing, and said nothing
+
+`check.rs` typed it — arity 3, `void` — and the interpreter's built-in
+table mapped it to one line:
+
+```rust
+"mail.send" => Value::Null,
+```
+
+A password-reset route typechecked, ran, returned 200 and sent no mail.
+The six `JWC_SMTP_*` variables were already in the config registry and
+`lettre` was already a dependency; only the code between them was
+missing. It is back, as `src/mail.rs` on both backends, and it **raises**
+when no relay is configured — the rule `redis.*` already follows, for the
+reason a silent stub taught: "no server" must never read as "sent".
+`mail.enabled()` is what to branch on when the send is optional.
+
+### `cache.*` was in the runtime and out of the language
+
+The native prelude has carried `jwc_cache_store` since the backend came
+back, but `cache` was not a namespace, so no 1.0 program could name it.
+It is a namespace now — `cache.get`, `cache.set`, `cache.del`,
+`cache.clear` — with the same four shapes as their `redis.*`
+counterparts, so moving a call between them is a rename.
+
+The store this restores was unbounded: it evicted only on a `get` of the
+expired key itself, so a program caching per-request keys it never read
+back grew it until the process died. Entries are now capped by
+`JWC_CACHE_MAX_ENTRIES` (default 10 000) — at the cap a write sweeps what
+has expired, then evicts the oldest — and `/metrics` reports
+`jwc_cache_entries`, `_hits_total`, `_misses_total`, `_evicted_total`,
+because a cache that has quietly become a no-op looks exactly like one
+that works.
+
+### Every database-free native build failed to compile
+
+`jwc build` advertises the database-free tier as its coverage. Nothing in
+that tier compiled: the no-DB `/metrics` emitter was a `push_str` of a
+literal whose format holes had been escaped as if it were a `format!`, so
+the generated crate carried `"{{}}…{{}}"` and rustc refused it with
+"multiple unused formatting arguments". Programs *with* a database took
+the other branch and were fine, which is why the differential runs never
+saw it.
+
+Two guards now stand where the class of bug lives: `ASYNC_BUILTINS` and
+the new `RESULT_BUILTINS` are checked against the prelude sources at test
+time, in both directions. The first run found a real gap
+(`jwc_b_redis_rate_limit`). Getting either list wrong breaks only the
+*generated* crate, which no test in this repo compiles.
+
 ## [0.9.903] — three defects a real port found — 2026-08-21
 
 Porting task-tracker — a 0.9.x board API with 36 source files, m2m

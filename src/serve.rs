@@ -611,6 +611,9 @@ fn metrics_text(program: &Program) -> String {
         );
         out.push_str(&format!("jwc_redis_pool_waiting {}\n", s.waiting));
     }
+    // Empty unless the program actually used the cache, so a service that
+    // never calls `cache.*` does not sprout four flat-zero series.
+    out.push_str(&crate::cache::metrics_text());
     out.push_str(
         "# HELP jwc_routes Declared routes.\n\
          # TYPE jwc_routes gauge\n",

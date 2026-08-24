@@ -220,6 +220,42 @@ counter with no TTL if the process dies between them, and that key is
 blocked for good. The window is fixed: the TTL is set by the request that
 creates the key and not pushed forward by later ones.
 
+`cache.*` is the process-local store:
+
+| Name | Type |
+|---|---|
+| `cache.get(k)` / `cache.set(k, v, ttl)` / `cache.del(k)` | `text?` / `boolean` / `int` |
+| `cache.clear()` | `void` |
+
+Deliberately the same four shapes as their `redis.*` counterparts, so
+moving a call from one to the other is a rename. What is **not** the same
+is the scope: this store lives in one process, so two replicas do not share
+it and a restart empties it. It is right for what a single process can own
+— a parsed JWKS document, a config row read on every request. It is wrong
+for anything whose correctness spans replicas, and a rate limiter is the
+standard mistake: per-process counters make the real limit `limit ×
+replicas`, and nothing in the response says so. `redis.rate_limit` is for
+that.
+
+Entries are capped by `JWC_CACHE_MAX_ENTRIES` (default 10 000). At the cap
+a write sweeps what has expired and then evicts the oldest write; the
+evictions are counted in `/metrics` as `jwc_cache_evicted_total`, because a
+cache that has quietly become a no-op looks exactly like one that works.
+
+`import mail;` makes `mail.*` resolvable:
+
+| Name | Type |
+|---|---|
+| `mail.send(to, subject, body_html)` | `void` |
+| `mail.enabled()` | `boolean` |
+
+The relay is `JWC_SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` /
+`_TLS`, and `mail.enabled()` answers whether the four required ones are
+set. The rule is the one `redis.*` follows and for the same reason:
+`mail.send` **raises** when no relay is configured. It used to answer
+`null` — a password-reset route typechecked, ran, returned 200 and
+delivered nothing.
+
 ---
 
 ## 9. Query-only
@@ -236,7 +272,7 @@ grouped query (`E0530`).
 | Not a builtin | Why, and what to write instead |
 |---|---|
 | `now()` | two clocks; write `date.now()` or `default now()` (types §2.4) |
-| `send_email` | I/O with a provider shape the language does not model. A package: `import mail; mail.send(to, subject, body)`. `DEFERRED-10` |
+| `send_email` | I/O with a provider shape the language does not model. The package is §8's `mail.send(to, subject, body)`. `DEFERRED-10` |
 | `log_insert` | overlapped `insert into` for no benefit. Write the insert (middleware §5 shows the `after`-safe form) |
 | `random_token` | ambiguous strength. `crypto.token(n)` |
 | `verify_signature` | ambiguous algorithm. `hash.hmac_verify(payload, sig, secret)` |

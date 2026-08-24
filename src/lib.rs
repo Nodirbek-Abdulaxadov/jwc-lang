@@ -54,6 +54,7 @@ pub mod wiring;
 pub mod workspace;
 
 // ---- infrastructure the language stands on
+pub mod cache;
 pub mod cmd;
 pub mod config;
 pub mod engine;
@@ -61,6 +62,7 @@ pub mod hash;
 pub mod jwks;
 pub mod jwt;
 pub mod locks;
+pub mod mail;
 pub mod observability;
 pub mod password;
 pub mod redis_engine;

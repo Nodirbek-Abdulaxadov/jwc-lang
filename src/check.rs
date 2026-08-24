@@ -2490,6 +2490,30 @@ impl<'a> Checker<'a> {
                 arity(self, 3);
                 Ty::Void
             }
+            "mail.enabled" => {
+                arity(self, 0);
+                Ty::boolean()
+            }
+
+            // --- process-local cache (builtins.md §8). Same shapes as the
+            // `redis.*` four it mirrors, so swapping one for the other is a
+            // rename and not a rewrite.
+            "cache.get" => {
+                arity(self, 1);
+                Ty::text().opt()
+            }
+            "cache.set" => {
+                arity(self, 3);
+                Ty::boolean()
+            }
+            "cache.del" => {
+                arity(self, 1);
+                Ty::int()
+            }
+            "cache.clear" => {
+                arity(self, 0);
+                Ty::Void
+            }
 
             // --- raw escape hatch (writes.md §6)
             "raw" => {
@@ -3836,6 +3860,7 @@ fn is_namespace(name: &str) -> bool {
             | "response"
             | "context"
             | "redis"
+            | "cache"
             | "mail"
             | "count"
             | "App"

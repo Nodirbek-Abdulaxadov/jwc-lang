@@ -3129,58 +3129,93 @@ fn jwc_b_now() -> V {
     v_str(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
-// --- process-wide in-memory cache (TTL-keyed, std-only) ---------------------
+// --- process-local cache (builtins.md §8) ------------------------------------
 //
-// Mirrors `jwc::cache` from the interpreter: single global Mutex<HashMap>,
-// lazy TTL eviction on read. Fine for single-process / single-replica
-// deployments; behind multiple replicas use a shared Redis cache instead.
+// Mirrors `jwc::cache` in the compiler, including its bound: entries are
+// capped by `JWC_CACHE_MAX_ENTRIES` (default 10 000), a write at the cap
+// sweeps expired entries first and then gives up the oldest write, and the
+// evictions are counted so `/metrics` can show a cache that has quietly
+// stopped caching.
+//
+// This store lives in one process. Behind more than one replica use
+// `redis.*` — a limiter keyed here counts per-process, so the real limit is
+// `limit × replicas`.
 
 mod jwc_cache_store {
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
     pub struct Entry {
         pub value: String,
-        /// `None` means "never expires".
+        /// `None` never expires.
         pub expires_at: Option<Instant>,
+        pub seq: u64,
     }
 
     pub fn store() -> &'static Mutex<HashMap<String, Entry>> {
         static STORE: OnceLock<Mutex<HashMap<String, Entry>>> = OnceLock::new();
         STORE.get_or_init(|| Mutex::new(HashMap::new()))
     }
+
+    pub static SEQ: AtomicU64 = AtomicU64::new(0);
+    pub static EVICTED: AtomicU64 = AtomicU64::new(0);
+    pub static HITS: AtomicU64 = AtomicU64::new(0);
+    pub static MISSES: AtomicU64 = AtomicU64::new(0);
+
+    pub fn max_entries() -> usize {
+        static MAX: OnceLock<usize> = OnceLock::new();
+        *MAX.get_or_init(|| {
+            std::env::var("JWC_CACHE_MAX_ENTRIES")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(10_000)
+        })
+    }
 }
 
-fn jwc_b_cache_get(key: V) -> V {
+/// A poisoned mutex means some other task panicked while holding it. The
+/// map is still a valid map, and taking down every later request over a
+/// cache lock is a worse outcome than reading a possibly-stale entry —
+/// which is what `locks::lock_recover` decided for the interpreter.
+fn jwc_cache_lock() -> std::sync::MutexGuard<
+    'static,
+    std::collections::HashMap<String, jwc_cache_store::Entry>,
+> {
+    jwc_cache_store::store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
+fn jwc_b_v1_cache_get(key: V) -> V {
+    use std::sync::atomic::Ordering;
     use std::time::Instant;
     let k = match key {
         V::Str(s) => s.into_owned(),
         _ => return V::Null,
     };
-    let mut guard = jwc_cache_store::store().lock().expect("cache mutex poisoned");
-    let expired = match guard.get(&k) {
-        Some(entry) => match entry.expires_at {
-            Some(deadline) => Instant::now() >= deadline,
-            None => false,
-        },
-        None => return V::Null,
+    let mut guard = jwc_cache_lock();
+    let Some(entry) = guard.get(&k) else {
+        jwc_cache_store::MISSES.fetch_add(1, Ordering::Relaxed);
+        return V::Null;
     };
-    if expired {
+    if entry.expires_at.is_some_and(|d| Instant::now() >= d) {
         guard.remove(&k);
+        jwc_cache_store::MISSES.fetch_add(1, Ordering::Relaxed);
         return V::Null;
     }
-    guard
-        .get(&k)
-        .map(|e| v_str(e.value.clone()))
-        .unwrap_or(V::Null)
+    jwc_cache_store::HITS.fetch_add(1, Ordering::Relaxed);
+    guard.get(&k).map(|e| v_str(e.value.clone())).unwrap_or(V::Null)
 }
 
-fn jwc_b_cache_set(key: V, value: V, ttl_secs: V) -> V {
+fn jwc_b_v1_cache_set(key: V, value: V, ttl_secs: V) -> V {
+    use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
     let k = match key {
         V::Str(s) => s.into_owned(),
-        _ => return V::Null,
+        _ => return V::Bool(false),
     };
     let v = match value {
         V::Str(s) => s.into_owned(),
@@ -3190,41 +3225,79 @@ fn jwc_b_cache_set(key: V, value: V, ttl_secs: V) -> V {
         V::Null => String::new(),
         other => jwc_to_json(&other),
     };
+    // A negative TTL is a caller mistake, not "expire in the past"; 0
+    // already means "no expiry".
     let ttl = jwc_to_int(&ttl_secs).unwrap_or(0).max(0) as u64;
     let expires_at = if ttl == 0 {
         None
     } else {
         Instant::now().checked_add(Duration::from_secs(ttl))
     };
-    let mut guard = jwc_cache_store::store().lock().expect("cache mutex poisoned");
+    let seq = jwc_cache_store::SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let mut guard = jwc_cache_lock();
+    // Only when the write would *add* a key — overwriting is free.
+    if guard.len() >= jwc_cache_store::max_entries() && !guard.contains_key(&k) {
+        let now = Instant::now();
+        guard.retain(|_, e| e.expires_at.is_none_or(|d| now < d));
+        if guard.len() >= jwc_cache_store::max_entries() {
+            // FIFO rather than LRU: tracking reads would mean taking the
+            // write lock on every `get`.
+            if let Some(oldest) = guard.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) {
+                guard.remove(&oldest);
+                jwc_cache_store::EVICTED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
     guard.insert(
         k,
         jwc_cache_store::Entry {
             value: v,
             expires_at,
+            seq,
         },
     );
-    V::Null
+    V::Bool(true)
 }
 
-fn jwc_b_cache_del(key: V) -> V {
+fn jwc_b_v1_cache_del(key: V) -> V {
     let k = match key {
         V::Str(s) => s.into_owned(),
-        _ => return V::Null,
+        _ => return V::Int(0),
     };
-    jwc_cache_store::store()
-        .lock()
-        .expect("cache mutex poisoned")
-        .remove(&k);
+    V::Int(i64::from(jwc_cache_lock().remove(&k).is_some()))
+}
+
+fn jwc_b_v1_cache_clear() -> V {
+    jwc_cache_lock().clear();
     V::Null
 }
 
-fn jwc_b_cache_clear() -> V {
-    jwc_cache_store::store()
-        .lock()
-        .expect("cache mutex poisoned")
-        .clear();
-    V::Null
+/// `/metrics`, matching `cache::metrics_text` in the compiler line for
+/// line. Empty until the cache is actually used.
+fn jwc_cache_metrics() -> String {
+    use std::sync::atomic::Ordering;
+    let hits = jwc_cache_store::HITS.load(Ordering::Relaxed);
+    let misses = jwc_cache_store::MISSES.load(Ordering::Relaxed);
+    let evicted = jwc_cache_store::EVICTED.load(Ordering::Relaxed);
+    let entries = jwc_cache_lock().len();
+    if hits == 0 && misses == 0 && evicted == 0 && entries == 0 {
+        return String::new();
+    }
+    format!(
+        "# HELP jwc_cache_entries Live entries in the process-local cache.\n\
+         # TYPE jwc_cache_entries gauge\n\
+         jwc_cache_entries {entries}\n\
+         # HELP jwc_cache_hits_total Reads that found a live entry.\n\
+         # TYPE jwc_cache_hits_total counter\n\
+         jwc_cache_hits_total {hits}\n\
+         # HELP jwc_cache_misses_total Reads that found nothing, expired included.\n\
+         # TYPE jwc_cache_misses_total counter\n\
+         jwc_cache_misses_total {misses}\n\
+         # HELP jwc_cache_evicted_total Entries dropped to stay under JWC_CACHE_MAX_ENTRIES.\n\
+         # TYPE jwc_cache_evicted_total counter\n\
+         jwc_cache_evicted_total {evicted}\n"
+    )
 }
 
 // --- class validation and the 400 contract (types.md §11) --------------------

@@ -135,6 +135,43 @@ Every other `redis.*` call **raises** when no server is configured. A
 rate limiter built on a call that quietly answered null would allow
 everything.
 
+## Cache
+
+Process-local, always available, no configuration:
+
+| | |
+|---|---|
+| `cache.get(k)`, `cache.set(k, v, ttl)`, `cache.del(k)` | `ttl = 0` is no expiry |
+| `cache.clear()` | drops every entry |
+
+The four shapes match `redis.*` on purpose — swapping one for the other
+is a rename. The scope does not: this store is **one process**. Two
+replicas do not share it, a restart empties it, and a rate limiter keyed
+here counts per pod, so the real limit is `limit × replicas`. Use
+`redis.rate_limit` for that.
+
+Entries are bounded by `JWC_CACHE_MAX_ENTRIES` (default 10 000): at the
+cap a write sweeps expired entries, then evicts the oldest. Watch
+`jwc_cache_evicted_total` in `/metrics` — a cache that has quietly turned
+into a no-op looks the same from outside as one that is working.
+
+## Mail
+
+Available when `JWC_SMTP_HOST`, `JWC_SMTP_USER`, `JWC_SMTP_PASSWORD` and
+`JWC_SMTP_FROM` are all set:
+
+| | |
+|---|---|
+| `mail.send(to, subject, body_html)` | HTML body; raises on a delivery failure |
+| `mail.enabled()` | what to branch on when the send is optional |
+
+`JWC_SMTP_PORT` defaults to `587` and `JWC_SMTP_TLS` to `starttls`
+(`tls` for implicit TLS on 465, `none` for a local relay).
+
+`mail.send` raises when no relay is configured, for the same reason
+`redis.*` does: it used to answer `null`, so a password-reset route
+returned 200 and sent nothing.
+
 ## Debug
 
 `debug.dump(v)` returns its argument unchanged, so wrapping a
