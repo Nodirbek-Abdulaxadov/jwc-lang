@@ -3,6 +3,28 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.913] — the test that tested itself — 2026-08-24
+
+CI had been red for three commits on a lint the local toolchain could not
+see. `dtolnay/rust-toolchain@stable` floats, a new stable landed, and
+`clippy::unnecessary_min_or_max` arrived with it:
+
+```
+error: `(MAX_BIND_PARAMS / (MAX_BIND_PARAMS + 10))` is never greater
+       than `1` and has therefore no effect
+```
+
+Clippy was right about more than the arithmetic. The whole test restated
+`flush`'s chunk-size formula rather than calling it, so it asserted that
+its own copy matched itself — it would have passed with `flush` computing
+something else entirely.
+
+The formula is `rows_per_chunk(ncols)` now, called from both, and the test
+checks the property over ten widths: a chunk never exceeds Postgres's
+65 535-parameter ceiling and is never empty, including the table so wide
+that one row alone exceeds it — which still sends that row, because one
+failing statement beats a batch silently dropped.
+
 ## [0.9.912] — the docs half — 2026-08-24
 
 `insert buffered` shipped in 0.9.910 with a spec clause and no user

@@ -194,6 +194,16 @@ type Binds = Vec<Option<String>>;
 /// different casts are not the same statement and go in separate batches.
 type Group = (String, String);
 
+/// How many rows of `ncols` columns fit under Postgres's parameter ceiling.
+///
+/// At least one, always: a table wide enough that a single row exceeds the
+/// ceiling still gets its row sent. It will fail at execute time, which is
+/// a visible error on one statement, rather than being silently chunked
+/// into nothing.
+fn rows_per_chunk(ncols: usize) -> usize {
+    (MAX_BIND_PARAMS / ncols.max(1)).max(1)
+}
+
 /// Write what is held: one multi-row `INSERT` per `(prefix, ncols)` group.
 ///
 /// Merging is the point. One statement per row would still be one round
@@ -216,7 +226,7 @@ async fn flush(pending: &mut Vec<Row>) {
 
     for ((prefix, tuple), rows) in groups {
         let ncols = rows.first().map(|r| r.len()).unwrap_or(1);
-        let per_chunk = (MAX_BIND_PARAMS / ncols.max(1)).max(1);
+        let per_chunk = rows_per_chunk(ncols);
         for chunk in rows.chunks(per_chunk) {
             let (sql, binds) = merge(&prefix, &tuple, chunk);
             match crate::db::run(&sql, &binds, Shape::None).await {
@@ -437,17 +447,23 @@ mod tests {
     /// time.
     #[test]
     fn a_wide_table_is_chunked_under_the_parameter_ceiling() {
-        let ncols = 20usize;
-        let per_chunk = (MAX_BIND_PARAMS / ncols).max(1);
-        assert_eq!(per_chunk, 3_276);
-        assert!(
-            per_chunk * ncols <= MAX_BIND_PARAMS,
-            "a chunk would exceed the ceiling"
-        );
+        assert_eq!(rows_per_chunk(20), 3_276);
 
-        // And a table so wide one row alone would exceed it still sends
-        // one row rather than none.
-        let absurd = (MAX_BIND_PARAMS / (MAX_BIND_PARAMS + 10)).max(1);
-        assert_eq!(absurd, 1);
+        // The property, over every width a table can have: a chunk never
+        // exceeds the ceiling, and is never empty. Restating the formula
+        // instead would only assert that this test's copy of it matches
+        // itself — which is what the first version of this test did.
+        for ncols in [0, 1, 2, 7, 20, 100, 1_000, 65_535, 65_545, 200_000] {
+            let per_chunk = rows_per_chunk(ncols);
+            assert!(per_chunk >= 1, "{ncols} columns chunked into nothing");
+            assert!(
+                ncols <= 1 || per_chunk == 1 || per_chunk * ncols <= MAX_BIND_PARAMS,
+                "{ncols} columns x {per_chunk} rows exceeds the ceiling"
+            );
+        }
+
+        // A table so wide one row alone exceeds the ceiling still sends
+        // that row: one failing statement beats a batch silently dropped.
+        assert_eq!(rows_per_chunk(MAX_BIND_PARAMS + 10), 1);
     }
 }
