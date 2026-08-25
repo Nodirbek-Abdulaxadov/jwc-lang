@@ -12,7 +12,7 @@ routes "/api/v1/deliveries" {
         --- Written on this request's connection, before the response goes
         --- out — so a `transaction { }` around it would roll the dispatch
         --- back with everything else.
-        dispatch Deliver(recipient: $req.recipient, subject: $req.subject);
+        dispatch Deliver(recipient: req.recipient, subject: req.subject);
 
         return accepted(json({ queued: true }));
     }
@@ -23,6 +23,6 @@ routes "/api/v1/deliveries" {
             orderby delivered_at desc, id desc
             limit 50;
 
-        return json($rows);
+        return json(rows);
     }
 }

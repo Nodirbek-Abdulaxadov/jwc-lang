@@ -669,8 +669,10 @@ pub enum Stmt {
 
 #[derive(Clone, Debug)]
 pub enum AssignTarget {
-    /// `$x = …`
-    Local(Ident),
+    /// `x = …`, or `$x = …`. `sigil` records which was written so `jwc fmt`
+    /// gives it back the way it came in — outside a query clause the two
+    /// mean the same thing (names.md §5.3).
+    Local { name: Ident, sigil: bool },
     /// `context.k = …`
     Context(Ident),
 }

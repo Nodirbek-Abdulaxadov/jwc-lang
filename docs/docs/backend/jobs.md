@@ -15,17 +15,17 @@ job SendWelcome(account_id: bigint, email: text) retries 5 backoff "30s" {
         where id == $account_id
         first or throw NotFound("account not found");
 
-    mail.send($email, "Welcome", "<p>salom</p>");
+    mail.send(email, "Welcome", "<p>salom</p>");
 }
 ```
 
 ```jwc no-compile
 route POST "register" {
-    let account = AuthService.register($req);
+    let account = AuthService.register(req);
 
-    dispatch SendWelcome(account_id: $account.id, email: $account.email);
+    dispatch SendWelcome(account_id: account.id, email: account.email);
 
-    return created(json($account));
+    return created(json(account));
 }
 ```
 
@@ -50,8 +50,8 @@ out:
 
 ```jwc no-compile
 transaction {
-    let account = AuthService.register($req);
-    dispatch SendWelcome(account_id: $account.id, email: $account.email);
+    let account = AuthService.register(req);
+    dispatch SendWelcome(account_id: account.id, email: account.email);
 }
 ```
 

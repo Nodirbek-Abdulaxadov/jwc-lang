@@ -1927,16 +1927,21 @@ impl Parser {
             });
         }
 
-        // `$x = …;` and `context.k = …;`
-        if let Tok::Local(name) = self.peek().tok.clone() {
+        // `x = …;`, `$x = …;` and `context.k = …;` — the sigil is optional
+        // outside a query clause (names.md §5.3).
+        if let Tok::Local(name) | Tok::Ident(name) = self.peek().tok.clone() {
             if self.peek_at(1).is(&Tok::Eq) {
+                let sigil = matches!(self.peek().tok, Tok::Local(_));
                 let nspan = self.bump().span;
                 self.bump();
                 let value = self.parse_expr()?;
                 let end = self.expect(Tok::Semi)?.span;
                 return Ok(Stmt::Assign {
                     at,
-                    target: AssignTarget::Local(Ident::new(name, nspan)),
+                    target: AssignTarget::Local {
+                        name: Ident::new(name, nspan),
+                        sigil,
+                    },
                     value,
                     span: start.to(end),
                 });
@@ -2344,7 +2349,7 @@ impl Parser {
                 self.bump();
                 let sspan = self.span();
                 let source = match self.peek().tok.clone() {
-                    Tok::Local(n) => {
+                    Tok::Local(n) | Tok::Ident(n) => {
                         self.bump();
                         Ident::new(n, sspan)
                     }
@@ -2352,7 +2357,7 @@ impl Parser {
                         self.err_note(
                             "E0012",
                             sspan,
-                            format!("expected `$name` after `...`, found {other}"),
+                            format!("expected a local after `...`, found {other}"),
                             "a spread source is a local with a declared shape",
                             "types.md §9.1",
                         );
@@ -3004,7 +3009,7 @@ impl Parser {
                 self.bump();
                 let sspan = self.span();
                 let source = match self.peek().tok.clone() {
-                    Tok::Local(n) => {
+                    Tok::Local(n) | Tok::Ident(n) => {
                         self.bump();
                         Ident::new(n, sspan)
                     }
@@ -3012,7 +3017,7 @@ impl Parser {
                         self.err_note(
                             "E0012",
                             sspan,
-                            format!("expected `$name` after `...`, found {other}"),
+                            format!("expected a local after `...`, found {other}"),
                             "a spread source is a local with a declared shape",
                             "types.md §9.1",
                         );

@@ -120,20 +120,20 @@ routes "/bins" {
     route POST "" {
         let req = request.body() as NewBin;
 
-        return created(json(BinService.create($req)));
+        return created(json(BinService.create(req)));
     }
 
     route GET "{slug}" {
         let bin = BinService.by_slug(@slug) or throw NotFound("no such bin");
 
-        return json($bin);
+        return json(bin);
     }
 
     route GET "{slug}/entries" {
         let bin = BinService.by_slug(@slug) or throw NotFound("no such bin");
 
         return json(BinService.entries(
-            $bin.id,
+            bin.id,
             request.query("cursor"),
             int(request.query("size") ?? "20")
         ));
@@ -143,7 +143,7 @@ routes "/bins" {
         let bin = BinService.by_slug(@slug) or throw NotFound("no such bin");
         let req = request.body() as NewEntry;
 
-        return created(json(BinService.add($bin.id, $req)));
+        return created(json(BinService.add(bin.id, req)));
     }
 }
 
@@ -153,7 +153,7 @@ function main() {
 ```
 
 `or throw NotFound(…)` is the line that does the work. It turns the
-`Record?` into a `Record`, so `$bin.id` on the next line type-checks —
+`Record?` into a `Record`, so `bin.id` on the next line type-checks —
 and it is the only place a missing bin is handled, once, rather than at
 every field read.
 

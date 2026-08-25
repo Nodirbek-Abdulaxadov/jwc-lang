@@ -13,10 +13,10 @@ middleware RequireAuth provides account_id: bigint {
     let header = request.header("Authorization") or throw Unauthorized("a bearer token is required");
     let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
 
-    let claims = jwt.verify($header, $secret)
+    let claims = jwt.verify(header, secret)
         or throw Unauthorized("token yaroqsiz");
 
-    context.account_id = bigint($claims.sub);
+    context.account_id = bigint(claims.sub);
 }
 ```
 
@@ -67,9 +67,9 @@ import redis;
 
 middleware RateLimit {
     let ip = request.client_ip();
-    let allowed = redis.rate_limit("rl:" + string.of($ip), 60, 60);
+    let allowed = redis.rate_limit("rl:" + string.of(ip), 60, 60);
 
-    if (!$allowed) {
+    if (!allowed) {
         return tooManyRequests("juda ko'p so'rov");
     }
 }
@@ -90,7 +90,7 @@ middleware Audit {
         let status = response.status();
         let method = request.method();
 
-        if ($method == "GET" or $status >= 400) {
+        if (method == "GET" or status >= 400) {
             return;
         }
 

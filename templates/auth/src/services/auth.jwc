@@ -14,7 +14,7 @@ function decoy_password_hash() -> text {
 
 service AuthService {
     function register(req: Register) {
-        let password_hash = hash.password($req.password);
+        let password_hash = hash.password(req.password);
 
         return insert into App.auth.Accounts {
             ...$req except (password),
@@ -38,24 +38,24 @@ service AuthService {
 
         let stored = decoy_password_hash();
 
-        if ($found != null) {
-            $stored = $found.password_hash;
+        if (found != null) {
+            stored = found.password_hash;
         }
 
-        let ok = hash.verify($req.password, $stored);
+        let ok = hash.verify(req.password, stored);
 
-        let account = $found or throw Unauthorized("email yoki parol xato");
+        let account = found or throw Unauthorized("email yoki parol xato");
 
-        if (!$ok) {
+        if (!ok) {
             throw Unauthorized("email yoki parol xato");
         }
 
         let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
         let ttl_minutes = int(env("JWT_TTL_MINUTES") ?? "60");
-        let subject = string.of($account.id);
-        let token = jwt.sign({ sub: $subject }, $secret, $ttl_minutes);
+        let subject = string.of(account.id);
+        let token = jwt.sign({ sub: subject }, secret, ttl_minutes);
 
-        return { token: $token, expires_in: $ttl_minutes * 60 };
+        return { token: token, expires_in: ttl_minutes * 60 };
     }
 
     function profile(account_id: bigint) {

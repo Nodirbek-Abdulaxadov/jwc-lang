@@ -28,7 +28,7 @@ import redis;
 
 middleware RateLimit {
     let allowed = redis.rate_limit("rl:" + string.of(request.client_ip()), 60, 60);
-    if (!$allowed) {
+    if (!allowed) {
         return tooManyRequests("too many requests");
     }
 }

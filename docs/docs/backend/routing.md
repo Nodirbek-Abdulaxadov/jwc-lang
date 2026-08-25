@@ -50,7 +50,9 @@ where it would have been a 500.
 
 `@name` is a path parameter and `$name` is a local. They are different
 sigils because they come from different places, and one of them is
-client-controlled.
+client-controlled. `@` is always required; `$` only inside a query clause,
+where a bare name is a column — everywhere else `account` and `$account`
+are the same reference.
 
 ## Which route wins
 
@@ -82,20 +84,20 @@ at startup rather than a coin flip at run time.
 | `content(mime, body)` | 200, body verbatim |
 
 A builder applied to something that is **already** a response replaces its
-status and keeps its body — so `created(json($row))` is 201 with that
+status and keeps its body — so `created(json(row))` is 201 with that
 body, not 201 wrapping a response object.
 
 `content` is the one that does not JSON-encode. An HTML page through
 `json()` reaches the browser as a quoted string.
 
 ```jwc no-compile
-return content("text/html", $page);
+return content("text/html", page);
 ```
 
 ## Headers
 
 ```jwc no-compile
-return created(json($w)) with { "Location": "/wallets/" + string.of($w.id) };
+return created(json(w)) with { "Location": "/wallets/" + string.of(w.id) };
 ```
 
 `with { … }` **replaces** a header of the same name rather than appending

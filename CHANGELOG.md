@@ -3,6 +3,93 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.924] — `$` is not required outside a query — 2026-08-25
+
+`$` was mine, from v0.20.0, and nobody asked for it.
+
+The reason it exists is real, and it is narrow. Inside a query clause a
+bare identifier is a **column**, so a local has to be told apart from one:
+without a mark, `where org_id == org_id` is a tautology that silently
+deletes a tenancy boundary — the defect `gaps.md` records three times in
+the sample, twice on a security path. The fix was a sigil on the local.
+
+Then I extended it to **everywhere**, for uniformity, and that half was
+not paid for by anything:
+
+```jwc
+function main() {
+    for (attempt in [1, 2, 3, 4, 5]) {
+        console.writeln("Attempt #" + string.of(attempt));   -- was $attempt
+    }
+}
+```
+
+There is no column named `attempt` in scope here. There is no ambiguity to
+resolve. The sigil bought nothing and cost every line.
+
+### The rule now
+
+| where | `$` |
+|---|---|
+| query clause — `where`, `having`, `group by`, `orderby`, `join … on`, a projection field, an aggregate filter, an `insert` object literal, a `set` clause, `page after` | **required** |
+| everywhere else — route bodies, services, `for`, `if`, argument lists, assignment | optional |
+
+`attempt` and `$attempt` are the same reference outside a query, `x = 1;`
+parses like `$x = 1;`, and `{ ...req }` spreads like `{ ...$req }` — a
+column cannot be spread, so there is nothing to disambiguate. Nothing that
+compiled before stops compiling; `jwc fmt` gives each spelling back the way
+it was written rather than picking a side.
+
+### A typo would have become a string
+
+Making the bare form ordinary exposed something that was already wrong:
+a bare name outside a query that matched no local and no declaration was
+**silently accepted**, and the interpreter evaluated it to its own name as
+text. `string.of(totl)` printed `totl`. It is `E0211: unknown name` now.
+
+Two backends made that worse than a bad value: native codegen has no
+binding to emit for such a name, so it refused to build a program the
+interpreter had happily run. Rejecting it in the checker closes the
+divergence at the source.
+
+### Three rules were keyed on the sigil
+
+Found by converting the templates and watching one stop compiling. Each of
+these matched `ExprKind::Local` and would have gone quiet the moment
+someone wrote the bare form:
+
+- **null narrowing** — `if (found != null) { … found.x … }` reported
+  `E0403` on a value it had just guarded;
+- **`private` column egress** (`E0410`) — `json(account)` would have
+  shipped a `private` column that `json($account)` refuses;
+- **`request.path()` taint**, and the password-hash lint.
+
+The first is a wrong error. The second is a **data leak**. Both are pinned
+by corpus cases now, in both spellings.
+
+### Guards
+
+- `tests/native.rs` — the two spellings must emit **byte-identical** Rust.
+  The interpreter reaches a local through one `lookup`; codegen reaches it
+  through a scope stack it keeps itself, and that is the kind of second
+  implementation that drifts.
+- `tests/native.rs` — a bare name that is *not* a local is still refused by
+  name, rather than emitted as a binding the generated crate lacks.
+- `tests/type_corpus/cases/sigils.jwc` — both spellings compile outside a
+  query; an unknown bare name is `E0211`; inside a query the column rule and
+  `W0104` are unchanged.
+- `tests/type_corpus/cases/private_columns.jwc` — the leak is caught in
+  either spelling.
+
+### Documentation
+
+`names.md` §2.5/§5.3/§5.5 restate the rule and stop claiming the sigil is
+universal. `syntax.md`, `control-flow.md`, `routing.md` and every guide
+sample outside a query clause drop it, as do the three `jwc new`
+templates — `jwc check` passes on all three. The conformance sample under
+`docs/spec/v1/sample/` keeps the sigil throughout: it is the artifact that
+proves the older spelling still compiles.
+
 ## [0.9.923] — macOS — 2026-08-25
 
 There has never been a macOS build. Not deleted at a cutover, not dropped

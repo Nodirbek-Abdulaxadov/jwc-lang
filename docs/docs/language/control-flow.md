@@ -10,15 +10,18 @@ description: "let, assignment, if, for, break, continue, and the two ways out of
 
 ```jwc no-compile
 let total = 0;
-$total = $total + 1;      -- assignment reads the sigil
+total = total + 1;
 ```
 
-There is no `+=`. A binding is declared with `let` and written with `$`.
+There is no `+=`. A binding is declared with `let` and written by name. The
+`$` sigil is legal here too (`$total = $total + 1;`) but only *required*
+inside a query clause, where a bare name is a column — see
+[Syntax](./syntax.md#sigils).
 
 ## `if`
 
 ```jwc no-compile
-if ($role != MemberRole.owner) {
+if (role != MemberRole.owner) {
     throw Forbidden("faqat egasi o'chira oladi");
 }
 ```
@@ -29,12 +32,12 @@ as usual.
 ## `for`
 
 ```jwc no-compile
-for (line in $invoice.lines) {
-    $total = $total + $line.amount;
+for (line in invoice.lines) {
+    total = total + line.amount;
 }
 ```
 
-The binder is a bare name and references use `$`. The iterable is an array:
+The iterable is an array:
 a `T[]` field, a query result, or an array literal. Iterating a `Raw` is
 `E0311` — add a projection.
 
@@ -55,7 +58,7 @@ for (attempt in [1, 2, 3, 4, 5]) {
     } catch Conflict (err) {
         continue;
     };
-    return $code;
+    return code;
 }
 throw CodeExhausted("qisqa kod ajratib bo'lmadi");
 ```
@@ -78,7 +81,7 @@ transaction {
         account_id = $owner_id,
         role       = MemberRole.owner
     };
-    return $org;
+    return org;
 }
 ```
 

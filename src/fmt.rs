@@ -642,7 +642,13 @@ impl Writer {
             }
             Stmt::Assign { target, value, .. } => {
                 let t = match target {
-                    AssignTarget::Local(i) => format!("${}", i.name),
+                    AssignTarget::Local { name, sigil } => {
+                        if *sigil {
+                            format!("${}", name.name)
+                        } else {
+                            name.name.clone()
+                        }
+                    }
                     AssignTarget::Context(i) => format!("context.{}", i.name),
                 };
                 self.assigned(&format!("{t} = "), value, ";");

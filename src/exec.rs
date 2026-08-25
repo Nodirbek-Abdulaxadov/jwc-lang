@@ -461,7 +461,7 @@ impl<'a> Vm<'a> {
             Stmt::Assign { target, value, .. } => {
                 let v = self.eval(value).await?;
                 match target {
-                    AssignTarget::Local(i) => self.assign(&i.name, v),
+                    AssignTarget::Local { name, .. } => self.assign(&name.name, v),
                     AssignTarget::Context(k) => {
                         self.context.insert(k.name.clone(), v);
                     }
@@ -695,7 +695,14 @@ impl<'a> Vm<'a> {
                 .cloned()
                 .ok_or_else(|| fault(format!("unknown path parameter `@{}`", i.name)))?,
 
-            ExprKind::Name(i) => Value::Text(i.name.clone()),
+            // Outside a query clause a bare name is a local when one is in
+            // scope — the sigil is optional there (names.md §5.3). Anything
+            // else keeps the previous reading, its own text: the checker has
+            // already rejected a bare name that is neither.
+            ExprKind::Name(i) => self
+                .lookup(&i.name)
+                .cloned()
+                .unwrap_or_else(|| Value::Text(i.name.clone())),
 
             ExprKind::Field { base, field } => self.field(base, field).await?,
 

@@ -49,7 +49,7 @@ routes "/notes" {
     route POST "" {
         let req = request.body() as NoteInput;
 
-        return created(json(NoteService.create($req)));
+        return created(json(NoteService.create(req)));
     }
 }
 ```

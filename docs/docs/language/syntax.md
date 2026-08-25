@@ -45,20 +45,40 @@ Two characters carry meaning where a bare name would be ambiguous:
 
 | Sigil | Means |
 |---|---|
-| `$name` | a local variable, read inside an expression or a query |
+| `$name` | a local variable — **required only inside a query clause** |
 | `@name` | a path parameter, from the route's pattern |
 
 ```jwc no-compile
 route GET "" {
     let account = AccountService.one(@id);
-    return json($account);
+    return json(account);
 }
 ```
 
-The sigil is part of the token — `@ id` is an error. Inside a query, the
-distinction is load-bearing: a bare `email` is the *column*, `$email` is
-your variable, and without the sigil `where email == email` would be a
-tautology no one meant to write.
+The sigil is part of the token — `@ id` is an error.
+
+**Ordinary code does not need `$`.** In a route body, a service, a `for` or
+an argument list there is no column in scope, so `account` and `$account`
+are the same reference:
+
+```jwc no-compile
+for (attempt in [1, 2, 3]) {
+    console.writeln("Attempt #" + string.of(attempt));
+}
+```
+
+**Inside a query clause it is required**, and there the distinction is
+load-bearing: a bare `email` is the *column*, `$email` is your variable, and
+without the sigil `where email == email` would be a tautology no one meant
+to write.
+
+```jwc no-compile
+select A from App.auth.Accounts where email == $email as { id } first;
+```
+
+Both spellings compile everywhere the sigil is optional, and `jwc fmt`
+leaves each as you wrote it. A name that is neither a local nor a
+declaration is `E0211`, so a typo is still an error and not a string.
 
 ## There are no reserved words
 

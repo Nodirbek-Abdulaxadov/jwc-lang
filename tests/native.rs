@@ -529,3 +529,68 @@ fn a_program_without_a_main_still_generates_a_crate_that_compiles() {
     );
     assert_calls_resolve(&rust);
 }
+
+/// names.md §5.3 — outside a query clause `$x` and `x` are the same
+/// reference. The interpreter reaches that through one `lookup`; codegen
+/// reaches it through a scope stack it keeps itself, which is exactly the
+/// kind of second implementation that drifts. Pinning it as *byte-identical
+/// output* means a spelling can never change what the binary does.
+#[test]
+fn the_sigil_changes_nothing_the_native_backend_emits() {
+    const BARE: &str = "namespace n;\n\
+         function total(base: int) -> int {\n\
+         \x20   let n = base;\n\
+         \x20   for (r in [1, 2, 3]) {\n\
+         \x20       n = n + r;\n\
+         \x20   }\n\
+         \x20   return n;\n\
+         }\n\
+         function main() {\n\
+         \x20   let x = total(2);\n\
+         \x20   console.writeln(string.of(x));\n\
+         }\n";
+    const SIGILED: &str = "namespace n;\n\
+         function total(base: int) -> int {\n\
+         \x20   let n = $base;\n\
+         \x20   for (r in [1, 2, 3]) {\n\
+         \x20       $n = $n + $r;\n\
+         \x20   }\n\
+         \x20   return $n;\n\
+         }\n\
+         function main() {\n\
+         \x20   let x = total(2);\n\
+         \x20   console.writeln(string.of($x));\n\
+         }\n";
+
+    let emit = |source: &str| {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), source).expect("write");
+        let ws = Workspace::load(dir.path()).expect("load");
+        assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+        jwc::native::codegen_for_test(&ws).expect("codegen")
+    };
+
+    assert_eq!(emit(BARE), emit(SIGILED));
+}
+
+/// The other half: a bare name that is *not* a local must still be refused
+/// rather than emitted as a binding the generated crate does not have.
+#[test]
+fn a_bare_name_that_is_not_a_local_is_still_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         function main() {\n\
+         \x20   console.writeln(string.of(nowhere));\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = Workspace::load(dir.path()).expect("load");
+    let err = jwc::native::codegen_for_test(&ws)
+        .expect_err("a name bound nowhere has no value to emit");
+    assert!(
+        err.to_string().contains("nowhere"),
+        "the refusal should name it: {err}"
+    );
+}
