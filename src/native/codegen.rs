@@ -33,6 +33,10 @@ use crate::workspace::Workspace;
 /// the prelude rather than guessed.
 const ASYNC_BUILTINS: &[&str] = &[
     "jwc_b_v1_http_get",
+    "jwc_b_v1_redis_eval",
+    "jwc_b_v1_redis_exists",
+    "jwc_b_v1_redis_ping",
+    "jwc_b_v1_sleep_ms",
     "jwc_b_v1_http_json",
     "jwc_b_v1_http_post",
     "jwc_b_v1_http_status",
@@ -223,6 +227,28 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "http.post" => "jwc_b_v1_http_post",
         "http.json" => "jwc_b_v1_http_json",
         "http.status" => "jwc_b_v1_http_status",
+
+        // --- the last of 0.9's registry (builtins.md §7f)
+        "redis.eval" => "jwc_b_v1_redis_eval",
+        "redis.exists" => "jwc_b_v1_redis_exists",
+        "redis.ping" => "jwc_b_v1_redis_ping",
+        "unix_timestamp" => "jwc_b_v1_unix_timestamp",
+        "random_int" => "jwc_b_v1_random_int",
+        "sleep_ms" => "jwc_b_v1_sleep_ms",
+        "array.take" => "jwc_b_v1_array_take",
+        "array.push" => "jwc_b_v1_array_push",
+        "array.range" => "jwc_b_v1_array_range",
+
+        // --- the filesystem (builtins.md §7e)
+        "file.read" => "jwc_b_v1_file_read",
+        "file.size" => "jwc_b_v1_file_size",
+        "file.exists" => "jwc_b_v1_file_exists",
+        "file.delete" => "jwc_b_v1_file_delete",
+        "file.write" => "jwc_b_v1_file_write",
+        "file.append" => "jwc_b_v1_file_append",
+        "directory.exists" => "jwc_b_v1_directory_exists",
+        "directory.create" => "jwc_b_v1_directory_create",
+        "directory.list" => "jwc_b_v1_directory_list",
 
         // --- JSON (builtins.md §7d)
         "json.parse" => "jwc_b_v1_json_parse",

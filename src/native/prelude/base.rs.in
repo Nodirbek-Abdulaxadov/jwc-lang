@@ -3272,6 +3272,147 @@ fn jwc_cache_lock() -> std::sync::MutexGuard<
         .unwrap_or_else(|p| p.into_inner())
 }
 
+/// builtins.md §7f — the last of 0.9's registry.
+fn jwc_b_v1_unix_timestamp() -> V {
+    let secs = ::std::time::SystemTime::now()
+        .duration_since(::std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    V::Int(secs)
+}
+
+/// Inclusive low, exclusive high, so `random_int(0, len)` is an index. A
+/// backwards or empty range answers the low bound rather than panicking
+/// on an empty sample.
+fn jwc_b_v1_random_int(lo: V, hi: V) -> V {
+    let lo = jwc_to_int(&lo).unwrap_or(0);
+    let hi = jwc_to_int(&hi).unwrap_or(0);
+    if hi <= lo {
+        return V::Int(lo);
+    }
+    let mut buf = [0u8; 8];
+    ::rand::RngCore::fill_bytes(&mut ::rand::thread_rng(), &mut buf);
+    let n = u64::from_le_bytes(buf);
+    V::Int(lo + (n % ((hi - lo) as u64)) as i64)
+}
+
+/// Yields the runtime rather than blocking a worker thread. The checker
+/// refuses it inside a request anyway (§7e.1).
+async fn jwc_b_v1_sleep_ms(ms: V) -> V {
+    let ms = jwc_to_int(&ms).unwrap_or(0).max(0) as u64;
+    ::tokio::time::sleep(::std::time::Duration::from_millis(ms)).await;
+    V::Null
+}
+
+fn jwc_b_v1_array_take(arr: V, n: V) -> V {
+    let n = jwc_to_int(&n).unwrap_or(0).max(0) as usize;
+    match &arr {
+        V::Array(items) => V::Array(::std::sync::Arc::new(
+            items.iter().take(n).cloned().collect::<Vec<V>>(),
+        )),
+        _ => arr,
+    }
+}
+
+/// Answers a new array rather than mutating: a JWC value is not a
+/// reference, and a `push` that appeared to mutate one would be the only
+/// place in the language where it did.
+fn jwc_b_v1_array_push(arr: V, item: V) -> V {
+    match &arr {
+        V::Array(items) => {
+            let mut out: Vec<V> = items.as_ref().clone();
+            out.push(item);
+            V::Array(::std::sync::Arc::new(out))
+        }
+        _ => arr,
+    }
+}
+
+fn jwc_b_v1_array_range(lo: V, hi: V) -> V {
+    let lo = jwc_to_int(&lo).unwrap_or(0);
+    let hi = jwc_to_int(&hi).unwrap_or(0);
+    V::Array(::std::sync::Arc::new(
+        (lo..hi).map(V::Int).collect::<Vec<V>>(),
+    ))
+}
+
+/// builtins.md §7e — the filesystem.
+///
+/// The checker refuses these outside a plain `function` (§7e.1), so
+/// nothing here re-checks where it was called from. A missing file is
+/// `V::Null`, not a raise: "is it there" is what `file.exists` answers.
+fn jwc_b_v1_file_read(path: V) -> V {
+    match ::std::fs::read_to_string(jwc_to_text(&path)) {
+        Ok(text) => v_str(text),
+        Err(_) => V::Null,
+    }
+}
+
+fn jwc_b_v1_file_size(path: V) -> V {
+    match ::std::fs::metadata(jwc_to_text(&path)) {
+        Ok(m) => V::Int(m.len() as i64),
+        Err(_) => V::Null,
+    }
+}
+
+fn jwc_b_v1_file_exists(path: V) -> V {
+    V::Bool(::std::path::Path::new(&jwc_to_text(&path)).is_file())
+}
+
+fn jwc_b_v1_file_delete(path: V) -> V {
+    V::Bool(::std::fs::remove_file(jwc_to_text(&path)).is_ok())
+}
+
+fn jwc_b_v1_file_write(path: V, body: V) -> V {
+    V::Bool(::std::fs::write(jwc_to_text(&path), jwc_to_text(&body)).is_ok())
+}
+
+fn jwc_b_v1_file_append(path: V, body: V) -> V {
+    use ::std::io::Write as _;
+    let ok = ::std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(jwc_to_text(&path))
+        .and_then(|mut f| f.write_all(jwc_to_text(&body).as_bytes()))
+        .is_ok();
+    V::Bool(ok)
+}
+
+fn jwc_b_v1_directory_exists(path: V) -> V {
+    V::Bool(::std::path::Path::new(&jwc_to_text(&path)).is_dir())
+}
+
+fn jwc_b_v1_directory_create(path: V) -> V {
+    V::Bool(::std::fs::create_dir_all(jwc_to_text(&path)).is_ok())
+}
+
+/// Sorted: the order a filesystem hands entries back in is not stable, and
+/// a program that iterates one should not depend on it.
+fn jwc_b_v1_directory_list(path: V) -> V {
+    let mut names: Vec<String> = ::std::fs::read_dir(jwc_to_text(&path))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    V::Array(::std::sync::Arc::new(
+        names.into_iter().map(v_str).collect::<Vec<V>>(),
+    ))
+}
+
+/// Text of a value for a path or a body — the same rendering the
+/// interpreter's `text()` helper does.
+fn jwc_to_text(v: &V) -> String {
+    match v {
+        V::Str(s) => s.to_string(),
+        V::Null => String::new(),
+        other => jwc_to_json(other),
+    }
+}
+
 /// builtins.md §7d — JSON. `parse` answers `RawJson`, the same thing a
 /// `jsonb` column reads as: it splices into a response verbatim and is not
 /// read field-wise, which is the honest shape for text whose structure the

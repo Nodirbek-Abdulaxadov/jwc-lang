@@ -3,6 +3,70 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.922] — the rest of the registry — 2026-08-25
+
+Closing the name-by-name diff of 0.9's builtin registry against 1.0's that
+0.9.921 started. Everything on it is back except what is listed as still
+gone at the bottom.
+
+### The filesystem, and where it is allowed
+
+| | |
+|---|---|
+| `file.read` | `text?` — `null` when it is not there |
+| `file.write` / `file.append` / `file.delete` | `boolean` |
+| `file.exists` / `file.size` | `boolean` / `bigint?` |
+| `directory.exists` / `directory.create` | `boolean` |
+| `directory.list` | `text[]`, **sorted** |
+
+A missing file reads as `null` rather than raising — "is it there" is what
+`file.exists` answers, and making `read` raise puts a `catch` around the
+ordinary case.
+
+**They are refused inside a route, middleware, `after`, `errorHandler`,
+service, view, job or socket handler (`E0230`).** 0.9 placed no
+restriction here at all, so this compiled:
+
+```jwc
+route GET "leak" {
+    let secret = file.read(request.query("path") ?? "/etc/passwd");
+}
+```
+
+A script needs files; an HTTP handler almost never does. The check is on
+the body being compiled, not a call graph — a helper `function` reached
+from both `main` and a route still passes, which is a smaller hole than
+the one it closes and is stated in the spec rather than implied away.
+
+Note that 0.9's *documentation* promised seventeen of these and its
+runtime implemented seven. The ten that never existed are why every
+documentation claim now has a test behind it.
+
+### The last of the registry
+
+`redis.eval` (what `rate_limit` is built on, and the only way to write a
+different atomic sequence), `redis.exists`, `redis.ping` — all three were
+already in `redis_engine` and in the native prelude, wired to nothing.
+
+`unix_timestamp()`, `random_int(lo, hi)` — inclusive low, exclusive high,
+and **not** a secret; `crypto.token` is. `sleep_ms(n)`, refused inside a
+request for the same reason as the filesystem: a handler that sleeps holds
+a connection open to do nothing.
+
+`array.take`, `array.push`, `array.range`. `push` answers a **new** array:
+a JWC value is not a reference, and a `push` that appeared to mutate one
+would be the only place in the language where it did.
+
+### Still gone, and why
+
+`jwc upgrade`, `list`, `ok`, `v` from the CLI. `print`, whose buffering
+made it a trap its own 0.9 documentation warned about. `ok()`, `html()`,
+`text()` — `json`, `content(mime, body)` and `statusCode` cover them.
+`setConnectionString`, `db_query`, `json_unchecked`, `set_json_field` —
+`raw()` and `DATABASE_URL` are the 1.0 answers. Queue introspection
+(`job_count`, `dlq_count`, `dlq_drain`) has no 1.0 shape yet: it wants a
+vocabulary, not three built-ins.
+
 ## [0.9.921] — a language for HTTP backends could not make an HTTP request — 2026-08-25
 
 A full diff of 0.9's builtin registry against 1.0's, prompted by `jwc run`

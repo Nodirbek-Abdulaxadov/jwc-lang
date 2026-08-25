@@ -92,6 +92,15 @@ impl<'a> Vm<'a> {
             return self.http_call(name, &vals).await;
         }
 
+        // Yields the runtime rather than blocking a worker thread, which
+        // is the whole difference between a script pausing and a server
+        // stalling. The checker refuses it inside a request anyway.
+        if path == "sleep_ms" {
+            let ms = vals.first().and_then(|v| v.as_i64()).unwrap_or(0).max(0);
+            tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            return Ok(Value::Null);
+        }
+
         if let Some(v) = self.builtin(&path, &vals)? {
             return Ok(v);
         }
@@ -223,6 +232,29 @@ impl<'a> Vm<'a> {
             "del" => r::del(&s(0)).await.map(Value::Int),
             "incr" => r::incr(&s(0)).await.map(Value::Bigint),
             "expire" => r::expire(&s(0), n(1)).await.map(Value::Bool),
+            "exists" => r::exists(&s(0)).await.map(Value::Bool),
+            "ping" => r::ping().await.map(|_| Value::Bool(true)),
+            // The primitive `rate_limit` is built on. A program that needs
+            // a different atomic sequence had no way to write one; keys
+            // and args arrive as JSON arrays because the language has no
+            // varargs.
+            "eval" => {
+                let list = |raw: String| -> Vec<String> {
+                    serde_json::from_str::<Vec<serde_json::Value>>(&raw)
+                        .map(|vs| {
+                            vs.into_iter()
+                                .map(|v| match v {
+                                    serde_json::Value::String(s) => s,
+                                    other => other.to_string(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                r::eval(&s(0), &list(s(1)), &list(s(2)))
+                    .await
+                    .map(|v| v.map(Value::Text).unwrap_or(Value::Null))
+            }
             "rate_limit" => {
                 let limit = n(1);
                 let window = n(2);
@@ -293,6 +325,93 @@ impl<'a> Vm<'a> {
             // prints nothing at all rather than erroring: a debug statement
             // that survived review should not be what takes an endpoint
             // down.
+            // builtins.md §7f — the last of 0.9's registry.
+            "unix_timestamp" => Value::Bigint(chrono::Utc::now().timestamp()),
+            // Inclusive low, exclusive high, so `random_int(0, len)` is an
+            // index. A backwards or empty range answers the low bound
+            // rather than panicking on an empty sample.
+            "random_int" => {
+                let lo = a.first().and_then(|v| v.as_i64()).unwrap_or(0);
+                let hi = a.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                Value::Int(if hi > lo {
+                    lo + (rand::RngCore::next_u64(&mut rand::thread_rng()) % ((hi - lo) as u64))
+                        as i64
+                } else {
+                    lo
+                })
+            }
+            "array.take" => {
+                let n = a.get(1).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+                match a.first() {
+                    Some(Value::Array(items)) => {
+                        Value::Array(items.iter().take(n).cloned().collect())
+                    }
+                    other => other.cloned().unwrap_or(Value::Null),
+                }
+            }
+            // Answers a new array rather than mutating: a JWC value is not
+            // a reference, and a `push` that appeared to mutate one would
+            // be the only place in the language where it did.
+            "array.push" => match a.first() {
+                Some(Value::Array(items)) => {
+                    let mut out = items.clone();
+                    out.push(a.get(1).cloned().unwrap_or(Value::Null));
+                    Value::Array(out)
+                }
+                other => other.cloned().unwrap_or(Value::Null),
+            },
+            "array.range" => {
+                let lo = a.first().and_then(|v| v.as_i64()).unwrap_or(0);
+                let hi = a.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+                Value::Array((lo..hi).map(Value::Int).collect())
+            }
+
+            // builtins.md §7e — the filesystem. The checker refuses these
+            // outside a plain `function` (§7e.1), so nothing here has to
+            // re-litigate where it was called from.
+            //
+            // A missing file is `null`, not a raise: "is it there" is the
+            // question `file.exists` answers, and making `read` raise
+            // forces a catch around the ordinary case.
+            "file.read" => match std::fs::read_to_string(s(0)) {
+                Ok(text) => Value::Text(text),
+                Err(_) => Value::Null,
+            },
+            "file.size" => match std::fs::metadata(s(0)) {
+                Ok(m) => Value::Bigint(m.len() as i64),
+                Err(_) => Value::Null,
+            },
+            "file.exists" => Value::Bool(std::path::Path::new(&s(0)).is_file()),
+            "file.delete" => Value::Bool(std::fs::remove_file(s(0)).is_ok()),
+            "file.write" => Value::Bool(std::fs::write(s(0), s(1)).is_ok()),
+            "file.append" => {
+                use std::io::Write as _;
+                let ok = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(s(0))
+                    .and_then(|mut f| f.write_all(s(1).as_bytes()))
+                    .is_ok();
+                Value::Bool(ok)
+            }
+            "directory.exists" => Value::Bool(std::path::Path::new(&s(0)).is_dir()),
+            "directory.create" => Value::Bool(std::fs::create_dir_all(s(0)).is_ok()),
+            // Sorted, because the order a filesystem hands entries back in
+            // is not stable and a program that iterates one should not
+            // depend on it.
+            "directory.list" => {
+                let mut names: Vec<String> = std::fs::read_dir(s(0))
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .filter_map(|e| e.file_name().into_string().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                names.sort();
+                Value::Array(names.into_iter().map(Value::Text).collect())
+            }
+
             // builtins.md §7d — JSON. `parse` answers `Raw`, which is the
             // same thing a `jsonb` column reads as: it splices into a
             // response and is not read field-wise. That is the honest

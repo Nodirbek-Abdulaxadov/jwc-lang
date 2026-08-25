@@ -271,6 +271,70 @@ off it is `E0310`, and the way to get a typed value is a `class`.
 
 ---
 
+## 7e. `file.*` / `directory.*` — the filesystem
+
+| Name | Type |
+|---|---|
+| `file.read(path)` | `text?` — `null` when it is not there |
+| `file.write(path, body)` | `boolean` |
+| `file.append(path, body)` | `boolean` |
+| `file.exists(path)` | `boolean` |
+| `file.size(path)` | `bigint?` |
+| `file.delete(path)` | `boolean` |
+| `directory.exists(path)` | `boolean` |
+| `directory.create(path)` | `boolean` — creates parents |
+| `directory.list(path)` | `text[]` — names only, **sorted** |
+
+A missing file reads as `null` rather than raising: "is it there" is what
+`file.exists` answers, and making `read` raise puts a `catch` around the
+ordinary case. The write paths answer `boolean` for the same reason.
+
+`directory.list` sorts. The order a filesystem hands entries back in is not
+stable, and a program that iterates one should not depend on it.
+
+### 7e.1 Only inside a plain `function` (E0230)
+
+These are refused in a `route`, `middleware`, `after`, `errorHandler`,
+`service`, `view`, `job` or socket handler.
+
+A route that reads or writes a path derived from the request is one line
+from path traversal:
+
+```jwc no-compile
+route GET "leak" {
+    let secret = file.read(request.query("path") ?? "/etc/passwd");
+}
+```
+
+0.9 placed no restriction here at all. A script needs files; an HTTP
+handler almost never does, and the rare one that does should reach for
+something that bounds the path rather than for the raw call.
+
+**What the check is, exactly**: the body being compiled, not a call graph.
+A helper `function` reached from both `main` and a route still passes. That
+is a smaller hole than the one it closes, and stating it is better than
+implying a guarantee the compiler does not make.
+
+---
+
+## 7f. The rest of 0.9's registry
+
+Restored in 0.9.922, after a name-by-name diff of the two registries.
+
+| Name | Type | |
+|---|---|---|
+| `redis.eval(script, keys_json, args_json)` | `text?` | what `rate_limit` is built on; keys and args are JSON arrays because the language has no varargs |
+| `redis.exists(key)` | `boolean` | |
+| `redis.ping()` | `boolean` | |
+| `unix_timestamp()` | `bigint` | the integer clock. `date.now()` is the application one and answers `timestamptz` |
+| `random_int(lo, hi)` | `int` | inclusive low, exclusive high, so `random_int(0, len)` is an index. **Not a secret** — `crypto.token(n)` is |
+| `sleep_ms(n)` | `void` | plain `function` only (§7e.1). A handler that sleeps holds a connection open to do nothing |
+| `array.take(xs, n)` | same as `xs` | |
+| `array.push(xs, v)` | same as `xs` | answers a **new** array. A JWC value is not a reference, and a `push` that appeared to mutate one would be the only place in the language where it did |
+| `array.range(lo, hi)` | `int[]` | |
+
+---
+
 ## 8. Package namespaces
 
 `import redis;` makes `redis.*` resolvable. A package's exported surface is
@@ -380,4 +444,5 @@ section about keeping the documentation honest that was itself wrong.
 |---|---|
 | `E0205` | wrong number of arguments to a builtin |
 | `E0206` | a field name in `json.get`-style access is not a string literal |
+| `E0230` | `file.*` / `directory.*` outside a plain `function` (§7e.1) |
 | `W1301` | `debug.dump` in the program (tooling §3.4) |
