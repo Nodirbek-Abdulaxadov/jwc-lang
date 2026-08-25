@@ -28,3 +28,13 @@ class Snake_Cased {                    -- expect: W0101
 }
 
 schema BadSchema of App;               -- expect: W0101
+
+-- names.md §6.2.3 — a package namespace is brought in by its import and by
+-- nothing else. The checker used to resolve `redis.*` whether or not the
+-- file imported it, which made the one line saying a program depends on a
+-- package optional, so it drifted out of files that did.
+service PackageUse {
+    function limited() {
+        return redis.enabled();        -- expect: E0202
+    }
+}

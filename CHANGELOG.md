@@ -3,6 +3,150 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.918] — `import redis;` was optional — 2026-08-24
+
+names.md §6.2.3 says a package import is what makes the package's
+namespace resolvable: "`import redis;` is what makes
+`redis.rate_limit(...)` resolvable". The checker resolved `redis.*`
+whether the file imported it or not, so the implementation was looser
+than its own specification.
+
+That made the one line saying a program depends on a package optional,
+and an optional line drifts out of the files that need it. `redis.*`
+without `import redis;` is `E0202` now, with a note naming the import and
+the `dependencies` entry it also needs.
+
+`PACKAGE_NAMESPACES` in `check.rs` is the list this keys on: `redis` is
+the only one. `cache`, `mail` and `socket` are the language's own and take
+no import — the distinction was never written down anywhere, which is part
+of why the two documentation pages describing it disagreed.
+
+Nothing in the wild breaks: `jwc-shortener` already wrote `import redis;`
+in the file that uses it. The convention was being followed; the compiler
+just was not asking.
+
+### builtins.md was still describing 0.9
+
+- "`dispatch`, job queue, WebSocket, SSE | ROADMAP §7 — the new vocabulary
+  cannot declare them yet" — all but SSE are declarations now
+- §11 described `docs/docs/reference/builtins.md` as generated from the
+  builtin table and checked by `tests/builtins_doc_sync.rs`. **Neither
+  file exists.** A section about keeping documentation honest that was
+  itself false
+- two sections were numbered `## 10.`
+
+## [0.9.917] — documentation that could not be checked — 2026-08-24
+
+Two audits of `docs/docs/` against `src/`. What they found was not a list
+of typos: three pages documented behaviour that has never existed.
+
+### Documented, never implemented
+
+| | |
+|---|---|
+| `packages/index.md` | "`jwc.lock` records the exact version and its checksum. It is committed" — there is no lockfile. No `jwc.lock` logic exists anywhere in `src/`, and `cli/index.md` said the opposite on the same site |
+| `packages/index.md` | `{"path": "../redis"}` as a dependency, "No network, no publish step" — path dependencies are not implemented. The value was read as `"*"` and fetched from the registry |
+| `packages/index.md`, `project-structure.md` | `tests/case_*.jwc` and `*_test.jwc` as test-file conventions — `jwc test` applies no filename filter at all. It runs every `test` block in the workspace, and `--filter` matches the block's name, not a path |
+
+The path-dependency case was also a defect in the compiler, not only in
+the page: `declared_dependencies` coerced any non-string requirement to
+`"*"`, so a manifest written the way the docs described failed with a 404
+about a version instead of a sentence about the manifest. It is refused
+now, with a message naming what to do instead.
+
+### Incomplete where it claimed to be complete
+
+`config.md`'s environment table listed **7 of the 51** variables
+`config.rs::REGISTRY` registers — every one that mail, the cache, jobs and
+buffered writes need was missing, along with the whole CORS, JWT, queue
+and retry families. The table is generated from the registry now and a
+test regenerates and compares it; `JWC_UPDATE_DOCS=1` rewrites it.
+
+The README's CLI table was missing 7 of 22 subcommands, `jwc new` and
+`jwc build` among them. `routing.md` enumerated what a `routes` block
+holds and left out `socket`. `intro.md` and `docs/docs/README.md` omitted
+jobs and sockets from their maps; `removed.md` said the cutover's damage
+was the native backend and listed nothing else that came back.
+
+### The tests that make it stick
+
+- every subcommand in `main.rs`'s `Command` enum appears in both CLI references
+- the environment table matches `config.rs::REGISTRY` exactly
+- the install page's platforms match `release.yml`'s build matrix, both ways
+- the capability page names no declaration the parser accepts
+
+Each of these was written because a page had already drifted. A page
+nobody can check is a page that will be wrong.
+
+## [0.9.916] — the page that argued against its own product — 2026-08-24
+
+"What 1.0 does not have" listed background jobs, WebSocket, an in-process
+cache and outbound email as not declarable, and had a table saying the
+queue was **deleted**, that sockets were "unreachable — nothing can
+declare one", and that "`cache.*` is not a built-in".
+
+All four were implemented across 0.9.902–0.9.910. The page is the one
+someone reads while deciding whether to adopt JWC, and it was telling them
+the compiler could not do things it does.
+
+It now says what is actually missing — SSE, sequences, generated columns,
+a 0.9→1.0 codemod — carries a note saying the earlier version was wrong so
+a reader who remembers it is corrected rather than confused, and lists the
+four as present with links.
+
+A test keys the page to the compiler: nothing in its absent section may
+name a declaration keyword the parser accepts (`job`, `socket`, …) or a
+namespace `is_namespace` resolves (`cache`, `mail`, `redis`). Restoring the
+old `job` row to the page fails it.
+
+### Uzbek in the English docs
+
+Sample code threw `NotFound("akkaunt topilmadi")`, `Unauthorized("token
+kerak")` and similar in twelve places across eight pages. Those are strings
+this repository wrote, and they are English now.
+
+The rest is not a docs bug and has not been changed: the compiler's own
+validation messages really are Uzbek — `"password kamida 10 belgidan
+iborat bo'lishi kerak"` is what a 400 body contains — so a page showing
+anything else would be describing output that does not exist. What was
+missing is that the docs never mentioned the per-rule `: "…"` override,
+which is the only way to change them. `validation.md` now states the
+default plainly and shows the override.
+
+**There is still no global language setting for those messages.** That is a
+product decision, not an oversight to fix quietly.
+
+## [0.9.915] — the install page told you to run a 404 — 2026-08-24
+
+The first page a new user opens was wrong in four ways at once, and every
+one of them was introduced when the 1.0 docs replaced the 0.9 ones.
+
+**It threw away the installers.** `install.sh` and `install.ps1` are in
+this repository, resolve the latest release themselves, verify the
+published `.sha256` and refuse to install on a mismatch. The 0.9 page led
+with both one-liners. The 1.0 page mentioned neither.
+
+**What it gave instead did not work.** A hand-rolled `curl` pinned to
+`VERSION=0.9.9` — a tag that was never cut. The one command a new user
+runs first answered 404.
+
+**It promised macOS.** "Archives are published for `x86_64-linux`,
+`aarch64-linux`, `x86_64-macos` and `aarch64-macos`." No macOS build has
+ever existed; `install.sh` says so itself, stopping with "Unsupported
+platform: darwin-\*". Someone on a Mac followed that sentence to a page of
+assets that were not there.
+
+**It left Windows out entirely** — which *is* built and published, as
+`jwc-vX.Y.Z-x86_64-windows.zip`, with `install.ps1` to fetch it. So did
+the README, whose only instruction was to build from source.
+
+Both now lead with the one-liner for each platform, and the page's
+platform table is checked against `release.yml`'s matrix by a test: a
+target the release builds and the page does not name fails, and so does a
+platform the page promises that nothing builds.
+
+`docs/docs/deployment/index.md` pinned the same phantom `0.9.9`.
+
 ## [0.9.914] — the Windows build nobody compiled — 2026-08-24
 
 `v0.9.913`'s release failed on `x86_64-pc-windows-msvc`, and only there.

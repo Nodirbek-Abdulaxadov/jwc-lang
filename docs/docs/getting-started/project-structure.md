@@ -72,7 +72,8 @@ src/
   routes/              thin — parse, call a service, respond
   views/               database views
 tests/
-  *_test.jwc           `jwc test`
+  any file with a       `jwc test` runs every `test` block in the
+  `test` block          workspace; there is no filename convention
 migrations/
   0001_init.up.sql     generated; read before applying
 ```

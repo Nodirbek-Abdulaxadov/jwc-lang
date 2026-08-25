@@ -13,7 +13,7 @@ thumbnail, a nightly sweep.
 job SendWelcome(account_id: bigint, email: text) retries 5 backoff "30s" {
     let account = select A from App.auth.Accounts
         where id == $account_id
-        first or throw NotFound("akkaunt topilmadi");
+        first or throw NotFound("account not found");
 
     mail.send($email, "Welcome", "<p>salom</p>");
 }

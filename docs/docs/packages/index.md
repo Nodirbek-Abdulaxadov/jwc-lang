@@ -29,25 +29,22 @@ import redis;
 middleware RateLimit {
     let allowed = redis.rate_limit("rl:" + string.of(request.client_ip()), 60, 60);
     if (!$allowed) {
-        return tooManyRequests("juda ko'p so'rov");
+        return tooManyRequests("too many requests");
     }
 }
 ```
 
-`jwc.lock` records the exact version and its checksum. It is committed:
-the point of a lockfile is that everyone and every deploy compiles the
-same source.
+`jwc install` writes the requirement into `jwcproj.json` and vendors the
+package under `jwc_packages/`. **There is no lockfile and no resolver** —
+what pins a build is the vendored directory, so commit `jwc_packages/` if
+you want every deploy to compile the same source.
 
-### A local path
-
-For a package you are developing beside the app:
-
-```json
-"dependencies": { "redis": { "path": "../redis" } }
-```
-
-No network, no publish step, and the compiler reads it exactly as it
-reads a fetched one.
+A requirement is a version string. Path and git dependencies do not
+exist; `{"path": "../redis"}` is refused with a message saying so rather
+than being read as a wildcard. To work on a package beside its consumer,
+either point `JWC_REGISTRY` at a local registry, or copy the package into
+`jwc_packages/<name>/` — `jwc check` reads what is vendored and does not
+re-fetch it.
 
 ## Writing one
 
@@ -87,6 +84,8 @@ version, not replacing the one people are already running.
 jwc test
 ```
 
-Each `tests/case_*.jwc` runs in a transaction that is rolled back, so
-cases cannot see each other's rows and the order they run in does not
-matter.
+Every `test` block in the workspace runs, wherever its file sits — there
+is no filename convention, and `jwc test` does not look for one. Each runs
+in a transaction that is rolled back, so cases cannot see each other's
+rows and the order they run in does not matter. `--filter` matches the
+test block's **name**, not a path.

@@ -10,7 +10,7 @@ description: "Chains that declare what they provide and what they require, so a 
 namespace middleware.auth;
 
 middleware RequireAuth provides account_id: bigint {
-    let header = request.header("Authorization") or throw Unauthorized("token kerak");
+    let header = request.header("Authorization") or throw Unauthorized("a bearer token is required");
     let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
 
     let claims = jwt.verify($header, $secret)
@@ -63,6 +63,8 @@ A middleware that **returns a response** stops the chain — the handler
 does not run:
 
 ```jwc no-compile
+import redis;
+
 middleware RateLimit {
     let ip = request.client_ip();
     let allowed = redis.rate_limit("rl:" + string.of($ip), 60, 60);

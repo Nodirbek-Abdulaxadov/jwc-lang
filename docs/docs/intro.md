@@ -126,7 +126,7 @@ the constraint. Routes do not build error responses by hand.
 | [Tutorial](./tutorial/) | A link bin: four endpoints, a real database |
 | [Language](./language/syntax) | Vocabulary, types, control flow, functions |
 | [Data](./data/schema) | Tables, queries, writes, migrations |
-| [Backend](./backend/routing) | Routes, middleware, errors, validation, `server { }` |
+| [Backend](./backend/routing) | Routes, middleware, errors, validation, sockets, background jobs, `server { }` |
 | [Standard library](./stdlib/builtins) | Every built-in, by group |
 | [Packages](./packages/index.md) | The manifest, imports, publishing |
 | [CLI](./cli/index.md) | Every `jwc` subcommand |

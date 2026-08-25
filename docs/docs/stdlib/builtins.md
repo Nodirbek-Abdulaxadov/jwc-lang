@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: "Built-ins"
-description: "Every built-in function JWC has, by group: coercions, dates, text, arrays, hashing, the request, responses and Redis."
+description: "Every built-in function JWC has, by group: coercions, dates, text, arrays, hashing, the request, responses, Redis, the cache, mail and debug."
 ---
 
 # Built-ins
@@ -118,7 +118,12 @@ From inside an `after` block: `response.status()`,
 
 ## Redis
 
-Available when `JWC_REDIS_URL` is set:
+`redis` is a **package**, not part of the language, so a file that uses it
+needs `import redis;` and `jwcproj.json` needs `redis` in `dependencies`.
+Without the import the names do not resolve (`E0202`).
+
+The calls answer when `JWC_REDIS_URL` is set and the binary was built with
+the driver; every name except `redis.enabled()` raises when it is not:
 
 | | |
 |---|---|

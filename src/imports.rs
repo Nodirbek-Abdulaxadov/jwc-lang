@@ -120,6 +120,29 @@ pub fn check(ws: &Workspace, packages: &BTreeSet<String>) -> Vec<(Loc, Diagnosti
         }
         let own = file_ns[fi].clone().unwrap_or_default();
         for (name, span) in mentions {
+            // §6.2.3 — a package namespace is brought in by its import and
+            // by nothing else. The checker resolved `redis.*` whether or
+            // not the file imported it, which made `import redis;` a
+            // comment: the one line that says a program depends on a
+            // package was optional, so it drifted out of files that did.
+            if crate::check::PACKAGE_NAMESPACES.contains(&name.as_str())
+                && !imported.contains_key(&name)
+            {
+                out.push((
+                    Loc { file: fi, span },
+                    Diagnostic::error(
+                        "E0202",
+                        span,
+                        format!("`{name}` is a package, and this file does not import it"),
+                    )
+                    .note(format!(
+                        "add `import {name};`, and `{name}` to `jwcproj.json`'s \
+                         `dependencies` if it is not there"
+                    ))
+                    .clause("names.md §6.2.3"),
+                ));
+                continue;
+            }
             let Some(ns) = home.get(&name) else { continue };
             if *ns == own {
                 continue;

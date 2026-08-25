@@ -75,8 +75,20 @@ quietly:
 
 ## The parts that came back
 
-The v0.25.0 cutover removed the native AOT backend along with the 0.9.x
-front-end. It was restored in 0.9.901–0.9.903 and now covers the
-language: `jwc build` produces a single binary, and it is checked against
-`jwc serve` by running the same requests against both and comparing the
-responses byte for byte.
+The v0.25.0 cutover deleted the native AOT backend along with the 0.9.x
+front-end, and several runtime features with it. They came back across
+0.9.901–0.9.910:
+
+| | |
+|---|---|
+| native AOT backend | `jwc build` produces a single binary, checked against `jwc serve` by running the same requests through both and comparing responses byte for byte |
+| background jobs | `job` + `dispatch`, over a durable Postgres queue with retries and a dead-letter table |
+| WebSocket | `socket "path" { on open / on message / on close }` |
+| in-process cache | `cache.*`, bounded, with eviction and `/metrics` counters |
+| outbound email | `mail.send` over SMTP |
+| buffered writes | `insert … buffered` |
+| `jwc new`, `jwc swagger`, the package commands | scaffolding, an HTML API reference, and `install`/`update`/`remove`/`tree` |
+
+Two did not come back. `jwc upgrade`'s rule registry was empty, so there
+was nothing in it to restore, and SSE is absent by choice — see
+[what 1.0 does not have](./not-in-1-0).

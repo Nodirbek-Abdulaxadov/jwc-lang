@@ -395,7 +395,7 @@ pub fn install(path: PathBuf, registry: String, force: bool) -> Result<()> {
     let base = registry.trim_end_matches('/');
     let client = reqwest::blocking::Client::new();
 
-    let mut pending: Vec<(String, String)> = declared_dependencies(&root.join("jwcproj.json"));
+    let mut pending: Vec<(String, String)> = declared_dependencies(&root.join("jwcproj.json"))?;
     let mut done: std::collections::BTreeSet<String> = Default::default();
     let mut installed = 0usize;
     let mut kept = 0usize;
@@ -417,7 +417,7 @@ pub fn install(path: PathBuf, registry: String, force: bool) -> Result<()> {
             println!("  {name} {}", picked.version);
             installed += 1;
         }
-        pending.extend(declared_dependencies(&dest.join("jwcproj.json")));
+        pending.extend(declared_dependencies(&dest.join("jwcproj.json"))?);
     }
 
     match (installed, kept) {
@@ -440,7 +440,7 @@ pub fn update(name: Option<String>, path: PathBuf, registry: String) -> Result<(
     let base = registry.trim_end_matches('/');
     let client = reqwest::blocking::Client::new();
 
-    let declared = declared_dependencies(&root.join("jwcproj.json"));
+    let declared = declared_dependencies(&root.join("jwcproj.json"))?;
     if declared.is_empty() {
         println!("no dependencies declared");
         return Ok(());
@@ -533,8 +533,7 @@ pub fn tree(path: PathBuf) -> Result<()> {
 
     println!("{name}");
     let mut seen: std::collections::BTreeSet<String> = Default::default();
-    print_tree(&root, &manifest, "", &mut seen);
-    Ok(())
+    print_tree(&root, &manifest, "", &mut seen)
 }
 
 fn print_tree(
@@ -542,8 +541,8 @@ fn print_tree(
     manifest: &Path,
     indent: &str,
     seen: &mut std::collections::BTreeSet<String>,
-) {
-    let deps = declared_dependencies(manifest);
+) -> Result<()> {
+    let deps = declared_dependencies(manifest)?;
     for (i, (name, req)) in deps.iter().enumerate() {
         let last = i + 1 == deps.len();
         let branch = if last { "└── " } else { "├── " };
@@ -558,29 +557,56 @@ fn print_tree(
         println!("{indent}{branch}{name} {state}");
         if seen.insert(name.clone()) {
             let next = format!("{indent}{}", if last { "    " } else { "│   " });
-            print_tree(root, &dest.join("jwcproj.json"), &next, seen);
+            print_tree(root, &dest.join("jwcproj.json"), &next, seen)?;
         }
     }
+    Ok(())
 }
 
 /// `dependencies` from a manifest, as `(name, requirement)`, sorted.
 /// A missing or unreadable manifest has none — a package without one
 /// declares no dependencies, which is the truthful reading.
-fn declared_dependencies(manifest: &Path) -> Vec<(String, String)> {
+///
+/// A requirement must be a **string**. Anything else used to be read as
+/// `"*"`, which turned `{"path": "../redis"}` — a form the documentation
+/// advertised and nothing ever implemented — into a wildcard fetch from
+/// the registry, failing with a 404 about a version rather than a word
+/// about the manifest.
+fn declared_dependencies(manifest: &Path) -> Result<Vec<(String, String)>> {
     let Ok(text) = std::fs::read_to_string(manifest) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    json.get("dependencies")
-        .and_then(|d| d.as_object())
-        .map(|o| {
-            o.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("*").to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(obj) = json.get("dependencies").and_then(|d| d.as_object()) else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    for (name, req) in obj {
+        let Some(req) = req.as_str() else {
+            bail!(
+                "{}: dependency `{name}` is {}, and a requirement has to be a version \
+                 string like \"^1.2.0\".\n\
+                 \n\
+                 Path and git dependencies do not exist: every dependency is fetched \
+                 from a registry and vendored under `{VENDOR_DIR}/`. To work on a \
+                 package beside its consumer, point `JWC_REGISTRY` at a local one, or \
+                 copy the package into `{VENDOR_DIR}/{name}/` yourself — `jwc check` \
+                 reads what is vendored and does not re-fetch it.",
+                manifest.display(),
+                match req {
+                    serde_json::Value::Object(_) => "an object",
+                    serde_json::Value::Array(_) => "an array",
+                    serde_json::Value::Null => "null",
+                    _ => "not a string",
+                }
+            );
+        };
+        out.push((name.clone(), req.to_string()));
+    }
+    Ok(out)
 }
 
 /// The `version` in a vendored package's own manifest.

@@ -97,6 +97,23 @@ blocking in CI, an external review, and migrating a pilot application.
 
 ## Install
 
+Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
+```
+
+Windows:
+
+```powershell
+iwr -useb https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.ps1 | iex
+```
+
+Both resolve the latest release, verify its published `.sha256`, and refuse
+to install on a mismatch. Prebuilt archives cover x86_64 and aarch64 Linux
+(glibc and static musl) and x86_64 Windows; there is no macOS build, so
+build from source there:
+
 ```bash
 git clone https://github.com/just-web-code/jwc-lang
 cd jwc-lang
@@ -117,7 +134,9 @@ cargo build --release --features redis
 
 | Command | What it does |
 |---|---|
+| `jwc new <name> [--template k]` | scaffold a project: `empty`, `api`, `auth` or `jobs` |
 | `jwc check [path]` | parse, resolve names, type-check, and check the wiring |
+| `jwc build [path] [--release]` | the native AOT backend: one binary that answers what `jwc serve` answers |
 | `jwc fmt [path] [--check]` | rewrite in canonical form; `--check` is the CI shape |
 | `jwc gen-sql [path] [--explain]` | the schema as Postgres DDL, deterministic and offline |
 | `jwc explain [path]` | every query the program issues, with its SQL |
@@ -136,6 +155,11 @@ cargo build --release --features redis
 | `jwc migrate verify [path]` | every constraint and index present under the name the binary expects |
 | `jwc serve [path] --port N` | run it. `--skip-schema-check` to boot without the live-schema check, `--dev` to enable `debug.dump` |
 | `jwc ast [path]` | the parsed AST — a debugging aid, not a stable format |
+| `jwc swagger [path] [--out f]` | a self-contained HTML page to read the API in |
+| `jwc install [path]` | fetch and vendor every declared dependency |
+| `jwc update [path] [-p name]` | move dependencies to the newest version their range allows |
+| `jwc remove <name> [path]` | drop a dependency from the manifest and from `jwc_packages/` |
+| `jwc tree [path]` | the dependency tree: declared, vendored, at which version |
 
 An expected failure — a type error, a migration that cannot be reversed —
 exits 1 with the message and its causes. It does not print a stack trace;

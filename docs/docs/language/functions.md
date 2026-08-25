@@ -43,7 +43,7 @@ service OrgService {
         return select O from App.org.Orgs
             where id == $org_id
             as { id, slug, name }
-            first or throw NotFound("tashkilot topilmadi");
+            first or throw NotFound("organisation not found");
     }
 }
 ```

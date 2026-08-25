@@ -124,13 +124,13 @@ routes "/bins" {
     }
 
     route GET "{slug}" {
-        let bin = BinService.by_slug(@slug) or throw NotFound("bunday to'plam yo'q");
+        let bin = BinService.by_slug(@slug) or throw NotFound("no such bin");
 
         return json($bin);
     }
 
     route GET "{slug}/entries" {
-        let bin = BinService.by_slug(@slug) or throw NotFound("bunday to'plam yo'q");
+        let bin = BinService.by_slug(@slug) or throw NotFound("no such bin");
 
         return json(BinService.entries(
             $bin.id,
@@ -140,7 +140,7 @@ routes "/bins" {
     }
 
     route POST "{slug}/entries" {
-        let bin = BinService.by_slug(@slug) or throw NotFound("bunday to'plam yo'q");
+        let bin = BinService.by_slug(@slug) or throw NotFound("no such bin");
         let req = request.body() as NewEntry;
 
         return created(json(BinService.add($bin.id, $req)));
@@ -234,7 +234,7 @@ curl -i localhost:8080/bins/nope
 HTTP/1.1 404 Not Found
 content-type: application/json; charset=utf-8
 
-{"error":"bunday to'plam yo'q"}
+{"error":"no such bin"}
 ```
 
 ## What the compiler already knows

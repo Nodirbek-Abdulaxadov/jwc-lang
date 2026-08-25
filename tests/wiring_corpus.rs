@@ -67,6 +67,14 @@ fn observed(case: &Path) -> (BTreeSet<(usize, String)>, String) {
     )
     .expect("prelude");
     std::fs::copy(case, dir.join("case.jwc")).expect("case");
+    // A manifest, so a case can exercise `import redis;` — a package import
+    // needs both the import line and the dependency (names.md §6.2.1).
+    std::fs::write(
+        dir.join("jwcproj.json"),
+        "{\n  \"name\": \"wiring_corpus\",\n  \"version\": \"0.1.0\",\n  \
+         \"dependencies\": { \"redis\": \"^0.2.0\" }\n}\n",
+    )
+    .expect("manifest");
 
     let ws = Workspace::load(&dir).expect("load");
     assert!(
