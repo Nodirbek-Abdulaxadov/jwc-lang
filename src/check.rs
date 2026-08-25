@@ -2230,6 +2230,22 @@ impl<'a> Checker<'a> {
                 );
             }
         };
+        // An optional trailing argument — headers on `http.*` — so the
+        // arity check does not have to pick one of the two and be wrong.
+        let arity_range = |c: &mut Self, lo: usize, hi: usize| {
+            if args.len() < lo || args.len() > hi {
+                c.err_note(
+                    span,
+                    "E0205",
+                    format!(
+                        "`{path}` takes {lo} to {hi} argument(s), given {}",
+                        args.len()
+                    ),
+                    "see builtins.md",
+                    "builtins.md §1.2",
+                );
+            }
+        };
         let a0 = args.first().cloned().unwrap_or(Ty::Unknown);
 
         Some(match path {
@@ -2752,7 +2768,119 @@ impl<'a> Checker<'a> {
                 Ty::Void
             }
 
-            // --- the terminal (builtins.md §7b). Restored in 0.9.920:
+            // --- the last of 0.9's registry (builtins.md §7f).
+            //
+            // `redis.eval` is what `rate_limit` is built on; a program
+            // that needs a different atomic sequence had no way to write
+            // one. `exists` and `ping` complete the surface.
+            "redis.eval" => {
+                arity(self, 3);
+                Ty::text().opt()
+            }
+            "redis.exists" => {
+                arity(self, 1);
+                Ty::boolean()
+            }
+            "redis.ping" => {
+                arity(self, 0);
+                Ty::boolean()
+            }
+
+            // Time and randomness. `date.now()` is the application clock
+            // and answers a `timestamptz`; this is the integer form, for
+            // an expiry or a nonce window.
+            "unix_timestamp" => {
+                arity(self, 0);
+                Ty::bigint()
+            }
+            // Not `crypto.token`: that is a secret, this is a number, and
+            // conflating them is how a session id ends up predictable.
+            "random_int" => {
+                arity(self, 2);
+                Ty::int()
+            }
+            // Only outside a request. A handler that sleeps is holding a
+            // connection open to do nothing.
+            "sleep_ms" => {
+                arity(self, 1);
+                self.filesystem_here(path, span);
+                Ty::Void
+            }
+
+            "array.take" => {
+                arity(self, 2);
+                a0
+            }
+            "array.push" => {
+                arity(self, 2);
+                a0
+            }
+            "array.range" => {
+                arity(self, 2);
+                Ty::int().array()
+            }
+
+            // --- the filesystem (builtins.md §7e). Restored in 0.9.922,
+            // and refused outside a plain `function` (§7e.1).
+            //
+            // A route that writes a path derived from the request is one
+            // line from path traversal, and 0.9 placed no restriction at
+            // all. A script needs files; an HTTP handler almost never
+            // does.
+            "file.read" | "file.size" | "file.exists" | "file.delete" | "directory.exists"
+            | "directory.create" | "directory.list" => {
+                arity(self, 1);
+                self.filesystem_here(path, span);
+                match path {
+                    "file.read" => Ty::text().opt(),
+                    "file.size" => Ty::bigint().opt(),
+                    "directory.list" => Ty::text().array(),
+                    _ => Ty::boolean(),
+                }
+            }
+            "file.write" | "file.append" => {
+                arity(self, 2);
+                self.filesystem_here(path, span);
+                Ty::boolean()
+            }
+
+            // --- outbound HTTP (builtins.md §7c). Restored in 0.9.921:
+            // the cutover deleted `http_get`/`http_post`/`fetch_json` and
+            // left a language about HTTP backends unable to call one.
+            //
+            // The body is `text`, not a parsed shape: what a remote
+            // service returns is not something this compiler can know, and
+            // inventing a shape for it is how a 500 becomes a type error
+            // in the wrong place. `http.json` hands back `Raw` for the
+            // same reason `jsonb` does.
+            "http.get" => {
+                arity_range(self, 1, 2);
+                Ty::text()
+            }
+            "http.post" => {
+                arity_range(self, 2, 3);
+                Ty::text()
+            }
+            "http.status" => {
+                arity_range(self, 1, 2);
+                Ty::int()
+            }
+            "http.json" => {
+                arity_range(self, 1, 2);
+                Ty::Raw
+            }
+
+            // --- JSON (builtins.md §7d)
+            "json.parse" => {
+                arity(self, 1);
+                Ty::Raw
+            }
+            "json.stringify" => {
+                arity(self, 1);
+                Ty::text()
+            }
+
+            // --- the terminal (builtins.md §7b).            // --- the terminal (builtins.md §7b). Restored in 0.9.920:
             // `console.*` was 0.9's surface for a program that talks to a
             // person rather than to HTTP, and the cutover took it along
             // with `jwc run`. Any value goes in, the same way `debug.dump`
@@ -4149,6 +4277,45 @@ fn base_of(t: &Ty) -> Ty {
 /// else in [`is_namespace`] is part of the language and needs none.
 pub const PACKAGE_NAMESPACES: &[&str] = &["redis"];
 
+impl Checker<'_> {
+    /// builtins.md §7e.1 — `file.*` and `directory.*` only inside a plain
+    /// `function`.
+    ///
+    /// The check is on the body being compiled, not on a call graph: a
+    /// helper `function` reached from both `main` and a route still
+    /// passes. That is a smaller hole than the one it closes, and naming
+    /// it here is better than implying a guarantee the compiler cannot
+    /// make.
+    fn filesystem_here(&mut self, path: &str, span: Span) {
+        let where_ = match self.body {
+            BodyKind::Free => return,
+            BodyKind::Route => "a route",
+            BodyKind::Middleware => "a middleware",
+            BodyKind::After => "an `after` block",
+            BodyKind::ErrorHandler => "an `errorHandler`",
+            BodyKind::Service => "a service function",
+            BodyKind::View => "a view",
+            BodyKind::Socket => "a socket handler",
+            // A job runs on a worker, off the request path, so the
+            // traversal argument does not apply — but it is still server
+            // code with no terminal, and a job that writes files is a
+            // design worth making explicit rather than allowing by
+            // omission. Revisit with a real use.
+            BodyKind::Job => "a job",
+            BodyKind::Test => return,
+        };
+        self.err_note(
+            span,
+            "E0230",
+            format!("`{path}` is not available inside {where_}"),
+            "the filesystem is reachable from a plain `function` — what `jwc run` \
+             calls. A path built from a request is one line from path traversal, \
+             which is why a handler cannot reach it",
+            "builtins.md §7e.1",
+        );
+    }
+}
+
 fn is_namespace(name: &str) -> bool {
     matches!(
         name,
@@ -4164,6 +4331,10 @@ fn is_namespace(name: &str) -> bool {
             | "redis"
             | "cache"
             | "console"
+            | "http"
+            | "file"
+            | "directory"
+            | "json"
             | "mail"
             | "socket"
             | "count"

@@ -1280,9 +1280,16 @@ pub async fn declared_port(program: &Arc<Program>) -> Result<u16> {
         id: "boot".into(),
     });
     let mut vm = crate::exec::Vm::new(program, request);
-    // A `main` that raises is a boot failure and says so, rather than
-    // listening on a port nobody asked for.
-    vm.run_block(&main.body).await.map_err(|e| match e {
+    // `run_body`, not `run_block`: a postfix `catch` returns from its
+    // enclosing function by throwing a sentinel, and `run_body` is what
+    // turns that back into a return. Going through `run_block` surfaced a
+    // bare `return;` inside a `catch` in `main` as
+    // `main() raised __return_void at boot` — an internal name, reported
+    // as the program's own error.
+    //
+    // A `main` that raises for real is a boot failure and says so, rather
+    // than listening on a port nobody asked for.
+    vm.run_body(&main.body).await.map_err(|e| match e {
         crate::exec::Abort::Thrown(t) => {
             anyhow!("main() raised {} at boot: {}", t.error, t.message())
         }

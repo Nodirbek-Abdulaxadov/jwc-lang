@@ -116,6 +116,54 @@ From inside an `after` block: `response.status()`,
 `response.duration_ms()`, `response.duration_us()`,
 `response.set_header(k, v)`, `response.add_header(k, v)`.
 
+## HTTP
+
+Calling another service. Restored in 0.9.921 — the cutover deleted it, and
+a language for HTTP backends could not make an HTTP request.
+
+| | |
+|---|---|
+| `http.get(url)` | the response body, as `text` |
+| `http.post(url, body)` | same |
+| `http.json(url)` | the body as `Raw`, spliced like a `jsonb` column |
+| `http.status(url)` | the status code |
+
+```jwc no-compile
+let body = http.get("https://api.example.com/rates");
+let code = http.status("https://api.example.com/health");
+```
+
+**A non-2xx is not an error.** A 404 from a remote service is an answer;
+`http.status` is how to ask what it was. What raises is the request never
+happening — a refused URL, DNS failing, a timeout — as `BadRequest`, so
+`catch BadRequest` recovers it.
+
+### Outbound requests are gated
+
+Both checks run before anything is dispatched:
+
+| | |
+|---|---|
+| `JWC_HTTP_ALLOWLIST` | comma-separated hosts; empty means no restriction |
+| `JWC_HTTP_BLOCK_PRIVATE` | refuses loopback, private and link-local addresses, resolving the host first — `169.254.169.254` is the reason it exists |
+
+Redirects are **not** followed: a redirect is how an allowlisted host walks
+you to one that is not. `JWC_HTTP_TIMEOUT_SECS` bounds the request,
+default 10.
+
+If a route takes a URL from the request and fetches it, set both.
+
+## JSON
+
+| | |
+|---|---|
+| `json.parse(text)` | `Raw` — raises `BadRequest` when it is not JSON |
+| `json.stringify(v)` | `text` |
+
+`json.parse` answers `Raw`, the same as a `jsonb` column: it splices into a
+response and is not read field-wise. To get typed fields out of JSON,
+declare a `class` and let validation do it.
+
 ## Console
 
 For a program that talks to a person rather than over HTTP. `jwc run` is

@@ -424,3 +424,22 @@ async fn jwc_b_v1_redis_rate_limit(key: V, limit: V, window: V) -> V {
 async fn jwc_b_v1_redis_enabled() -> V {
     V::Bool(jwc_redis_pool().is_some())
 }
+
+// builtins.md §7f — the three the 1.0 surface was missing. The bodies
+// above are 0.9's and already correct; these add the `require` guard the
+// rest of the v1 surface carries, so an unconfigured server raises here
+// too instead of answering.
+async fn jwc_b_v1_redis_exists(key: V) -> V {
+    jwc_redis_require("exists");
+    jwc_b_redis_exists(key).await
+}
+
+async fn jwc_b_v1_redis_ping() -> V {
+    jwc_redis_require("ping");
+    jwc_b_redis_ping().await
+}
+
+async fn jwc_b_v1_redis_eval(script: V, keys_json: V, args_json: V) -> V {
+    jwc_redis_require("eval");
+    jwc_b_redis_eval(script, keys_json, args_json).await
+}

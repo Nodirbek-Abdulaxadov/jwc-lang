@@ -1289,3 +1289,37 @@ fn the_environment_table_is_generated_from_the_registry() {
         jwc::config::REGISTRY.len()
     );
 }
+
+/// `file.*` and `directory.*` are refused where a request can reach them.
+///
+/// 0.9 placed no restriction on them at all, so a route could read a path
+/// built from the query string. The rule is on the body being compiled,
+/// not a call graph, and this pins both halves of it.
+#[test]
+fn the_filesystem_is_out_of_reach_of_a_request() {
+    let load = |src: &str| -> Result<(), String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = Workspace::load(dir.path()).expect("load");
+        serve::load(&ws).map(|_| ()).map_err(|e| e.to_string())
+    };
+
+    let msg = load(
+        "namespace h;\n\
+         routes \"/x\" {\n\
+         \x20   route GET \"\" {\n\
+         \x20       let s = file.read(request.query(\"p\") ?? \"/etc/passwd\");\n\
+         \x20       return json({ s: $s });\n\
+         \x20   }\n\
+         }\n",
+    )
+    .err()
+    .unwrap_or_else(|| panic!("a route must not read a path from the request"));
+    assert!(msg.contains("E0230"), "{msg}");
+
+    // The same call in a plain `function` — what `jwc run` calls — is fine.
+    assert!(
+        load("namespace h;\nfunction main() { let s = file.read(\"a.txt\"); }\n").is_ok(),
+        "a script must be able to read a file"
+    );
+}

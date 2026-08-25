@@ -3,6 +3,127 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.922] — the rest of the registry — 2026-08-25
+
+Closing the name-by-name diff of 0.9's builtin registry against 1.0's that
+0.9.921 started. Everything on it is back except what is listed as still
+gone at the bottom.
+
+### The filesystem, and where it is allowed
+
+| | |
+|---|---|
+| `file.read` | `text?` — `null` when it is not there |
+| `file.write` / `file.append` / `file.delete` | `boolean` |
+| `file.exists` / `file.size` | `boolean` / `bigint?` |
+| `directory.exists` / `directory.create` | `boolean` |
+| `directory.list` | `text[]`, **sorted** |
+
+A missing file reads as `null` rather than raising — "is it there" is what
+`file.exists` answers, and making `read` raise puts a `catch` around the
+ordinary case.
+
+**They are refused inside a route, middleware, `after`, `errorHandler`,
+service, view, job or socket handler (`E0230`).** 0.9 placed no
+restriction here at all, so this compiled:
+
+```jwc
+route GET "leak" {
+    let secret = file.read(request.query("path") ?? "/etc/passwd");
+}
+```
+
+A script needs files; an HTTP handler almost never does. The check is on
+the body being compiled, not a call graph — a helper `function` reached
+from both `main` and a route still passes, which is a smaller hole than
+the one it closes and is stated in the spec rather than implied away.
+
+Note that 0.9's *documentation* promised seventeen of these and its
+runtime implemented seven. The ten that never existed are why every
+documentation claim now has a test behind it.
+
+### The last of the registry
+
+`redis.eval` (what `rate_limit` is built on, and the only way to write a
+different atomic sequence), `redis.exists`, `redis.ping` — all three were
+already in `redis_engine` and in the native prelude, wired to nothing.
+
+`unix_timestamp()`, `random_int(lo, hi)` — inclusive low, exclusive high,
+and **not** a secret; `crypto.token` is. `sleep_ms(n)`, refused inside a
+request for the same reason as the filesystem: a handler that sleeps holds
+a connection open to do nothing.
+
+`array.take`, `array.push`, `array.range`. `push` answers a **new** array:
+a JWC value is not a reference, and a `push` that appeared to mutate one
+would be the only place in the language where it did.
+
+### Still gone, and why
+
+`jwc upgrade`, `list`, `ok`, `v` from the CLI. `print`, whose buffering
+made it a trap its own 0.9 documentation warned about. `ok()`, `html()`,
+`text()` — `json`, `content(mime, body)` and `statusCode` cover them.
+`setConnectionString`, `db_query`, `json_unchecked`, `set_json_field` —
+`raw()` and `DATABASE_URL` are the 1.0 answers. Queue introspection
+(`job_count`, `dlq_count`, `dlq_drain`) has no 1.0 shape yet: it wants a
+vocabulary, not three built-ins.
+
+## [0.9.921] — a language for HTTP backends could not make an HTTP request — 2026-08-25
+
+A full diff of 0.9's builtin registry against 1.0's, prompted by `jwc run`
+turning out to be missing: 113 names then, 110 now, and most of the
+difference renames rather than losses. Checking each one by hand, the
+largest real loss was the HTTP client — `http_get`, `http_post` and
+`fetch_json`, deleted at the v0.25.0 cutover with nothing in their place.
+
+A JWC service could not call a payment provider, exchange an OAuth code or
+post a webhook. In a language whose subject is HTTP backends.
+
+### `http.*`
+
+| | |
+|---|---|
+| `http.get(url)` | the response body, as `text` |
+| `http.post(url, body)` | same |
+| `http.json(url)` | the body as `Raw` |
+| `http.status(url)` | the status code |
+
+A **non-2xx is not a raise**: a 404 from a remote service is an answer, and
+making every caller wrap the call to discover that is worse than handing
+them `http.status`. What raises is the request never happening — refused,
+unresolvable, timed out — as `BadRequest`, so it is catchable.
+
+`JWC_HTTP_ALLOWLIST` and `JWC_HTTP_BLOCK_PRIVATE` had survived in
+`config::REGISTRY` the whole time, documenting builtins that no longer
+existed. They mean what they say again, and both gates run before the
+request is dispatched. Redirects are not followed at all: a redirect is how
+an allowlisted host walks you to one that is not.
+
+`src/native/prelude/http.rs.in` also survived — 166 lines of client and
+SSRF guards, wired to nothing. The new surface reuses those guards rather
+than carrying a second copy. What it does not reuse is 0.9's error
+handling: `jwc_b_http_get` returned the failure *as the response body*, so
+a URL the gate refused came back looking like a successful fetch of the
+refusal text.
+
+### `json.parse` / `json.stringify`
+
+`Raw` on the way out of `parse`, the same as a `jsonb` column: it splices
+into a response and is not read field-wise. Reading a field off it is
+`E0310`, and a `class` is how to get typed values.
+
+### Two defects found while testing this
+
+**A bare `return;` in `main` reported an internal name.** `declared_port`
+ran `main` through `run_block`, which does not unwrap the sentinel a
+postfix `catch` throws to return from its enclosing function. A `return;`
+inside a `catch` in `main` surfaced as
+`main() raised __return_void at boot`.
+
+**The native backend swallowed a raise in `main`.** `let _ =
+jwc_user_main().await;` discarded the result, so a program whose `main`
+raised printed nothing and started its listener anyway. It reports and
+exits 1 now, as the interpreter does.
+
 ## [0.9.920] — `jwc run` comes back — 2026-08-25
 
 ```jwc

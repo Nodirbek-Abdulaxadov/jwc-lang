@@ -220,6 +220,121 @@ stderr is ordinary. They are the surface `jwc run` exists for
 
 ---
 
+## 7c. `http.*` — outbound HTTP
+
+| Name | Type |
+|---|---|
+| `http.get(url)` | `text` — the response body |
+| `http.post(url, body)` | `text` |
+| `http.json(url)` | `Raw` — the body, spliced like a `jsonb` column |
+| `http.status(url)` | `int` |
+
+A **non-2xx is not a raise**. A 404 from a remote service is an answer, and
+a language that turns it into a fault makes every caller wrap the call to
+find that out. `http.status` is how to ask.
+
+What raises is the request never happening: a refused URL, DNS failing, the
+timeout expiring. `BadRequest`, so `catch BadRequest` recovers it — a
+remote service being unreachable is not the program being wrong.
+
+The body is `text`, not a shape. What a remote service returns is not
+something this compiler can know, and inventing a shape for it turns a
+runtime surprise into a type error in the wrong place.
+
+### 7c.1 The SSRF gates
+
+Both run **before** the request is dispatched, so a refused URL never
+touches the network.
+
+| | |
+|---|---|
+| scheme | only `http` and `https`. `file:` is refused by name |
+| `JWC_HTTP_ALLOWLIST` | comma-separated hosts. Empty means no restriction |
+| `JWC_HTTP_BLOCK_PRIVATE` | resolves the host and refuses loopback, private, link-local and unspecified addresses — including `169.254.169.254`, which is the reason it exists. Off by default, because talking to a sibling container by name is ordinary |
+| redirects | **not followed**. A redirect is how an allowlisted host walks you to one that is not |
+
+`JWC_HTTP_TIMEOUT_SECS` bounds the whole request; default 10.
+
+---
+
+## 7d. `json.*`
+
+| Name | Type |
+|---|---|
+| `json.parse(text)` | `Raw` — raises `BadRequest` when it is not JSON |
+| `json.stringify(v)` | `text` |
+
+`parse` answers `Raw`, the same thing a `jsonb` column reads as: it splices
+into a response verbatim and is not read field-wise. That is the honest
+shape for text whose structure the compiler cannot know — reading a field
+off it is `E0310`, and the way to get a typed value is a `class`.
+
+---
+
+## 7e. `file.*` / `directory.*` — the filesystem
+
+| Name | Type |
+|---|---|
+| `file.read(path)` | `text?` — `null` when it is not there |
+| `file.write(path, body)` | `boolean` |
+| `file.append(path, body)` | `boolean` |
+| `file.exists(path)` | `boolean` |
+| `file.size(path)` | `bigint?` |
+| `file.delete(path)` | `boolean` |
+| `directory.exists(path)` | `boolean` |
+| `directory.create(path)` | `boolean` — creates parents |
+| `directory.list(path)` | `text[]` — names only, **sorted** |
+
+A missing file reads as `null` rather than raising: "is it there" is what
+`file.exists` answers, and making `read` raise puts a `catch` around the
+ordinary case. The write paths answer `boolean` for the same reason.
+
+`directory.list` sorts. The order a filesystem hands entries back in is not
+stable, and a program that iterates one should not depend on it.
+
+### 7e.1 Only inside a plain `function` (E0230)
+
+These are refused in a `route`, `middleware`, `after`, `errorHandler`,
+`service`, `view`, `job` or socket handler.
+
+A route that reads or writes a path derived from the request is one line
+from path traversal:
+
+```jwc no-compile
+route GET "leak" {
+    let secret = file.read(request.query("path") ?? "/etc/passwd");
+}
+```
+
+0.9 placed no restriction here at all. A script needs files; an HTTP
+handler almost never does, and the rare one that does should reach for
+something that bounds the path rather than for the raw call.
+
+**What the check is, exactly**: the body being compiled, not a call graph.
+A helper `function` reached from both `main` and a route still passes. That
+is a smaller hole than the one it closes, and stating it is better than
+implying a guarantee the compiler does not make.
+
+---
+
+## 7f. The rest of 0.9's registry
+
+Restored in 0.9.922, after a name-by-name diff of the two registries.
+
+| Name | Type | |
+|---|---|---|
+| `redis.eval(script, keys_json, args_json)` | `text?` | what `rate_limit` is built on; keys and args are JSON arrays because the language has no varargs |
+| `redis.exists(key)` | `boolean` | |
+| `redis.ping()` | `boolean` | |
+| `unix_timestamp()` | `bigint` | the integer clock. `date.now()` is the application one and answers `timestamptz` |
+| `random_int(lo, hi)` | `int` | inclusive low, exclusive high, so `random_int(0, len)` is an index. **Not a secret** — `crypto.token(n)` is |
+| `sleep_ms(n)` | `void` | plain `function` only (§7e.1). A handler that sleeps holds a connection open to do nothing |
+| `array.take(xs, n)` | same as `xs` | |
+| `array.push(xs, v)` | same as `xs` | answers a **new** array. A JWC value is not a reference, and a `push` that appeared to mutate one would be the only place in the language where it did |
+| `array.range(lo, hi)` | `int[]` | |
+
+---
+
 ## 8. Package namespaces
 
 `import redis;` makes `redis.*` resolvable. A package's exported surface is
@@ -329,4 +444,5 @@ section about keeping the documentation honest that was itself wrong.
 |---|---|
 | `E0205` | wrong number of arguments to a builtin |
 | `E0206` | a field name in `json.get`-style access is not a string literal |
+| `E0230` | `file.*` / `directory.*` outside a plain `function` (§7e.1) |
 | `W1301` | `debug.dump` in the program (tooling §3.4) |
