@@ -433,6 +433,12 @@ impl Ctx<'_> {
 /// A generated crate: the source, and which halves of the runtime it needs.
 pub struct Generated {
     pub source: String,
+    /// Every file the emitted `JWC_ASSETS` table names, as
+    /// `(mount index, path inside the mount, file on disk)`. The build
+    /// copies these into the crate so the `include_bytes!` calls resolve —
+    /// one walk, shared with the emission, so the table and the tree cannot
+    /// disagree (routing.md §10.6).
+    pub assets: Vec<(usize, String, std::path::PathBuf)>,
     pub needs_db: bool,
     pub needs_http_client: bool,
     pub needs_crypto: bool,
@@ -911,6 +917,38 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     }
     out.push_str("    failed\n}\n");
 
+    // routing.md §10.6 — the tree goes into the binary. Walked once here;
+    // `scaffold_workspace` copies exactly what this named.
+    let mut assets: Vec<(usize, String, std::path::PathBuf)> = Vec::new();
+    let mut assets_src = String::new();
+    if !wired.mounts.is_empty() {
+        assets_src.push_str("\n// ── static mounts (routing.md §10) ──\n");
+        assets_src.push_str("static JWC_MOUNTS: &[(&str, u32)] = &[\n");
+        for m in &wired.mounts {
+            assets_src.push_str(&format!(
+                "    ({}, {}),\n",
+                rust_str_literal(&m.prefix),
+                m.max_age
+            ));
+        }
+        assets_src.push_str("];\n\nstatic JWC_ASSETS: &[JwcAsset] = &[\n");
+        for (i, m) in wired.mounts.iter().enumerate() {
+            for (rel, file) in crate::assets::walk(&m.root) {
+                let Ok(bytes) = std::fs::read(&file) else {
+                    bail!("cannot read the asset {}", file.display());
+                };
+                assets_src.push_str(&format!(
+                    "    JwcAsset {{ mount: {i}, path: {}, body: include_bytes!({}), etag: {} }},\n",
+                    rust_str_literal(&rel),
+                    rust_str_literal(&format!("assets/m{i}/{rel}")),
+                    rust_str_literal(&crate::assets::etag(&bytes)),
+                ));
+                assets.push((i, rel, file));
+            }
+        }
+        assets_src.push_str("];\n");
+    }
+
     let mut source = String::new();
     source.push_str(super::PRELUDE_BASE);
     source.push_str(super::PRELUDE_V1);
@@ -938,10 +976,29 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         // deduction, and the two have to agree.
         source.push_str(super::PRELUDE_HTTP);
     }
+    if wired.mounts.is_empty() {
+        // The base prelude calls this on every miss. With no mount there is
+        // nothing to look in, and emitting the stub rather than the whole
+        // asset runtime keeps a program that declares none from carrying it.
+        source.push_str(
+            "\n/// No `static` mount was declared (routing.md §10).\n\
+             fn jwc_static_asset(\n\
+             \x20   _method: &str,\n\
+             \x20   _path: &str,\n\
+             \x20   _headers: &BTreeMap<String, String>,\n\
+             ) -> Option<axum::response::Response> {\n\
+             \x20   None\n}\n",
+        );
+    } else {
+        source.push_str(super::PRELUDE_ASSETS_CORE);
+        source.push_str(super::PRELUDE_ASSETS);
+        source.push_str(&assets_src);
+    }
     source.push_str(&out);
 
     Ok(Generated {
         source,
+        assets,
         needs_db,
         needs_jobs,
         needs_mail,

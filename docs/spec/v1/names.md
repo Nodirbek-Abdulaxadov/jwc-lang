@@ -60,19 +60,20 @@ A reserved-word list would forbid the language's own examples.
 The words with grammatical meaning are:
 
 ```
-after     and       as        asc       break     by        cascade   catch
-check     class     conflict  continue  cross     database  default   delete
-desc      do
-else      enum      error     errorHandler         except   exists    false
-first     for       foreign   from      full      function  group     having
-identity  if        ilike     import    in        index     inner     insert
-into      join      key       left      let       like      limit     max
-middleware          namespace no        not       nothing   null      nulls
-of        on        or        orderby   page      primary   private   provides
-raises    references          requires  restrict  return    right     route
-routes    schema    select    server    service   set       size      table
-test      throw     transaction         transient true      under     unique
-update    use       using     view      was       where     with      assert
+after     and       as        asc       assert    backoff   break     buffered
+by        cache     cascade   catch     check     class     close     conflict
+continue  cross     database  default   delete    desc      dispatch  do
+else      enum      error     errorHandler except    exists    false     first
+for       foreign   from      full      function  group     having    identity
+if        ilike     import    in        index     inner     insert    into
+job       join      key       left      let       like      limit     max
+message   middleware namespace no        not       nothing   null      nulls
+of        on        open      or        orderby   page      primary   private
+provides  raises    references requires  restrict  retries   return    right
+route     routes    schema    select    server    service   set       size
+socket    static    table     test      throw     transaction transient true
+under     unique    update    use       using     view      was       where
+with
 ```
 
 A word in a position where the grammar expects that keyword is that keyword.

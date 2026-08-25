@@ -594,3 +594,86 @@ fn a_bare_name_that_is_not_a_local_is_still_refused() {
         "the refusal should name it: {err}"
     );
 }
+
+/// routing.md §10.6 — the two backends run the *same text* for every
+/// decision a static mount makes.
+///
+/// `src/assets.rs` includes `assets_core.rs.in`; codegen pastes the same
+/// file into the crate it generates. Asserting the paste is verbatim is
+/// what turns "they agree" from a claim into a property: a rule cannot be
+/// changed on one side, because there is only one side.
+#[test]
+fn the_asset_rules_in_the_binary_are_the_same_source_the_interpreter_runs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("public/sub")).expect("mkdir");
+    std::fs::write(dir.path().join("public/app.js"), b"x").expect("write");
+    std::fs::write(dir.path().join("public/sub/a.css"), b"y").expect("write");
+    std::fs::write(dir.path().join("public/.env"), b"SECRET").expect("write");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\nstatic \"/assets\" from \"public\" cache 60;\n",
+    )
+    .expect("write");
+    let ws = Workspace::load(dir.path()).expect("load");
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+
+    let core = include_str!("../src/assets_core.rs.in");
+    assert!(
+        rust.contains(core),
+        "the generated crate should carry `assets_core.rs.in` verbatim"
+    );
+
+    // The table names the mount and the files, and the ETags are the ones
+    // `jwc serve` computes from the same bytes.
+    assert!(rust.contains(r#"static JWC_MOUNTS: &[(&str, u32)] = &["#));
+    assert!(rust.contains(r#"("/assets", 60)"#));
+    assert!(rust.contains(r#"include_bytes!("assets/m0/app.js")"#));
+    assert!(rust.contains(r#"include_bytes!("assets/m0/sub/a.css")"#));
+    // The emitted literal is the interpreter's ETag with its quotes
+    // escaped, so compare on the digest the two share.
+    let digest = jwc::assets::etag(b"x");
+    let digest = digest.trim_matches('"');
+    assert!(
+        rust.contains(digest),
+        "the emitted ETag is the sha256 `jwc serve` computes"
+    );
+    // A dotfile is 404 at run time, so it has no business inside the
+    // artifact either. (`.env` appears in the pasted rules as the comment
+    // that explains why, so the assertion is on the table, not the file.)
+    assert!(
+        !rust.contains("assets/m0/.env"),
+        "a dotfile reached the binary"
+    );
+    assert!(
+        !rust.contains(r#"path: ".env""#),
+        "a dotfile reached the table"
+    );
+}
+
+/// A program with no mount carries no asset runtime — only the stub the
+/// router calls on a miss.
+#[test]
+fn a_program_with_no_mount_does_not_carry_the_asset_runtime() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         routes \"/x\" {\n\
+         \x20   route GET \"\" { return json({ ok: true }); }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = Workspace::load(dir.path()).expect("load");
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+
+    assert!(!rust.contains("JWC_ASSETS"), "no table without a mount");
+    assert!(
+        !rust.contains("fn safe_relative"),
+        "no asset rules without a mount"
+    );
+    assert!(
+        rust.contains("fn jwc_static_asset("),
+        "the router calls it on every miss, so it has to exist"
+    );
+    assert_calls_resolve(&rust);
+}

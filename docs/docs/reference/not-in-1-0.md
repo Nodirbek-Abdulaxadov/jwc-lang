@@ -41,7 +41,9 @@ The four things this page used to list as missing:
 | **Outbound email** | `mail.send(to, subject, html)` over SMTP, configured with `JWC_SMTP_*`. It raises when unconfigured rather than pretending to send |
 
 Also present, and sometimes assumed missing: `redis.*`, `insert … buffered`
-for writes a request should not wait for, and the native AOT backend
+for writes a request should not wait for, `static "/assets" from "public"`
+for a directory of files — which `jwc build` puts *inside* the binary, so
+there is nothing to ship beside it — and the native AOT backend
 (`jwc build`), which produces a single binary that answers byte-identically
 to `jwc serve`.
 

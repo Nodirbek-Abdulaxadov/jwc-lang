@@ -3,6 +3,119 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.925] — static files, inside the binary — 2026-08-25
+
+```jwc
+static "/assets" from "public";
+static "/" from "dist" cache 31536000;
+```
+
+JWC has never served a file. Not removed at the cutover, not deferred:
+`apple-darwin`-style, it simply was not there — no `static`, no `ServeDir`,
+nothing in the spec, nothing on the roadmap. A backend that cannot answer
+`/favicon.ico` needs something else in front of it, which is a second
+deployment for a language whose selling point is one binary.
+
+### Binary bodies
+
+`Response.body` was a `String`, so the wire could only carry UTF-8. A PNG
+through `String::from_utf8_lossy` is a 200 with a corrupt image on it.
+
+`Response` now carries `bytes: Option<Vec<u8>>` — a second field rather
+than widening `body`, because every other response in the language is text
+and every test that reads one is a string. Only a mount sets it, and
+`into_axum` sends it when it is there.
+
+### What a mount will not serve
+
+Refusals, not repairs. Normalising `a/../b` to `b` means agreeing with the
+operating system about every encoding, separator and case fold — get one
+wrong and the path that was checked is not the path that is opened. So the
+URL is split on `/`, each segment is percent-decoded **on its own**, and a
+segment is refused outright when it is `..`, begins with `.`, decodes to
+something holding `/`, `\`, `:` or NUL, or carries an escape that is not
+`%` plus two hex digits. Splitting before decoding is why `a%2fb` is one
+refused segment rather than two accepted ones.
+
+What survives is joined and canonicalised, and the result must still be
+under the canonical root — a symlink out of the tree is caught even when
+every segment of the URL was an ordinary name.
+
+`.env`, `.git/config`, `.htpasswd`, a directory listing: 404. A directory
+answers its `index.html` or nothing.
+
+### The tree goes into the binary
+
+`jwc build` walks the mount, copies it into the crate it generates and
+`include_bytes!`s it. `bin/release/app` is the deployment — verified by
+copying the binary to an empty directory with no `public/` in sight and
+watching it answer the PNG byte-for-byte.
+
+The walk applies §10.3's rules too, so a `.env` sitting in a `dist/` is not
+merely unreachable in the artifact — it is not in it.
+
+### One implementation, two backends
+
+The decisions — refusals, content type, `Cache-Control`, `If-None-Match` —
+are `src/assets_core.rs.in`. `src/assets.rs` includes it; codegen pastes
+the same file into the generated crate. The two backends do not implement
+the section twice, they run the same text, and `tests/native.rs` asserts
+the paste is verbatim.
+
+Checked live: 25 probes — every file, every traversal spelling, 304, HEAD,
+405, the binary, the declared-route and operational precedence — diffed
+between `jwc serve` and the compiled binary. Status, body and every header
+identical on all 25.
+
+### Precedence, and what a mount cannot take
+
+1. a declared `route` or `socket`
+2. `/healthz`, `/readyz`, `/metrics`
+3. a `static` mount, in source order
+4. 404
+
+A mount at `"/"` therefore cannot capture the probes — a file named
+`healthz` in a `dist/` does not answer `/readyz`, which is the same rule
+that stopped jwc-shortener's `/{code}` from doing it.
+
+### Headers, and the method
+
+`Content-Type` by extension, with `application/octet-stream` for an unknown
+one rather than a guess — a wrong `text/html` on a file someone uploaded is
+a stored XSS. A strong `ETag` (sha256 of the bytes, so the native build can
+compute it without an mtime it does not have), `Cache-Control`, and
+`X-Content-Type-Options: nosniff`.
+
+`POST` to a mounted path is **405** with `Allow: GET, HEAD`. A 404 there
+sends the caller looking for a typo in a path that is right.
+
+### `E0230` still stands
+
+A route may not read a path the caller chose. A mount is not that: the root
+is in the source, fixed at compile time, and the caller supplies only a
+name inside it that the rules above have already refused unless it is an
+ordinary file name. The hardening guard that pins `E0230` is untouched.
+
+### Diagnostics
+
+| | |
+|---|---|
+| `E0740` | the prefix is not a literal path beginning with `/` |
+| `E0741` | the root is missing, or is not a directory |
+| `E0742` | two mounts on one prefix |
+| `E0743` | `cache` is not a number of seconds within the one-year ceiling |
+| `E0744` | the root is outside the project — `jwc build` would embed it |
+
+All five are reported when the program is **checked**, not at the first
+request that misses.
+
+### Also
+
+`names.md`'s keyword table had drifted: `job`, `socket`, `dispatch`,
+`buffered`, `retries`, `backoff`, `open`, `message` and `close` all had
+grammatical meaning and none were listed. Regenerated against the parser,
+sorted, with `static` and `cache` added.
+
 ## [0.9.924] — `$` is not required outside a query — 2026-08-25
 
 `$` was mine, from v0.20.0, and nobody asked for it.

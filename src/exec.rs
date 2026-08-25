@@ -112,6 +112,8 @@ pub struct Program {
     pub model: SchemaModel,
     pub symbols: Symbols,
     pub routes: Vec<ResolvedRoute>,
+    /// `static` mounts, in source order (routing.md §10.2).
+    pub mounts: Vec<crate::assets::Mount>,
     pub functions: HashMap<String, FunctionDecl>,
     pub middleware: HashMap<String, MiddlewareDecl>,
     /// Declared `job`s, by name.
@@ -243,6 +245,14 @@ pub struct Response {
     pub status: u16,
     pub body: String,
     pub headers: Vec<(String, String)>,
+    /// A byte body. Only a `static` mount produces one — the language's own
+    /// responses are text — and when it is set it is what goes on the wire.
+    ///
+    /// A separate field rather than `body: Vec<u8>` because every other
+    /// response in the program, and every test that reads one, is a string:
+    /// widening the common case to carry the rare one would have made the
+    /// whole codebase pay for assets.
+    pub bytes: Option<Vec<u8>>,
 }
 
 impl Response {
@@ -256,6 +266,18 @@ impl Response {
                 "content-type".into(),
                 "application/json; charset=utf-8".into(),
             )],
+            bytes: None,
+        }
+    }
+
+    /// A static asset (routing.md §10). `body` stays empty: the bytes are
+    /// the response.
+    pub fn asset(status: u16, bytes: Vec<u8>, headers: Vec<(String, String)>) -> Response {
+        Response {
+            status,
+            body: String::new(),
+            headers,
+            bytes: Some(bytes),
         }
     }
 
@@ -271,6 +293,7 @@ impl Response {
             status,
             body: String::new(),
             headers: Vec::new(),
+            bytes: None,
         }
     }
 }

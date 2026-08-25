@@ -18,6 +18,7 @@
 
 // ---- the language
 pub mod apply;
+pub mod assets;
 pub mod ast;
 pub mod check;
 pub mod cursor;

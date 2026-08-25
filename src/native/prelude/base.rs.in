@@ -3024,6 +3024,13 @@ async fn handle_axum_request(
             if let Some(r) = jwc_operational(&method_str, path_str).await {
                 return r;
             }
+            // routing.md §10.2 — a `static` mount is last but one. A
+            // declared route wins over it, and so do the operational paths
+            // above: a mount at `/` must not take `/readyz` away either.
+            // `serve.rs` puts this in exactly the same place.
+            if let Some(r) = jwc_static_asset(&method_str, path_str, &header_map) {
+                return r;
+            }
             // `serve.rs` answers one thing for anything unmatched:
             // `Response::message(404, "not found")`. The richer envelope
             // this used to build — and the 405 with `Allow` — came from

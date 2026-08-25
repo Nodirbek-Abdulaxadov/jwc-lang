@@ -70,6 +70,7 @@ pub enum Decl {
     Routes(RoutesDecl),
     ErrorHandler(ErrorHandlerDecl),
     Server(ServerDecl),
+    Static(StaticDecl),
     Function(FunctionDecl),
     Job(JobDecl),
     Test(TestDecl),
@@ -93,6 +94,7 @@ impl Decl {
             Decl::Routes(d) => d.span,
             Decl::ErrorHandler(d) => d.span,
             Decl::Server(d) => d.span,
+            Decl::Static(d) => d.span,
             Decl::Function(d) => d.span,
             Decl::Test(d) => d.span,
         }
@@ -115,6 +117,7 @@ impl Decl {
             Decl::Routes(d) => &d.at,
             Decl::ErrorHandler(d) => &d.at,
             Decl::Server(d) => &d.at,
+            Decl::Static(d) => &d.at,
             Decl::Function(d) => &d.at,
             Decl::Test(d) => &d.at,
         }
@@ -530,6 +533,25 @@ pub struct CatchArm {
     pub error: Option<Ident>,
     pub binder: Ident,
     pub body: Block,
+    pub span: Span,
+}
+
+/// `static "/assets" from "public" cache 3600;` (routing.md §10).
+///
+/// A mount, not a route: it has no body, takes no middleware, and is
+/// reached only once every declared route has failed to match.
+#[derive(Clone, Debug)]
+pub struct StaticDecl {
+    pub at: Attached,
+    /// The URL prefix as written.
+    pub prefix: String,
+    pub prefix_span: Span,
+    /// The directory, relative to the project root.
+    pub root: String,
+    pub root_span: Span,
+    /// `cache <n>` — `Cache-Control: max-age=<n>`. Absent is 0.
+    pub max_age: u32,
+    pub max_age_span: Option<Span>,
     pub span: Span,
 }
 

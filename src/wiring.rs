@@ -17,6 +17,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub struct Wired {
     pub routes: Vec<ResolvedRoute>,
+    /// `static` mounts in source order — the order they are tried in
+    /// (routing.md §10.2).
+    pub mounts: Vec<crate::assets::Mount>,
     pub diags: Vec<(Loc, Diagnostic)>,
 }
 
@@ -63,6 +66,16 @@ impl Segment {
     }
 }
 
+/// `"/assets/"` and `"/assets"` are one mount; `"/"` stays `"/"`.
+fn normalise_prefix(p: &str) -> String {
+    let t = p.trim_end_matches('/');
+    if t.is_empty() {
+        "/".to_string()
+    } else {
+        t.to_string()
+    }
+}
+
 pub fn wire(ws: &Workspace, sym: &Symbols) -> Wired {
     let mut w = Wiring {
         ws,
@@ -77,8 +90,10 @@ pub fn wire(ws: &Workspace, sym: &Symbols) -> Wired {
     w.check_context();
     w.check_error_model();
     w.check_cursor_secret();
+    let mounts = w.collect_mounts();
     Wired {
         routes: w.routes,
+        mounts,
         diags: w.diags,
     }
 }
@@ -985,6 +1000,129 @@ impl Wiring<'_> {
     /// unsigned cursor means. Unsigned, a cursor is a client-supplied
     /// predicate: a caller could hand back any ordering tuple and read
     /// rows the query's own `where` was meant to keep from them.
+    /// `static` mounts, checked and resolved (routing.md §10).
+    ///
+    /// The root is resolved here rather than at request time so that a
+    /// directory that is not there is a *compile* error. A mount that fails
+    /// a check is dropped: reporting it once is better than answering 404
+    /// for every asset at run time and calling it a routing problem.
+    fn collect_mounts(&mut self) -> Vec<crate::assets::Mount> {
+        // A year. Beyond it the header stops meaning anything a cache acts
+        // on, and a number that large is a typo more often than a policy.
+        const MAX_AGE_CEILING: u32 = 31_536_000;
+
+        let mut out: Vec<crate::assets::Mount> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let root = self.ws.root.clone();
+        let decls: Vec<(usize, crate::ast::StaticDecl)> = self
+            .ws
+            .files
+            .iter()
+            .enumerate()
+            .flat_map(|(fi, f)| {
+                f.program.decls.iter().filter_map(move |d| match d {
+                    Decl::Static(sd) => Some((fi, sd.clone())),
+                    _ => None,
+                })
+            })
+            .collect();
+
+        for (fi, sd) in decls {
+            let ploc = Loc {
+                file: fi,
+                span: sd.prefix_span,
+            };
+            let rloc = Loc {
+                file: fi,
+                span: sd.root_span,
+            };
+
+            // §10.1 — a mount is a literal prefix. A `{slot}` would make it
+            // a route, and a route is the thing that wins over it.
+            if !sd.prefix.starts_with('/') || sd.prefix.contains(['{', '?', '#']) {
+                self.err(
+                    ploc,
+                    "E0740",
+                    format!("`{}` is not a mount prefix", sd.prefix),
+                    "it starts with `/` and is literal: no `{slot}`, no query, no fragment",
+                    "routing.md §10.1",
+                );
+                continue;
+            }
+            let prefix = normalise_prefix(&sd.prefix);
+            if seen.contains(&prefix) {
+                self.err(
+                    ploc,
+                    "E0742",
+                    format!("`{prefix}` is already mounted"),
+                    "two mounts on one prefix means which directory answers depends on \
+                     the order the files happened to load in",
+                    "routing.md §10.2",
+                );
+                continue;
+            }
+
+            if sd.max_age > MAX_AGE_CEILING {
+                self.err(
+                    Loc {
+                        file: fi,
+                        span: sd.max_age_span.unwrap_or(sd.span),
+                    },
+                    "E0743",
+                    format!("`cache {}` is longer than a year", sd.max_age),
+                    format!("the ceiling is {MAX_AGE_CEILING} seconds"),
+                    "routing.md §10.4",
+                );
+                continue;
+            }
+
+            // §10.3 — the root is resolved against the project directory and
+            // has to stay inside it. `from "../../etc"` publishes a tree the
+            // project does not own, and `jwc build` would then embed it.
+            let joined = root.join(&sd.root);
+            let (Ok(canon), Ok(canon_root)) = (joined.canonicalize(), root.canonicalize()) else {
+                self.err(
+                    rloc,
+                    "E0741",
+                    format!("no directory `{}` to serve", sd.root),
+                    "the path is relative to the project directory, and it has to exist \
+                     when the program is checked",
+                    "routing.md §10.3",
+                );
+                continue;
+            };
+            if !canon.starts_with(&canon_root) {
+                self.err(
+                    rloc,
+                    "E0744",
+                    format!("`{}` is outside the project", sd.root),
+                    "a mount publishes everything under it, and `jwc build` embeds it \
+                     into the binary",
+                    "routing.md §10.3",
+                );
+                continue;
+            }
+            if !canon.is_dir() {
+                self.err(
+                    rloc,
+                    "E0741",
+                    format!("`{}` is not a directory", sd.root),
+                    "a mount serves a directory tree, not a single file",
+                    "routing.md §10.3",
+                );
+                continue;
+            }
+
+            seen.push(prefix.clone());
+            out.push(crate::assets::Mount {
+                prefix,
+                root: canon,
+                max_age: sd.max_age,
+            });
+        }
+        out
+    }
+
     fn check_cursor_secret(&mut self) {
         let mut paging: Option<Loc> = None;
         let mut has_secret = false;
