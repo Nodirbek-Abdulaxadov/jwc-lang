@@ -164,3 +164,69 @@ async fn jwc_b_fetch_json(url: V) -> V {
         other => other,
     }
 }
+
+// ---------------------------------------------------------------------
+// builtins.md §7c — the 1.0 surface.
+//
+// `jwc_b_http_get` above is 0.9's, and it returns the failure *as the
+// body*: a URL the SSRF gate refuses comes back looking like a successful
+// response whose content is the refusal. These raise instead, matching
+// `src/http.rs` in the interpreter, so the two backends answer the same.
+//
+// A non-2xx is not a raise. A 404 from a remote service is an answer, and
+// making every caller wrap the call to find that out is worse than
+// handing them `http.status`.
+
+async fn jwc_http_v1(method: &str, url: &V, body: Option<String>) -> Result<(u16, String), JwcThrown> {
+    // 400: an unreachable dependency is not the caller sending a bad
+    // request, but it is the class a route can answer with, and
+    // `catch BadRequest` is what makes it recoverable.
+    let refuse = |m: String| JwcThrown::new("BadRequest", 400, v_str(m));
+    let u = match url {
+        V::Str(s) => s.to_string(),
+        other => return Err(refuse(format!("`http.*` takes a URL string, got {:?}", other))),
+    };
+    jwc_check_outbound_url(&u).map_err(refuse)?;
+
+    let mut req = match method {
+        "POST" => jwc_http_client().post(&u),
+        _ => jwc_http_client().get(&u),
+    };
+    if let Some(b) = body {
+        req = req.header("content-type", "application/json").body(b);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| refuse(format!("{method} {u} failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| refuse(format!("{method} {u}: could not read the body: {e}")))?;
+    Ok((status, text))
+}
+
+async fn jwc_b_v1_http_get(url: V) -> JwcResult {
+    let (_, body) = jwc_http_v1("GET", &url, None).await?;
+    Ok(v_str(body))
+}
+
+async fn jwc_b_v1_http_post(url: V, body: V) -> JwcResult {
+    let payload = match &body {
+        V::Str(s) => s.to_string(),
+        other => jwc_to_json(other),
+    };
+    let (_, out) = jwc_http_v1("POST", &url, Some(payload)).await?;
+    Ok(v_str(out))
+}
+
+async fn jwc_b_v1_http_json(url: V) -> JwcResult {
+    let (_, body) = jwc_http_v1("GET", &url, None).await?;
+    Ok(V::RawJson(::std::borrow::Cow::Owned(body)))
+}
+
+async fn jwc_b_v1_http_status(url: V) -> JwcResult {
+    let (status, _) = jwc_http_v1("GET", &url, None).await?;
+    Ok(V::Int(status as i64))
+}

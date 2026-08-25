@@ -87,6 +87,11 @@ impl<'a> Vm<'a> {
             return self.mail_call(name, &vals).await;
         }
 
+        // `http.*` is a network round trip, so it is async too.
+        if let Some(name) = path.strip_prefix("http.") {
+            return self.http_call(name, &vals).await;
+        }
+
         if let Some(v) = self.builtin(&path, &vals)? {
             return Ok(v);
         }
@@ -152,6 +157,42 @@ impl<'a> Vm<'a> {
     /// Without a reachable server they raise. Answering anyway is what
     /// the stub did, and for a rate limiter "no server" must never read as
     /// "allowed".
+    /// builtins.md §7c — outbound HTTP.
+    ///
+    /// A non-2xx is **not** a raise: a 404 from a remote service is an
+    /// answer, and a language that turns it into a fault forces every
+    /// caller to wrap the call to find out. `http.status` is how to ask.
+    ///
+    /// What does raise is the request never happening — an SSRF gate
+    /// refusing it, DNS failing, the timeout expiring. `BadRequest` so it
+    /// is catchable, because a remote service being unreachable is not the
+    /// program being wrong.
+    async fn http_call(&mut self, name: &str, a: &[Value]) -> Exec<Value> {
+        let s = |i: usize| text(a.get(i).unwrap_or(&Value::Null));
+        let (method, body) = match name {
+            "post" => ("POST", Some(s(1))),
+            "get" | "json" | "status" => ("GET", None),
+            other => {
+                return Err(fault(format!(
+                    "unknown function `http.{other}`. There is get, post, json \
+                     and status (builtins.md §7c)."
+                )))
+            }
+        };
+
+        match crate::http::request(method, &s(0), body).await {
+            Ok(reply) => Ok(match name {
+                "status" => Value::Int(reply.status as i64),
+                "json" => Value::Raw(reply.body),
+                _ => Value::Text(reply.body),
+            }),
+            Err(e) => Err(Abort::Thrown(Thrown {
+                error: "BadRequest".into(),
+                args: vec![Value::Text(e.to_string())],
+            })),
+        }
+    }
+
     async fn redis_call(&mut self, name: &str, a: &[Value]) -> Exec<Value> {
         use crate::redis_engine as r;
         let s = |i: usize| text(a.get(i).unwrap_or(&Value::Null));
@@ -252,6 +293,28 @@ impl<'a> Vm<'a> {
             // prints nothing at all rather than erroring: a debug statement
             // that survived review should not be what takes an endpoint
             // down.
+            // builtins.md §7d — JSON. `parse` answers `Raw`, which is the
+            // same thing a `jsonb` column reads as: it splices into a
+            // response and is not read field-wise. That is the honest
+            // shape for text whose structure the compiler cannot know.
+            "json.parse" => {
+                let raw = text(&arg(0));
+                match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(v) => Value::Raw(v.to_string()),
+                    Err(e) => {
+                        return Err(Abort::Thrown(Thrown {
+                            error: "BadRequest".into(),
+                            args: vec![Value::Text(format!("not JSON: {e}"))],
+                        }))
+                    }
+                }
+            }
+            "json.stringify" => {
+                let mut out = String::new();
+                arg(0).write_json(&mut out);
+                Value::Text(out)
+            }
+
             // builtins.md §7b — the terminal. `write` leaves the cursor
             // where it is so a prompt can be answered on the same line,
             // which is the whole reason it is separate from `writeln`.

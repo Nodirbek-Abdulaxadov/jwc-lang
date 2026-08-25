@@ -220,6 +220,57 @@ stderr is ordinary. They are the surface `jwc run` exists for
 
 ---
 
+## 7c. `http.*` — outbound HTTP
+
+| Name | Type |
+|---|---|
+| `http.get(url)` | `text` — the response body |
+| `http.post(url, body)` | `text` |
+| `http.json(url)` | `Raw` — the body, spliced like a `jsonb` column |
+| `http.status(url)` | `int` |
+
+A **non-2xx is not a raise**. A 404 from a remote service is an answer, and
+a language that turns it into a fault makes every caller wrap the call to
+find that out. `http.status` is how to ask.
+
+What raises is the request never happening: a refused URL, DNS failing, the
+timeout expiring. `BadRequest`, so `catch BadRequest` recovers it — a
+remote service being unreachable is not the program being wrong.
+
+The body is `text`, not a shape. What a remote service returns is not
+something this compiler can know, and inventing a shape for it turns a
+runtime surprise into a type error in the wrong place.
+
+### 7c.1 The SSRF gates
+
+Both run **before** the request is dispatched, so a refused URL never
+touches the network.
+
+| | |
+|---|---|
+| scheme | only `http` and `https`. `file:` is refused by name |
+| `JWC_HTTP_ALLOWLIST` | comma-separated hosts. Empty means no restriction |
+| `JWC_HTTP_BLOCK_PRIVATE` | resolves the host and refuses loopback, private, link-local and unspecified addresses — including `169.254.169.254`, which is the reason it exists. Off by default, because talking to a sibling container by name is ordinary |
+| redirects | **not followed**. A redirect is how an allowlisted host walks you to one that is not |
+
+`JWC_HTTP_TIMEOUT_SECS` bounds the whole request; default 10.
+
+---
+
+## 7d. `json.*`
+
+| Name | Type |
+|---|---|
+| `json.parse(text)` | `Raw` — raises `BadRequest` when it is not JSON |
+| `json.stringify(v)` | `text` |
+
+`parse` answers `Raw`, the same thing a `jsonb` column reads as: it splices
+into a response verbatim and is not read field-wise. That is the honest
+shape for text whose structure the compiler cannot know — reading a field
+off it is `E0310`, and the way to get a typed value is a `class`.
+
+---
+
 ## 8. Package namespaces
 
 `import redis;` makes `redis.*` resolvable. A package's exported surface is

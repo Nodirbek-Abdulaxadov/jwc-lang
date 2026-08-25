@@ -359,7 +359,7 @@ impl<'a> Vm<'a> {
         self.declare(name, v);
     }
 
-    pub(super) async fn run_body(&mut self, b: &Block) -> Exec<Flow> {
+    pub async fn run_body(&mut self, b: &Block) -> Exec<Flow> {
         // A postfix `catch` unwinds through a synthetic throw so it can
         // return from the *enclosing* function (errors.md §7.2).
         match Box::pin(self.run_block(b)).await {

@@ -2230,6 +2230,22 @@ impl<'a> Checker<'a> {
                 );
             }
         };
+        // An optional trailing argument — headers on `http.*` — so the
+        // arity check does not have to pick one of the two and be wrong.
+        let arity_range = |c: &mut Self, lo: usize, hi: usize| {
+            if args.len() < lo || args.len() > hi {
+                c.err_note(
+                    span,
+                    "E0205",
+                    format!(
+                        "`{path}` takes {lo} to {hi} argument(s), given {}",
+                        args.len()
+                    ),
+                    "see builtins.md",
+                    "builtins.md §1.2",
+                );
+            }
+        };
         let a0 = args.first().cloned().unwrap_or(Ty::Unknown);
 
         Some(match path {
@@ -2752,7 +2768,43 @@ impl<'a> Checker<'a> {
                 Ty::Void
             }
 
-            // --- the terminal (builtins.md §7b). Restored in 0.9.920:
+            // --- outbound HTTP (builtins.md §7c). Restored in 0.9.921:
+            // the cutover deleted `http_get`/`http_post`/`fetch_json` and
+            // left a language about HTTP backends unable to call one.
+            //
+            // The body is `text`, not a parsed shape: what a remote
+            // service returns is not something this compiler can know, and
+            // inventing a shape for it is how a 500 becomes a type error
+            // in the wrong place. `http.json` hands back `Raw` for the
+            // same reason `jsonb` does.
+            "http.get" => {
+                arity_range(self, 1, 2);
+                Ty::text()
+            }
+            "http.post" => {
+                arity_range(self, 2, 3);
+                Ty::text()
+            }
+            "http.status" => {
+                arity_range(self, 1, 2);
+                Ty::int()
+            }
+            "http.json" => {
+                arity_range(self, 1, 2);
+                Ty::Raw
+            }
+
+            // --- JSON (builtins.md §7d)
+            "json.parse" => {
+                arity(self, 1);
+                Ty::Raw
+            }
+            "json.stringify" => {
+                arity(self, 1);
+                Ty::text()
+            }
+
+            // --- the terminal (builtins.md §7b).            // --- the terminal (builtins.md §7b). Restored in 0.9.920:
             // `console.*` was 0.9's surface for a program that talks to a
             // person rather than to HTTP, and the cutover took it along
             // with `jwc run`. Any value goes in, the same way `debug.dump`
@@ -4164,6 +4216,8 @@ fn is_namespace(name: &str) -> bool {
             | "redis"
             | "cache"
             | "console"
+            | "http"
+            | "json"
             | "mail"
             | "socket"
             | "count"

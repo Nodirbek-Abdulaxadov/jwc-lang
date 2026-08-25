@@ -3272,6 +3272,29 @@ fn jwc_cache_lock() -> std::sync::MutexGuard<
         .unwrap_or_else(|p| p.into_inner())
 }
 
+/// builtins.md §7d — JSON. `parse` answers `RawJson`, the same thing a
+/// `jsonb` column reads as: it splices into a response verbatim and is not
+/// read field-wise, which is the honest shape for text whose structure the
+/// compiler cannot know.
+fn jwc_b_v1_json_parse(v: V) -> JwcResult {
+    let raw = match &v {
+        V::Str(s) => s.to_string(),
+        other => jwc_to_json(other),
+    };
+    match ::serde_json::from_str::<::serde_json::Value>(&raw) {
+        Ok(parsed) => Ok(V::RawJson(::std::borrow::Cow::Owned(parsed.to_string()))),
+        Err(e) => Err(JwcThrown::new(
+            "BadRequest",
+            400,
+            v_str(format!("not JSON: {e}")),
+        )),
+    }
+}
+
+fn jwc_b_v1_json_stringify(v: V) -> V {
+    v_str(jwc_to_json(&v))
+}
+
 /// builtins.md §7b — the terminal.
 ///
 /// Both write paths flush. A prompt that reaches the screen after the

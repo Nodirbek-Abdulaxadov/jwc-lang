@@ -32,6 +32,10 @@ use crate::workspace::Workspace;
 /// yields a future where a `V` was wanted, so the list is derived from
 /// the prelude rather than guessed.
 const ASYNC_BUILTINS: &[&str] = &[
+    "jwc_b_v1_http_get",
+    "jwc_b_v1_http_json",
+    "jwc_b_v1_http_post",
+    "jwc_b_v1_http_status",
     "jwc_b_v1_mail_enabled",
     "jwc_b_v1_mail_send",
     "jwc_b_v1_redis_del",
@@ -82,7 +86,14 @@ const ASYNC_BUILTINS: &[&str] = &[
 ///
 /// `int` and `bigint` are fallible too but are special-cased earlier: they
 /// take a fixed single argument, not the generic argument list.
-const RESULT_BUILTINS: &[&str] = &["jwc_b_v1_mail_send"];
+const RESULT_BUILTINS: &[&str] = &[
+    "jwc_b_v1_mail_send",
+    "jwc_b_v1_http_get",
+    "jwc_b_v1_http_post",
+    "jwc_b_v1_http_json",
+    "jwc_b_v1_http_status",
+    "jwc_b_v1_json_parse",
+];
 
 /// The 1.0 built-in name on the left, the prelude function on the right.
 ///
@@ -206,6 +217,16 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "cache.set" => "jwc_b_v1_cache_set",
         "cache.del" => "jwc_b_v1_cache_del",
         "cache.clear" => "jwc_b_v1_cache_clear",
+
+        // --- outbound HTTP (builtins.md §7c)
+        "http.get" => "jwc_b_v1_http_get",
+        "http.post" => "jwc_b_v1_http_post",
+        "http.json" => "jwc_b_v1_http_json",
+        "http.status" => "jwc_b_v1_http_status",
+
+        // --- JSON (builtins.md §7d)
+        "json.parse" => "jwc_b_v1_json_parse",
+        "json.stringify" => "jwc_b_v1_json_stringify",
 
         // --- the terminal (builtins.md §7b)
         "console.write" => "jwc_b_v1_console_write",
@@ -709,7 +730,10 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // the same order the interpreter uses, so a program that hardcodes its
     // port gets that port on both backends.
     let user_main = if has_main {
-        "    let _ = jwc_user_main().await;\n"
+        "    if let Err(t) = jwc_user_main().await {\n\
+         \x20       eprintln!(\"main() raised {}: {}\", t.error, t.message);\n\
+         \x20       ::std::process::exit(1);\n\
+         \x20   }\n"
     } else {
         ""
     };
