@@ -566,6 +566,59 @@ pub fn routes(path: PathBuf) -> Result<()> {
 }
 
 /// `jwc v1 serve <path> --port N` — run the program.
+/// `jwc run [path]` — run `main()` and exit.
+///
+/// Restored in 0.9.920. The v0.25.0 cutover deleted `jwc run` with the
+/// rest of the 0.9 front-end, and nothing replaced it: `jwc serve` was the
+/// only way to execute a program, so the smallest thing anyone writes
+/// first — print a line — started an HTTP listener, and needed a Postgres
+/// to do it.
+///
+/// A program with no `database` connects to nothing, exactly as in
+/// `serve`. One that queries still needs `DATABASE_URL`, because the query
+/// does.
+pub fn run(path: PathBuf, dev: bool) -> Result<()> {
+    let ws = crate::workspace::Workspace::load(&path)?;
+    let program = std::sync::Arc::new(crate::serve::load(&ws)?);
+
+    let Some(_) = program.functions.get("main") else {
+        bail!(
+            "nothing to run: this program declares no `main`.\n\
+             \n\
+             `jwc run` calls `main()`. Add one:\n\
+             \n  \
+             function main() {{\n      \
+             console.writeln(\"hello\");\n  \
+             }}\n\
+             \n\
+             A program that is only routes is started with `jwc serve`."
+        );
+    };
+
+    crate::exec::set_dev_mode(dev);
+
+    let needs_db = ws.files.iter().any(|f| {
+        f.program
+            .decls
+            .iter()
+            .any(|d| matches!(d, crate::ast::Decl::Database(_)))
+    });
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        if needs_db {
+            crate::engine::init_engine_from_env()?;
+        }
+        crate::redis_engine::init_from_env()?;
+        // `declared_port` is the one path that runs `main`. Its return
+        // value is a port this command has no use for — a program that
+        // called `serve(...)` has already blocked inside it and never
+        // reaches here.
+        crate::serve::declared_port(&program).await?;
+        Ok(())
+    })
+}
+
 pub fn serve(path: PathBuf, port: Option<u16>, skip_schema_check: bool, dev: bool) -> Result<()> {
     let ws = crate::workspace::Workspace::load(&path)?;
     let program = std::sync::Arc::new(crate::serve::load(&ws)?);

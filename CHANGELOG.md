@@ -3,6 +3,63 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.920] — `jwc run` comes back — 2026-08-25
+
+```jwc
+function main () {
+    console.write("Hello, World!");
+}
+```
+
+```
+PS C:\Users\nbkab> jwc run .\app.jwc
+error: unrecognized subcommand 'run'
+```
+
+That program was **valid 0.9**. Both halves of it — `jwc run` and
+`console.write` — existed and worked, and the v0.25.0 cutover deleted them
+with the rest of the 0.9 front-end. It was never on the restoration list
+this series worked through, because that list was assembled from the
+runtime and never from a diff of the CLI.
+
+Both are back, and the program above now runs unchanged.
+
+### `jwc run [path]`
+
+Calls `main()` and exits. Nothing listens, and a program that declares no
+`database` needs no `DATABASE_URL` — which is what makes a program that
+only prints something you can actually run.
+
+A `main` that calls `serve(...)` still starts a server: that is what the
+call means, and `run` only declines to start one on the program's behalf.
+A program with no `main` gets a message naming `jwc serve` instead.
+
+### `console.*`
+
+| | |
+|---|---|
+| `console.write(v)` | stdout, no trailing newline — for a prompt |
+| `console.writeln(v)` | stdout, with one |
+| `console.error(v)` | stderr |
+| `console.read()` | one line from stdin, `null` at EOF |
+
+Both write paths flush. 0.9 also had `print`, which appended to a buffer
+flushed after `main` returned — so a prompt written before a read appeared
+after the answer was due, and inside a route body whatever it printed
+became the response body. Its own documentation called it a trap.
+**`print` is not back**; this family is the reason it does not need to be.
+
+Implemented on both backends and diffed: the same program under `jwc run`
+and as a `jwc build` binary puts identical bytes on the terminal.
+
+### What is still gone
+
+`upgrade`, `list`, `ok` and `v` from the 0.9 CLI, and the `file.*` /
+`directory.*` families. The filesystem surface is a security question of
+its own — what a program may read, and whether a route body may read it at
+all — and is not something to restore by reflex because it used to be
+there.
+
 ## [0.9.919] — hello world needed a Postgres — 2026-08-25
 
 Someone installed JWC on Windows, wrote the program everyone writes

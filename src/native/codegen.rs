@@ -207,6 +207,12 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "cache.del" => "jwc_b_v1_cache_del",
         "cache.clear" => "jwc_b_v1_cache_clear",
 
+        // --- the terminal (builtins.md §7b)
+        "console.write" => "jwc_b_v1_console_write",
+        "console.writeln" => "jwc_b_v1_console_writeln",
+        "console.error" => "jwc_b_v1_console_error",
+        "console.read" => "jwc_b_v1_console_read",
+
         // --- sockets (builtins.md §9)
         "socket.send" => "jwc_b_v1_socket_send",
         "socket.close" => "jwc_b_v1_socket_close",

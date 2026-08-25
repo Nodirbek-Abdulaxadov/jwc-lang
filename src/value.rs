@@ -169,6 +169,22 @@ impl Value {
         }
     }
 
+    /// What `console.*` writes (builtins.md §7b).
+    ///
+    /// A text value prints as its characters, not as a JSON string —
+    /// `console.write("hi")` puts `hi` on the terminal, not `"hi"`. That
+    /// is the one difference from [`debug_text`], which quotes because a
+    /// dump is for reading a value's shape rather than its content.
+    /// Everything else renders the same way, so `console.write(42)` and
+    /// `console.write($row)` both work.
+    pub fn display_text(&self) -> String {
+        match self {
+            Value::Text(s) | Value::Numeric(s) => s.clone(),
+            Value::Null => String::new(),
+            other => other.debug_text(),
+        }
+    }
+
     pub fn field(&self, name: &str) -> Option<&Value> {
         match self {
             Value::Record(fields) => fields.iter().find(|(k, _)| k == name).map(|(_, v)| v),

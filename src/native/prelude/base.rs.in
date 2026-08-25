@@ -3272,6 +3272,54 @@ fn jwc_cache_lock() -> std::sync::MutexGuard<
         .unwrap_or_else(|p| p.into_inner())
 }
 
+/// builtins.md §7b — the terminal.
+///
+/// Both write paths flush. A prompt that reaches the screen after the
+/// answer was due is what 0.9's buffered `print` did, and the reason this
+/// family replaced it rather than joining it.
+fn jwc_b_v1_console_write(v: V) -> V {
+    use ::std::io::Write as _;
+    print!("{}", jwc_display_text(&v));
+    let _ = ::std::io::stdout().flush();
+    V::Null
+}
+
+fn jwc_b_v1_console_writeln(v: V) -> V {
+    use ::std::io::Write as _;
+    println!("{}", jwc_display_text(&v));
+    let _ = ::std::io::stdout().flush();
+    V::Null
+}
+
+fn jwc_b_v1_console_error(v: V) -> V {
+    use ::std::io::Write as _;
+    eprint!("{}", jwc_display_text(&v));
+    let _ = ::std::io::stderr().flush();
+    V::Null
+}
+
+/// `null` at EOF, so a read loop ends rather than spinning on "".
+fn jwc_b_v1_console_read() -> V {
+    let mut line = String::new();
+    match ::std::io::BufRead::read_line(&mut ::std::io::stdin().lock(), &mut line) {
+        Ok(0) | Err(_) => V::Null,
+        Ok(_) => V::Str(::std::borrow::Cow::Owned(
+            line.trim_end_matches('\n').trim_end_matches('\r').to_string(),
+        )),
+    }
+}
+
+/// A text value prints as its characters, not as a JSON string. Matches
+/// `Value::display_text` in the interpreter — the two backends have to put
+/// the same bytes on the terminal.
+fn jwc_display_text(v: &V) -> String {
+    match v {
+        V::Str(s) => s.to_string(),
+        V::Null => String::new(),
+        other => jwc_to_json(other),
+    }
+}
+
 fn jwc_b_v1_cache_get(key: V) -> V {
     use std::sync::atomic::Ordering;
     use std::time::Instant;

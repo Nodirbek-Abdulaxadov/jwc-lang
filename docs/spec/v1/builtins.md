@@ -192,6 +192,34 @@ tooling §3.
 
 ---
 
+## 7b. `console.*` — the terminal
+
+| Name | Type |
+|---|---|
+| `console.write(v)` | `void` — stdout, **no** trailing newline |
+| `console.writeln(v)` | `void` — stdout, with one |
+| `console.error(v)` | `void` — stderr, no trailing newline |
+| `console.read()` | `text?` — one line from stdin, line terminator stripped; `null` at EOF |
+
+Any value goes in, not only text: `console.write(42)` is not an error. A
+text value prints as its characters; anything else prints the way
+`debug.dump` renders it.
+
+Both write paths **flush**. 0.9 also had `print`, which appended to a
+buffer flushed after `main` returned — so a prompt written before a read
+appeared after the answer was due, and inside a route body whatever it
+printed became the response. `print` is not back, and this family is why.
+
+`console.read()` does not trim: it returns the line as typed, minus the
+terminator. `int()` trims before parsing, so `int(console.read())` is safe
+on `" 42 "`.
+
+These are legal anywhere, including a route body — a handler that logs to
+stderr is ordinary. They are the surface `jwc run` exists for
+(tooling.md §2.1), and they work identically under `jwc build`.
+
+---
+
 ## 8. Package namespaces
 
 `import redis;` makes `redis.*` resolvable. A package's exported surface is
