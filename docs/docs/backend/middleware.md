@@ -63,6 +63,8 @@ A middleware that **returns a response** stops the chain — the handler
 does not run:
 
 ```jwc no-compile
+import redis;
+
 middleware RateLimit {
     let ip = request.client_ip();
     let allowed = redis.rate_limit("rl:" + string.of($ip), 60, 60);

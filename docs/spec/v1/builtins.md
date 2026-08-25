@@ -279,20 +279,23 @@ grouped query (`E0530`).
 | `days(n)` | `date.days(n)` |
 | `next_invoice_number` | application logic, not a language feature. The sample shows a counter table |
 | `seed.*` | test fixtures; the isolation model is `DEFERRED-11` (ROADMAP v0.28.0) |
-| `dispatch`, job queue, WebSocket, SSE | ROADMAP §7 — the new vocabulary cannot declare them yet |
+| SSE | `DEFERRED-19`. Use a `socket` (routing §9) or long-polling. 0.9 parsed `route SSE "…"` end to end and dispatched it to a stub, so a program could declare one, pass every check and serve nothing. This row used to also list `dispatch`, the job queue and WebSocket; all three are declarations now (jobs.md, routing §9) |
 
 ---
 
 ## 11. Reference generation
 
-`docs/docs/reference/builtins.md` is generated from the compiler's builtin
-table and checked by `tests/builtins_doc_sync.rs`. This file is the
-specification; that file is the inventory. A disagreement is a bug in the
-inventory.
+There is no generator and no inventory file today. This file is the
+specification, and `docs/docs/stdlib/builtins.md` is written by hand
+against it.
+
+An earlier version of this section described `docs/docs/reference/builtins.md`
+as generated and checked by `tests/builtins_doc_sync.rs`. Neither exists — a
+section about keeping the documentation honest that was itself wrong.
 
 ---
 
-## 10. Diagnostics introduced here
+## 12. Diagnostics introduced here
 
 | Code | Meaning |
 |---|---|

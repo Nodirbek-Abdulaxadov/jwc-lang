@@ -4126,6 +4126,13 @@ fn base_of(t: &Ty) -> Ty {
     }
 }
 
+/// Namespaces a **package** brings in, as opposed to the language's own.
+///
+/// names.md §6.2.3 — `import redis;` is what makes `redis.*` resolvable, so
+/// these are the ones `imports::check` requires an import for. Everything
+/// else in [`is_namespace`] is part of the language and needs none.
+pub const PACKAGE_NAMESPACES: &[&str] = &["redis"];
+
 fn is_namespace(name: &str) -> bool {
     matches!(
         name,

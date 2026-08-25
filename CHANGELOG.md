@@ -3,6 +3,38 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.918] — `import redis;` was optional — 2026-08-24
+
+names.md §6.2.3 says a package import is what makes the package's
+namespace resolvable: "`import redis;` is what makes
+`redis.rate_limit(...)` resolvable". The checker resolved `redis.*`
+whether the file imported it or not, so the implementation was looser
+than its own specification.
+
+That made the one line saying a program depends on a package optional,
+and an optional line drifts out of the files that need it. `redis.*`
+without `import redis;` is `E0202` now, with a note naming the import and
+the `dependencies` entry it also needs.
+
+`PACKAGE_NAMESPACES` in `check.rs` is the list this keys on: `redis` is
+the only one. `cache`, `mail` and `socket` are the language's own and take
+no import — the distinction was never written down anywhere, which is part
+of why the two documentation pages describing it disagreed.
+
+Nothing in the wild breaks: `jwc-shortener` already wrote `import redis;`
+in the file that uses it. The convention was being followed; the compiler
+just was not asking.
+
+### builtins.md was still describing 0.9
+
+- "`dispatch`, job queue, WebSocket, SSE | ROADMAP §7 — the new vocabulary
+  cannot declare them yet" — all but SSE are declarations now
+- §11 described `docs/docs/reference/builtins.md` as generated from the
+  builtin table and checked by `tests/builtins_doc_sync.rs`. **Neither
+  file exists.** A section about keeping documentation honest that was
+  itself false
+- two sections were numbered `## 10.`
+
 ## [0.9.917] — documentation that could not be checked — 2026-08-24
 
 Two audits of `docs/docs/` against `src/`. What they found was not a list
