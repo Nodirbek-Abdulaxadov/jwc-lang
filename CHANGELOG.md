@@ -3,6 +3,47 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.923] — macOS — 2026-08-25
+
+There has never been a macOS build. Not deleted at a cutover, not dropped
+from a matrix: `apple-darwin` has never appeared in `release.yml` in the
+history of this repository. Meanwhile the install page claimed archives
+for `x86_64-macos` and `aarch64-macos` until 0.9.915, and `install.sh` —
+the honest one — stopped with "Unsupported platform: darwin-\*".
+
+GitHub's macOS runners are free for public repositories, so the reason was
+an oversight rather than a cost.
+
+| | |
+|---|---|
+| `x86_64-apple-darwin` | `macos-13`, the last x86_64 image |
+| `aarch64-apple-darwin` | `macos-14` |
+
+Both build natively, so neither needs an SDK dance.
+
+### The step that would have shipped nothing
+
+The strip and package steps were `if: runner.os == 'Linux'`, and the zip
+step `== 'Windows'`. Adding two darwin targets to the matrix without
+touching those would have produced **two green build jobs and no
+assets** — a release that looks complete and is missing a platform.
+
+They are `!= 'Windows'` now, with `strip -x` on macOS (plain `strip` there
+removes symbols the linker needs and the binary will not run) and
+`shasum -a 256` where `sha256sum` does not exist.
+
+### Checked before the tag, not by it
+
+CI gets a `macos-14` job — `cargo check --workspace --all-targets
+--features redis` — for the same reason the Windows one exists: a target
+only the release workflow builds is a target whose first failure is a
+failed release, which is how v0.9.913 shipped without a Windows binary.
+
+The install-page guard used to carry a hardcoded "macOS is absent". That
+made the guard the thing that was wrong the moment macOS was added, so it
+now derives both directions from the matrix: every target built must be
+named on the page, and every archive the page shows must be built.
+
 ## [0.9.922] — the rest of the registry — 2026-08-25
 
 Closing the name-by-name diff of 0.9's builtin registry against 1.0's that

@@ -9,7 +9,7 @@ description: "Install the jwc compiler with the one-line installer on Linux or W
 JWC ships as one binary. It needs a Postgres to talk to; it does not need a
 Rust toolchain, a package manager, or a runtime installed alongside it.
 
-## Linux
+## Linux and macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
@@ -58,12 +58,15 @@ The variable goes before `bash`, not before `curl` — `bash` is what reads it.
 | x86_64 Linux (static) | `jwc-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` |
 | aarch64 Linux (glibc) | `jwc-vX.Y.Z-aarch64-linux.tar.gz` |
 | aarch64 Linux (static) | `jwc-vX.Y.Z-aarch64-unknown-linux-musl.tar.gz` |
+| x86_64 macOS | `jwc-vX.Y.Z-x86_64-macos.tar.gz` |
+| aarch64 macOS | `jwc-vX.Y.Z-aarch64-macos.tar.gz` |
 | x86_64 Windows | `jwc-vX.Y.Z-x86_64-windows.zip` |
 
 Each has a `.sha256` beside it.
 
-**There is no macOS build.** Build from source there — the section below is
-the whole procedure, and it is the same one CI runs.
+macOS ships as of **v0.9.923**. Before that there was no darwin build at
+all — not removed at any point, simply never in the release matrix, while
+this page claimed archives for it. On an older release, build from source.
 
 The glibc Linux builds are linked against glibc 2.35, which covers Ubuntu
 22.04, Debian 12, RHEL 9 and Amazon Linux 2023. On anything older, or on

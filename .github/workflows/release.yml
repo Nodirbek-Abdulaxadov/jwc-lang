@@ -84,6 +84,21 @@ jobs:
             os: ubuntu-24.04-arm
             short: aarch64-unknown-linux-musl
             ext: tar.gz
+          # macOS has never been built — not deleted at any cutover, never
+          # in this matrix at all, while the install page claimed archives
+          # for it. GitHub's macOS runners are free for public repos, so
+          # the reason was an oversight rather than a cost.
+          #
+          # macos-13 is the last x86_64 image; macos-14 and later are arm64
+          # only. Both build natively, so neither needs an SDK dance.
+          - target: x86_64-apple-darwin
+            os: macos-13
+            short: x86_64-macos
+            ext: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-14
+            short: aarch64-macos
+            ext: tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             short: x86_64-windows
@@ -134,13 +149,26 @@ jobs:
       - name: Build
         run: cargo build --release --features redis --bin jwc --target ${{ matrix.target }}
 
-      - name: Strip (linux)
-        if: runner.os == 'Linux'
+      # `-x` on macOS: plain `strip` there removes symbols ld needs and
+      # the result will not run. Linux takes the default.
+      - name: Strip (unix)
+        if: runner.os != 'Windows'
         run: |
-          strip target/${{ matrix.target }}/release/jwc
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            strip -x target/${{ matrix.target }}/release/jwc
+          else
+            strip target/${{ matrix.target }}/release/jwc
+          fi
 
-      - name: Package (linux)
-        if: runner.os == 'Linux'
+      # macOS as well as Linux. Both were gated on `runner.os == 'Linux'`
+      # when the darwin targets were added, which would have produced two
+      # green build jobs and no assets — a release that looks complete and
+      # is missing a platform.
+      #
+      # `shasum -a 256` because macOS has no `sha256sum`; its output is the
+      # same "<hash>  <file>" that `sha256sum -c` reads.
+      - name: Package (unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p stage
@@ -148,7 +176,11 @@ jobs:
           cp README.md ROADMAP.md stage/
           asset="jwc-${{ steps.ver.outputs.label }}-${{ matrix.short }}.tar.gz"
           tar -czf "$asset" -C stage .
-          sha256sum "$asset" > "$asset.sha256"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
           echo "ASSET=$asset" >> "$GITHUB_ENV"
 
       - name: Package (windows)

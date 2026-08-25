@@ -90,6 +90,23 @@ jobs:
       - name: Cargo check (redis feature)
         run: cargo check --workspace --all-targets --features redis
 
+  # Same reason as the windows job: a target that only the release
+  # workflow builds is a target whose first failure is a failed release.
+  # v0.9.913 shipped without a Windows binary that way.
+  macos:
+    name: macOS compiles
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cargo check (redis feature)
+        run: cargo check --workspace --all-targets --features redis
+
   postgres:
     name: against a real Postgres
     runs-on: ubuntu-latest
