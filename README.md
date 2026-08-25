@@ -135,6 +135,7 @@ cargo build --release --features redis
 | Command | What it does |
 |---|---|
 | `jwc new <name> [--template k]` | scaffold a project: `empty`, `api`, `auth` or `jobs` |
+| `jwc run [path] [--dev]` | call `main()` and exit — no listener, and no database unless the program declares one |
 | `jwc check [path]` | parse, resolve names, type-check, and check the wiring |
 | `jwc build [path] [--release]` | the native AOT backend: one binary that answers what `jwc serve` answers |
 | `jwc fmt [path] [--check]` | rewrite in canonical form; `--check` is the CI shape |

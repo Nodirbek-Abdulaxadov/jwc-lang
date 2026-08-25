@@ -1,7 +1,7 @@
 ---
 sidebar_position: 1
 title: "The `jwc` command"
-description: "Every subcommand: new, check, fmt, serve, build, migrate, test, lint, routes, explain, gen-sql, ast, openapi, swagger, lsp, and the registry commands."
+description: "Every subcommand: new, check, fmt, run, serve, build, migrate, test, lint, routes, explain, gen-sql, ast, openapi, swagger, lsp, and the registry commands."
 ---
 
 # The `jwc` command
@@ -40,11 +40,20 @@ against it without connecting to anything.
 ## Running
 
 ```bash
+jwc run app.jwc                # call main() and exit — no listener
+jwc run . --dev                # ...with debug.dump printing
 jwc serve .                    # the interpreter — the whole language
 jwc build .                    # a native binary at bin/debug/<name>
 jwc build . --release          # optimised
 jwc build . --emit-rust        # the generated Rust, without compiling it
 ```
+
+`jwc run` calls the program's `main()` and exits. Nothing listens, and a
+program that declares no `database` needs no `DATABASE_URL` — that is what
+makes a program which only prints something you can actually run. A `main`
+that calls `serve(...)` still starts a server, because that is what the
+call means; `run` only declines to start one on the program's behalf. A
+program with no `main` is `jwc serve`'s job, and `run` says so.
 
 `jwc build` produces one statically-linkable binary with no runtime
 dependency on the compiler. It needs a Rust toolchain, because that is

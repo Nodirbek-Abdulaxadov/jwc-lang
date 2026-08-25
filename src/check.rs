@@ -2752,6 +2752,22 @@ impl<'a> Checker<'a> {
                 Ty::Void
             }
 
+            // --- the terminal (builtins.md §7b). Restored in 0.9.920:
+            // `console.*` was 0.9's surface for a program that talks to a
+            // person rather than to HTTP, and the cutover took it along
+            // with `jwc run`. Any value goes in, the same way `debug.dump`
+            // takes one — `console.write(42)` is not an error.
+            "console.write" | "console.writeln" | "console.error" => {
+                arity(self, 1);
+                Ty::Void
+            }
+            // `null` at EOF, so a read loop terminates on it rather than
+            // spinning on an empty string.
+            "console.read" => {
+                arity(self, 0);
+                Ty::text().opt()
+            }
+
             // --- raw escape hatch (writes.md §6)
             "raw" => {
                 self.check_raw(exprs, span);
@@ -4147,6 +4163,7 @@ fn is_namespace(name: &str) -> bool {
             | "context"
             | "redis"
             | "cache"
+            | "console"
             | "mail"
             | "socket"
             | "count"

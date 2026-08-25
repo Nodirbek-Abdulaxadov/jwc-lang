@@ -116,6 +116,38 @@ From inside an `after` block: `response.status()`,
 `response.duration_ms()`, `response.duration_us()`,
 `response.set_header(k, v)`, `response.add_header(k, v)`.
 
+## Console
+
+For a program that talks to a person rather than over HTTP. `jwc run` is
+what executes one.
+
+| | |
+|---|---|
+| `console.write(v)` | stdout, **no** trailing newline — for a prompt |
+| `console.writeln(v)` | stdout, with one |
+| `console.error(v)` | stderr |
+| `console.read()` | one line from stdin, `null` at EOF |
+
+```jwc no-compile
+function main() {
+    console.write("Your name: ");
+    let who = console.read();
+    console.writeln("Hello, " + ($who ?? "stranger"));
+}
+```
+
+```bash
+jwc run app.jwc
+```
+
+Any value works — `console.write(42)` is fine. Text prints as its
+characters; anything else prints the way `debug.dump` renders it. Both
+write paths flush, so a prompt reaches the screen before the read.
+
+`console.read()` returns the line as typed, minus the terminator, without
+trimming. `int()` trims before parsing, so `int(console.read())` handles
+`" 42 "`.
+
 ## Redis
 
 `redis` is a **package**, not part of the language, so a file that uses it

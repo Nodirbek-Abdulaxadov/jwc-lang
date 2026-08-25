@@ -501,3 +501,84 @@ fn a_nested_response_builder_documents_one_status_with_the_body() {
     }
     assert!(checked > 0, "the sample has no `created(...)` route left");
 }
+
+/// `jwc run` executes `main()` and exits, with no database and no listener.
+///
+/// Restored in 0.9.920. The v0.25.0 cutover deleted `jwc run` and nothing
+/// replaced it, so the smallest program anyone writes — print a line —
+/// had no way to be run: `jwc serve` was the only executor, it started a
+/// listener, and it demanded `DATABASE_URL` from a program with no tables.
+/// Someone hit exactly that on a fresh install.
+#[test]
+fn run_executes_main_and_exits() {
+    let dir = std::env::temp_dir().join("jwc-run-console");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("app.jwc"),
+        "function main() {\n\
+         \x20   console.write(\"Ismingiz: \");\n\
+         \x20   let who = console.read();\n\
+         \x20   console.writeln(\"Salom, \" + ($who ?? \"notanish\"));\n\
+         \x20   console.writeln(42);\n\
+         }\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_jwc"))
+        .args(["run", dir.join("app.jwc").to_str().expect("utf8")])
+        .env_remove("DATABASE_URL")
+        .env_remove("JWC_DATABASE_URL")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write as _;
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin")
+                .write_all(b"Nodirbek\n")?;
+            child.wait_with_output()
+        })
+        .expect("run");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "exit {:?}\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // No trailing newline after `write`, one after each `writeln`, and a
+    // non-text value renders as itself rather than as JSON.
+    assert_eq!(stdout, "Ismingiz: Salom, Nodirbek\n42\n", "{stdout}");
+}
+
+/// A program with no `main` is not something `run` can run, and the
+/// message says which command it wants instead.
+#[test]
+fn run_without_a_main_says_what_to_do() {
+    let dir = std::env::temp_dir().join("jwc-run-no-main");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(
+        dir.join("app.jwc"),
+        "routes \"/x\" {\n    route GET \"\" { return json({ ok: true }); }\n}\n",
+    )
+    .expect("write");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_jwc"))
+        .args(["run", dir.join("app.jwc").to_str().expect("utf8")])
+        .output()
+        .expect("run");
+
+    assert!(!out.status.success(), "a program with no `main` cannot run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("declares no `main`"), "{err}");
+    assert!(
+        err.contains("jwc serve"),
+        "it should name the alternative: {err}"
+    );
+}

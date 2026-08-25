@@ -263,6 +263,20 @@ enum Command {
         emit_rust: bool,
     },
     /// Run the program.
+    /// Run a program's `main()` and exit.
+    ///
+    /// The counterpart to `serve`: no listener, no port, nothing left
+    /// running when `main` returns. A program that calls `serve(...)` from
+    /// `main` still starts a server, because that is what the call means —
+    /// `run` is about not starting one on the program's behalf.
+    Run {
+        /// File or directory. Defaults to the current directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Development mode: `debug.dump` prints.
+        #[arg(long)]
+        dev: bool,
+    },
     Serve {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -435,6 +449,7 @@ fn run() -> Result<()> {
             deny_warnings,
         } => cmd::lint(path, constraints, deny_warnings),
         Command::Routes { path } => cmd::routes(path),
+        Command::Run { path, dev } => cmd::run(path, dev),
         Command::Serve {
             path,
             port,

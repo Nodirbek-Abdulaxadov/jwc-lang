@@ -566,15 +566,83 @@ pub fn routes(path: PathBuf) -> Result<()> {
 }
 
 /// `jwc v1 serve <path> --port N` — run the program.
+/// `jwc run [path]` — run `main()` and exit.
+///
+/// Restored in 0.9.920. The v0.25.0 cutover deleted `jwc run` with the
+/// rest of the 0.9 front-end, and nothing replaced it: `jwc serve` was the
+/// only way to execute a program, so the smallest thing anyone writes
+/// first — print a line — started an HTTP listener, and needed a Postgres
+/// to do it.
+///
+/// A program with no `database` connects to nothing, exactly as in
+/// `serve`. One that queries still needs `DATABASE_URL`, because the query
+/// does.
+pub fn run(path: PathBuf, dev: bool) -> Result<()> {
+    let ws = crate::workspace::Workspace::load(&path)?;
+    let program = std::sync::Arc::new(crate::serve::load(&ws)?);
+
+    let Some(_) = program.functions.get("main") else {
+        bail!(
+            "nothing to run: this program declares no `main`.\n\
+             \n\
+             `jwc run` calls `main()`. Add one:\n\
+             \n  \
+             function main() {{\n      \
+             console.writeln(\"hello\");\n  \
+             }}\n\
+             \n\
+             A program that is only routes is started with `jwc serve`."
+        );
+    };
+
+    crate::exec::set_dev_mode(dev);
+
+    let needs_db = ws.files.iter().any(|f| {
+        f.program
+            .decls
+            .iter()
+            .any(|d| matches!(d, crate::ast::Decl::Database(_)))
+    });
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        if needs_db {
+            crate::engine::init_engine_from_env()?;
+        }
+        crate::redis_engine::init_from_env()?;
+        // `declared_port` is the one path that runs `main`. Its return
+        // value is a port this command has no use for — a program that
+        // called `serve(...)` has already blocked inside it and never
+        // reaches here.
+        crate::serve::declared_port(&program).await?;
+        Ok(())
+    })
+}
+
 pub fn serve(path: PathBuf, port: Option<u16>, skip_schema_check: bool, dev: bool) -> Result<()> {
     let ws = crate::workspace::Workspace::load(&path)?;
     let program = std::sync::Arc::new(crate::serve::load(&ws)?);
     let snap = crate::snapshot::of(&crate::model::build(&ws).model);
 
     crate::exec::set_dev_mode(dev);
+
+    // A program that declares no `database` has no tables, no queries and
+    // nothing to connect to, and `serve` demanded `DATABASE_URL` from it
+    // anyway. The first program anyone writes is that program, so the
+    // first thing JWC said to them was that it needed a Postgres to print
+    // a line.
+    let needs_db = ws.files.iter().any(|f| {
+        f.program
+            .decls
+            .iter()
+            .any(|d| matches!(d, crate::ast::Decl::Database(_)))
+    });
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
-        crate::engine::init_engine_from_env()?;
+        if needs_db {
+            crate::engine::init_engine_from_env()?;
+        }
         // The `redis` package's surface (builtins.md §8) is dead without
         // this: the driver reads `JWC_REDIS_URL` here and nowhere else, so
         // until it was called, `redis.enabled()` answered `false` on a
@@ -585,7 +653,7 @@ pub fn serve(path: PathBuf, port: Option<u16>, skip_schema_check: bool, dev: boo
         // Postgres's 42703 in a 500 at request time. `information_schema`
         // is readable by every role, so this costs one query and no
         // privileges.
-        if !skip_schema_check {
+        if needs_db && !skip_schema_check {
             let url = crate::engine::database_url_from_env()?;
             let client = crate::engine::connect_for_migrations(&url).await?;
             let missing = crate::apply::check_live_schema(&client, &snap).await?;
@@ -616,10 +684,14 @@ pub fn serve(path: PathBuf, port: Option<u16>, skip_schema_check: bool, dev: boo
         // `main` is an ordinary body, so it runs on an ordinary Vm — which
         // is also what makes `serve(int(env("PORT") ?? "8080"))`, the form
         // the spec's own sample uses, mean anything.
-        let port = match port {
-            Some(p) => p,
-            None => crate::serve::declared_port(&program).await?,
-        };
+        //
+        // `main` runs either way. It used to run only when `--port` was
+        // absent, because the only caller was the port lookup — so
+        // `jwc serve --port 3000` skipped the program's initialisation
+        // entirely, and a `main` that did anything besides call `serve`
+        // did it or not depending on a flag about the port.
+        let declared = crate::serve::declared_port(&program).await?;
+        let port = port.unwrap_or(declared);
         println!("{} routes", program.routes.len());
         crate::serve::serve(program, port).await
     })

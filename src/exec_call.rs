@@ -252,6 +252,37 @@ impl<'a> Vm<'a> {
             // prints nothing at all rather than erroring: a debug statement
             // that survived review should not be what takes an endpoint
             // down.
+            // builtins.md §7b — the terminal. `write` leaves the cursor
+            // where it is so a prompt can be answered on the same line,
+            // which is the whole reason it is separate from `writeln`.
+            // Both flush: a prompt that appears after the answer was due
+            // is what 0.9's buffered `print` did, and why it is not back.
+            "console.write" | "console.writeln" | "console.error" => {
+                use std::io::Write as _;
+                let text = arg(0).display_text();
+                let newline = path == "console.writeln";
+                if path == "console.error" {
+                    eprint!("{text}");
+                    let _ = std::io::stderr().flush();
+                } else {
+                    print!("{text}{}", if newline { "\n" } else { "" });
+                    let _ = std::io::stdout().flush();
+                }
+                Value::Null
+            }
+            // `null` at EOF, so `while (console.read() != null)` ends.
+            "console.read" => {
+                let mut line = String::new();
+                match std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line) {
+                    Ok(0) | Err(_) => Value::Null,
+                    Ok(_) => Value::Text(
+                        line.trim_end_matches('\n')
+                            .trim_end_matches('\r')
+                            .to_string(),
+                    ),
+                }
+            }
+
             "debug.dump" => {
                 if crate::exec::dev_mode() {
                     eprintln!("[dump] {}", arg(0).debug_text());

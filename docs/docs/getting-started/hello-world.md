@@ -6,7 +6,29 @@ description: "A table, a route, a migration and a running server — the whole l
 
 # Hello world
 
-The smallest useful JWC program is a table, a route over it, and `main`.
+## The actual smallest one
+
+```jwc no-compile
+function main() {
+    console.writeln("Hello, World!");
+}
+```
+
+```bash
+jwc run app.jwc
+```
+
+One file, no manifest, no database, no server. `jwc run` calls `main()`
+and exits.
+
+That is worth knowing before the rest of this page, because JWC is a
+language for HTTP backends over Postgres and everything below assumes one
+— but "everything below" is not the price of printing a line.
+
+## The smallest useful one
+
+The rest of this page builds what JWC is actually for: a table, a route
+over it, and `main`.
 
 ## The project
 
