@@ -247,6 +247,8 @@ mod tests {
         assert!(hit.ends_with("index.html"));
         // The root of the mount is the same rule.
         std::fs::write(root.path().join("index.html"), b"<r>").expect("write");
-        assert!(resolve(root.path(), "").expect("root index").ends_with("index.html"));
+        assert!(resolve(root.path(), "")
+            .expect("root index")
+            .ends_with("index.html"));
     }
 }

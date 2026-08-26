@@ -77,7 +77,10 @@ const BINARY: &[u8] = b"\x89PNG\r\n\x1a\n\x00\xff\xfeend";
 
 fn tree() -> Vec<(&'static str, &'static [u8])> {
     vec![
-        ("public/index.html", b"<!doctype html><h1>root</h1>" as &[u8]),
+        (
+            "public/index.html",
+            b"<!doctype html><h1>root</h1>" as &[u8],
+        ),
         ("public/app.js", b"console.log(1)"),
         ("public/logo.png", BINARY),
         ("public/sub/index.html", b"<i>sub</i>"),
@@ -93,7 +96,10 @@ async fn a_file_comes_back_with_its_type_its_validator_and_no_sniffing() {
 
     assert_eq!(r.status, 200);
     assert_eq!(r.bytes.as_deref(), Some(b"console.log(1)" as &[u8]));
-    assert_eq!(header(&r, "content-type"), Some("text/javascript; charset=utf-8"));
+    assert_eq!(
+        header(&r, "content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
     assert_eq!(header(&r, "cache-control"), Some("public, max-age=600"));
     assert_eq!(header(&r, "x-content-type-options"), Some("nosniff"));
     assert!(
@@ -201,13 +207,25 @@ async fn a_matching_validator_is_a_304_with_no_body() {
     let tag = header(&first, "etag").expect("etag").to_string();
 
     for candidate in [tag.clone(), "*".to_string(), format!("W/{tag}")] {
-        let r = call(&p, "GET", "/assets/app.js", &[("if-none-match", &candidate)]).await;
+        let r = call(
+            &p,
+            "GET",
+            "/assets/app.js",
+            &[("if-none-match", &candidate)],
+        )
+        .await;
         assert_eq!(r.status, 304, "{candidate}");
         assert!(r.bytes.is_none() && r.body.is_empty(), "{candidate}");
         assert_eq!(header(&r, "etag"), Some(tag.as_str()), "{candidate}");
     }
 
-    let r = call(&p, "GET", "/assets/app.js", &[("if-none-match", "\"other\"")]).await;
+    let r = call(
+        &p,
+        "GET",
+        "/assets/app.js",
+        &[("if-none-match", "\"other\"")],
+    )
+    .await;
     assert_eq!(r.status, 200);
 }
 
@@ -219,7 +237,10 @@ async fn head_is_the_headers_of_the_get_with_the_length_and_no_body() {
     assert_eq!(r.status, 200);
     assert!(r.bytes.is_none() && r.body.is_empty());
     assert_eq!(header(&r, "content-length"), Some("14"));
-    assert_eq!(header(&r, "content-type"), Some("text/javascript; charset=utf-8"));
+    assert_eq!(
+        header(&r, "content-type"),
+        Some("text/javascript; charset=utf-8")
+    );
 }
 
 #[tokio::test]
@@ -271,11 +292,10 @@ async fn a_mount_that_cannot_work_is_reported_when_the_program_is_checked() {
 
     // §10.3 — the directory has to be there at check time, not at the first
     // request that misses.
-    assert!(diagnose(
-        "namespace s;\nstatic \"/a\" from \"nope\";\n",
-        dir_only
-    )
-    .contains(&"E0741".to_string()));
+    assert!(
+        diagnose("namespace s;\nstatic \"/a\" from \"nope\";\n", dir_only)
+            .contains(&"E0741".to_string())
+    );
     assert!(
         diagnose(
             "namespace s;\nstatic \"/a\" from \"public/a.txt\";\n",
@@ -301,11 +321,10 @@ async fn a_mount_that_cannot_work_is_reported_when_the_program_is_checked() {
 
     // §10.3 — `jwc build` embeds the tree, so it may not be one the project
     // does not own.
-    assert!(diagnose(
-        "namespace s;\nstatic \"/a\" from \"..\";\n",
-        dir_only
-    )
-    .contains(&"E0744".to_string()));
+    assert!(
+        diagnose("namespace s;\nstatic \"/a\" from \"..\";\n", dir_only)
+            .contains(&"E0744".to_string())
+    );
 
     // And the shape that is fine stays fine.
     assert!(diagnose(
@@ -331,7 +350,10 @@ fn the_walk_that_fills_the_binary_publishes_what_the_request_path_would() {
     std::os::unix::fs::symlink(dir.path().join("outside.txt"), root.join("link.txt"))
         .expect("symlink");
 
-    let names: Vec<String> = jwc::assets::walk(&root).into_iter().map(|(r, _)| r).collect();
+    let names: Vec<String> = jwc::assets::walk(&root)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
 
     // `jwc serve` answers 404 for every one of these, so `jwc build` must
     // not put them in the binary — an unreachable copy of `.env` inside a
@@ -347,6 +369,9 @@ fn the_walk_is_sorted_so_the_generated_table_is_reproducible() {
     for name in ["z.txt", "a.txt", "m.txt"] {
         std::fs::write(root.join(name), b"x").expect("write");
     }
-    let names: Vec<String> = jwc::assets::walk(root).into_iter().map(|(r, _)| r).collect();
+    let names: Vec<String> = jwc::assets::walk(root)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
     assert_eq!(names, vec!["a.txt", "m.txt", "z.txt"]);
 }
