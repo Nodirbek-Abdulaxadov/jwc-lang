@@ -102,11 +102,19 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Cargo check (redis feature)
         run: cargo check --workspace --all-targets --features redis
+
+      # The release builds the Intel target by cross-compiling from this
+      # same arm64 runner, so the cross has to be checked here too — a
+      # linker that cannot produce x86_64 would otherwise be found by a tag.
+      - name: Cargo check (x86_64 cross)
+        run: cargo check --workspace --features redis --target x86_64-apple-darwin
 
   postgres:
     name: against a real Postgres

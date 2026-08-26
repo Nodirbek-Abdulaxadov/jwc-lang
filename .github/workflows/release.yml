@@ -89,10 +89,21 @@ jobs:
           # for it. GitHub's macOS runners are free for public repos, so
           # the reason was an oversight rather than a cost.
           #
-          # macos-13 is the last x86_64 image; macos-14 and later are arm64
-          # only. Both build natively, so neither needs an SDK dance.
+          # Both run on macos-14 (arm64). The arm64 target builds natively;
+          # the x86_64 one is cross-compiled, which on macOS needs nothing
+          # but the target's std — clang ships every arch and the SDK is
+          # universal.
+          #
+          # x86_64 was on `macos-13`, the last Intel image, for one release.
+          # In v0.9.925 that job sat queued for 25 minutes while all six
+          # other targets finished in two and attached their archives, so
+          # the tag shipped without an Intel Mac binary and `install.sh`'s
+          # `darwin-x86_64` case pointed at an asset that was not there.
+          # GitHub has been retiring the Intel images; a runner label that
+          # may or may not have capacity is not something a release can be
+          # made to depend on.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             short: x86_64-macos
             ext: tar.gz
           - target: aarch64-apple-darwin
