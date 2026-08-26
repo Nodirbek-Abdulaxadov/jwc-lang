@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# jwc — one-liner installer (Linux x86_64 / aarch64).
+# jwc — one-liner installer (Linux and macOS, x86_64 / aarch64).
 #
-# Not macOS: no darwin binary is published, so this script stops with
-# "Unsupported platform: darwin-*" there. The header used to claim macOS,
-# which meant the documented one-liner promised a platform that has never
-# had a build. Build from source or use the Docker image instead.
+# macOS is published as of v0.9.923. It never had a build before that —
+# not removed at any cutover, simply never in the release matrix, while
+# the install page claimed archives for it. This script was the honest
+# one: it stopped with "Unsupported platform: darwin-*".
 #
 #   curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
 #
@@ -41,9 +41,22 @@ case "${os}-${arch}" in
         MUSL_FLAVOUR="aarch64-unknown-linux-musl"
         ext="tar.gz"
         ;;
+    # macOS builds natively on both architectures and links against the
+    # system libSystem, so there is no glibc/musl split here — the same
+    # flavour is used for the retry path, which then never fires.
+    darwin-x86_64)
+        GLIBC_FLAVOUR="x86_64-macos"
+        MUSL_FLAVOUR="x86_64-macos"
+        ext="tar.gz"
+        ;;
+    darwin-arm64 | darwin-aarch64)
+        GLIBC_FLAVOUR="aarch64-macos"
+        MUSL_FLAVOUR="aarch64-macos"
+        ext="tar.gz"
+        ;;
     *)
         echo "Unsupported platform: ${os}-${arch}." >&2
-        echo "Prebuilt JWC binaries ship for x86_64 and aarch64 Linux, and x86_64 Windows." >&2
+        echo "Prebuilt JWC binaries ship for x86_64 and aarch64 Linux and macOS, and x86_64 Windows." >&2
         echo >&2
         # The old text said "Build from source: ./install-from-source.sh",
         # which is unactionable in the documented install path: you get here

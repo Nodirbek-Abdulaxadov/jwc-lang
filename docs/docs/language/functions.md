@@ -11,7 +11,7 @@ description: "Free functions, services as the unit of logic, and the raise set t
 ```jwc no-compile
 function invite_body(token: text) -> text {
     let base = env("APP_URL") ?? "https://app.example.com";
-    return "Taklifnomani qabul qilish: " + $base + "/invites/" + $token;
+    return "Taklifnomani qabul qilish: " + base + "/invites/" + token;
 }
 ```
 
@@ -35,7 +35,7 @@ service OrgService {
                 role       = MemberRole.owner
             };
 
-            return $org;
+            return org;
         }
     }
 
@@ -48,7 +48,7 @@ service OrgService {
 }
 ```
 
-Call it as `OrgService.create($req, $owner_id)`. Everything in a service is
+Call it as `OrgService.create(req, owner_id)`. Everything in a service is
 exported; there is no `public` marker, because the service *is* the
 boundary.
 

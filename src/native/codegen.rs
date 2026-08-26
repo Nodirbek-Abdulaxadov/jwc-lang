@@ -365,6 +365,12 @@ struct Ctx<'a> {
     /// `let x = request.body() as C`. A `...` spread's columns come from
     /// this, and nothing else in the pass needs a type.
     classes_in_scope: BTreeMap<String, String>,
+    /// The local names in scope where the current statement is being
+    /// emitted, innermost last. Outside a query clause a bare name is a
+    /// local when one of these holds it (names.md §5.3); anything else is a
+    /// name this backend has no value for, and says so rather than emitting
+    /// a binding the generated crate does not have.
+    locals: Vec<std::collections::BTreeSet<String>>,
     mode: Mode,
     /// How many `transaction { }` blocks enclose the statement being
     /// emitted. Each one is an `async` block, so a `return` inside it has
@@ -387,6 +393,31 @@ impl Ctx<'_> {
         self.classes_in_scope.get(name).cloned()
     }
 
+    /// A fresh local scope for a handler body: nothing a previous handler
+    /// bound is reachable from this one.
+    fn open_handler(&mut self) {
+        self.locals.clear();
+        self.locals.push(std::collections::BTreeSet::new());
+    }
+
+    fn push_scope(&mut self) {
+        self.locals.push(std::collections::BTreeSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.locals.pop();
+    }
+
+    fn bind_local(&mut self, name: &str) {
+        if let Some(s) = self.locals.last_mut() {
+            s.insert(name.to_string());
+        }
+    }
+
+    fn is_local(&self, name: &str) -> bool {
+        self.locals.iter().any(|s| s.contains(name))
+    }
+
     /// errors.md §4.3 — the status a declared error carries. Resolved here,
     /// at compile time, so the binary needs no name → status map.
     fn error_status(&self, name: &str) -> Result<u16> {
@@ -402,6 +433,12 @@ impl Ctx<'_> {
 /// A generated crate: the source, and which halves of the runtime it needs.
 pub struct Generated {
     pub source: String,
+    /// Every file the emitted `JWC_ASSETS` table names, as
+    /// `(mount index, path inside the mount, file on disk)`. The build
+    /// copies these into the crate so the `include_bytes!` calls resolve —
+    /// one walk, shared with the emission, so the table and the tree cannot
+    /// disagree (routing.md §10.6).
+    pub assets: Vec<(usize, String, std::path::PathBuf)>,
     pub needs_db: bool,
     pub needs_http_client: bool,
     pub needs_crypto: bool,
@@ -445,6 +482,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         uses_validation: false,
         uses_page: false,
         classes_in_scope: BTreeMap::new(),
+        locals: vec![std::collections::BTreeSet::new()],
         mode: Mode::Value,
         tx_depth: 0,
     };
@@ -498,6 +536,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
                 Decl::Function(f) if f.name.name == "main" => {
                     ctx.mode = Mode::Value;
                     has_main = true;
+                    ctx.open_handler();
                     out.push_str("\nasync fn jwc_user_main() -> JwcResult {\n");
                     emit_block(&mut out, &f.body, 1, &mut ctx)?;
                     out.push_str("    Ok(V::Null)\n}\n");
@@ -523,6 +562,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
              async fn {}() -> Result<Option<V>, JwcThrown> {{\n",
             mw_fn(name)
         ));
+        ctx.open_handler();
         emit_block(&mut out, &m.body, 1, &mut ctx)?;
         out.push_str("    Ok(None)\n}\n");
         if let Some(after) = &m.after {
@@ -531,6 +571,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
                 "\nasync fn {}_after() -> JwcResult {{\n",
                 mw_fn(name)
             ));
+            ctx.open_handler();
             emit_block(&mut out, after, 1, &mut ctx)?;
             out.push_str("    Ok(V::Null)\n}\n");
         }
@@ -553,6 +594,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
             );
         };
         out.push_str(&format!("\nasync fn {name}_body() -> JwcResult {{\n"));
+        ctx.open_handler();
         emit_block(&mut out, body, 1, &mut ctx)?;
         out.push_str("    Ok(V::Null)\n}\n");
         emit_route_dispatch(&mut out, &name, route, &middleware);
@@ -586,7 +628,9 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
             out.push_str(&format!(
                 "\nasync fn {name}(__payload: serde_json::Value) -> JwcResult {{\n"
             ));
+            ctx.open_handler();
             for (pname, ty) in &sym.params {
+                ctx.bind_local(pname);
                 out.push_str(&format!(
                     "    let {} = jwc_job_arg(&__payload, {}, {});\n",
                     local(pname),
@@ -642,6 +686,10 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
                             body: &Block|
          -> Result<()> {
             ctx.mode = Mode::Value;
+            ctx.open_handler();
+            if let Some(b) = binder {
+                ctx.bind_local(b);
+            }
             match binder {
                 Some(b) => out.push_str(&format!(
                     "\nasync fn {name}_{suffix}({}: V) -> JwcResult {{\n",
@@ -869,6 +917,38 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     }
     out.push_str("    failed\n}\n");
 
+    // routing.md §10.6 — the tree goes into the binary. Walked once here;
+    // `scaffold_workspace` copies exactly what this named.
+    let mut assets: Vec<(usize, String, std::path::PathBuf)> = Vec::new();
+    let mut assets_src = String::new();
+    if !wired.mounts.is_empty() {
+        assets_src.push_str("\n// ── static mounts (routing.md §10) ──\n");
+        assets_src.push_str("static JWC_MOUNTS: &[(&str, u32)] = &[\n");
+        for m in &wired.mounts {
+            assets_src.push_str(&format!(
+                "    ({}, {}),\n",
+                rust_str_literal(&m.prefix),
+                m.max_age
+            ));
+        }
+        assets_src.push_str("];\n\nstatic JWC_ASSETS: &[JwcAsset] = &[\n");
+        for (i, m) in wired.mounts.iter().enumerate() {
+            for (rel, file) in crate::assets::walk(&m.root) {
+                let Ok(bytes) = std::fs::read(&file) else {
+                    bail!("cannot read the asset {}", file.display());
+                };
+                assets_src.push_str(&format!(
+                    "    JwcAsset {{ mount: {i}, path: {}, body: include_bytes!({}), etag: {} }},\n",
+                    rust_str_literal(&rel),
+                    rust_str_literal(&format!("assets/m{i}/{rel}")),
+                    rust_str_literal(&crate::assets::etag(&bytes)),
+                ));
+                assets.push((i, rel, file));
+            }
+        }
+        assets_src.push_str("];\n");
+    }
+
     let mut source = String::new();
     source.push_str(super::PRELUDE_BASE);
     source.push_str(super::PRELUDE_V1);
@@ -896,10 +976,29 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         // deduction, and the two have to agree.
         source.push_str(super::PRELUDE_HTTP);
     }
+    if wired.mounts.is_empty() {
+        // The base prelude calls this on every miss. With no mount there is
+        // nothing to look in, and emitting the stub rather than the whole
+        // asset runtime keeps a program that declares none from carrying it.
+        source.push_str(
+            "\n/// No `static` mount was declared (routing.md §10).\n\
+             fn jwc_static_asset(\n\
+             \x20   _method: &str,\n\
+             \x20   _path: &str,\n\
+             \x20   _headers: &BTreeMap<String, String>,\n\
+             ) -> Option<axum::response::Response> {\n\
+             \x20   None\n}\n",
+        );
+    } else {
+        source.push_str(super::PRELUDE_ASSETS_CORE);
+        source.push_str(super::PRELUDE_ASSETS);
+        source.push_str(&assets_src);
+    }
     source.push_str(&out);
 
     Ok(Generated {
         source,
+        assets,
         needs_db,
         needs_jobs,
         needs_mail,
@@ -1107,10 +1206,12 @@ fn emit_function(
     ctx.mode = Mode::Value;
     out.push_str(&format!("\nasync fn {}(", user_fn(name)));
     ctx.classes_in_scope.clear();
+    ctx.open_handler();
     for (i, p) in f.params.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
+        ctx.bind_local(&p.name.name);
         out.push_str(&format!("{}: V", local(&p.name.name)));
         if let crate::ast::TypeKind::Named(n) = &p.ty.kind {
             let named = n.text();
@@ -1411,9 +1512,11 @@ fn emit_dispatch(
 }
 
 fn emit_block(out: &mut String, body: &Block, indent: usize, ctx: &mut Ctx) -> Result<()> {
+    ctx.push_scope();
     for stmt in body {
         emit_stmt(out, stmt, indent, ctx)?;
     }
+    ctx.pop_scope();
     Ok(())
 }
 
@@ -1453,12 +1556,13 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
                     .insert(name.name.clone(), ty.name.clone());
             }
             let v = emit_expr(value, ctx)?;
+            ctx.bind_local(&name.name);
             out.push_str(&format!("{pad}let mut {} = {v};\n", local(&name.name)));
         }
         Stmt::Assign { target, value, .. } => {
             let v = emit_expr(value, ctx)?;
             match target {
-                crate::ast::AssignTarget::Local(i) => {
+                crate::ast::AssignTarget::Local { name: i, .. } => {
                     out.push_str(&format!("{pad}{} = {v};\n", local(&i.name)));
                 }
                 crate::ast::AssignTarget::Context(i) => {
@@ -1495,7 +1599,10 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
                 "{pad}for {} in jwc_to_array({it}).iter().cloned() {{\n",
                 local(&binder.name)
             ));
+            ctx.push_scope();
+            ctx.bind_local(&binder.name);
             emit_block(out, body, indent + 1, ctx)?;
+            ctx.pop_scope();
             out.push_str(&format!("{pad}}}\n"));
         }
         // middleware.md §4.2 — `return <Response>` short-circuits the chain;
@@ -1606,6 +1713,9 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
         ExprKind::PathParam(i) => {
             format!("jwc_b_path_param(v_str({}))", rust_str_literal(&i.name))
         }
+        // names.md §5.3 — outside a query clause the sigil is optional, so
+        // a bare name that is bound is the local it names.
+        ExprKind::Name(i) if ctx.is_local(&i.name) => format!("{}.clone()", local(&i.name)),
         ExprKind::Name(i) => bail!(
             "native build cannot resolve the bare name `{}` outside a query",
             i.name
@@ -1842,7 +1952,10 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
             body,
         } => {
             let v = emit_expr(value, ctx)?;
+            ctx.push_scope();
+            ctx.bind_local(&binder.name);
             let arm = render_block(body, 4, ctx)?;
+            ctx.pop_scope();
             format!(
                 "{{\n    let __c: JwcResult = async {{ Ok::<V, JwcThrown>({v}) }}.await;\n\
                      match __c {{\n\

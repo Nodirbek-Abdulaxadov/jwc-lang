@@ -129,6 +129,7 @@ pub fn load(ws: &Workspace) -> Result<Program> {
         model: built.model,
         symbols,
         routes: wired.routes,
+        mounts: wired.mounts,
         functions,
         middleware,
         jobs,
@@ -575,6 +576,7 @@ async fn operational(program: &Program, incoming: &Incoming) -> Option<Response>
                 "text/plain; version=0.0.4; charset=utf-8".into(),
             )],
             body: metrics_text(program).await,
+            bytes: None,
         }),
         _ => None,
     }
@@ -801,6 +803,85 @@ pub async fn run_socket_handler(
     }
 }
 
+/// A `static` mount's answer, or `None` when no mount covers the path
+/// (routing.md §10).
+///
+/// Reads the file per request rather than holding the tree in memory: the
+/// point of `jwc serve` is that an edit shows on the next refresh. The
+/// native build embeds the same bytes instead, and `assets.rs` is what
+/// makes the two agree on every header.
+fn static_asset(program: &Program, incoming: &Incoming) -> Option<Response> {
+    use crate::assets;
+
+    let is_read = incoming.method == "GET" || incoming.method == "HEAD";
+    for mount in &program.mounts {
+        let Some(rest) = assets::under(&mount.prefix, &incoming.path) else {
+            continue;
+        };
+        // §10.5 — the mount covers the path, so a write to it is a method
+        // error rather than a missing page. A 404 here would send the
+        // caller looking for a typo in a path that is right.
+        if !is_read {
+            let mut r = Response::message(405, "method not allowed");
+            r.headers.push(("allow".into(), "GET, HEAD".into()));
+            return Some(r);
+        }
+        let Some(rel) = assets::safe_relative(rest) else {
+            // A refused shape is 404, not 400: telling the caller their
+            // traversal was *understood* is more than they need to know.
+            return Some(Response::message(404, "not found"));
+        };
+        let Some(file) = assets::resolve(&mount.root, &rel) else {
+            return Some(Response::message(404, "not found"));
+        };
+        let Ok(body) = std::fs::read(&file) else {
+            return Some(Response::message(404, "not found"));
+        };
+
+        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let tag = assets::etag(&body);
+        let mut headers = vec![
+            ("content-type".to_string(), assets::content_type(name).to_string()),
+            ("etag".to_string(), tag.clone()),
+            (
+                "cache-control".to_string(),
+                assets::cache_control(mount.max_age),
+            ),
+            // The bytes are what they are: no sniffing them into a
+            // different type, which is how an uploaded `.txt` becomes a
+            // script in a browser that guesses.
+            ("x-content-type-options".to_string(), "nosniff".to_string()),
+        ];
+
+        if incoming
+            .headers
+            .get("if-none-match")
+            .is_some_and(|h| assets::none_match(h, &tag))
+        {
+            return Some(Response {
+                status: 304,
+                body: String::new(),
+                headers,
+                bytes: None,
+            });
+        }
+
+        // HEAD is the same headers with no body, including the length the
+        // GET would have sent.
+        if incoming.method == "HEAD" {
+            headers.push(("content-length".to_string(), body.len().to_string()));
+            return Some(Response {
+                status: 200,
+                body: String::new(),
+                headers,
+                bytes: None,
+            });
+        }
+        return Some(Response::asset(200, body, headers));
+    }
+    None
+}
+
 /// A `Response` as axum sees it. Shared by the HTTP path and by the
 /// socket path's pre-upgrade refusals, so a 401 from `RequireAuth` on a
 /// socket is byte-identical to a 401 from the same middleware on a route.
@@ -811,7 +892,13 @@ fn into_axum(r: Response) -> axum::response::Response {
     for (k, v) in &r.headers {
         b = b.header(k.as_str(), v.as_str());
     }
-    b.body(axum::body::Body::from(r.body)).unwrap_or_else(|_| {
+    // A `static` asset carries bytes; everything else in the language
+    // produces text (routing.md §10).
+    let body = match r.bytes {
+        Some(bytes) => axum::body::Body::from(bytes),
+        None => axum::body::Body::from(r.body),
+    };
+    b.body(body).unwrap_or_else(|_| {
         // Only reachable if a header value the program produced is not
         // a legal header value — which `Response` already normalises.
         axum::response::Response::builder()
@@ -974,6 +1061,12 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
     let Some((route, binds)) = matched else {
         // Only once nothing declared matched.
         if let Some(r) = operational(&program, &incoming).await {
+            return r;
+        }
+        // routing.md §10.2 — a `static` mount is last but one. A declared
+        // route wins over it, and so do the operational paths above: a
+        // mount at `/` must not be able to take `/readyz` away either.
+        if let Some(r) = static_asset(&program, &incoming) {
             return r;
         }
         return Response::message(404, "not found");
@@ -1190,6 +1283,7 @@ fn as_response(v: Value) -> Response {
             status,
             body,
             headers,
+            bytes: None,
         },
         _ => Response::message(500, "internal_error"),
     }
@@ -1764,6 +1858,7 @@ mod route_matching {
             },
             symbols: Default::default(),
             routes,
+            mounts: Vec::new(),
             functions: HashMap::new(),
             middleware: HashMap::new(),
             route_bodies: HashMap::new(),

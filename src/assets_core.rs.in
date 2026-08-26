@@ -1,0 +1,143 @@
+// Shared verbatim by `jwc serve` and by the crate `jwc build` generates:
+// `src/assets.rs` includes it, and codegen pastes the same text into the
+// binary's prelude. Nothing here touches the filesystem or the rest of the
+// crate, which is what makes one copy possible — and one copy is the only
+// way two backends can be relied on to refuse the same request.
+//
+// Do not add a `crate::` path or a `use` to this file.
+
+/// The part of `path` that falls inside `prefix`, or `None` when the mount
+/// does not cover it.
+///
+/// `"/assets"` covers `/assets` and `/assets/…` but **not** `/assetsx` —
+/// a prefix match on the raw string would hand a neighbouring route's path
+/// to the wrong mount.
+pub fn under<'a>(prefix: &str, path: &'a str) -> Option<&'a str> {
+    if prefix == "/" {
+        return Some(path.strip_prefix('/').unwrap_or(path));
+    }
+    let rest = path.strip_prefix(prefix)?;
+    match rest.as_bytes().first() {
+        None => Some(""),
+        Some(b'/') => Some(&rest[1..]),
+        Some(_) => None,
+    }
+}
+
+/// The relative path a URL is allowed to name, or `None` if it is refused.
+///
+/// Splitting happens **before** decoding on purpose: a segment that decodes
+/// to something containing a separator was trying to smuggle one past the
+/// split, and is refused rather than re-split.
+pub fn safe_relative(url_rest: &str) -> Option<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in url_rest.split('/') {
+        let seg = percent_decode(raw)?;
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        // A parent reference is refused, never resolved: resolving it means
+        // agreeing with the filesystem about what the parent is.
+        if seg == ".." {
+            return None;
+        }
+        // `.env`, `.git/config`, `.htpasswd`. A dotfile inside a directory
+        // someone chose to publish is still not something they meant to.
+        if seg.starts_with('.') {
+            return None;
+        }
+        // A separator, a NUL, or a Windows drive/stream marker that arrived
+        // through an encoding.
+        if seg.contains(['/', '\\', ':', '\0']) {
+            return None;
+        }
+        out.push(seg);
+    }
+    Some(out.join("/"))
+}
+
+/// Strict percent-decoding: `%` must introduce two hex digits.
+///
+/// A lenient decoder that passes a stray `%` through gives two readings of
+/// the same URL — one here and one in whatever else looks at it.
+fn percent_decode(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            if i + 2 >= b.len() {
+                return None;
+            }
+            let hi = (b[i + 1] as char).to_digit(16)?;
+            let lo = (b[i + 2] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The content type for a path, by extension.
+///
+/// Unknown is `application/octet-stream` rather than a guess: a wrong
+/// `text/html` on a file a user uploaded is a stored XSS.
+pub fn content_type(path: &str) -> &'static str {
+    let ext = path
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "map" => "application/json; charset=utf-8",
+        "txt" => "text/plain; charset=utf-8",
+        "md" => "text/markdown; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        "svg" => "image/svg+xml; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `Cache-Control` for a mount.
+pub fn cache_control(max_age: u32) -> String {
+    if max_age == 0 {
+        "public, max-age=0, must-revalidate".to_string()
+    } else {
+        format!("public, max-age={max_age}")
+    }
+}
+
+/// Whether `If-None-Match` names this ETag.
+///
+/// `*` matches anything the server has, per RFC 9110 §13.1.2.
+pub fn none_match(header: &str, tag: &str) -> bool {
+    header.split(',').any(|c| {
+        let c = c.trim();
+        c == "*" || c == tag || c.strip_prefix("W/").is_some_and(|c| c == tag)
+    })
+}

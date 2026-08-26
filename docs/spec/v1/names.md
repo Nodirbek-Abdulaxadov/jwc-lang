@@ -45,8 +45,8 @@ binary float (types §2.4).
 2.4 **Raw string** — `r"..."` with no escape processing except `\"`. Used for
 regular expressions: `pattern(r"^[a-z0-9-]{3,40}$")`.
 
-2.5 **Sigils** — `@name` (path parameter, §5.2) and `$name` (local reference
-inside a query, §5.3). The sigil is part of the token; `@ name` is an error.
+2.5 **Sigils** — `@name` (path parameter, §5.2) and `$name` (local reference,
+§5.3). The sigil is part of the token; `@ name` is an error.
 
 2.6 **There are no reserved words.** Every word the grammar gives meaning to
 is also a legal identifier; the parser decides by position.
@@ -60,19 +60,20 @@ A reserved-word list would forbid the language's own examples.
 The words with grammatical meaning are:
 
 ```
-after     and       as        asc       break     by        cascade   catch
-check     class     conflict  continue  cross     database  default   delete
-desc      do
-else      enum      error     errorHandler         except   exists    false
-first     for       foreign   from      full      function  group     having
-identity  if        ilike     import    in        index     inner     insert
-into      join      key       left      let       like      limit     max
-middleware          namespace no        not       nothing   null      nulls
-of        on        or        orderby   page      primary   private   provides
-raises    references          requires  restrict  return    right     route
-routes    schema    select    server    service   set       size      table
-test      throw     transaction         transient true      under     unique
-update    use       using     view      was       where     with      assert
+after     and       as        asc       assert    backoff   break     buffered
+by        cache     cascade   catch     check     class     close     conflict
+continue  cross     database  default   delete    desc      dispatch  do
+else      enum      error     errorHandler except    exists    false     first
+for       foreign   from      full      function  group     having    identity
+if        ilike     import    in        index     inner     insert    into
+job       join      key       left      let       like      limit     max
+message   middleware namespace no        not       nothing   null      nulls
+of        on        open      or        orderby   page      primary   private
+provides  raises    references requires  restrict  retries   return    right
+route     routes    schema    select    server    service   set       size
+socket    static    table     test      throw     transaction transient true
+under     unique    update    use       using     view      was       where
+with
 ```
 
 A word in a position where the grammar expects that keyword is that keyword.
@@ -177,35 +178,41 @@ Path parameters are typed at their binding site (routing §4) and are **never**
 strings by default. `@org_id` in a route under
 `routes "/api/v1/orgs/{org_id: bigint}"` has type `bigint`.
 
-### 5.3 Locals — `$name`, everywhere
+### 5.3 Locals — `$name` where a column could be meant
 
-**Every reference to a local, a function parameter, or a `for` binding
-carries `$`.** Not only inside queries — everywhere, including route bodies
-and service code:
-
-```jwc
-let account = AuthService.profile(context.account_id);
-return created(json($account)) with { "Location": "/orgs/" + string.of($account.id) };
-```
-
-The *declaration* site is bare (`let account`, `function f(org_id: bigint)`,
-`for (line in $xs)`); the *reference* carries the sigil. One rule, no
-context-sensitivity, and a reader can always tell a value that came from code
-from a name that came from the database.
-
-Consequently, inside a **query clause** — a `join ... on` expression,
-`where`, `having`, `group by`, `orderby`, a projection field expression, an
-aggregate filter, an `insert` object literal, a `set` clause, or a
-`page after` expression — an unqualified identifier can only be a column:
+Inside a **query clause** — a `join ... on` expression, `where`, `having`,
+`group by`, `orderby`, a projection field expression, an aggregate filter, an
+`insert` object literal, a `set` clause, or a `page after` expression — an
+unqualified identifier can only be a column:
 
 - an **unqualified identifier resolves to a column** of exactly one binding;
 - **`Binding.name`** resolves to a column of that binding;
 - **`$name`** is a local, **`@name`** is a path parameter.
 
-A bare identifier that is neither a column nor a declaration name is
-`E0211: unknown identifier — did you mean '$name'?`.
+That is the one place a local has to be told apart from a column, so it is
+the one place the sigil is **required**.
 
-Consequences, all of them intended:
+**Everywhere else it is optional.** In a route body, a service, a `for`, an
+argument list, there is no column in scope for a local to be confused with,
+so `attempt` and `$attempt` are the same reference and both compile:
+
+```jwc
+for (attempt in [1, 2, 3]) {
+    console.writeln("Attempt #" + string.of(attempt));
+}
+```
+
+`jwc fmt` leaves each as written. New code should use the bare form outside
+a query clause — that is what the templates and the guides do. The sigil stays legal so that programs written under the
+older rule keep compiling; the conformance sample in this directory is one of
+them. A `...` spread source is a local either way (`{ ...req }` and
+`{ ...$req }`), since a column cannot be spread.
+
+A bare name outside a query clause that is neither a local nor a declaration
+is `E0211: unknown name`. Without it a mistyped local would quietly evaluate
+to its own name as text.
+
+Consequences inside a query clause, all of them intended:
 
 ```jwc no-compile
 where org_id == $org_id          -- tenancy filter: column vs. local
@@ -214,7 +221,7 @@ where code == $req.plan_code
 where accepted_at == null
 ```
 
-Because the sigil is **required everywhere**, a bare identifier in a query clause is
+Because the sigil is **required here**, a bare identifier in a query clause is
 unambiguously a column and `where org_id == org_id` can only ever mean the
 tautology it looks like. That is the whole fix for #2/#34: the ambiguity is
 removed by construction rather than reported. The compiler still warns —
@@ -260,13 +267,13 @@ An unqualified column name that exists in more than one binding is
 
 ### 5.5 Locals
 
-`let name = …;` introduces a local; every reference to it is `$name` (§5.3).
-A `let` may not shadow a local, parameter or path parameter that is already
+`let name = …;` introduces a local; a reference to it is `name`, or `$name`
+where §5.3 requires the sigil. A `let` may not shadow a local, parameter or path parameter that is already
 in scope (`E0214`). Blocks nest; a local goes out of scope at the end of its
 block.
 
-Assignment to a local (`$x = expr;`) is permitted and does not change its
-type. Assignment to a field (`x.y = expr;`) does not parse: load-modify-save
+Assignment to a local (`x = expr;`, or `$x = expr;`) is permitted and does
+not change its type. Assignment to a field (`x.y = expr;`) does not parse: load-modify-save
 is a declared non-goal.
 
 ---
@@ -362,7 +369,7 @@ rather than implemented as an unreachable check.)*
 | `E0203` | import is both a namespace and a package |
 | `E0204` | unknown function |
 | `E0210` | bare identifier in a query clause is not a column but matches a local |
-| `E0211` | unknown identifier — likely a missing `$` |
+| `E0211` | unknown name: not a column here, and not a local or declaration |
 | `E0212` | duplicate binding name in one query |
 | `E0213` | unqualified column is ambiguous across bindings |
 | `E0214` | `let` shadows an existing binding |

@@ -55,6 +55,11 @@ pub struct CompileReport {
 /// them away, and LTO recovered the binary size but nothing recovered the
 /// compile time.
 pub const PRELUDE_BASE: &str = include_str!("prelude/base.rs.in");
+/// The static-asset decisions, byte-for-byte the file `src/assets.rs`
+/// includes. Pasting the source rather than re-describing it is what keeps
+/// `jwc serve` and a native binary refusing the same URLs (routing.md §10.6).
+pub const PRELUDE_ASSETS_CORE: &str = include_str!("../assets_core.rs.in");
+pub const PRELUDE_ASSETS: &str = include_str!("prelude/assets.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");
 pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");
 pub const PRELUDE_JOBS: &str = include_str!("prelude/jobs.rs.in");
@@ -107,6 +112,7 @@ fn scaffold_workspace(
     app_name: &str,
     rust_src: &str,
     needs: Needs,
+    assets: &[(usize, String, PathBuf)],
 ) -> Result<PathBuf> {
     let workspace = root.join(BUILD_DIR_NAME);
     check_path_length(&workspace)?;
@@ -121,6 +127,28 @@ fn scaffold_workspace(
     let main_rs = src_dir.join("main.rs");
     std::fs::write(&main_rs, rust_src)
         .with_context(|| format!("Failed to write {}", main_rs.display()))?;
+
+    // routing.md §10.6 — `include_bytes!` resolves relative to `main.rs`,
+    // so the tree is copied in beside it rather than referenced where it
+    // lies. A moved project then still builds, and the crate is the whole
+    // input to the build.
+    //
+    // Cleared first: a file deleted from the mount has to leave the binary
+    // too, and a stale copy under a rebuilt crate would keep answering.
+    let assets_dir = src_dir.join("assets");
+    if assets_dir.exists() {
+        std::fs::remove_dir_all(&assets_dir)
+            .with_context(|| format!("Failed to clear {}", assets_dir.display()))?;
+    }
+    for (mount, rel, file) in assets {
+        let dest = assets_dir.join(format!("m{mount}")).join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        std::fs::copy(file, &dest)
+            .with_context(|| format!("Failed to embed {}", file.display()))?;
+    }
 
     let gitignore = workspace.join(".gitignore");
     if !gitignore.is_file() {
@@ -556,6 +584,7 @@ pub fn compile(
             ws: gen.needs_ws,
             regex: gen.needs_regex,
         },
+        &gen.assets,
     )?;
     let bin = invoke_cargo(&cargo, &workspace, app_name, release, None)?;
     let binary_path = copy_to_project_bin(root, &bin, release, None)?;

@@ -59,7 +59,7 @@ let org = select O from App.org.Orgs
     where id == $id
     as { id, name, created_at }
     first or throw NotFound("not found");
-return json({ id: $org.id, label: $org.name });
+return json({ id: org.id, label: org.name });
 ```
 
 `as { … }` is the only way to get a `Record`. It is also the response

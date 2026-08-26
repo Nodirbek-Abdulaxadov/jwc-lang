@@ -3,6 +3,247 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.925] — static files, inside the binary — 2026-08-25
+
+```jwc
+static "/assets" from "public";
+static "/" from "dist" cache 31536000;
+```
+
+JWC has never served a file. Not removed at the cutover, not deferred:
+`apple-darwin`-style, it simply was not there — no `static`, no `ServeDir`,
+nothing in the spec, nothing on the roadmap. A backend that cannot answer
+`/favicon.ico` needs something else in front of it, which is a second
+deployment for a language whose selling point is one binary.
+
+### Binary bodies
+
+`Response.body` was a `String`, so the wire could only carry UTF-8. A PNG
+through `String::from_utf8_lossy` is a 200 with a corrupt image on it.
+
+`Response` now carries `bytes: Option<Vec<u8>>` — a second field rather
+than widening `body`, because every other response in the language is text
+and every test that reads one is a string. Only a mount sets it, and
+`into_axum` sends it when it is there.
+
+### What a mount will not serve
+
+Refusals, not repairs. Normalising `a/../b` to `b` means agreeing with the
+operating system about every encoding, separator and case fold — get one
+wrong and the path that was checked is not the path that is opened. So the
+URL is split on `/`, each segment is percent-decoded **on its own**, and a
+segment is refused outright when it is `..`, begins with `.`, decodes to
+something holding `/`, `\`, `:` or NUL, or carries an escape that is not
+`%` plus two hex digits. Splitting before decoding is why `a%2fb` is one
+refused segment rather than two accepted ones.
+
+What survives is joined and canonicalised, and the result must still be
+under the canonical root — a symlink out of the tree is caught even when
+every segment of the URL was an ordinary name.
+
+`.env`, `.git/config`, `.htpasswd`, a directory listing: 404. A directory
+answers its `index.html` or nothing.
+
+### The tree goes into the binary
+
+`jwc build` walks the mount, copies it into the crate it generates and
+`include_bytes!`s it. `bin/release/app` is the deployment — verified by
+copying the binary to an empty directory with no `public/` in sight and
+watching it answer the PNG byte-for-byte.
+
+The walk applies §10.3's rules too, so a `.env` sitting in a `dist/` is not
+merely unreachable in the artifact — it is not in it.
+
+### One implementation, two backends
+
+The decisions — refusals, content type, `Cache-Control`, `If-None-Match` —
+are `src/assets_core.rs.in`. `src/assets.rs` includes it; codegen pastes
+the same file into the generated crate. The two backends do not implement
+the section twice, they run the same text, and `tests/native.rs` asserts
+the paste is verbatim.
+
+Checked live: 25 probes — every file, every traversal spelling, 304, HEAD,
+405, the binary, the declared-route and operational precedence — diffed
+between `jwc serve` and the compiled binary. Status, body and every header
+identical on all 25.
+
+### Precedence, and what a mount cannot take
+
+1. a declared `route` or `socket`
+2. `/healthz`, `/readyz`, `/metrics`
+3. a `static` mount, in source order
+4. 404
+
+A mount at `"/"` therefore cannot capture the probes — a file named
+`healthz` in a `dist/` does not answer `/readyz`, which is the same rule
+that stopped jwc-shortener's `/{code}` from doing it.
+
+### Headers, and the method
+
+`Content-Type` by extension, with `application/octet-stream` for an unknown
+one rather than a guess — a wrong `text/html` on a file someone uploaded is
+a stored XSS. A strong `ETag` (sha256 of the bytes, so the native build can
+compute it without an mtime it does not have), `Cache-Control`, and
+`X-Content-Type-Options: nosniff`.
+
+`POST` to a mounted path is **405** with `Allow: GET, HEAD`. A 404 there
+sends the caller looking for a typo in a path that is right.
+
+### `E0230` still stands
+
+A route may not read a path the caller chose. A mount is not that: the root
+is in the source, fixed at compile time, and the caller supplies only a
+name inside it that the rules above have already refused unless it is an
+ordinary file name. The hardening guard that pins `E0230` is untouched.
+
+### Diagnostics
+
+| | |
+|---|---|
+| `E0740` | the prefix is not a literal path beginning with `/` |
+| `E0741` | the root is missing, or is not a directory |
+| `E0742` | two mounts on one prefix |
+| `E0743` | `cache` is not a number of seconds within the one-year ceiling |
+| `E0744` | the root is outside the project — `jwc build` would embed it |
+
+All five are reported when the program is **checked**, not at the first
+request that misses.
+
+### Also
+
+`names.md`'s keyword table had drifted: `job`, `socket`, `dispatch`,
+`buffered`, `retries`, `backoff`, `open`, `message` and `close` all had
+grammatical meaning and none were listed. Regenerated against the parser,
+sorted, with `static` and `cache` added.
+
+## [0.9.924] — `$` is not required outside a query — 2026-08-25
+
+`$` was mine, from v0.20.0, and nobody asked for it.
+
+The reason it exists is real, and it is narrow. Inside a query clause a
+bare identifier is a **column**, so a local has to be told apart from one:
+without a mark, `where org_id == org_id` is a tautology that silently
+deletes a tenancy boundary — the defect `gaps.md` records three times in
+the sample, twice on a security path. The fix was a sigil on the local.
+
+Then I extended it to **everywhere**, for uniformity, and that half was
+not paid for by anything:
+
+```jwc
+function main() {
+    for (attempt in [1, 2, 3, 4, 5]) {
+        console.writeln("Attempt #" + string.of(attempt));   -- was $attempt
+    }
+}
+```
+
+There is no column named `attempt` in scope here. There is no ambiguity to
+resolve. The sigil bought nothing and cost every line.
+
+### The rule now
+
+| where | `$` |
+|---|---|
+| query clause — `where`, `having`, `group by`, `orderby`, `join … on`, a projection field, an aggregate filter, an `insert` object literal, a `set` clause, `page after` | **required** |
+| everywhere else — route bodies, services, `for`, `if`, argument lists, assignment | optional |
+
+`attempt` and `$attempt` are the same reference outside a query, `x = 1;`
+parses like `$x = 1;`, and `{ ...req }` spreads like `{ ...$req }` — a
+column cannot be spread, so there is nothing to disambiguate. Nothing that
+compiled before stops compiling; `jwc fmt` gives each spelling back the way
+it was written rather than picking a side.
+
+### A typo would have become a string
+
+Making the bare form ordinary exposed something that was already wrong:
+a bare name outside a query that matched no local and no declaration was
+**silently accepted**, and the interpreter evaluated it to its own name as
+text. `string.of(totl)` printed `totl`. It is `E0211: unknown name` now.
+
+Two backends made that worse than a bad value: native codegen has no
+binding to emit for such a name, so it refused to build a program the
+interpreter had happily run. Rejecting it in the checker closes the
+divergence at the source.
+
+### Three rules were keyed on the sigil
+
+Found by converting the templates and watching one stop compiling. Each of
+these matched `ExprKind::Local` and would have gone quiet the moment
+someone wrote the bare form:
+
+- **null narrowing** — `if (found != null) { … found.x … }` reported
+  `E0403` on a value it had just guarded;
+- **`private` column egress** (`E0410`) — `json(account)` would have
+  shipped a `private` column that `json($account)` refuses;
+- **`request.path()` taint**, and the password-hash lint.
+
+The first is a wrong error. The second is a **data leak**. Both are pinned
+by corpus cases now, in both spellings.
+
+### Guards
+
+- `tests/native.rs` — the two spellings must emit **byte-identical** Rust.
+  The interpreter reaches a local through one `lookup`; codegen reaches it
+  through a scope stack it keeps itself, and that is the kind of second
+  implementation that drifts.
+- `tests/native.rs` — a bare name that is *not* a local is still refused by
+  name, rather than emitted as a binding the generated crate lacks.
+- `tests/type_corpus/cases/sigils.jwc` — both spellings compile outside a
+  query; an unknown bare name is `E0211`; inside a query the column rule and
+  `W0104` are unchanged.
+- `tests/type_corpus/cases/private_columns.jwc` — the leak is caught in
+  either spelling.
+
+### Documentation
+
+`names.md` §2.5/§5.3/§5.5 restate the rule and stop claiming the sigil is
+universal. `syntax.md`, `control-flow.md`, `routing.md` and every guide
+sample outside a query clause drop it, as do the three `jwc new`
+templates — `jwc check` passes on all three. The conformance sample under
+`docs/spec/v1/sample/` keeps the sigil throughout: it is the artifact that
+proves the older spelling still compiles.
+
+## [0.9.923] — macOS — 2026-08-25
+
+There has never been a macOS build. Not deleted at a cutover, not dropped
+from a matrix: `apple-darwin` has never appeared in `release.yml` in the
+history of this repository. Meanwhile the install page claimed archives
+for `x86_64-macos` and `aarch64-macos` until 0.9.915, and `install.sh` —
+the honest one — stopped with "Unsupported platform: darwin-\*".
+
+GitHub's macOS runners are free for public repositories, so the reason was
+an oversight rather than a cost.
+
+| | |
+|---|---|
+| `x86_64-apple-darwin` | `macos-13`, the last x86_64 image |
+| `aarch64-apple-darwin` | `macos-14` |
+
+Both build natively, so neither needs an SDK dance.
+
+### The step that would have shipped nothing
+
+The strip and package steps were `if: runner.os == 'Linux'`, and the zip
+step `== 'Windows'`. Adding two darwin targets to the matrix without
+touching those would have produced **two green build jobs and no
+assets** — a release that looks complete and is missing a platform.
+
+They are `!= 'Windows'` now, with `strip -x` on macOS (plain `strip` there
+removes symbols the linker needs and the binary will not run) and
+`shasum -a 256` where `sha256sum` does not exist.
+
+### Checked before the tag, not by it
+
+CI gets a `macos-14` job — `cargo check --workspace --all-targets
+--features redis` — for the same reason the Windows one exists: a target
+only the release workflow builds is a target whose first failure is a
+failed release, which is how v0.9.913 shipped without a Windows binary.
+
+The install-page guard used to carry a hardcoded "macOS is absent". That
+made the guard the thing that was wrong the moment macOS was added, so it
+now derives both directions from the matrix: every target built must be
+named on the page, and every archive the page shows must be built.
+
 ## [0.9.922] — the rest of the registry — 2026-08-25
 
 Closing the name-by-name diff of 0.9's builtin registry against 1.0's that

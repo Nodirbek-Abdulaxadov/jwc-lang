@@ -1090,13 +1090,24 @@ fn the_install_page_lists_the_platforms_the_release_actually_builds() {
         );
     }
 
-    // The inverse: a platform the page promises and nothing builds. macOS is
-    // the one that was there, and `install.sh` stops with "Unsupported
-    // platform: darwin-*" on it.
-    for absent in ["x86_64-macos", "aarch64-macos"] {
+    // The inverse, derived rather than listed: every archive name the page
+    // shows must be a target the matrix builds. A hardcoded "macOS is
+    // absent" was here until macOS was added, at which point the guard
+    // was the thing that was wrong.
+    for line in page.lines() {
+        let Some(rest) = line.trim().strip_prefix("| ") else {
+            continue;
+        };
+        let Some((_, name)) = rest.split_once("`jwc-vX.Y.Z-") else {
+            continue;
+        };
+        let Some(short) = name.split(&['.', '`'][..]).next().filter(|s| !s.is_empty()) else {
+            continue;
+        };
         assert!(
-            !page.contains(absent),
-            "the install page promises `{absent}` and no release job builds it"
+            built.contains(short),
+            "the install page shows an archive for `{short}` and no release job builds it \
+             (built: {built:?})"
         );
     }
 

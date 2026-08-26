@@ -18,9 +18,13 @@ pub fn format_program(p: &Program) -> String {
     let mut w = Writer::default();
     for (i, d) in p.decls.iter().enumerate() {
         if i > 0 {
-            let solo = matches!(d, Decl::Import(_) | Decl::Namespace(_))
-                && matches!(p.decls[i - 1], Decl::Import(_) | Decl::Namespace(_));
-            // Consecutive imports stay together; everything else gets air.
+            let solo = matches!(d, Decl::Import(_) | Decl::Namespace(_) | Decl::Static(_))
+                && matches!(
+                    p.decls[i - 1],
+                    Decl::Import(_) | Decl::Namespace(_) | Decl::Static(_)
+                );
+            // Consecutive one-line declarations — imports, mounts — stay
+            // together; everything else gets air.
             if solo && !d.attached().blank_before {
                 // no blank line
             } else {
@@ -109,6 +113,18 @@ impl Writer {
             Decl::Routes(n) => self.routes(n),
             Decl::ErrorHandler(n) => self.error_handler(n),
             Decl::Server(n) => self.server(n),
+            Decl::Static(n) => {
+                let cache = if n.max_age_span.is_some() {
+                    format!(" cache {}", n.max_age)
+                } else {
+                    String::new()
+                };
+                self.line(&format!(
+                    "static {} from {}{cache};",
+                    quote(&n.prefix),
+                    quote(&n.root)
+                ));
+            }
             Decl::Function(n) => self.function(n),
             Decl::Test(n) => {
                 self.line(&format!("test {} {{", quote(&n.name)));
@@ -642,7 +658,13 @@ impl Writer {
             }
             Stmt::Assign { target, value, .. } => {
                 let t = match target {
-                    AssignTarget::Local(i) => format!("${}", i.name),
+                    AssignTarget::Local { name, sigil } => {
+                        if *sigil {
+                            format!("${}", name.name)
+                        } else {
+                            name.name.clone()
+                        }
+                    }
                     AssignTarget::Context(i) => format!("context.{}", i.name),
                 };
                 self.assigned(&format!("{t} = "), value, ";");

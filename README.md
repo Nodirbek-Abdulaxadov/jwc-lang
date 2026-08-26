@@ -49,7 +49,7 @@ routes "/notes" {
     route POST "" {
         let req = request.body() as NoteInput;
 
-        return created(json(NoteService.create($req)));
+        return created(json(NoteService.create(req)));
     }
 }
 ```
@@ -97,7 +97,7 @@ blocking in CI, an external review, and migrating a pilot application.
 
 ## Install
 
-Linux:
+Linux and macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
@@ -111,8 +111,8 @@ iwr -useb https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.
 
 Both resolve the latest release, verify its published `.sha256`, and refuse
 to install on a mismatch. Prebuilt archives cover x86_64 and aarch64 Linux
-(glibc and static musl) and x86_64 Windows; there is no macOS build, so
-build from source there:
+(glibc and static musl), x86_64 and aarch64 macOS, and x86_64 Windows. To
+build from source instead:
 
 ```bash
 git clone https://github.com/just-web-code/jwc-lang

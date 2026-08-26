@@ -56,7 +56,7 @@ where created_at > date.now() - date.hours(24)
 `string.ends_with`, `string.strip_prefix`, `string.pad_left`,
 `string.pad_right`, `string.matches`.
 
-`string.strip_prefix($h, "Bearer ")` is the one to reach for over
+`string.strip_prefix(h, "Bearer ")` is the one to reach for over
 `string.replace`, which also strips the literal from the middle of a
 token.
 
@@ -66,7 +66,7 @@ token.
 `array.contains`, `array.pluck`, `array.sum`, `array.sum_product`,
 `array.min`, `array.max`, `array.sorted`.
 
-The field-taking ones — `array.sum($rows, "amount")` — exist because JWC
+The field-taking ones — `array.sum(rows, "amount")` — exist because JWC
 has no lambdas. A function is not a first-class value here, so the
 alternative to `array.sum(rows, "amount")` would be a `for` loop and an
 accumulator.
@@ -95,7 +95,7 @@ stops a token outliving the policy that issued it.
 one-liner:
 
 ```jwc no-compile
-let claims = jwt.verify($token, $secret) or throw Unauthorized("token yaroqsiz");
+let claims = jwt.verify(token, secret) or throw Unauthorized("token yaroqsiz");
 ```
 
 ## The request
@@ -180,7 +180,7 @@ what executes one.
 function main() {
     console.write("Your name: ");
     let who = console.read();
-    console.writeln("Hello, " + ($who ?? "stranger"));
+    console.writeln("Hello, " + (who ?? "stranger"));
 }
 ```
 

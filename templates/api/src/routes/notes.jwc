@@ -6,29 +6,29 @@ import services.notes;
 routes "/api/v1/notes" {
     route GET "" {
         let size = int(request.query("size") ?? "20");
-        let page = NoteService.list(request.query("cursor"), $size);
+        let page = NoteService.list(request.query("cursor"), size);
 
-        return json($page);
+        return json(page);
     }
 
     route POST "" {
         let req = request.body() as NoteCreate;
-        let note = NoteService.create($req);
+        let note = NoteService.create(req);
 
-        return created(json($note));
+        return created(json(note));
     }
 
     route GET "{id: bigint}" {
         let note = NoteService.get(@id);
 
-        return json($note);
+        return json(note);
     }
 
     route PATCH "{id: bigint}" {
         let req = request.body() as NoteEdit;
-        let note = NoteService.edit(@id, $req);
+        let note = NoteService.edit(@id, req);
 
-        return json($note);
+        return json(note);
     }
 
     route DELETE "{id: bigint}" {

@@ -17,7 +17,7 @@ routes "/live" use RequireAuth {
         }
 
         on message (text) {
-            socket.send("echo: " + $text);
+            socket.send("echo: " + text);
         }
 
         on close {
@@ -69,7 +69,7 @@ handler returns, so:
 
 ```jwc no-compile
 on message (text) {
-    if ($text == "bye") {
+    if (text == "bye") {
         socket.close();
     }
     socket.send("this never goes");   -- the close came first

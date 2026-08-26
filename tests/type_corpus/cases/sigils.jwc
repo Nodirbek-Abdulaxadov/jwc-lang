@@ -1,7 +1,8 @@
 namespace sigils;
 
--- Every local reference carries `$`, so a bare name in a query clause is a
--- column and nothing else (names.md §5.3).
+-- Inside a query clause a bare name is a column and nothing else, so a local
+-- read there carries `$`. Outside one there is no column to be confused with
+-- and the sigil is optional (names.md §5.3).
 service Sigils {
     function tenancy_filter(org_id: bigint) {
         return select N from App.s.Notes where org_id == $org_id;
@@ -21,6 +22,15 @@ service Sigils {
 
     function local_without_sigil_outside_a_query() {
         let x = 1;
-        return x;                                                -- expect: E0211
+        return x;
+    }
+
+    function local_with_sigil_outside_a_query() {
+        let x = 1;
+        return $x;
+    }
+
+    function unknown_name_outside_a_query() {
+        return nope;                                             -- expect: E0211
     }
 }

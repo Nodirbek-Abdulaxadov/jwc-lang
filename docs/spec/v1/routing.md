@@ -386,7 +386,104 @@ end-to-end in the parser and the validator and dispatched it to a stub, so
 a program could declare one, pass every check, and serve nothing. A
 half-implemented transport is worse than an absent one.
 
-## 10. Diagnostics introduced here
+## 10. Static assets
+
+### 10.1 Declaration
+
+```jwc
+static "/assets" from "public";
+static "/" from "dist" cache 31536000;
+```
+
+A **mount**, not a route: no body, no `use` chain, no path parameters. The
+prefix is a literal beginning with `/`; a `{slot}`, a `?` or a `#` in it is
+`E0740`. `"/assets/"` and `"/assets"` are the same mount.
+
+`from` names a directory **relative to the project**. A mount is not a
+handler and takes no middleware — a tree of files has no `context` to
+populate and nothing to authorise per file. Anything that needs a decision
+per request is a `route`, which can read the file itself.
+
+### 10.2 Precedence
+
+A request is answered by the first of these that matches:
+
+1. a declared `route` or `socket`;
+2. `/healthz`, `/readyz`, `/metrics` (config.md §4.0.2);
+3. a `static` mount, in source order;
+4. 404.
+
+A mount is therefore never able to take a declared path away, and a mount
+at `"/"` cannot capture the operational paths — a file that happens to be
+named `healthz` does not answer the probe. Two mounts on one prefix is
+`E0742`: which directory answered would otherwise depend on the order the
+files happened to load in.
+
+### 10.3 What a mount will not serve
+
+The URL under the prefix is split on `/`, and each segment is
+percent-decoded on its own. A segment is **refused** — never repaired —
+when it is `..`, when it begins with `.`, when it decodes to something
+containing `/`, `\`, `:` or a NUL, or when its escape is not `%` followed
+by two hex digits. A refusal is a 404: that the traversal was *understood*
+is more than the caller needs to know.
+
+Nothing is normalised. Normalising `a/../b` to `b` is a repair, and a
+repair has to be exactly as clever as the caller — it has to agree with the
+operating system about every encoding, separator and case fold, or the path
+that was checked and the path that is opened are different strings.
+
+What survives is joined to the root and **canonicalised**, and the result
+must still be under the canonical root: a symlink leaving the tree is
+caught even though every segment of the URL was an ordinary name.
+
+The root itself must exist, be a directory, and be inside the project
+(`E0741`, `E0744`) — checked when the program is checked, not at the first
+request that misses.
+
+A path that resolves to a directory answers that directory's `index.html`,
+and nothing else. There is no listing.
+
+### 10.4 What a mount sends
+
+| Header | Value |
+|---|---|
+| `Content-Type` | by extension; an unknown one is `application/octet-stream`, never a guess |
+| `ETag` | the sha256 of the bytes, quoted |
+| `Cache-Control` | `public, max-age=<cache>`, or `public, max-age=0, must-revalidate` without one |
+| `X-Content-Type-Options` | `nosniff` |
+
+`cache <n>` is a whole number of seconds, at most 31536000 (a year);
+anything else is `E0743`.
+
+An `If-None-Match` naming the ETag — exactly, weakly, or as `*` — is a 304
+with the same headers and no body. `HEAD` is those headers plus the
+`Content-Length` the `GET` would have sent. Any other method on a path the
+mount covers is **405** with `Allow: GET, HEAD`, not a 404: the path exists
+and the request is wrong.
+
+### 10.5 The filesystem is still out of reach
+
+`E0230` stands: a route may not read a path the caller chose. A mount is
+not that. Its root is written in the source and fixed when the program is
+compiled, and the only thing the caller supplies is a name inside it that
+§10.3 has already refused unless it is an ordinary file name.
+
+### 10.6 One implementation, two backends
+
+`jwc serve` reads the directory per request, so an edit shows on the next
+refresh. `jwc build` walks the tree at compile time, copies it into the
+crate it generates and `include_bytes!`s it: the binary carries its assets
+and needs no directory beside it. The build applies §10.3's rules to the
+walk as well, so a dotfile or an escaping symlink is not merely unreachable
+in the artifact — it is not in it.
+
+Every *decision* in §10.3 and §10.4 is one file, `src/assets_core.rs.in`,
+which the interpreter includes and codegen pastes verbatim into the
+generated crate. The two backends do not implement this section twice; they
+run the same text.
+
+## 11. Diagnostics introduced here
 
 | Code | Meaning |
 |---|---|
@@ -401,6 +498,11 @@ half-implemented transport is worse than an absent one.
 | `E0734` | `response.status()` outside an `after` block |
 | `E0735` | `content(...)` media type is not a string literal |
 | `E0736` | `content(...)` body is not `text` |
+| `E0740` | a `static` prefix is not a literal path beginning with `/` |
+| `E0741` | a `static` root is missing, or is not a directory |
+| `E0742` | two `static` mounts on one prefix |
+| `E0743` | a `static` `cache` value is not a number of seconds within the ceiling |
+| `E0744` | a `static` root is outside the project |
 | `E0019` | a `socket` member that is not `on open` / `on message (m)` / `on close` |
 | `E0020` | the same `on` handler declared twice |
 | `E0021` | a `socket` with no handlers at all |
@@ -411,7 +513,7 @@ half-implemented transport is worse than an absent one.
 
 ---
 
-## 11. `E0900` — the removed vocabulary
+## 12. `E0900` — the removed vocabulary
 
 Encountering a pre-1.0 keyword produces a dedicated diagnostic naming its
 replacement. There is no migration path and no compatibility flag; the old

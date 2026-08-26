@@ -162,7 +162,7 @@ service WorkspaceService {
                 workspace_id = $ws.id, user_id = $owner_id, role = "owner"
             };
 
-            return $ws;
+            return ws;
         }
     }
 }

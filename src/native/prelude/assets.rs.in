@@ -1,0 +1,120 @@
+// ── static assets (routing.md §10) ───────────────────────────────────────
+//
+// The tree is in the binary. `jwc build` walked the mount at compile time,
+// copied every file into the generated crate and `include_bytes!`d it, so
+// there is no directory to ship beside the binary and no path for it to
+// resolve at run time.
+//
+// The *decisions* — which URLs are refusable, what the content type is,
+// what `Cache-Control` says, whether `If-None-Match` matches — are not
+// written here. They are `assets_core.rs.in`, pasted above verbatim from
+// the same file `jwc serve` includes. Two backends reading one paragraph
+// is how they come to disagree; two backends running one function is not.
+
+struct JwcAsset {
+    /// Index into `JWC_MOUNTS`.
+    mount: usize,
+    /// The path inside the mount, e.g. `sub/app.js`.
+    path: &'static str,
+    body: &'static [u8],
+    /// Computed by `jwc build` with the same sha256 `jwc serve` computes
+    /// per request, so the two send the same validator for the same file.
+    etag: &'static str,
+}
+
+fn jwc_asset_lookup(mount: usize, rel: &str) -> Option<&'static JwcAsset> {
+    // `resolve` answers a directory with its `index.html`; the table has no
+    // directories, so the same rule is: the file itself, then the index
+    // under it.
+    let index = if rel.is_empty() {
+        "index.html".to_string()
+    } else {
+        format!("{rel}/index.html")
+    };
+    JWC_ASSETS
+        .iter()
+        .find(|a| a.mount == mount && a.path == rel)
+        .or_else(|| {
+            JWC_ASSETS
+                .iter()
+                .find(|a| a.mount == mount && a.path == index)
+        })
+}
+
+fn jwc_asset_response(
+    status: u16,
+    headers: &[(&str, String)],
+    body: axum::body::Body,
+) -> axum::response::Response {
+    let mut b = axum::response::Response::builder().status(status);
+    for (k, v) in headers {
+        b = b.header(*k, v.as_str());
+    }
+    b.body(body)
+        .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
+}
+
+/// A mount's answer, or `None` when no mount covers the path.
+///
+/// Mirrors `serve.rs::static_asset` statement for statement: same order,
+/// same statuses, same header set.
+fn jwc_static_asset(
+    method: &str,
+    path: &str,
+    headers: &BTreeMap<String, String>,
+) -> Option<axum::response::Response> {
+    let is_read = method == "GET" || method == "HEAD";
+    for (i, (prefix, max_age)) in JWC_MOUNTS.iter().enumerate() {
+        let Some(rest) = under(prefix, path) else {
+            continue;
+        };
+        if !is_read {
+            return Some(jwc_asset_response(
+                405,
+                &[
+                    ("content-type", JWC_JSON_CT.to_string()),
+                    ("allow", "GET, HEAD".to_string()),
+                ],
+                "{\"error\":\"method not allowed\"}".into(),
+            ));
+        }
+        let not_found = || {
+            Some(jwc_asset_response(
+                404,
+                &[("content-type", JWC_JSON_CT.to_string())],
+                "{\"error\":\"not found\"}".into(),
+            ))
+        };
+        let Some(rel) = safe_relative(rest) else {
+            return not_found();
+        };
+        let Some(asset) = jwc_asset_lookup(i, &rel) else {
+            return not_found();
+        };
+
+        let hdrs = vec![
+            ("content-type", content_type(asset.path).to_string()),
+            ("etag", asset.etag.to_string()),
+            ("cache-control", cache_control(*max_age)),
+            ("x-content-type-options", "nosniff".to_string()),
+        ];
+
+        if headers
+            .get("if-none-match")
+            .is_some_and(|h| none_match(h, asset.etag))
+        {
+            return Some(jwc_asset_response(304, &hdrs, axum::body::Body::empty()));
+        }
+        if method == "HEAD" {
+            let mut hdrs = hdrs;
+            hdrs.push(("content-length", asset.body.len().to_string()));
+            return Some(jwc_asset_response(200, &hdrs, axum::body::Body::empty()));
+        }
+        return Some(jwc_asset_response(
+            200,
+            &hdrs,
+            axum::body::Body::from(asset.body),
+        ));
+    }
+    None
+}

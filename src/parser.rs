@@ -44,6 +44,7 @@ const DECL_STARTS: &[&str] = &[
     "routes",
     "errorHandler",
     "server",
+    "static",
     "function",
     "test",
 ];
@@ -343,6 +344,7 @@ impl Parser {
             "routes" => Decl::Routes(self.parse_routes(at, start)?),
             "errorHandler" => Decl::ErrorHandler(self.parse_error_handler(at, start)?),
             "server" => Decl::Server(self.parse_server(at, start)?),
+            "static" => Decl::Static(self.parse_static(at, start)?),
             "function" => Decl::Function(self.parse_function(at, start)?),
             "job" => Decl::Job(self.parse_job(at, start)?),
             "test" => Decl::Test(self.parse_test(at, start)?),
@@ -1539,6 +1541,72 @@ impl Parser {
         })
     }
 
+    /// `static "/assets" from "public" cache 3600;` (routing.md §10).
+    fn parse_static(&mut self, at: Attached, start: Span) -> PResult<StaticDecl> {
+        self.bump();
+        let (prefix, prefix_span) = self.expect_string()?;
+        if !self.at_word("from") {
+            let found = self.peek().tok.clone();
+            self.err_note(
+                "E0009",
+                self.span(),
+                format!("expected `from`, found {found}"),
+                "a static mount names the directory it serves: \
+                 `static \"/assets\" from \"public\";`",
+                "routing.md §10.1",
+            );
+            return Err(());
+        }
+        self.bump();
+        let (root, root_span) = self.expect_string()?;
+        let (max_age, max_age_span) = if self.at_word("cache") {
+            let cspan = self.span();
+            self.bump();
+            let span = self.span();
+            match self.peek().tok.clone() {
+                Tok::Int(n) => {
+                    self.bump();
+                    match n.parse::<u32>() {
+                        Ok(v) => (v, Some(cspan.to(span))),
+                        Err(_) => {
+                            self.err_note(
+                                "E0743",
+                                span,
+                                format!("`cache {n}` is not a number of seconds"),
+                                "the value is a whole number of seconds, at most 31536000",
+                                "routing.md §10.4",
+                            );
+                            (0, Some(cspan.to(span)))
+                        }
+                    }
+                }
+                other => {
+                    self.err_note(
+                        "E0743",
+                        span,
+                        format!("expected a number of seconds after `cache`, found {other}"),
+                        "`cache 3600` is one hour",
+                        "routing.md §10.4",
+                    );
+                    return Err(());
+                }
+            }
+        } else {
+            (0, None)
+        };
+        let end = self.expect(Tok::Semi)?.span;
+        Ok(StaticDecl {
+            at,
+            prefix,
+            prefix_span,
+            root,
+            root_span,
+            max_age,
+            max_age_span,
+            span: start.to(end),
+        })
+    }
+
     fn parse_server(&mut self, at: Attached, start: Span) -> PResult<ServerDecl> {
         self.bump();
         self.expect(Tok::LBrace)?;
@@ -1927,16 +1995,21 @@ impl Parser {
             });
         }
 
-        // `$x = …;` and `context.k = …;`
-        if let Tok::Local(name) = self.peek().tok.clone() {
+        // `x = …;`, `$x = …;` and `context.k = …;` — the sigil is optional
+        // outside a query clause (names.md §5.3).
+        if let Tok::Local(name) | Tok::Ident(name) = self.peek().tok.clone() {
             if self.peek_at(1).is(&Tok::Eq) {
+                let sigil = matches!(self.peek().tok, Tok::Local(_));
                 let nspan = self.bump().span;
                 self.bump();
                 let value = self.parse_expr()?;
                 let end = self.expect(Tok::Semi)?.span;
                 return Ok(Stmt::Assign {
                     at,
-                    target: AssignTarget::Local(Ident::new(name, nspan)),
+                    target: AssignTarget::Local {
+                        name: Ident::new(name, nspan),
+                        sigil,
+                    },
                     value,
                     span: start.to(end),
                 });
@@ -2344,7 +2417,7 @@ impl Parser {
                 self.bump();
                 let sspan = self.span();
                 let source = match self.peek().tok.clone() {
-                    Tok::Local(n) => {
+                    Tok::Local(n) | Tok::Ident(n) => {
                         self.bump();
                         Ident::new(n, sspan)
                     }
@@ -2352,7 +2425,7 @@ impl Parser {
                         self.err_note(
                             "E0012",
                             sspan,
-                            format!("expected `$name` after `...`, found {other}"),
+                            format!("expected a local after `...`, found {other}"),
                             "a spread source is a local with a declared shape",
                             "types.md §9.1",
                         );
@@ -3004,7 +3077,7 @@ impl Parser {
                 self.bump();
                 let sspan = self.span();
                 let source = match self.peek().tok.clone() {
-                    Tok::Local(n) => {
+                    Tok::Local(n) | Tok::Ident(n) => {
                         self.bump();
                         Ident::new(n, sspan)
                     }
@@ -3012,7 +3085,7 @@ impl Parser {
                         self.err_note(
                             "E0012",
                             sspan,
-                            format!("expected `$name` after `...`, found {other}"),
+                            format!("expected a local after `...`, found {other}"),
                             "a spread source is a local with a declared shape",
                             "types.md §9.1",
                         );

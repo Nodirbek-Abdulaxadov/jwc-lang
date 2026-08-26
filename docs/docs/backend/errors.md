@@ -42,7 +42,7 @@ let account = select A from App.auth.Accounts
 ```
 
 `first` answers `Record?`. `or throw` turns the null into the error, and
-what comes out is a `Record` — so `$account.email` type-checks, with no
+what comes out is a `Record` — so `account.email` type-checks, with no
 narrowing step and no null propagating three call frames before it
 surfaces as a 500.
 
@@ -56,7 +56,7 @@ let header = request.header("Authorization") or throw Unauthorized("a bearer tok
 ## `throw`
 
 ```jwc no-compile
-if ($board.project_id != $task.project_id) {
+if (board.project_id != task.project_id) {
     throw BadRequest("vazifani boshqa loyihaga ko'chirib bo'lmaydi");
 }
 ```
@@ -67,7 +67,7 @@ Handles one kind, and the block must **diverge** — return or throw. There
 is no falling through to a value that was never produced.
 
 ```jwc no-compile
-WorkspaceService.require_member($p.workspace_id, $req.user_id)
+WorkspaceService.require_member(p.workspace_id, req.user_id)
     catch NotAMember (e) {
         throw BadRequest("that user is not a member of this workspace");
     };
@@ -82,7 +82,7 @@ service raising "not a member" is a 403 when it is about the caller, and a
 ```jwc no-compile
 errorHandler {
     on PaymentDeclined (e) {
-        return statusCode(402, { error: $e.message, retry: false });
+        return statusCode(402, { error: e.message, retry: false });
     }
 }
 ```

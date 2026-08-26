@@ -778,7 +778,7 @@ impl<'a> Checker<'a> {
             Stmt::Assign { target, value, .. } => {
                 let got = self.expr(value);
                 match target {
-                    AssignTarget::Local(i) => match self.lookup(&i.name) {
+                    AssignTarget::Local { name: i, .. } => match self.lookup(&i.name) {
                         Some(want) => {
                             if !got.assignable_to(&want) {
                                 self.err(
@@ -794,7 +794,7 @@ impl<'a> Checker<'a> {
                         None => self.err_note(
                             i.span,
                             "E0211",
-                            format!("unknown local `${}`", i.name),
+                            format!("unknown local `{}`", i.name),
                             "declare it with `let` first",
                             "names.md §5.5",
                         ),
@@ -1557,8 +1557,14 @@ impl<'a> Checker<'a> {
         if self.in_query() {
             return self.column(i);
         }
+        // Outside a query clause there is no column for a local to be
+        // confused with, so the sigil is not required: `string.of(attempt)`
+        // and `string.of($attempt)` are the same reference (names.md §5.3).
+        if let Some(t) = self.lookup(&i.name) {
+            return t;
+        }
         // Enum / service / builtin namespaces resolve through `Field`, so a
-        // bare name outside a query is either a declaration or a mistake.
+        // bare name that is not a local is either a declaration or a mistake.
         if self.sym.enums.contains_key(&i.name)
             || self.sym.classes.contains_key(&i.name)
             || self.sym.services.contains_key(&i.name)
@@ -1567,16 +1573,6 @@ impl<'a> Checker<'a> {
             || is_namespace(&i.name)
         {
             return Ty::Unknown;
-        }
-        if self.lookup(&i.name).is_some() {
-            self.err_note(
-                i.span,
-                "E0211",
-                format!("`{}` is a local; write `${}`", i.name, i.name),
-                "every reference to a local carries `$`",
-                "names.md §5.3",
-            );
-            return self.lookup(&i.name).unwrap_or(Ty::Unknown);
         }
         // `now()` gets its own message: it is a column default, not a call.
         if i.name == "now" {
@@ -1590,6 +1586,19 @@ impl<'a> Checker<'a> {
             );
             return Ty::Unknown;
         }
+        // Nothing left for it to be. Reporting it matters more now that the
+        // sigil is optional: without this a mistyped local would quietly
+        // evaluate to its own name as text, and the native backend — which
+        // has no value to emit for it — would refuse a program the
+        // interpreter ran.
+        self.err_note(
+            i.span,
+            "E0211",
+            format!("unknown name `{}`", i.name),
+            "declare it with `let`, take it as a parameter, or qualify it with \
+             the declaration it belongs to",
+            "names.md §5.3",
+        );
         Ty::Unknown
     }
 
@@ -3289,8 +3298,10 @@ impl<'a> Checker<'a> {
     /// may not be handed to a response builder.
     fn reject_private_response(&mut self, arg: Option<&Expr>, path: &str, span: Span) {
         let Some(arg) = arg else { return };
+        // Sigil or not, it is the same local — and this rule is the reason
+        // a `private` column cannot leave the process (names.md §5.3).
         let name = match &*arg.kind {
-            ExprKind::Local(i) => i.name.clone(),
+            ExprKind::Local(i) | ExprKind::Name(i) => i.name.clone(),
             _ => return,
         };
         if self.tainted.contains(&name) {
@@ -3760,7 +3771,9 @@ impl<'a> Checker<'a> {
         };
         let fresh = |e: &Expr| -> bool {
             match &*e.kind {
-                ExprKind::Local(n) => self.password_hashed.contains(&n.name),
+                ExprKind::Local(n) | ExprKind::Name(n) => {
+                    self.password_hashed.contains(&n.name)
+                }
                 ExprKind::Call { callee, .. } => {
                     matches!(&*callee.kind, ExprKind::Field { base, field }
                         if field.name == "password"
@@ -3788,7 +3801,7 @@ impl<'a> Checker<'a> {
     /// through a local it was assigned to.
     fn reads_request_path(&self, e: &Expr) -> bool {
         match &*e.kind {
-            ExprKind::Local(n) => self.path_keyed.contains(&n.name),
+            ExprKind::Local(n) | ExprKind::Name(n) => self.path_keyed.contains(&n.name),
             ExprKind::Call { callee, .. } => {
                 matches!(&*callee.kind, ExprKind::Field { base, field }
                     if field.name == "path"
@@ -4523,8 +4536,10 @@ fn narrowing_target(cond: &Expr, want_is_null: bool) -> Option<String> {
     if is_null_test != want_is_null {
         return None;
     }
+    // An `if` is never a query clause, so a bare name here is the local
+    // it names whether or not it was written with the sigil (names.md §5.3).
     let name = |e: &Expr| match &*e.kind {
-        ExprKind::Local(i) => Some(i.name.clone()),
+        ExprKind::Local(i) | ExprKind::Name(i) => Some(i.name.clone()),
         _ => None,
     };
     match (name(lhs), &*rhs.kind) {

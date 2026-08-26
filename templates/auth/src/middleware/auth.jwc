@@ -6,12 +6,12 @@ namespace middleware.auth;
 middleware RequireAuth provides account_id: bigint {
     let header = request.header("Authorization") or throw Unauthorized("token kerak");
 
-    let token = string.strip_prefix($header, "Bearer ");
+    let token = string.strip_prefix(header, "Bearer ");
     let secret = env("JWT_SECRET") or throw Unauthorized("server sozlanmagan");
 
-    let claims = jwt.verify($token, $secret)
+    let claims = jwt.verify(token, secret)
         or throw Unauthorized("token yaroqsiz yoki muddati o'tgan");
 
     --- Not client-derived: the signature proves we minted it.
-    context.account_id = bigint($claims.sub);
+    context.account_id = bigint(claims.sub);
 }

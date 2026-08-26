@@ -112,6 +112,8 @@ pub struct Program {
     pub model: SchemaModel,
     pub symbols: Symbols,
     pub routes: Vec<ResolvedRoute>,
+    /// `static` mounts, in source order (routing.md §10.2).
+    pub mounts: Vec<crate::assets::Mount>,
     pub functions: HashMap<String, FunctionDecl>,
     pub middleware: HashMap<String, MiddlewareDecl>,
     /// Declared `job`s, by name.
@@ -243,6 +245,14 @@ pub struct Response {
     pub status: u16,
     pub body: String,
     pub headers: Vec<(String, String)>,
+    /// A byte body. Only a `static` mount produces one — the language's own
+    /// responses are text — and when it is set it is what goes on the wire.
+    ///
+    /// A separate field rather than `body: Vec<u8>` because every other
+    /// response in the program, and every test that reads one, is a string:
+    /// widening the common case to carry the rare one would have made the
+    /// whole codebase pay for assets.
+    pub bytes: Option<Vec<u8>>,
 }
 
 impl Response {
@@ -256,6 +266,18 @@ impl Response {
                 "content-type".into(),
                 "application/json; charset=utf-8".into(),
             )],
+            bytes: None,
+        }
+    }
+
+    /// A static asset (routing.md §10). `body` stays empty: the bytes are
+    /// the response.
+    pub fn asset(status: u16, bytes: Vec<u8>, headers: Vec<(String, String)>) -> Response {
+        Response {
+            status,
+            body: String::new(),
+            headers,
+            bytes: Some(bytes),
         }
     }
 
@@ -271,6 +293,7 @@ impl Response {
             status,
             body: String::new(),
             headers: Vec::new(),
+            bytes: None,
         }
     }
 }
@@ -461,7 +484,7 @@ impl<'a> Vm<'a> {
             Stmt::Assign { target, value, .. } => {
                 let v = self.eval(value).await?;
                 match target {
-                    AssignTarget::Local(i) => self.assign(&i.name, v),
+                    AssignTarget::Local { name, .. } => self.assign(&name.name, v),
                     AssignTarget::Context(k) => {
                         self.context.insert(k.name.clone(), v);
                     }
@@ -695,7 +718,14 @@ impl<'a> Vm<'a> {
                 .cloned()
                 .ok_or_else(|| fault(format!("unknown path parameter `@{}`", i.name)))?,
 
-            ExprKind::Name(i) => Value::Text(i.name.clone()),
+            // Outside a query clause a bare name is a local when one is in
+            // scope — the sigil is optional there (names.md §5.3). Anything
+            // else keeps the previous reading, its own text: the checker has
+            // already rejected a bare name that is neither.
+            ExprKind::Name(i) => self
+                .lookup(&i.name)
+                .cloned()
+                .unwrap_or_else(|| Value::Text(i.name.clone())),
 
             ExprKind::Field { base, field } => self.field(base, field).await?,
 
