@@ -3,6 +3,37 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.926] — the Intel Mac binary v0.9.925 did not ship — 2026-08-26
+
+v0.9.925 put `x86_64-apple-darwin` on `macos-13`, the last Intel image.
+That job sat **queued for 25 minutes** while all six other targets finished
+in two and attached their archives. GitHub has been retiring the Intel
+runners, and a release cannot be made to depend on a label that may or may
+not have capacity.
+
+So the tag shipped six archives and not the seventh, and `install.sh`'s
+`darwin-x86_64` case pointed at an asset that was not there. An Intel Mac
+running the one-liner got a 404.
+
+Both macOS targets now build on `macos-14`. The arm64 one is native; the
+x86_64 one is cross-compiled, which on macOS needs nothing beyond the
+target's std — clang ships every architecture and the SDK is universal.
+
+The `macOS compiles` CI job cross-checks `x86_64-apple-darwin` as well, for
+the same reason it exists at all: a target only the release workflow builds
+is a target whose first failure is a failed release. It caught nothing here
+because the failure was a runner queue rather than the code — which is
+exactly why the runner label moved instead.
+
+`v0.9.925`'s other six archives are fine and that release is not being
+rebuilt. An Intel Mac wants this tag.
+
+### Also — `cargo fmt`
+
+`cargo fmt --check` is CI's first step and I pushed 0.9.925 without running
+it. The job failed there and never reached build or test, so the suite did
+not run on main at all. Thirteen hunks, formatting only.
+
 ## [0.9.925] — static files, inside the binary — 2026-08-25
 
 ```jwc

@@ -841,7 +841,10 @@ fn static_asset(program: &Program, incoming: &Incoming) -> Option<Response> {
         let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let tag = assets::etag(&body);
         let mut headers = vec![
-            ("content-type".to_string(), assets::content_type(name).to_string()),
+            (
+                "content-type".to_string(),
+                assets::content_type(name).to_string(),
+            ),
             ("etag".to_string(), tag.clone()),
             (
                 "cache-control".to_string(),

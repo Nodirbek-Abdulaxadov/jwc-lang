@@ -3771,9 +3771,7 @@ impl<'a> Checker<'a> {
         };
         let fresh = |e: &Expr| -> bool {
             match &*e.kind {
-                ExprKind::Local(n) | ExprKind::Name(n) => {
-                    self.password_hashed.contains(&n.name)
-                }
+                ExprKind::Local(n) | ExprKind::Name(n) => self.password_hashed.contains(&n.name),
                 ExprKind::Call { callee, .. } => {
                     matches!(&*callee.kind, ExprKind::Field { base, field }
                         if field.name == "password"

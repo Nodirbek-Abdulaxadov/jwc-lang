@@ -587,8 +587,8 @@ fn a_bare_name_that_is_not_a_local_is_still_refused() {
     )
     .expect("write");
     let ws = Workspace::load(dir.path()).expect("load");
-    let err = jwc::native::codegen_for_test(&ws)
-        .expect_err("a name bound nowhere has no value to emit");
+    let err =
+        jwc::native::codegen_for_test(&ws).expect_err("a name bound nowhere has no value to emit");
     assert!(
         err.to_string().contains("nowhere"),
         "the refusal should name it: {err}"
