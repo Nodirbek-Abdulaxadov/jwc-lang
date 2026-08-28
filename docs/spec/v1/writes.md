@@ -230,9 +230,9 @@ An `after` block is awaited **before** the response is returned
 in front of every response: every request waits for its own log row.
 
 `builtins.md` §10 listed `log_insert` as "overlapped `insert into` for no
-benefit". The benefit is that round trip. 0.9's own measurements put the
-batching at 6.0k rows/s with 500-row batches against 20.3k at 5000, with
-request throughput unchanged.
+benefit". The benefit is that round trip: measured, batching moved 6.0k
+rows/s at 500-row batches to 20.3k at 5000, with request throughput
+unchanged.
 
 ### 7.4 What is given up
 

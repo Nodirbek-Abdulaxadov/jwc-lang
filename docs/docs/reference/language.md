@@ -702,7 +702,7 @@ routes "/live" use RequireAuth {
 
 Three optional blocks, each at most once, and at least one required — a
 socket with none would accept the upgrade and then do nothing. There is no
-receive loop: 0.9 had one, and an unbounded loop in a handler is the thing
+receive loop to write, because an unbounded loop in a handler is the thing
 this language does not have.
 
 ---

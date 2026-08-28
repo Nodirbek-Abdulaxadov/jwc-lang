@@ -14,8 +14,8 @@ description: "Comments, literals, sigils, and the fact that JWC has no reserved 
 --- database as a COMMENT ON, and `jwc migrate` diffs it
 ```
 
-`//` is **not** a comment. It is division, twice, and the first `//` line in
-a 0.9.x file is where the port stops.
+`//` is **not** a comment. It is division, twice — so a `//` line does
+not fail where you wrote it, it fails somewhere else.
 
 ## Literals
 

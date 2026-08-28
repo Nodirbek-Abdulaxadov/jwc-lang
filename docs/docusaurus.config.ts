@@ -40,10 +40,6 @@ const config: Config = {
           // still describes the language deployed 0.9.x binaries implement,
           // but it is no longer served: every code sample on it fails to lex
           // against this compiler, which is worse than no page at all.
-          //
-          // `docs/reference/removed.md` is the bridge — what each 0.9.x
-          // construct became — so a reader arriving from the old site is not
-          // left guessing.
           path: 'docs',
           // `README.md` is the note explaining the tree, not a page.
           // Docusaurus routes a folder's README like its index, so it would

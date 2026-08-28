@@ -10,7 +10,7 @@ closed; these are dated omissions.
 | id | Deferred | What 1.0 does instead | Why |
 |---|---|---|---|
 | `DEFERRED-1` | Explicit nullable coercions (`int?(x)`) | Source-based classification: coercion failure on a client-derived value is `BadRequest` 400, elsewhere a fault (types §7.2) | Taxes 100% of call sites to fix the 1%; a developer who forgets the `?` gets the 500 anyway |
-| ~~`DEFERRED-2`~~ | ~~`--native` AOT backend~~ | **Withdrawn in 0.9.903.** `jwc build` produces a native binary and covers the language; `view`, and nothing else, is refused by name. There is no `--native` flag and there was never an `E0910` | The stated reason — a second backend doubling every query-compiler change — does not hold against the 1.0 front-end: `query_sql` lowers a query to a SQL string at compile time, so codegen *calls* the query compiler rather than reimplementing it. The two backends are held to byte-identical responses over jwc-shortener, MyWallet and task-tracker |
+| ~~`DEFERRED-2`~~ | ~~AOT backend~~ | **Withdrawn.** `jwc build` produces a native binary and covers the language; `view`, and nothing else, is refused by name | The stated reason — a second backend doubling every query-compiler change — does not hold: `query_sql` lowers a query to a SQL string at compile time, so codegen *calls* the query compiler rather than reimplementing it. The two backends are held to byte-identical responses over jwc-shortener, MyWallet and task-tracker |
 | `DEFERRED-3` | Enum `DROP VALUE` / reorder rebuild | `E1102` plus the printed five-statement recipe and a guard `SELECT count(*)` (migrations §5.3) | The rebuild needs a cross-schema column map. Refusal loses no data; wrong automation does |
 | `DEFERRED-4` | Per-foreign-key messages | FK violation → `BadRequest` 400, `"referenced row does not exist"`; `jwc lint --constraints` lists them (errors §6.3) | The right status varies by case (400/404/409) and the data to choose does not exist yet |
 | `DEFERRED-5` | General subqueries, CTEs, window functions, recursive queries, full-text | `where exists`/`not exists` in the query language; everything else through the parameterised `raw(…)` escape hatch, banned inside `view`, counted by `jwc lint` (writes §6) | The query compiler is already 28% of the work. The hatch is a valve and its usage count measures which feature to add next |
@@ -27,27 +27,22 @@ closed; these are dated omissions.
 | `DEFERRED-16` | ~~Background jobs, durable queue, DLQ, WebSocket, SSE, in-process cache~~ **Withdrawn** — all but SSE are implemented; see the note below | jobs.md, routing §9, builtins §8 | The reason given was "guessing a vocabulary means writing it twice". Writing it once turned out to be the cheaper half |
 | `DEFERRED-17` | Sequences as a declared object class | A counter table plus `update … first` (which emits `FOR UPDATE`) — shown in the sample's `next_invoice_number` | A sequence is a sixth DDL object class with its own diff rules, for one use in the sample. The counter-table form is correct and already specified |
 | `DEFERRED-18` | Generated columns (`GENERATED ALWAYS AS … STORED`) | Compute in application code, or a counter table | The expression would be raw SQL text inside a declaration — a hole in the DBA test, not a feature |
-| `DEFERRED-19` | Server-Sent Events | A `socket` (routing §9), or long-polling | 0.9 parsed and validated `route SSE "…"` end to end and dispatched it to a stub, so a program could declare one, pass every check and serve nothing. A transport that typechecks and does not run is worse than an absent one |
+| `DEFERRED-19` | Server-Sent Events | A `socket` (routing §9), or long-polling | Absent rather than half-implemented: a transport that typechecks and does not run is worse than one that is not there |
 
 ---
 
-## A correction to `DEFERRED-16`
+## `DEFERRED-16` — resolved
 
-This row used to read "the 0.9.x runtime code is retained but unreachable".
-That was not true of all of it. The v0.25.0 cutover deleted 73 source files
-along with the 0.9.x front-end, and the queue was among them:
+Everything this row once covered is now a declaration, except SSE, which
+moved to `DEFERRED-19` with its own reason:
 
 | | State |
 |---|---|
-| durable queue, DLQ, `dispatch` | **implemented** in 0.9.909 — `job` + `dispatch`, jobs.md, both backends. Durable only: 0.9's in-memory driver was the default and lost every pending job on deploy |
-| WebSocket | **implemented** in 0.9.908 — `socket "…" { on open / on message (m) / on close }`, routing §9, both backends |
-| SSE | still absent, now as `DEFERRED-19` rather than as part of this row. 0.9 recognised `route SSE "…"` and dispatched it to a stub |
-| in-process cache | **implemented** in 0.9.904 — `cache.get/set/del/clear`, builtins §8, both backends |
-| native AOT backend | **restored** in 0.9.901–0.9.903, and covered — see `DEFERRED-2` |
-
-"Retained but unreachable" and "deleted" are different facts, and a reader
-deciding whether to depend on 1.0 needs the second one. Nothing is left of
-this row but SSE, which moved to `DEFERRED-19` with its own reason.
+| durable queue, DLQ, `dispatch` | **implemented** — `job` + `dispatch`, jobs.md, both backends. Durable only (jobs §3.2) |
+| WebSocket | **implemented** — `socket "…" { on open / on message (m) / on close }`, routing §9, both backends |
+| SSE | absent — `DEFERRED-19` |
+| in-process cache | **implemented** — `cache.get/set/del/clear`, builtins §8, both backends |
+| native AOT backend | **implemented** — see `DEFERRED-2` |
 
 ---
 

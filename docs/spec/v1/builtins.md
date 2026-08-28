@@ -275,10 +275,10 @@ Any value goes in, not only text: `console.write(42)` is not an error. A
 text value prints as its characters; anything else prints the way
 `debug.dump` renders it.
 
-Both write paths **flush**. 0.9 also had `print`, which appended to a
-buffer flushed after `main` returned — so a prompt written before a read
-appeared after the answer was due, and inside a route body whatever it
-printed became the response. `print` is not back, and this family is why.
+Both write paths **flush**. A buffered write is a write that arrives
+after the moment it was meant to explain: a prompt landing after the
+answer it was asking for, or a handler's debug output arriving inside the
+response. There is no buffered form.
 
 `console.read()` does not trim: it returns the line as typed, minus the
 terminator. `int()` trims before parsing, so `int(console.read())` is safe
@@ -398,9 +398,9 @@ route GET "leak" {
 }
 ```
 
-0.9 placed no restriction here at all. A script needs files; an HTTP
-handler almost never does, and the rare one that does should reach for
-something that bounds the path rather than for the raw call.
+A script needs files; an HTTP handler almost never does, and the rare
+one that does should reach for something that bounds the path rather than
+for the raw call.
 
 **What the check is, exactly**: the body being compiled, not a call graph.
 A helper `function` reached from both `main` and a route still passes. That
@@ -409,9 +409,7 @@ implying a guarantee the compiler does not make.
 
 ---
 
-## 7f. The rest of 0.9's registry
-
-Restored in 0.9.922, after a name-by-name diff of the two registries.
+## 7f. The rest of the registry
 
 | Name | Type | |
 |---|---|---|
@@ -514,7 +512,7 @@ grouped query (`E0530`).
 | `days(n)` | `date.days(n)` |
 | `next_invoice_number` | application logic, not a language feature. The sample shows a counter table |
 | `seed.*` | test fixtures; the isolation model is `DEFERRED-11` (ROADMAP v0.28.0) |
-| SSE | `DEFERRED-19`. Use a `socket` (routing §9) or long-polling. 0.9 parsed `route SSE "…"` end to end and dispatched it to a stub, so a program could declare one, pass every check and serve nothing. This row used to also list `dispatch`, the job queue and WebSocket; all three are declarations now (jobs.md, routing §9) |
+| SSE | `DEFERRED-19`. Use a `socket` (routing §9) or long-polling |
 
 ---
 

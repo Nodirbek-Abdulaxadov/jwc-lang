@@ -20,8 +20,7 @@ migrations/
 ```
 
 `jwc migrate up` / `down` apply files in order under a session advisory lock,
-recording applied names in `_jwc_migrations`. The applier is unchanged from
-0.9.x (ROADMAP §0).
+recording applied names in `_jwc_migrations`.
 
 ---
 

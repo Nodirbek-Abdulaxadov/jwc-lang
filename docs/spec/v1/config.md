@@ -338,10 +338,9 @@ When neither `DATABASE_URL` nor `JWC_DATABASE_URL` is set, `PG_USER`,
 one. All five are required.
 
 Both are one implementation — `src/dotenv_core.rs.in`, which the CLI
-includes and codegen pastes into the generated crate — because until
-0.9.927 the native backend assembled `PG_*` and read `.env`, and the
-interpreter did neither: the same file worked in a built binary and failed
-under `jwc serve`.
+includes and codegen pastes into the generated crate. Two readings of the
+same paragraph is how a `.env` file comes to work in a built binary and
+fail under `jwc serve`.
 
 ## 6. Secrets never appear in output
 

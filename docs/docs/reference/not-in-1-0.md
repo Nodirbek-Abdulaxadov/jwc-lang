@@ -10,24 +10,13 @@ This page exists so a decision to depend on JWC can be made with the whole
 picture. Everything below is a dated omission, not a non-goal, and each row
 says what 1.0 does instead.
 
-:::note
-
-Earlier versions of this page listed background jobs, WebSocket, an
-in-process cache and outbound email as absent. They were, when it was
-written; they were implemented across 0.9.902–0.9.910 and the page did not
-keep up. If you were told JWC could not do one of these, check the table
-below rather than your memory of it.
-
-:::
-
 ## Not declarable
 
 | | What to do instead |
 |---|---|
-| **Server-Sent Events** | a [`socket`](../backend/sockets), or long-polling. 0.9 parsed `route SSE "…"` end to end and dispatched it to a stub, so a program could declare one, pass every check and serve nothing — which is worse than not having it |
+| **Server-Sent Events** | a [`socket`](../backend/sockets), or long-polling. Absent rather than half-wired: a transport you can declare and pass every check against, and that then serves nothing, is worse than one that is not there |
 | **Sequences as a declared object** | a counter table plus `update … first` |
 | **Generated columns** | compute in application code |
-| **`jwc upgrade`** (a 0.9 → 1.0 codemod) | the diagnostics. Every removed construct has one that names its replacement — see [what 0.9.x had](./removed) |
 
 ## What it does have
 

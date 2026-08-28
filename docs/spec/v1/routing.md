@@ -415,13 +415,13 @@ The three blocks are optional and each may appear at most once (`E0012`).
 A `socket` with none of them is `E0013`: the endpoint would accept the
 upgrade and then do nothing.
 
-The 0.9 form was `route WS "…" { … }` with one body that ran per
-connection and called `ws_recv()` in a loop. 1.0 has no unbounded loop —
-`for` over a collection is the only iteration — and adding `while` to
-serve sockets would be a worse trade than saying what a socket handler is:
-three moments in a connection's life. The runtime owns the loop, which
-also removes the failure mode a hand-written one has, where forgetting to
-break holds a task for the process's lifetime.
+Three blocks rather than one body looping on a receive call: the
+language has no unbounded loop — `for` over a collection is the only
+iteration — and adding `while` to serve sockets would be a worse trade
+than naming what a socket handler is, which is three moments in a
+connection's life. The runtime owns the loop, which also removes the
+failure mode a hand-written one has, where forgetting to break holds a
+task for the process's lifetime.
 
 ### 9.2 Semantics
 
@@ -520,10 +520,10 @@ that **HTTP survives it**. Set `max_sockets` with that in mind.
 under `x-jwc-sockets` rather than emitting the upgrade as a `GET` that
 answers 200 — a lie a client generator would act on.
 
-Server-Sent Events are `DEFERRED-17`. 0.9 recognised `route SSE "…"`
-end-to-end in the parser and the validator and dispatched it to a stub, so
-a program could declare one, pass every check, and serve nothing. A
-half-implemented transport is worse than an absent one.
+Server-Sent Events are `DEFERRED-17`: absent rather than
+half-implemented. A transport a program can declare and pass every check
+against, and that then serves nothing, is worse than one that is simply
+not there.
 
 ## 10. Static assets
 

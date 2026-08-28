@@ -108,7 +108,7 @@ the same answers as every other route.
 
 ## Server-Sent Events
 
-Not implemented. 0.9 parsed and validated `route SSE "…"` end to end and
-dispatched it to a stub, so a program could declare one, pass every check
-and serve nothing — which is worse than not having it. Use a `socket`, or
+Not implemented — deliberately absent rather than half-wired. A
+transport you can declare, pass every check against, and then serve
+nothing from is worse than one that is not there. Use a `socket`, or
 long-polling.

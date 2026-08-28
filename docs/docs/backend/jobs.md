@@ -39,9 +39,9 @@ workers.
 Arguments are named and typed against the declaration. A misspelled name,
 a missing one, or a `text` where a `bigint` belongs does not compile.
 
-0.9's form was `dispatch(name, payload_json)` — two strings. A handler
-that expected `account_id` and a caller that sent `accountId` typechecked,
-ran, and failed at 3am with a JSON parse error in a worker log.
+Pass a payload as an untyped string instead and a handler expecting
+`account_id` with a caller sending `accountId` typechecks, runs, and fails
+at 3am with a JSON parse error in a worker log.
 
 ## It is part of your transaction
 
@@ -117,7 +117,6 @@ were schema.
 
 There is one driver, and it is Postgres.
 
-0.9 shipped two and defaulted to the wrong one — `JWC_QUEUE_DRIVER=memory`
-was the default, and every pending job died with the process. A queue that
+There is no in-memory alternative and no switch to pick one. A queue that
 loses work on deploy has no guarantee to build on, and the loss is
 invisible: the enqueue succeeded, the work just never happened.

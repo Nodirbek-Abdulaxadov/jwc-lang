@@ -20,7 +20,6 @@ This tree is what jwc.1kb.uz serves. `docusaurus.config.ts` points at it.
 | `reference/language.md` | the whole language on one page, with the reasons — for a person and for an agent |
 | `reference/ai-agent-guide.md` | the same ground compressed to tables, for a context window |
 | `reference/error-codes.md` | every diagnostic, generated from the spec's tables |
-| `reference/removed.md` | what 0.9.x had that 1.0 does not |
 | `reference/not-in-1-0.md` | what 1.0 does not have, and what to do instead |
 
 ## The rules this tree is held to
@@ -50,8 +49,7 @@ language deployed 0.9.x binaries implement — `dbcontext`, `entity`,
 against this compiler.
 
 It stays in the repository because it is the only description of what
-those binaries do. `reference/removed.md` is the bridge for a reader
-arriving from it.
+those binaries do.
 
 ## Building
 

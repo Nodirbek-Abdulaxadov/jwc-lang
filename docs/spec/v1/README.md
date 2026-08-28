@@ -1,9 +1,7 @@
 # JWC v1 — the specification
 
 This directory is the **normative** description of the language JWC 1.0 will
-be. Nothing here compiles with the 0.9.x compiler and nothing here is
-expected to: v1 replaces that language rather than extending it
-(ROADMAP §0).
+be.
 
 ## The normative documents
 

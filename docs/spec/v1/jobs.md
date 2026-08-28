@@ -77,10 +77,10 @@ Arguments are **named**, and checked against the declaration:
 
 An optional parameter left out is `null`, which is what `T?` means.
 
-0.9's form was `dispatch(name, payload)` — two strings. A handler that
-expected `account_id` and a caller that sent `accountId` typechecked, ran,
-and failed at 3am with a JSON parse error in a worker log. That is the
-whole reason this is a declaration.
+A payload passed as an untyped string is why this is a declaration
+rather than a call: a handler expecting `account_id` and a caller sending
+`accountId` would typecheck, run, and fail at 3am with a JSON parse error
+in a worker log.
 
 ### 2.1 It is part of the transaction
 
@@ -113,11 +113,10 @@ and a snapshot would carry rows of pending work as if they were schema.
 
 There is one driver and it is the database the program already has.
 
-0.9 shipped two and defaulted to the wrong one: `JWC_QUEUE_DRIVER` chose
-between an in-memory `VecDeque` and Postgres, and unset meant memory. A
-queue whose default loses every pending job on deploy has no guarantee
-anyone can build on, and the loss is invisible — the enqueue succeeded,
-the work simply never happened.
+There is no in-memory alternative, and no switch to pick one. A queue
+that can lose every pending job on deploy has no guarantee anyone can
+build on, and the loss is invisible — the enqueue succeeded, the work
+simply never happened.
 
 ### 3.3 At-least-once
 

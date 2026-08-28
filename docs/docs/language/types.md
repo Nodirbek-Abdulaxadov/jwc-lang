@@ -23,8 +23,7 @@ description: "Scalars, optionality, Raw versus Record, and why bigint is a strin
 **`bigint` and `numeric` are strings in JSON, and that is deliberate.**
 JavaScript loses integer precision above 2^53, and a float has no business
 holding money. If a client reads an id as a number, declare the column
-`int` — that is what a 0.9.x `int pk autoincrement` was, and keeping it
-keeps the wire format.
+`int`: it stays a JSON number.
 
 ## Optionality
 
