@@ -1,6 +1,6 @@
 [package]
 name = "jwc"
-version = "0.9.930"
+version = "0.9.931"
 edition = "2021"
 # Workspace-private until a license decision lands (see deny.toml [licenses]
 # `private = { ignore = true }`). Set to false explicitly so cargo-deny v2
@@ -156,3 +156,9 @@ tempfile = "3"
 # only — gnu / windows / dev builds are unaffected.
 [target.'cfg(target_env = "musl")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
+
+# One line in `main`: restore SIGPIPE to its default, so `jwc lint
+# --list-codes | head` exits instead of panicking on a broken pipe.
+# Already in the tree transitively; naming it costs no extra compilation.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

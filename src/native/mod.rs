@@ -565,6 +565,7 @@ pub fn compile(
     root: &Path,
     app_name: &str,
     release: bool,
+    target: Option<&str>,
 ) -> Result<CompileReport> {
     let gen = codegen::generate(ws)?;
 
@@ -591,8 +592,8 @@ pub fn compile(
         },
         &gen.assets,
     )?;
-    let bin = invoke_cargo(&cargo, &workspace, app_name, release, None)?;
-    let binary_path = copy_to_project_bin(root, &bin, release, None)?;
+    let bin = invoke_cargo(&cargo, &workspace, app_name, release, target)?;
+    let binary_path = copy_to_project_bin(root, &bin, release, target)?;
 
     Ok(CompileReport {
         binary_path,

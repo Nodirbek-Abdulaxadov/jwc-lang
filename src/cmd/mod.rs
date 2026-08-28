@@ -118,10 +118,47 @@ pub fn check(path: PathBuf, quiet: bool, parse_only: bool, deny_warnings: bool) 
 ///
 /// `--check` reports which files would change and exits non-zero without
 /// writing, which is the CI shape.
-pub fn fmt(path: PathBuf, check_only: bool) -> Result<()> {
-    let files = collect_sources(&path)?;
+pub fn fmt(paths: Vec<PathBuf>, check_only: bool, to_stdout: bool) -> Result<()> {
+    let paths = if paths.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        paths
+    };
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for p in &paths {
+        files.extend(collect_sources(p)?);
+    }
+    // Two inputs can name the same file — `jwc fmt src src/app.jwc`. Left
+    // as-is that rewrites it twice and counts it twice.
+    files.sort();
+    files.dedup();
     if files.is_empty() {
-        bail!("no .jwc files under {}", path.display());
+        let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        bail!("no .jwc files under {}", names.join(", "));
+    }
+
+    if to_stdout {
+        // One input only. Concatenating two formatted files produces
+        // something that is not a program, and a caller redirecting this
+        // into a file would get exactly that.
+        if files.len() != 1 {
+            bail!(
+                "--stdout formats one file; {} matched. Name the file, or \
+                 drop --stdout to rewrite them in place.",
+                files.len()
+            );
+        }
+        if check_only {
+            bail!("--check and --stdout ask for different things: one reports, one prints");
+        }
+        let parsed = crate::parse_file(&files[0])?;
+        if parsed.has_errors() {
+            eprint!("{}", parsed.render_all());
+            bail!("source did not parse — nothing printed");
+        }
+        print!("{}", crate::fmt::format_program(&parsed.program));
+        return Ok(());
     }
 
     let mut changed: Vec<PathBuf> = Vec::new();
@@ -996,6 +1033,37 @@ pub fn migrate_status(path: PathBuf, dir: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// `jwc migrate list [path]` — the migration files on disk, in order.
+///
+/// Offline, unlike `migrate status`: it says what is *written*, not what
+/// is applied, so it works with no `DATABASE_URL` and no reachable
+/// database. That is the difference worth having — "what does this
+/// checkout contain" is a question you ask before you have a database,
+/// and `status` needs one to answer anything at all.
+pub fn migrate_list(path: PathBuf, dir: Option<PathBuf>) -> Result<()> {
+    let dir = migrations_dir(&path, dir);
+    let files = crate::snapshot::list(&dir);
+    if files.is_empty() {
+        println!(
+            "no migrations in {} — `jwc migrate new <name>` writes the first",
+            display_relative(&dir)
+        );
+        return Ok(());
+    }
+    for m in &files {
+        // A `down` is optional and its absence is the interesting fact:
+        // it is what `migrate down` will refuse.
+        let down = if m.down().exists() {
+            ""
+        } else {
+            "   (no down)"
+        };
+        println!("{:>4}  {}{}", m.ordinal, m.stem, down);
+    }
+    println!("{} migration{}", files.len(), plural(files.len()));
+    Ok(())
+}
+
 /// `jwc migrate verify [path]` — the names the binary expects against the
 /// ones Postgres holds (#28).
 pub fn migrate_verify(path: PathBuf) -> Result<()> {
@@ -1111,9 +1179,24 @@ fn describe_abort(a: &crate::exec::Abort) -> String {
 ///
 /// Offline. Every part of the document already exists in the compiler; this
 /// arranges them and infers nothing of its own.
-pub fn openapi(path: PathBuf, out: Option<PathBuf>, title: Option<String>) -> Result<()> {
+/// `compact` writes one line. Indented is the default and `--pretty` names
+/// it: 0.9 had the inversion — compact by default, `--pretty` to indent —
+/// and flipping back would change the output of every caller that has been
+/// running `jwc openapi` since. The choice the flag existed to give is
+/// what matters, not which side of it is the default.
+pub fn openapi(
+    path: PathBuf,
+    out: Option<PathBuf>,
+    title: Option<String>,
+    compact: bool,
+) -> Result<()> {
     let doc = openapi_document(&path, title)?;
-    let text = format!("{}\n", serde_json::to_string_pretty(&doc)?);
+    let body = if compact {
+        serde_json::to_string(&doc)?
+    } else {
+        serde_json::to_string_pretty(&doc)?
+    };
+    let text = format!("{body}\n");
     match out {
         Some(p) => {
             std::fs::write(&p, text)?;
@@ -1271,10 +1354,161 @@ fn middleware_body<'a>(
 
 /// `jwc lint [path] [--constraints]` — `jwc check` plus the whole-program
 /// lints that are advisory rather than definitional (tooling.md §4).
-pub fn lint(path: PathBuf, constraints: bool, deny_warnings: bool) -> Result<()> {
+/// `jwc lint --list-codes` — every diagnostic the spec documents.
+///
+/// The table comes from `docs/spec/v1/*.md` by way of `build.rs`, so this
+/// listing cannot fall behind the spec: there is no second copy to fall
+/// behind with.
+fn print_code_list() -> Result<()> {
+    let all = crate::codes::DIAGNOSTIC_CATALOGUE;
+    if all.is_empty() {
+        bail!(
+            "this binary carries no diagnostic catalogue — it was built \
+             without `docs/spec/v1` beside it"
+        );
+    }
+    let mut band = "";
+    for (code, file, meaning) in all {
+        // A blank line between bands. E02xx is names, E03xx types, E07xx
+        // routing — the grouping is the useful part of a 200-row list.
+        if &code[..3] != band {
+            if !band.is_empty() {
+                println!();
+            }
+            band = &code[..3];
+        }
+        println!("{code}  {meaning}  ({file})");
+    }
+    println!("\n{} diagnostics", all.len());
+    Ok(())
+}
+
+/// `jwc lint --explain E0211` — one code, with the spec file that defines
+/// it. A miss lists the code's band rather than nothing: `E02` is names,
+/// so a mistyped `E0121` still lands the reader near the answer.
+fn explain_code(code: &str) -> Result<()> {
+    match crate::codes::lookup(code) {
+        Some((code, file, meaning)) => {
+            println!("{code}  {meaning}");
+            println!("\nspec: docs/spec/v1/{file}");
+            Ok(())
+        }
+        None => {
+            let band = crate::codes::in_same_band(code);
+            if band.is_empty() {
+                bail!("no diagnostic {code} — `jwc lint --list-codes` has the whole set");
+            }
+            eprintln!("no diagnostic {code}. In the same band:");
+            for (c, _, meaning) in &band {
+                eprintln!("  {c}  {meaning}");
+            }
+            bail!("unknown diagnostic code");
+        }
+    }
+}
+
+/// `jwc lint --json` — every diagnostic as one JSON array on stdout.
+///
+/// The shape an editor or a CI annotation reads: absolute path, 1-based
+/// line and column, severity, code, message, and the spec clause when the
+/// diagnostic names one. Warnings included — filtering them here would
+/// make the flag useless for the tools it exists for.
+fn lint_json(ws: &crate::workspace::Workspace) -> Result<()> {
+    use crate::diag::Severity;
+
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut errors = 0usize;
+
+    let mut push = |file: &crate::diag::SourceFile, d: &crate::diag::Diagnostic| {
+        let (line, col) = file.line_col(d.span.start);
+        let (end_line, end_col) = file.line_col(d.span.end);
+        out.push(serde_json::json!({
+            "file": file.path.display().to_string(),
+            "line": line,
+            "column": col,
+            "end_line": end_line,
+            "end_column": end_col,
+            "severity": match d.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            },
+            "code": d.code,
+            "message": d.message,
+            "note": d.note,
+            "spec": d.clause,
+        }));
+    };
+
+    for f in &ws.files {
+        for d in &f.diags {
+            if d.severity == Severity::Error {
+                errors += 1;
+            }
+            push(&f.source, d);
+        }
+    }
+
+    // Parse errors make everything downstream meaningless, so the array
+    // stops there rather than carrying diagnostics derived from a tree
+    // that does not exist.
+    if errors == 0 {
+        let built = crate::model::build(ws);
+        let symbols = crate::symbols::build(ws, &built.model);
+        let checked = crate::check::check(ws, &symbols, &built.model);
+        let wired = crate::wiring::wire(ws, &symbols);
+        let mut imports = crate::imports::check(ws, &ws.packages);
+        imports.extend(crate::imports::case_convention(ws));
+        imports.extend(crate::packages::check(ws, &symbols));
+        for (loc, d) in built
+            .diags
+            .iter()
+            .chain(&symbols.diags)
+            .chain(&checked.diags)
+            .chain(&wired.diags)
+            .chain(&imports)
+        {
+            if d.severity == Severity::Error {
+                errors += 1;
+            }
+            if let Some(f) = ws.files.get(loc.file) {
+                push(&f.source, d);
+            }
+        }
+    }
+
+    println!("{}", serde_json::to_string(&out)?);
+    // Machine-readable output on stdout, the verdict in the exit code:
+    // a CI step reads the array and the shell reads the status.
+    if errors > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+pub fn lint(
+    path: PathBuf,
+    constraints: bool,
+    deny_warnings: bool,
+    json: bool,
+    list_codes: bool,
+    explain: Option<String>,
+) -> Result<()> {
+    // Both read the catalogue and no sources, so they answer outside a
+    // project — which is the point: you look a code up when you have one
+    // in front of you, not when you have a checkout.
+    if list_codes {
+        return print_code_list();
+    }
+    if let Some(code) = explain {
+        return explain_code(&code);
+    }
+
     let ws = crate::workspace::Workspace::load(&path)?;
     if ws.files.is_empty() {
         bail!("no .jwc files under {}", path.display());
+    }
+    if json {
+        return lint_json(&ws);
     }
     // Everything `jwc check` would say, said first and once.
     check(path.clone(), true, false, false)?;
@@ -1523,7 +1757,7 @@ fn display_relative(p: &Path) -> String {
 /// — the prelude the generated crate includes — came back unchanged; the
 /// codegen is written against the 1.0 AST, because the old one named
 /// declarations this language does not have.
-pub fn build(path: PathBuf, release: bool, emit_rust: bool) -> Result<()> {
+pub fn build(path: PathBuf, release: bool, emit_rust: bool, target: Option<String>) -> Result<()> {
     let ws = crate::workspace::Workspace::load(&path)?;
     if ws.files.is_empty() {
         bail!("no .jwc files under {}", path.display());
@@ -1545,7 +1779,7 @@ pub fn build(path: PathBuf, release: bool, emit_rust: bool) -> Result<()> {
         return Ok(());
     }
 
-    let report = crate::native::compile(&ws, &path, &app, release)?;
+    let report = crate::native::compile(&ws, &path, &app, release, target.as_deref())?;
     println!("{}", report.binary_path.display());
     Ok(())
 }

@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "jwc"
-version = "0.9.930"
+version = "0.9.931"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1745,6 +1745,7 @@ dependencies = [
  "jwc-runtime",
  "lazy_static",
  "lettre",
+ "libc",
  "md-5 0.10.6",
  "native-tls",
  "notify",

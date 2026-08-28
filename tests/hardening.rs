@@ -1492,7 +1492,16 @@ fn every_env_var_the_code_reads_is_registered_and_the_other_way_round() {
             // doc comment is not a literal and still does not count.
             let mut rest = text.as_str();
             while let Some(i) = rest.find("\"JWC_") {
+                // `env!("JWC_BUILD_TARGET")` is a *compile-time* constant
+                // emitted by build.rs, not a runtime knob: nobody sets it
+                // in an environment and the boot table has nothing to
+                // print. `option_env!` is the same.
+                let before = &rest[..i];
+                let compile_time = before.ends_with("env!(") || before.ends_with("option_env!(");
                 rest = &rest[i + 1..];
+                if compile_time {
+                    continue;
+                }
                 if let Some(j) = rest.find('"') {
                     let name = &rest[..j];
                     if name
@@ -1921,5 +1930,82 @@ fn both_backends_format_the_access_line_from_the_same_text() {
     assert!(
         !serve.contains("pub fn format_request_log_line("),
         "serve.rs must not define its own copy"
+    );
+}
+
+/// `jwc lint --explain E0211` has to answer for every code the compiler
+/// can produce, or it is a lookup table with holes exactly where a reader
+/// needs it. The catalogue is generated from the spec by `build.rs`, so
+/// this is really a check that the extraction sees the same rows the
+/// documentation guard above sees.
+#[test]
+fn the_catalogue_answers_for_every_documented_code() {
+    use std::collections::BTreeSet;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut documented: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(root.join("docs/spec/v1"))
+        .expect("docs/spec/v1")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        for line in text.lines() {
+            let t = line.trim();
+            if !t.starts_with("| `E") && !t.starts_with("| `W") {
+                continue;
+            }
+            if let Some(code) = t.trim_start_matches("| `").split('`').next() {
+                let ok = code.len() == 5
+                    && (code.starts_with('E') || code.starts_with('W'))
+                    && code[1..].chars().all(|c| c.is_ascii_digit());
+                if ok {
+                    documented.insert(code.to_string());
+                }
+            }
+        }
+    }
+
+    assert!(
+        documented.len() > 50,
+        "found {} documented codes — the table format changed",
+        documented.len()
+    );
+
+    let missing: Vec<&String> = documented
+        .iter()
+        .filter(|c| jwc::codes::lookup(c).is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "documented but absent from the catalogue `--explain` reads: {missing:?}"
+    );
+
+    // And nothing extra: a row the spec does not have is a meaning
+    // invented by the extractor.
+    let extra: Vec<&str> = jwc::codes::DIAGNOSTIC_CATALOGUE
+        .iter()
+        .map(|(c, _, _)| *c)
+        .filter(|c| !documented.contains(*c))
+        .collect();
+    assert!(extra.is_empty(), "in the catalogue, in no spec: {extra:?}");
+
+    // Every row carries a meaning and the file that defines it — an empty
+    // one would print as a blank line and read as a code with no rule.
+    for (code, file, meaning) in jwc::codes::DIAGNOSTIC_CATALOGUE {
+        assert!(!meaning.trim().is_empty(), "{code} has no meaning");
+        assert!(file.ends_with(".md"), "{code} names {file}");
+    }
+
+    // A miss lands the reader in the right band rather than nowhere.
+    assert!(jwc::codes::lookup("E0211").is_some());
+    assert!(jwc::codes::lookup("e0211").is_some(), "case-insensitive");
+    assert!(jwc::codes::lookup("E0299").is_none());
+    assert!(
+        jwc::codes::in_same_band("E0299").len() > 3,
+        "a mistyped code should still list its band"
     );
 }

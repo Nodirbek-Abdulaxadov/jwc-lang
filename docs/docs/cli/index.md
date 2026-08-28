@@ -33,6 +33,14 @@ jwc fmt .          # rewrite in canonical form
 jwc test           # run every `test` block
 ```
 
+```bash
+jwc fmt src tests           # several inputs
+jwc fmt src/app.jwc --stdout   # print the formatted text, rewrite nothing
+```
+
+`--stdout` takes one file: concatenating two formatted files produces
+something that is not a program, so it refuses rather than doing that.
+
 `jwc check` is the one to put in a pre-commit hook. It needs no database
 and no network: the schema is in the source, so the queries are checked
 against it without connecting to anything.
@@ -46,7 +54,12 @@ jwc serve .                    # the interpreter — the whole language
 jwc build .                    # a native binary at bin/debug/<name>
 jwc build . --release          # optimised
 jwc build . --emit-rust        # the generated Rust, without compiling it
+jwc build . --release --target x86_64-unknown-linux-musl
 ```
+
+`--target` cross-compiles to a Rust target triple; the toolchain has to
+have it already (`rustup target add <triple>`). The binary lands under
+`bin/<triple>/<profile>/` so several targets coexist.
 
 `jwc run` calls the program's `main()` and exits. Nothing listens, and a
 program that declares no `database` needs no `DATABASE_URL` — that is what
@@ -111,6 +124,7 @@ pipeline configured against `jwc serve` reads `jwc build` output unchanged.
 
 ```bash
 jwc migrate new <name> .       # diff against the last snapshot
+jwc migrate list .             # the files on disk, in order — offline
 jwc migrate up .               # apply what is pending
 jwc migrate status .           # applied, pending, drifted
 jwc migrate verify .           # constraints and indexes, by name
@@ -118,12 +132,18 @@ jwc migrate down .             # roll back, newest first
 jwc gen-sql .                  # the whole schema as DDL, to stdout
 ```
 
+`migrate list` says what is **written**; `migrate status` says what is
+**applied**. Only the second needs a database, which is why the first
+answers in a fresh clone with no `DATABASE_URL` — "what does this checkout
+contain" is a question you ask before you have a database.
+
 ## Seeing what the compiler sees
 
 ```bash
 jwc routes .                   # method, path, middleware chain
 jwc explain .                  # every query, with the SQL it lowers to
 jwc openapi . > openapi.json   # OpenAPI 3.1 for the route table
+jwc openapi . --compact        # one line, no indentation
 jwc ast .                      # the parsed AST — a debugging aid
 ```
 
@@ -151,9 +171,28 @@ network interface.
 
 ```bash
 jwc lint .                     # check, plus the advisory whole-program lints
-jwc lint . --deny-warnings     # for CI
-jwc lint . --constraints       # a where or orderby with no index behind it
+jwc lint . --constraints       # every constraint each route can reach
+jwc lint . --deny-warnings     # the CI shape
+jwc lint . --json              # one JSON array on stdout, for editors and CI
+jwc lint --list-codes          # every diagnostic the spec documents
+jwc lint --explain E0211       # one of them, with the spec file that defines it
 ```
+
+`--list-codes` and `--explain` read no sources, so they answer outside a
+project — which is the point: you look a code up when you have one in front
+of you, not when you have a checkout. The table is generated from
+`docs/spec/v1/*.md` at build time, so it cannot fall behind the spec.
+
+`--json` prints every diagnostic — warnings included — as one array:
+
+```json
+[{"file":"/p/a.jwc","line":2,"column":27,"end_line":2,"end_column":31,
+  "severity":"error","code":"E0211","message":"unknown name `totl`",
+  "note":"declare it with `let`, …","spec":"names.md §5.3"}]
+```
+
+The array is on stdout and the verdict is the exit code, so a CI step reads
+one and the shell reads the other.
 
 ## Packages
 
@@ -196,3 +235,20 @@ jwc lsp                        # the language server, LSP over stdio
 Diagnostics, go-to-definition, hover and completion, from the same
 front-end `jwc check` uses — so the editor and the build never disagree.
 See [Editor setup](../getting-started/editor-setup.md).
+
+## Which build is this?
+
+```bash
+jwc --version              # jwc 0.9.931
+jwc --version --verbose    # ...plus the triple, profile, commit and rustc
+```
+
+```
+jwc 0.9.931
+build target:  x86_64-unknown-linux-gnu
+build profile: release
+git commit:    629ee9d3eaa2
+rustc 1.94.1 (e408947bf 2026-03-25)
+```
+
+The long form is the first line of a useful bug report.

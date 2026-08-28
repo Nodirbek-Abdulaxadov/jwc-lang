@@ -9,10 +9,34 @@ use jwc::cmd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// `jwc --version --verbose`: the target triple, the profile, the commit
+/// and the rustc that built this binary.
+///
+/// `build.rs` has emitted all four on every build since it was written,
+/// shelling out to `rustc --version` and `git rev-parse` each time — and
+/// nothing has read them since the 0.9 CLI was deleted. "Which build is
+/// this?" is the first question of every bug report, so they are read
+/// again.
+///
+/// `concat!` builds one `&'static str` at compile time; no allocation and
+/// no runtime lookup.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nbuild target:  ",
+    env!("JWC_BUILD_TARGET"),
+    "\nbuild profile: ",
+    env!("JWC_BUILD_PROFILE"),
+    "\ngit commit:    ",
+    env!("JWC_GIT_HASH"),
+    "\n",
+    env!("JWC_RUSTC_VERSION"),
+);
+
 #[derive(Parser)]
 #[command(
     name = "jwc",
     version,
+    long_version = LONG_VERSION,
     about = "JWC — a backend language with first-class routes, tables and views",
     long_about = None
 )]
@@ -74,11 +98,17 @@ enum Command {
     },
     /// Rewrite sources in canonical form.
     Fmt {
+        /// Files or directories. Defaults to the current directory.
         #[arg(default_value = ".")]
-        path: PathBuf,
+        paths: Vec<PathBuf>,
         /// Report what would change and exit non-zero; write nothing.
         #[arg(long)]
         check: bool,
+        /// Write the formatted text to stdout instead of rewriting the
+        /// file. One input only — concatenating two formatted files would
+        /// produce something that is not a program.
+        #[arg(long)]
+        stdout: bool,
     },
     /// Emit the schema as Postgres DDL.
     ///
@@ -211,6 +241,14 @@ enum Command {
         /// `info.title`. Defaults to the `database` name.
         #[arg(long)]
         title: Option<String>,
+        /// Indented JSON. This is the default; the flag names it, so a
+        /// script that passes it keeps working.
+        #[arg(long)]
+        pretty: bool,
+        /// One line, no indentation. Smaller over the wire and what a
+        /// tool reads.
+        #[arg(long, conflicts_with = "pretty")]
+        compact: bool,
     },
     /// Serve a browsable API reference, rendered from the same document
     /// `jwc openapi` emits.
@@ -241,6 +279,18 @@ enum Command {
         /// Exit non-zero on any warning. The CI shape.
         #[arg(long)]
         deny_warnings: bool,
+        /// One JSON array of diagnostics on stdout instead of the
+        /// human-readable form. For editors and CI annotations.
+        #[arg(long)]
+        json: bool,
+        /// Print every diagnostic the spec documents and stop. Reads no
+        /// sources.
+        #[arg(long)]
+        list_codes: bool,
+        /// Explain one code — `jwc lint --explain E0211` — and stop. Reads
+        /// no sources.
+        #[arg(long, value_name = "CODE")]
+        explain: Option<String>,
     },
     /// Print the resolved route table: method, path, middleware chain.
     Routes {
@@ -261,6 +311,11 @@ enum Command {
         /// Write the generated Rust and stop, without invoking cargo.
         #[arg(long)]
         emit_rust: bool,
+        /// Cross-compile to a Rust target triple, e.g.
+        /// `x86_64-unknown-linux-musl`. The toolchain must already have
+        /// it: `rustup target add <triple>`.
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Run the program.
     /// Run a program's `main()` and exit.
@@ -376,7 +431,36 @@ enum MigrateCommand {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List the migration files on disk, in order. Offline: says what is
+    /// written, not what is applied — that is `migrate status`.
+    List {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
+
+/// Rust's runtime ignores `SIGPIPE` so that a write to a closed pipe
+/// surfaces as an `io::Error` — and `println!` panics on one. The visible
+/// effect is that `jwc lint --list-codes | head` prints a Rust backtrace
+/// instead of the eight lines that were asked for, which is the same
+/// defect as the one fixed for diagnostics: a routine outcome rendered as
+/// a compiler crash.
+///
+/// Restoring the default disposition makes the process exit the way every
+/// other command-line tool does when the reader goes away.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    // SAFETY: `signal` with `SIG_DFL` is async-signal-safe and this runs
+    // before any thread is spawned.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
 
 /// `Err` from a subcommand is almost always the *program's* fault, not the
 /// tool's: a type error, a missing migration, a database that refused a
@@ -386,6 +470,7 @@ enum MigrateCommand {
 /// frames under the diagnostic, which reads as a compiler crash. The
 /// answer is the message and its causes; the frames belong to panics.
 fn main() -> ExitCode {
+    restore_sigpipe();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -407,8 +492,10 @@ fn main() -> ExitCode {
 fn project_dir(c: &Command) -> Option<&std::path::Path> {
     use Command::*;
     match c {
+        // `fmt` takes several inputs; the first is where its `.env` would
+        // be, and formatting reads no configuration anyway.
+        Fmt { paths, .. } => paths.first().map(|p| p.as_path()),
         Check { path, .. }
-        | Fmt { path, .. }
         | GenSql { path, .. }
         | Explain { path, .. }
         | Publish { path, .. }
@@ -431,7 +518,8 @@ fn project_dir(c: &Command) -> Option<&std::path::Path> {
             | MigrateCommand::Up { path, .. }
             | MigrateCommand::Down { path, .. }
             | MigrateCommand::Status { path, .. }
-            | MigrateCommand::Verify { path, .. } => Some(path.as_path()),
+            | MigrateCommand::Verify { path, .. }
+            | MigrateCommand::List { path, .. } => Some(path.as_path()),
         },
         // `new` creates the project, so there is no `.env` to read yet;
         // `login` and `lsp` are not run inside one.
@@ -480,7 +568,11 @@ fn run() -> Result<()> {
             parse_only,
             deny_warnings,
         } => cmd::check(path, quiet, parse_only, deny_warnings),
-        Command::Fmt { path, check } => cmd::fmt(path, check),
+        Command::Fmt {
+            paths,
+            check,
+            stdout,
+        } => cmd::fmt(paths, check, stdout),
         Command::GenSql { path, explain, out } => cmd::gen_sql(path, explain, out),
         Command::Explain {
             path,
@@ -518,7 +610,13 @@ fn run() -> Result<()> {
             no_rollback,
         } => cmd::test(path, filter, no_rollback),
         Command::Lsp => jwc::lsp::run(),
-        Command::Openapi { path, out, title } => cmd::openapi(path, out, title),
+        Command::Openapi {
+            path,
+            out,
+            title,
+            pretty: _,
+            compact,
+        } => cmd::openapi(path, out, title, compact),
         Command::Swagger {
             path,
             port,
@@ -529,7 +627,10 @@ fn run() -> Result<()> {
             path,
             constraints,
             deny_warnings,
-        } => cmd::lint(path, constraints, deny_warnings),
+            json,
+            list_codes,
+            explain,
+        } => cmd::lint(path, constraints, deny_warnings, json, list_codes, explain),
         Command::Routes { path } => cmd::routes(path),
         Command::Run {
             path,
@@ -548,7 +649,8 @@ fn run() -> Result<()> {
             path,
             release,
             emit_rust,
-        } => cmd::build(path, release, emit_rust),
+            target,
+        } => cmd::build(path, release, emit_rust, target),
         Command::Migrate { command } => match command {
             MigrateCommand::New {
                 name,
@@ -561,6 +663,7 @@ fn run() -> Result<()> {
             MigrateCommand::Down { path, dir, count } => cmd::migrate_down(path, dir, count),
             MigrateCommand::Status { path, dir } => cmd::migrate_status(path, dir),
             MigrateCommand::Verify { path } => cmd::migrate_verify(path),
+            MigrateCommand::List { path, dir } => cmd::migrate_list(path, dir),
         },
         Command::Ast { path } => cmd::ast(path),
     }

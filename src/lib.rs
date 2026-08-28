@@ -21,6 +21,7 @@ pub mod apply;
 pub mod assets;
 pub mod ast;
 pub mod check;
+pub mod codes;
 pub mod cursor;
 pub mod db;
 pub mod ddl;
