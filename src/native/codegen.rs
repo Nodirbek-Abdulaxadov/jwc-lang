@@ -951,6 +951,11 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
 
     let mut source = String::new();
     source.push_str(super::PRELUDE_BASE);
+    // After the base prelude, never before: that file opens with the
+    // crate's `#![allow(...)]`, and an inner attribute has to be the first
+    // thing in the file. Order does not matter to the call — `main` reaches
+    // `load_dotenv` wherever it is defined in the module.
+    source.push_str(super::PRELUDE_DOTENV_CORE);
     source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);

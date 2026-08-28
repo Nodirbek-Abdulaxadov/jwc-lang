@@ -1334,3 +1334,226 @@ fn the_filesystem_is_out_of_reach_of_a_request() {
         "a script must be able to read a file"
     );
 }
+
+/// Every variable a generated `.env.example` names is one something reads.
+///
+/// `jwc new` writes this file and the first line tells the reader the
+/// runtime reads it. Until 0.9.927 nothing did — `DATABASE_URL` in a
+/// `.env` was inert, and a beginner who followed the file exactly got
+/// "DATABASE_URL is required" with no way forward. The loader is the fix;
+/// this is the guard, because the failure was never in the loader, it was
+/// in nobody checking that the file and the code agreed.
+///
+/// A name is legitimate when the runtime registry holds it, or when the
+/// template's own sources read it with `env("NAME")` — `CURSOR_SECRET` is
+/// the second kind: `server { cursor_secret = env("CURSOR_SECRET") }`.
+#[test]
+fn a_generated_env_example_names_nothing_that_is_never_read() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    let mut checked = 0;
+
+    for entry in std::fs::read_dir(&root).expect("templates/").flatten() {
+        let dir = entry.path();
+        let example = dir.join(".env.example");
+        let Ok(text) = std::fs::read_to_string(&example) else {
+            continue;
+        };
+        let template = dir.file_name().unwrap().to_string_lossy().to_string();
+
+        // Every `env("…")` the template's own sources read.
+        let mut read_by_source = std::collections::BTreeSet::new();
+        let mut stack = vec![dir.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("jwc") {
+                    let src = std::fs::read_to_string(&p).unwrap_or_default();
+                    let mut rest = src.as_str();
+                    while let Some(i) = rest.find("env(\"") {
+                        rest = &rest[i + 5..];
+                        if let Some(j) = rest.find('"') {
+                            read_by_source.insert(rest[..j].to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, _)) = line.split_once('=') else {
+                panic!("{template}/.env.example: `{line}` is not KEY=VALUE");
+            };
+            let name = name.trim();
+            let known_to_runtime = jwc::config::REGISTRY.iter().any(|v| v.name == name)
+                // Read by name outside the registry, which documents only
+                // the `JWC_*` surface.
+                || matches!(name, "DATABASE_URL" | "JWC_DATABASE_URL");
+            assert!(
+                known_to_runtime || read_by_source.contains(name),
+                "templates/{template}/.env.example names `{name}`, which is not in \
+                 config::REGISTRY and which no `.jwc` under templates/{template} \
+                 reads with env(\"{name}\") — the file would be telling a new user \
+                 to set something nothing looks at"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 8,
+        "expected several variables, checked {checked}"
+    );
+}
+
+/// A `.env` beside the sources reaches the code that asks for the database.
+///
+/// The unit tests cover the parser; this covers the wiring, which is where
+/// it was broken: the parser did not exist, so nothing downstream could
+/// have been wrong, and no test noticed the absence.
+#[test]
+fn a_dotenv_value_reaches_the_database_url_lookup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = "JWC_DATABASE_URL";
+    // The loader never overwrites, so the variable has to be clear first.
+    let restore = std::env::var_os(name);
+    // SAFETY: single-threaded test.
+    unsafe { std::env::remove_var(name) };
+    unsafe { std::env::remove_var("DATABASE_URL") };
+
+    std::fs::write(
+        dir.path().join(".env"),
+        "# a comment\nJWC_DATABASE_URL=postgres://u:p@h:5432/db\n",
+    )
+    .expect("write");
+
+    let report = jwc::config::load_dotenv(dir.path());
+    assert_eq!(
+        report.set,
+        vec![name.to_string()],
+        "{report:?}",
+        report = report.malformed
+    );
+
+    let url = jwc::engine::database_url_from_env().expect("the .env value");
+    assert_eq!(url, "postgres://u:p@h:5432/db");
+
+    // SAFETY: single-threaded test.
+    unsafe { std::env::remove_var(name) };
+    if let Some(v) = restore {
+        unsafe { std::env::set_var(name, v) };
+    }
+}
+
+/// The env-var registry and the code that reads the environment name the
+/// same variables.
+///
+/// `JWC_QUEUE_WORKERS` sat in the registry and in `config.md` while
+/// `jobs.rs` read `JWC_JOB_WORKERS`: the documented knob did nothing and
+/// the working knob was documented nowhere. Nothing could notice, because
+/// the registry was a hand-kept list beside the code rather than a
+/// statement about it.
+///
+/// Both directions, because each is a different lie: a registered name
+/// nothing reads is a setting that silently does nothing, and an unread
+/// name is a setting nobody can discover.
+#[test]
+fn every_env_var_the_code_reads_is_registered_and_the_other_way_round() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // Every `JWC_*` string literal under src/, minus the test-only ones.
+    let mut read_by_code: std::collections::BTreeSet<String> = Default::default();
+    let mut stack = vec![src];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext != "rs" && !p.to_string_lossy().ends_with(".rs.in") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            // The registry itself is the thing under test, so it does not
+            // get to vouch for its own entries.
+            if p.ends_with("config.rs") {
+                continue;
+            }
+            // Any `"JWC_…"` *string literal*. Not just `env::var("…")`:
+            // `mail.rs` passes the name to a helper and the CORS code
+            // builds its reads through one, and a scanner that only knew
+            // the direct form called both of them dead. A name inside a
+            // doc comment is not a literal and still does not count.
+            let mut rest = text.as_str();
+            while let Some(i) = rest.find("\"JWC_") {
+                rest = &rest[i + 1..];
+                if let Some(j) = rest.find('"') {
+                    let name = &rest[..j];
+                    if name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        read_by_code.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let registered: std::collections::BTreeSet<String> = jwc::config::REGISTRY
+        .iter()
+        .map(|v| v.name.to_string())
+        .collect();
+
+    // Marker strings codegen emits into the generated crate to name a
+    // query's shape. They share the prefix and nothing else — no one sets
+    // them, and the environment never sees them.
+    const NOT_A_KNOB: &[&str] = &["JWC_SHAPE_FIRST", "JWC_SHAPE_NONE", "JWC_SHAPE_ROWS"];
+
+    let unregistered: Vec<&String> = read_by_code
+        .iter()
+        .filter(|n| !registered.contains(*n) && !NOT_A_KNOB.contains(&n.as_str()))
+        .collect();
+    assert!(
+        unregistered.is_empty(),
+        "read by the code, absent from config::REGISTRY (so undiscoverable, \
+         and missing from the boot table): {unregistered:?}"
+    );
+
+    // A registered name nothing reads is a setting that silently does
+    // nothing. Thirteen of them were shipped that way, documented in
+    // config.md and printed in the boot table. Implementing thirteen
+    // features is not what this test is for, so the registry says so in
+    // the entry itself and the generated table carries it — and this
+    // assertion is what keeps the two in step: a dead knob must be
+    // labelled, and a labelled knob must still be dead.
+    for name in registered.difference(&read_by_code) {
+        let entry = jwc::config::REGISTRY
+            .iter()
+            .find(|v| v.name == name.as_str())
+            .expect("from the registry");
+        assert!(
+            entry.doc.starts_with("NOT IMPLEMENTED"),
+            "`{name}` is in config::REGISTRY, is printed in the boot table and \
+             documented in config.md, and nothing in src/ reads it. Either wire \
+             it up, or start its `doc` with `NOT IMPLEMENTED — ` so the table \
+             stops promising it."
+        );
+    }
+    for v in jwc::config::REGISTRY {
+        if v.doc.starts_with("NOT IMPLEMENTED") {
+            assert!(
+                !read_by_code.contains(v.name),
+                "`{}` is labelled NOT IMPLEMENTED but the code reads it — drop \
+                 the label",
+                v.name
+            );
+        }
+    }
+}

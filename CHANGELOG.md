@@ -3,6 +3,87 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.927] — the `.env` nothing read — 2026-08-28
+
+`jwc new` writes a `.env.example` whose first line says the runtime reads
+these. Nothing did. `DATABASE_URL` in a `.env` was inert, the error said
+`DATABASE_URL (or JWC_DATABASE_URL) is required for db access`, and the
+only way through was to export it by hand — which the documentation showed
+as `export DATABASE_URL=…`, a line that does not run on Windows.
+
+So the documented path from `jwc new` to a running program did not exist.
+Every test in this repository passed, because every one of them set the
+variable the way CI does.
+
+### It was worse than absent: it was half-present
+
+A binary from `jwc build` **did** read a `.env`, and **did** assemble
+`DATABASE_URL` from a `PG_*` block. `jwc serve` did neither. The same
+project therefore worked when compiled and failed when interpreted — the
+one thing this project promises never happens.
+
+The two parsers also disagreed. The native one dropped surrounding quotes
+on the floor (`DATABASE_URL="postgres://…"` kept its quotes), did not know
+a leading `export `, and skipped a malformed line in silence.
+
+### One parser, both backends
+
+`src/dotenv_core.rs.in` — the CLI includes it, codegen pastes the same text
+into the generated crate, the same arrangement `assets_core.rs.in` uses.
+Verified by running one `.env` with an `export` line, a double-quoted
+value, a single-quoted value and a broken line under `jwc run` and as a
+built binary: identical output, identical warning, three identical values.
+
+| | |
+|---|---|
+| `KEY=VALUE`, one per line | a leading `export ` is tolerated |
+| `#` at line start | a comment; `#` inside a value stays in the value |
+| `'…'` / `"…"` | stripped; nothing inside is interpreted |
+| `$OTHER` | **not** expanded — a password containing `$` is a password |
+| not `KEY=VALUE` | **warned on stderr**, not skipped in silence |
+| already in the environment | **wins**; the file never overwrites it |
+
+The last row is the one that makes it safe to ship: a container's
+configuration is untouched by a file lying in the directory.
+
+`jwc run app.jwc` names a file, so the `.env` is looked for beside it
+rather than inside it.
+
+### The guard, which is the actual fix
+
+Two mechanical checks, because the defect was never in the loader — the
+loader did not exist, and nothing could notice.
+
+**`a_generated_env_example_names_nothing_that_is_never_read`.** Every
+variable in a template's `.env.example` must be in `config::REGISTRY` or
+read by that template's own sources with `env("NAME")`. It failed on its
+first run: `templates/jobs` names `JWC_JOB_WORKERS`, which is real, and the
+registry had `JWC_QUEUE_WORKERS`, which nothing reads.
+
+**`every_env_var_the_code_reads_is_registered_and_the_other_way_round`.**
+Both directions. It found eight variables the code reads that no registry
+knew — `JWC_BIND_HOST`, `JWC_DEV`, `JWC_HTTP_TIMEOUT_SECS`, `JWC_LOG_SQL`,
+`JWC_OTLP_ENDPOINT`, `JWC_SERVICE_NAME`, `JWC_REGISTRY`,
+`JWC_REQUEST_BODY` — so they were absent from the boot table and from
+`config.md`, discoverable only by reading the source. `JWC_OTLP_ENDPOINT`
+is how tracing is turned on.
+
+And thirteen the other way: registered, printed in the boot table,
+documented in `config.md`, **read by nothing**. `JWC_SERVER_WORKERS`,
+`JWC_REQUEST_TIMEOUT`, `JWC_QUEUE_MAX_ATTEMPTS`, `JWC_REGISTRY_TOKEN` and
+nine more do not appear anywhere in `src/`. Implementing thirteen features
+is not this change; their `doc` now begins `NOT IMPLEMENTED — `, the
+generated table carries it, and the guard enforces the pairing in both
+directions — a dead knob must be labelled, and a labelled knob must still
+be dead.
+
+### Also
+
+`listening on http://0.0.0.0:8080` was the bind address printed verbatim.
+A browser will not open it on Windows and it resolves to nothing useful
+anywhere; the line exists to be clicked. It now reads
+`listening on http://localhost:8080  (bound to 0.0.0.0 — every interface)`.
+
 ## [0.9.926] — the Intel Mac binary v0.9.925 did not ship — 2026-08-26
 
 v0.9.925 put `x86_64-apple-darwin` on `macos-13`, the last Intel image.

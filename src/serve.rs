@@ -1669,7 +1669,21 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     let addr = std::net::SocketAddr::new(ip, port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let scheme = if acceptor.is_some() { "https" } else { "http" };
-    println!("listening on {scheme}://{addr}");
+    // The wildcard is what the socket is bound to, not an address anyone
+    // can open. Printing it verbatim gave `http://0.0.0.0:8080`, which a
+    // browser refuses on Windows and resolves to nothing useful anywhere;
+    // the line exists to be clicked, so it names a host that answers and
+    // says separately what the bind actually is.
+    let shown = match ip {
+        std::net::IpAddr::V4(v4) if v4.is_unspecified() => {
+            format!("{scheme}://localhost:{port}  (bound to 0.0.0.0 — every interface)")
+        }
+        std::net::IpAddr::V6(v6) if v6.is_unspecified() => {
+            format!("{scheme}://localhost:{port}  (bound to [::] — every interface)")
+        }
+        _ => format!("{scheme}://{addr}"),
+    };
+    println!("listening on {shown}");
 
     // After the bind, so a queue that cannot reach the database does not
     // stop the HTTP half from answering — and before the accept loop, so

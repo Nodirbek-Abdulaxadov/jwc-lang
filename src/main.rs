@@ -384,8 +384,76 @@ fn main() -> ExitCode {
     }
 }
 
+/// The project directory a command works in — where its `.env` is read
+/// from.
+///
+/// Exhaustive on purpose. A new subcommand has to say whether it has a
+/// project, so the loader cannot quietly skip one: that is how `.env`
+/// came to be documented in every generated project and read by nothing.
+fn project_dir(c: &Command) -> Option<&std::path::Path> {
+    use Command::*;
+    match c {
+        Check { path, .. }
+        | Fmt { path, .. }
+        | GenSql { path, .. }
+        | Explain { path, .. }
+        | Publish { path, .. }
+        | Add { path, .. }
+        | Install { path, .. }
+        | Update { path, .. }
+        | Remove { path, .. }
+        | Tree { path, .. }
+        | Test { path, .. }
+        | Openapi { path, .. }
+        | Swagger { path, .. }
+        | Lint { path, .. }
+        | Routes { path, .. }
+        | Build { path, .. }
+        | Run { path, .. }
+        | Serve { path, .. }
+        | Ast { path, .. } => Some(path.as_path()),
+        Migrate { command } => match command {
+            MigrateCommand::New { path, .. }
+            | MigrateCommand::Up { path, .. }
+            | MigrateCommand::Down { path, .. }
+            | MigrateCommand::Status { path, .. }
+            | MigrateCommand::Verify { path, .. } => Some(path.as_path()),
+        },
+        // `new` creates the project, so there is no `.env` to read yet;
+        // `login` and `lsp` are not run inside one.
+        New { .. } | Login { .. } | Lsp => None,
+    }
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // config.md §5 — the `.env` beside the sources, before anything reads
+    // the environment. It never overwrites a variable that is already set,
+    // so a deployment that exports its own configuration is untouched.
+    if let Some(target) = project_dir(&cli.command) {
+        // `jwc run app.jwc` names a file, not a directory — the `.env` is
+        // beside it. Looking inside `app.jwc/` found nothing and said
+        // nothing, which is the same silence the loader exists to end.
+        let dir = if target.is_file() {
+            target.parent().unwrap_or(std::path::Path::new("."))
+        } else {
+            target
+        };
+        let report = jwc::config::load_dotenv(dir);
+        for (line, text) in &report.malformed {
+            eprintln!(
+                "warning: {}:{line} is not `KEY=VALUE` and was ignored: {}",
+                report
+                    .path
+                    .as_deref()
+                    .unwrap_or(std::path::Path::new(".env"))
+                    .display(),
+                text.trim()
+            );
+        }
+    }
+
     match cli.command {
         Command::New {
             name,

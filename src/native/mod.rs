@@ -58,6 +58,7 @@ pub const PRELUDE_BASE: &str = include_str!("prelude/base.rs.in");
 /// The static-asset decisions, byte-for-byte the file `src/assets.rs`
 /// includes. Pasting the source rather than re-describing it is what keeps
 /// `jwc serve` and a native binary refusing the same URLs (routing.md §10.6).
+pub const PRELUDE_DOTENV_CORE: &str = include_str!("../dotenv_core.rs.in");
 pub const PRELUDE_ASSETS_CORE: &str = include_str!("../assets_core.rs.in");
 pub const PRELUDE_ASSETS: &str = include_str!("prelude/assets.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");

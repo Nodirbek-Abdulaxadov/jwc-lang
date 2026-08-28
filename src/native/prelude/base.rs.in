@@ -78,57 +78,43 @@ fn v_record(field_names: Arc<Vec<JwcStr>>, values: Vec<V>) -> V {
 /// Load a `.env` from the current working directory or the binary's directory.
 /// Mirrors `project::load_dotenv` so a standalone native binary picks up the
 /// same env layout the `jwc run`/`jwc serve` CLI does.
+// The `.env`, read the same way `jwc serve` reads it: the rules are
+// `dotenv_core.rs.in`, pasted into this crate by codegen, so a file that
+// works under the interpreter works here. Before 0.9.927 there were two
+// parsers — this one dropped surrounding quotes on the floor and did not
+// know `export ` — and the interpreter had none at all.
 fn jwc_load_dotenv() {
-    let candidates: Vec<std::path::PathBuf> = {
-        let mut v = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            v.push(cwd.join(".env"));
+    // The working directory first, then beside the binary and up a few
+    // levels: a deployed binary is often `bin/release/app` with the `.env`
+    // at the project root.
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut at = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..3 {
+            let Some(d) = at else { break };
+            dirs.push(d.clone());
+            at = d.parent().map(|p| p.to_path_buf());
         }
-        if let Ok(exe) = std::env::current_exe() {
-            // bin/release/app.exe → walk up to project root
-            if let Some(parent) = exe.parent() {
-                v.push(parent.join(".env"));
-                if let Some(g) = parent.parent() {
-                    v.push(g.join(".env"));
-                    if let Some(gg) = g.parent() {
-                        v.push(gg.join(".env"));
-                    }
-                }
+    }
+    for dir in dirs {
+        let report = load_dotenv(&dir);
+        if report.path.is_some() {
+            for (line, text) in &report.malformed {
+                eprintln!(
+                    "[jwc] warning: .env:{line} is not `KEY=VALUE` and was ignored: {}",
+                    text.trim()
+                );
             }
-        }
-        v
-    };
-    let mut content = None;
-    for c in &candidates {
-        if let Ok(s) = std::fs::read_to_string(c) {
-            content = Some(s);
             break;
         }
     }
-    let Some(content) = content else { return };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            let v = v.trim();
-            if std::env::var(k).is_err() {
-                std::env::set_var(k, v);
-            }
-        }
-    }
     if std::env::var("DATABASE_URL").is_err() {
-        if let (Ok(u), Ok(p), Ok(h), Ok(port), Ok(d)) = (
-            std::env::var("PG_USER"),
-            std::env::var("PG_PASSWORD"),
-            std::env::var("PG_HOST"),
-            std::env::var("PG_PORT"),
-            std::env::var("PG_DATABASE"),
-        ) {
-            std::env::set_var(
-                "DATABASE_URL",
-                format!("postgresql://{}:{}@{}:{}/{}", u, p, h, port, d),
-            );
+        if let Some(url) = database_url_from_pg_fields() {
+            // SAFETY: startup, before the runtime spawns anything.
+            unsafe { std::env::set_var("DATABASE_URL", url) };
         }
     }
 }

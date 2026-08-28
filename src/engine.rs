@@ -43,9 +43,24 @@ pub fn database_url_from_env() -> Result<String> {
 }
 
 fn read_database_url() -> Result<String> {
-    std::env::var("DATABASE_URL")
-        .or_else(|_| std::env::var("JWC_DATABASE_URL"))
-        .map_err(|_| anyhow!("DATABASE_URL (or JWC_DATABASE_URL) is required for db access"))
+    if let Ok(url) = std::env::var("DATABASE_URL") {
+        return Ok(url);
+    }
+    if let Ok(url) = std::env::var("JWC_DATABASE_URL") {
+        return Ok(url);
+    }
+    // The `PG_*` block, which the native backend has always assembled and
+    // this one never did: the same `.env` worked in a built binary and
+    // failed here (config.md §5.2).
+    if let Some(url) = crate::config::database_url_from_pg_fields() {
+        return Ok(url);
+    }
+    Err(anyhow!(
+        "DATABASE_URL (or JWC_DATABASE_URL, or the PG_HOST/PG_PORT/PG_USER/\
+         PG_PASSWORD/PG_DATABASE block) is required for db access.\n\
+         A `.env` beside the project is read at startup; an environment \
+         variable that is already set wins over it."
+    ))
 }
 
 /// Mask the `user:password` segment of a `postgres://` (or any
