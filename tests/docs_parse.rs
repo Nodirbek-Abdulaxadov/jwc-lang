@@ -186,3 +186,75 @@ fn the_spec_coverage_map_is_current() {
          and commit the result"
     );
 }
+
+/// The agent guide's examples do not merely parse — they **check**.
+///
+/// It is written to be pasted into a coding agent's context, so every
+/// program in it is something an agent will copy verbatim. Parsing is not
+/// enough: `as many` on a `select` parses (it reads as `as <class>`) and
+/// is `E0301`, and a query with `page` and no `server { cursor_secret }`
+/// parses and is `E1205`. Both were in the first draft of this page.
+///
+/// Each block is a whole program on its own, so it is checked on its own.
+#[test]
+fn every_agent_guide_example_type_checks() {
+    let root = repo_root();
+    let path = root.join("docs/docs/reference/ai-agent-guide.md");
+    let text = std::fs::read_to_string(&path).expect("ai-agent-guide.md");
+
+    let mut broken: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    for (line, body) in jwc_blocks(&text) {
+        if body.trim().is_empty() {
+            continue;
+        }
+        checked += 1;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), &body).expect("write");
+        let ws = match jwc::workspace::Workspace::load(dir.path()) {
+            Ok(ws) => ws,
+            Err(e) => {
+                broken.push(format!("ai-agent-guide.md:{line}: {e}"));
+                continue;
+            }
+        };
+        if ws.has_parse_errors() {
+            broken.push(format!(
+                "ai-agent-guide.md:{line}: {}",
+                ws.parse_errors().join(" ")
+            ));
+            continue;
+        }
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        let checked_out = jwc::check::check(&ws, &sym, &built.model);
+        let wired = jwc::wiring::wire(&ws, &sym);
+        let errors: Vec<String> = built
+            .diags
+            .iter()
+            .chain(&sym.diags)
+            .chain(&checked_out.diags)
+            .chain(&wired.diags)
+            .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+            .map(|(_, d)| format!("{}: {}", d.code, d.message))
+            .collect();
+        if !errors.is_empty() {
+            broken.push(format!("ai-agent-guide.md:{line}: {}", errors.join("; ")));
+        }
+    }
+
+    assert!(
+        checked >= 5,
+        "expected the guide's programs, saw {checked} — the block scanner \
+         or the page's fences changed"
+    );
+    assert!(
+        broken.is_empty(),
+        "{} example(s) in the agent guide do not check. An agent copies \
+         these verbatim:\n  {}",
+        broken.len(),
+        broken.join("\n  ")
+    );
+}
