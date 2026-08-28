@@ -746,7 +746,37 @@ fn jwc_panic_payload_to_string(p: Box<dyn std::any::Any + Send>) -> String {
 
 // --- arithmetic & coercion ---------------------------------------------------
 
+// `jwc_parse_iso_duration`, `jwc_shift_secs` and `jwc_ts_diff_secs` are
+// the same text `src/exec.rs` includes; `codegen` pastes them into this
+// crate as `PRELUDE_INTERVAL_CORE`. Not an `include!` here — this file is
+// pasted, so a path relative to it would not exist in the crate that gets
+// written. See `jwc_ts_shift` for why the pair is matched on shape.
+
+/// `timestamptz ± interval`, when that is what the pair is.
+///
+/// The interpreter has a `Value::Timestamptz` and a `Value::Interval` and
+/// matches on them. `V` has neither: a timestamp and an interval are both
+/// `V::Str`, so the pair is recognised by shape — the left must parse as
+/// RFC 3339 and the right must be a whole ISO 8601 duration. Both are
+/// exact readings, not guesses: `jwc_parse_iso_duration` rejects anything
+/// with a digit no unit claimed, so `ts + "P30"` is still two strings.
+///
+/// `None` means "not that pair", and the caller falls through to the
+/// behaviour it had.
+fn jwc_ts_shift(a: &V, b: &V, sign: i64) -> Option<V> {
+    let (V::Str(t), V::Str(i)) = (a, b) else {
+        return None;
+    };
+    let secs = jwc_parse_iso_duration(i)?;
+    Some(v_str(jwc_shift_secs(t, sign * secs)?))
+}
+
 fn jwc_add(a: V, b: V) -> V {
+    // Before the string arm, which would otherwise glue `PT720H` onto the
+    // end of a timestamp and call it an answer.
+    if let Some(v) = jwc_ts_shift(&a, &b, 1) {
+        return v;
+    }
     match (a, b) {
         (V::Int(x), V::Int(y)) => V::Int(x + y),
         (V::Float(x), V::Float(y)) => V::Float(x + y),
@@ -759,6 +789,16 @@ fn jwc_add(a: V, b: V) -> V {
 }
 
 fn jwc_sub(a: V, b: V) -> V {
+    if let Some(v) = jwc_ts_shift(&a, &b, -1) {
+        return v;
+    }
+    // `timestamptz - timestamptz -> interval`. Second, so a pair that is
+    // a timestamp and a duration is read as the shift it is.
+    if let (V::Str(x), V::Str(y)) = (&a, &b) {
+        if let Some(secs) = jwc_ts_diff_secs(x, y) {
+            return v_str(format!("PT{}S", secs));
+        }
+    }
     match (a, b) {
         (V::Int(x), V::Int(y)) => V::Int(x - y),
         (V::Float(x), V::Float(y)) => V::Float(x - y),

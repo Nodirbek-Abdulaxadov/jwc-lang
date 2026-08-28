@@ -1811,13 +1811,24 @@ fn display_relative(p: &Path) -> String {
 /// codegen is written against the 1.0 AST, because the old one named
 /// declarations this language does not have.
 pub fn build(path: PathBuf, release: bool, emit_rust: bool, target: Option<String>) -> Result<()> {
+    // `jwc build` must not ship what `jwc check` refuses.
+    //
+    // It did. This function tested `has_parse_errors` and nothing else, so
+    // every diagnostic past the parser — every type error, every unknown
+    // name, every unresolved import — was skipped on the one path that
+    // produces the production binary. A program that `jwc serve` refuses to
+    // boot and `jwc check` exits 1 on built clean and ran, because codegen
+    // does not need the types to be right in order to emit something that
+    // happens to compile.
+    //
+    // Calling `check` rather than repeating its passes is the point: a
+    // second list of analyses here is a second list to forget to extend,
+    // which is how the first one ended up being just the parser.
+    check(path.clone(), true, false, false)?;
+
     let ws = crate::workspace::Workspace::load(&path)?;
     if ws.files.is_empty() {
         bail!("no .jwc files under {}", path.display());
-    }
-    if ws.has_parse_errors() {
-        eprint!("{}", ws.parse_errors().join(""));
-        bail!("source did not parse");
     }
 
     let app = ws

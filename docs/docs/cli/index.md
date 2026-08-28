@@ -48,7 +48,7 @@ against it without connecting to anything.
 ## Running
 
 ```bash
-jwc run app.jwc                # call main() and exit — no listener
+jwc run app.jwc              # call main() and exit
 jwc run --dev                # ...with debug.dump printing
 jwc serve                    # the interpreter — the whole language
 jwc build                    # a native binary at bin/debug/<name>
@@ -71,6 +71,15 @@ program with no `main` is `jwc serve`'s job, and `run` says so.
 `jwc build` produces one statically-linkable binary with no runtime
 dependency on the compiler. It needs a Rust toolchain, because that is
 what it hands the generated crate to.
+
+It runs `jwc check` first and builds nothing if that fails. Until 0.9.935
+it did not: it tested only that the source parsed, so a program with type
+errors — one `jwc check` exits 1 on — compiled to a release binary and ran.
+
+The binary listens when the program is a server: it declares a `route` or
+a `socket`, or its `main` calls `serve(port)`. A program with neither is a
+console program, and the binary returns when `main` does rather than
+binding a port behind it.
 
 The two backends are held to the same answers: the release check builds
 each real application both ways, runs the same requests against both, and
@@ -245,12 +254,12 @@ See [Editor setup](../getting-started/editor-setup.md).
 ## Which build is this?
 
 ```bash
-jwc --version              # jwc 0.9.934
+jwc --version              # jwc 0.9.935
 jwc --version --verbose    # ...plus the triple, profile, commit and rustc
 ```
 
 ```
-jwc 0.9.934
+jwc 0.9.935
 build target:  x86_64-unknown-linux-gnu
 build profile: release
 git commit:    629ee9d3eaa2

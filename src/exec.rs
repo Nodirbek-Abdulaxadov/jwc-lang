@@ -1227,7 +1227,10 @@ fn add(a: &Value, b: &Value) -> Option<Value> {
         return Some(Value::Text(format!("{x}{y}")));
     }
     if let (Value::Timestamptz(t), Value::Interval(i)) = (a, b) {
-        return Some(Value::Timestamptz(shift(t, i)?));
+        return Some(Value::Timestamptz(jwc_shift_secs(
+            t,
+            jwc_parse_iso_duration(i)?,
+        )?));
     }
     numeric_op(BinOp::Add, a, b)
 }
@@ -1242,21 +1245,16 @@ fn add(a: &Value, b: &Value) -> Option<Value> {
 /// "the last day", which is the more common direction of the two.
 fn sub(a: &Value, b: &Value) -> Option<Value> {
     if let (Value::Timestamptz(t), Value::Interval(i)) = (a, b) {
-        // Negated in seconds, not in the text: `parse_iso_duration` reads
-        // unsigned digits after a leading `P`, so neither `-PT24H` nor
-        // `PT-24H` would come back.
-        return Some(Value::Timestamptz(shift_secs(t, -parse_iso_duration(i)?)?));
+        // Negated in seconds, not in the text: `jwc_parse_iso_duration`
+        // reads unsigned digits after a leading `P`, so neither `-PT24H`
+        // nor `PT-24H` would come back.
+        return Some(Value::Timestamptz(jwc_shift_secs(
+            t,
+            -jwc_parse_iso_duration(i)?,
+        )?));
     }
     if let (Value::Timestamptz(x), Value::Timestamptz(y)) = (a, b) {
-        use chrono::{DateTime, Utc};
-        let l: DateTime<Utc> = x.parse().ok()?;
-        let r: DateTime<Utc> = y.parse().ok()?;
-        // Seconds, because that is the resolution `parse_iso_duration`
-        // reads back and the only one the pair can agree on.
-        return Some(Value::Interval(format!(
-            "PT{}S",
-            l.signed_duration_since(r).num_seconds()
-        )));
+        return Some(Value::Interval(format!("PT{}S", jwc_ts_diff_secs(x, y)?)));
     }
     numeric_op(BinOp::Sub, a, b)
 }
@@ -1306,58 +1304,6 @@ fn format_decimal(v: f64) -> String {
     } else {
         s
     }
-}
-
-/// `timestamptz + interval`. Intervals are carried in ISO 8601 form, which
-/// is also their wire form (types.md §2.1).
-fn shift(ts: &str, interval: &str) -> Option<String> {
-    shift_secs(ts, parse_iso_duration(interval)?)
-}
-
-fn shift_secs(ts: &str, secs: i64) -> Option<String> {
-    use chrono::{DateTime, Duration, Utc};
-    let base: DateTime<Utc> = ts.parse().ok()?;
-    let out = base.checked_add_signed(Duration::seconds(secs))?;
-    Some(out.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-}
-
-fn parse_iso_duration(s: &str) -> Option<i64> {
-    // `P30D`, `PT10S`, `PT2H`, `PT5M`
-    let s = s.strip_prefix('P')?;
-    let (date, time) = match s.split_once('T') {
-        Some((d, t)) => (d, t),
-        None => (s, ""),
-    };
-    let mut total = 0i64;
-    let mut num = String::new();
-    for c in date.chars() {
-        if c.is_ascii_digit() {
-            num.push(c);
-        } else {
-            let n: i64 = num.parse().ok()?;
-            num.clear();
-            total += match c {
-                'D' => n * 86_400,
-                'W' => n * 604_800,
-                _ => return None,
-            };
-        }
-    }
-    for c in time.chars() {
-        if c.is_ascii_digit() {
-            num.push(c);
-        } else {
-            let n: i64 = num.parse().ok()?;
-            num.clear();
-            total += match c {
-                'H' => n * 3_600,
-                'M' => n * 60,
-                'S' => n,
-                _ => return None,
-            };
-        }
-    }
-    Some(total)
 }
 
 // ---------------------------------------------------------------- queries
@@ -1816,3 +1762,9 @@ fn last_tuple(keys: &str) -> Option<Vec<Option<String>>> {
             .collect(),
     )
 }
+
+// The three timestamp overloads live in a file the native backend pastes
+// into the crate it generates, so `jwc serve` and `jwc build` do the same
+// arithmetic rather than two readings of types.md §12 (one of which was
+// blank).
+include!("interval_core.rs.in");

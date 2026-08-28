@@ -64,6 +64,11 @@ pub const PRELUDE_ASSETS_CORE: &str = include_str!("../assets_core.rs.in");
 /// includes, so `--request-logging` and `JWC_REQUEST_LOG=1` produce
 /// byte-identical lines from either backend.
 pub const PRELUDE_ACCESS_LOG_CORE: &str = include_str!("../access_log_core.rs.in");
+/// `timestamptz ± interval` and `timestamptz - timestamptz` — the same
+/// text `src/exec.rs` includes, so the two backends do not disagree about
+/// what "the last 24 hours" is. Before this the native `+` concatenated
+/// the two strings and `-` panicked (types.md §12).
+pub const PRELUDE_INTERVAL_CORE: &str = include_str!("../interval_core.rs.in");
 pub const PRELUDE_ASSETS: &str = include_str!("prelude/assets.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");
 pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");

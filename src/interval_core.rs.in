@@ -1,0 +1,144 @@
+// Timestamp/interval arithmetic — types.md §12.1–§12.2.
+//
+// `include!`d by `src/exec.rs` and pasted verbatim into the crate
+// `jwc build` generates, so the two backends run the same text rather
+// than two readings of the same paragraph.
+//
+// It exists because they did not. The interpreter carried all three
+// overloads; the native prelude carried none of them, and its `+` fell
+// into the string arm — so `date.now() + date.days(30)` compiled, passed
+// every check, and answered the eleven characters `PT720H` glued onto
+// the end of a timestamp. That value then went into a bound parameter,
+// which is how a silent wrong answer becomes a Postgres error somewhere
+// else entirely. `-` at least panicked.
+//
+// Everything here is `&str` in, `Option` out: no `Value`, no `V`, so
+// there is nothing type-specific for the two sides to disagree about.
+// The dispatch stays on each side, because the two runtimes represent a
+// timestamptz differently — one has a variant for it, the other has a
+// string and a shape.
+
+/// Seconds in an ISO 8601 duration, or `None` when it is not one.
+///
+/// `P30D`, `PT10S`, `PT2H`, `PT5M`, `P1W`. Only the units `date.*`
+/// produces, plus weeks.
+///
+/// **Every digit must be consumed by a unit.** `"P30"` is not a duration
+/// — it is a `P`, and then a number that never said what of. Letting it
+/// through returned `Some(0)`, which on the native side is the
+/// difference between "this is not an interval, concatenate the strings"
+/// and "this is an interval of no time at all", and the second one
+/// quietly drops the operand.
+fn jwc_parse_iso_duration(s: &str) -> Option<i64> {
+    let s = s.strip_prefix('P')?;
+    let (date, time) = match s.split_once('T') {
+        Some((d, t)) => (d, t),
+        None => (s, ""),
+    };
+    if date.is_empty() && time.is_empty() {
+        return None;
+    }
+    let mut total: i64 = 0;
+    let mut num = String::new();
+    let mut any = false;
+    for (part, is_time) in [(date, false), (time, true)] {
+        for c in part.chars() {
+            if c.is_ascii_digit() {
+                num.push(c);
+                continue;
+            }
+            let n: i64 = num.parse().ok()?;
+            num.clear();
+            let mult = match (c, is_time) {
+                ('D', false) => 86_400,
+                ('W', false) => 604_800,
+                ('H', true) => 3_600,
+                ('M', true) => 60,
+                ('S', true) => 1,
+                _ => return None,
+            };
+            total = total.checked_add(n.checked_mul(mult)?)?;
+            any = true;
+        }
+        // Digits with no unit after them: not a duration.
+        if !num.is_empty() {
+            return None;
+        }
+    }
+    any.then_some(total)
+}
+
+/// An RFC 3339 timestamp moved by `secs`, rendered the way `date.now()`
+/// renders one so a shifted timestamp and a fresh one are the same shape.
+fn jwc_shift_secs(ts: &str, secs: i64) -> Option<String> {
+    let base: chrono::DateTime<chrono::Utc> = ts.parse().ok()?;
+    let out = base.checked_add_signed(chrono::Duration::try_seconds(secs)?)?;
+    Some(out.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+}
+
+/// `timestamptz - timestamptz`, in seconds.
+///
+/// Seconds because that is the resolution `jwc_parse_iso_duration` reads
+/// back, and the only one the pair can agree on.
+fn jwc_ts_diff_secs(later: &str, earlier: &str) -> Option<i64> {
+    let l: chrono::DateTime<chrono::Utc> = later.parse().ok()?;
+    let r: chrono::DateTime<chrono::Utc> = earlier.parse().ok()?;
+    Some(l.signed_duration_since(r).num_seconds())
+}
+
+#[cfg(test)]
+mod interval_core_tests {
+    use super::*;
+
+    #[test]
+    fn every_unit_date_can_produce_reads_back() {
+        assert_eq!(jwc_parse_iso_duration("P30D"), Some(2_592_000));
+        assert_eq!(jwc_parse_iso_duration("P1W"), Some(604_800));
+        assert_eq!(jwc_parse_iso_duration("PT24H"), Some(86_400));
+        assert_eq!(jwc_parse_iso_duration("PT5M"), Some(300));
+        assert_eq!(jwc_parse_iso_duration("PT10S"), Some(10));
+        assert_eq!(jwc_parse_iso_duration("P1DT2H30M"), Some(95_400));
+        assert_eq!(jwc_parse_iso_duration("PT0S"), Some(0));
+    }
+
+    /// The native backend decides "is this pair a timestamp and an
+    /// interval" by asking this function, so anything it accepts loosely
+    /// is a string a program meant to concatenate and got arithmetic on
+    /// instead.
+    #[test]
+    fn a_string_that_is_not_a_duration_is_refused() {
+        for s in [
+            "", "P", "PT", "P30", "PT24", "hello", "30D", "PT24X", "P1M", "PT1D", "-PT24H",
+            "PT-24H", "P 1 D",
+        ] {
+            assert_eq!(jwc_parse_iso_duration(s), None, "{s} is not a duration");
+        }
+    }
+
+    /// `P1M` above is the reason: ISO 8601 months are `M` in the date
+    /// half and minutes are `M` in the time half, and a month is not a
+    /// number of seconds. `date.*` never emits one, so it is refused
+    /// rather than guessed at.
+    #[test]
+    fn a_month_is_not_a_number_of_seconds() {
+        assert_eq!(jwc_parse_iso_duration("P1M"), None);
+        assert_eq!(jwc_parse_iso_duration("PT1M"), Some(60));
+    }
+
+    #[test]
+    fn a_shift_round_trips_and_keeps_the_shape_date_now_uses() {
+        let t = "2026-08-28T15:44:14.922709Z";
+        let back = jwc_shift_secs(t, -86_400).expect("shift");
+        assert_eq!(back, "2026-08-27T15:44:14.922709Z");
+        assert_eq!(jwc_shift_secs(&back, 86_400).as_deref(), Some(t));
+        assert_eq!(jwc_ts_diff_secs(t, &back), Some(86_400));
+        assert_eq!(jwc_ts_diff_secs(&back, t), Some(-86_400));
+    }
+
+    #[test]
+    fn something_that_is_not_a_timestamp_shifts_to_nothing() {
+        assert_eq!(jwc_shift_secs("PT24H", 1), None);
+        assert_eq!(jwc_shift_secs("hello", 1), None);
+        assert_eq!(jwc_ts_diff_secs("hello", "2026-08-28T15:44:14Z"), None);
+    }
+}

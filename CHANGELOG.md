@@ -3,6 +3,109 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.935] — `jwc build` did not run the checker — 2026-08-28
+
+Rewriting `jwc-shortener` against the 1.0 language, three more.
+
+**`jwc build` shipped what `jwc check` refuses.** It tested
+`has_parse_errors` and went straight to codegen, so every diagnostic past
+the parser — every type error, every unknown name, every unresolved import
+— was skipped on the one command that produces the artefact you deploy. A
+five-error program built a release binary and ran it. Codegen does not need
+the types to be right in order to emit something that happens to compile,
+which is exactly why it cannot be the thing that decides. `build` now calls
+`check` first, rather than carrying a second list of analyses to forget to
+extend.
+
+**`timestamptz + interval` was string concatenation on the native
+backend.** types.md §12 gives `+` and `-` three overloads on timestamps.
+The interpreter had all three; the native prelude had none. `-` panicked,
+which is at least loud. `+` fell into `jwc_add`'s string arm and answered
+`"2026-08-28T15:44:14ZPT720H"` — a wrong value, not reported, that only
+becomes an error later and somewhere else. The arithmetic now lives in
+`src/interval_core.rs.in`, included by `src/exec.rs` and pasted into the
+generated crate, so there is one implementation instead of two. Reading a
+duration also got stricter on both sides: `"P30"` is a `P` and then a
+number that never said what of, and it used to come back as zero seconds.
+
+**A native console binary bound a port.** The generated `main` called the
+listener unconditionally with a port defaulting to 8080, so `jwc build` on
+the `console.writeln` program from the docs produced a binary that printed
+its output and then sat on a socket — or, on a machine already using 8080,
+printed its output and then a bind error. A binary is a server when the
+program declares routes or sockets, or when `serve(...)` ran; the port
+static now starts at a sentinel so "never called" is expressible at all.
+`jwc run` on the same source has returned when `main` does since 0.9.934.
+
+The shortener rewrite is what walked into all three, and into
+[a routing tension](docs/spec/v1/routing.md) that is *not* fixed here:
+§10.2 answers a request from a `route` before a `static` mount, and a
+`{slot}` route is a route — so `/{code}` swallows `/robots.txt` and
+`/favicon.ico` from the mount beside `index.html`, while §4.3 one page
+earlier says the router picks the candidate with the most literal segments.
+Changing it changes which handler answers an existing program's request, so
+it is written up and left for a decision rather than taken.
+
+## [0.9.934] — three defects rewriting jwc-shortener walked into — 2026-08-28
+
+**A vendored package collided with itself.** A namespace under
+`jwc_packages/` was counted as local, so importing the package you had
+vendored reported `E0203` against your own copy.
+
+**An unknown call qualifier was not reported.** `foo.bar()` where `foo` is
+neither a service, a package nor a builtin namespace type-checked and then
+failed at runtime. Now `E0204`, naming the three things `foo` could have
+been.
+
+**`jwc run` did not serve.** A `main` that calls `serve(...)` ran `main`
+and exited. `serve::declared_port` answers `Option<u16>` now — `None` when
+`main` never asked to listen — and `run` serves when it did.
+
+## [0.9.933] — `o.x = v` answered a different key order from each backend — 2026-08-28
+
+Assigning to a field that does not exist yet appended it to a
+`V::Object`, which serialises sorted, while the interpreter kept a
+`Value::Record`, which serialises in order. The same program answered two
+different JSON documents depending on the backend. `jwc_set_field_path`
+keeps the record and appends.
+
+Both fix attempts compiled and passed all 484 tests before either worked,
+because nothing in CI compiles the preludes. The `native-build` job added
+in 0.9.932 is what closes that.
+
+## [0.9.932] — the rest of what the cutover took, and three things that shipped broken — 2026-08-28
+
+**The else branch of a null test narrows** (types.md §6.6 rule 3):
+`if (x == null) { … } else { x.field }` no longer reports `E0320` on the
+branch where `x` cannot be null.
+
+**`jwc build` could not compile its own `api` template.** Nothing in CI
+had ever compiled a generated crate. The `native-build` job now builds the
+compiler and then runs `jwc new` + `jwc build --release` for all four
+templates, boots one, and curls `/healthz`.
+
+**The AI agent guide, rewritten for 1.0** — every example in it now
+type-checks, pinned by a test — plus a formatting page, and
+`cargo update -p chacha20` for the yanked 0.10.1.
+
+## [0.9.931] — the lost CLI flags, and the settings that did nothing — 2026-08-28
+
+`--list-codes` and `--explain <code>`, backed by a catalogue `build.rs`
+generates from `docs/spec/v1/*.md` — the spec is the definition, so there
+is no second copy to drift. `jwc migrate list`, `jwc fmt --stdout`,
+`jwc openapi --compact`, `jwc lint --json`, and the boot fence and config
+table `serve` prints.
+
+**Twelve settings did nothing.** Three were wired (`JWC_LOG_FORMAT`,
+`JWC_SERVER_WORKERS`, `JWC_PRINT_CONFIG`, `JWC_HOME`), nine removed. The
+registry and the code now check each other in both directions, so a row
+that names nothing and a variable nobody documents are both test failures.
+
+**`jwt.verify` crashed native builds on a bad token**, and
+`jwt.verify_jwks` shipped, compiled, and could not be called from the
+language — the fourth instance of that shape. Both backends now answer the
+same `Record?`.
+
 ## [0.9.930] — four names for code that was already here — 2026-08-28
 
 ```jwc

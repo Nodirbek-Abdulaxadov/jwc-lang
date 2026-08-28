@@ -495,8 +495,12 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
 
     out.push_str("\n// ── generated from the program ──\n");
     out.push_str(
+        // 0 means `serve(...)` has not run. The generated `main` turns
+        // that into "this program is not a server" — see the listener
+        // block below — so a console program built with `jwc build` exits
+        // when `main` returns instead of binding :8080 behind it.
         "\nstatic JWC_SERVE_PORT: ::std::sync::atomic::AtomicU16 = \
-         ::std::sync::atomic::AtomicU16::new(8080);\n",
+         ::std::sync::atomic::AtomicU16::new(0);\n",
     );
     emit_constraint_messages(&mut out, &built.model);
     emit_cursor_secret(&mut out, ws);
@@ -808,6 +812,29 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // `main` runs, and `serve(port)` inside it records where to listen —
     // the same order the interpreter uses, so a program that hardcodes its
     // port gets that port on both backends.
+    // Whether this binary is a server at all.
+    //
+    // It used to be "always": `main` ran, and then the listener bound
+    // :8080 whatever the program was. A console program built with
+    // `jwc build` printed its output and then sat on a socket, or — on a
+    // box already running something — printed its output and then a bind
+    // error, which is a strange thing for `jwc run`'s own example to do.
+    //
+    // Two ways to be one, matching what the interpreter concludes:
+    // `serve(port)` ran, or the program declares routes or sockets. A
+    // program with neither said what it was.
+    let is_server = !routes.is_empty() || !sockets.is_empty();
+    let listen = if is_server {
+        // Routes with no `serve(...)` still listen, on the documented
+        // default (config.md §3.1).
+        "    let __port = JWC_SERVE_PORT.load(::std::sync::atomic::Ordering::SeqCst);\n\
+         \x20   jwc_serve_impl(if __port == 0 { 8080 } else { __port }).await;\n"
+    } else {
+        "    let __port = JWC_SERVE_PORT.load(::std::sync::atomic::Ordering::SeqCst);\n\
+         \x20   if __port != 0 {\n\
+         \x20       jwc_serve_impl(__port).await;\n\
+         \x20   }\n"
+    };
     let user_main = if has_main {
         "    if let Err(t) = jwc_user_main().await {\n\
          \x20       eprintln!(\"main() raised {}: {}\", t.error, t.message);\n\
@@ -823,7 +850,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
          {user_main}\
          {db_boot}\
          {jobs_boot}\
-         \x20   jwc_serve_impl(JWC_SERVE_PORT.load(::std::sync::atomic::Ordering::SeqCst)).await;\n}}\n"
+         {listen}}}\n"
     ));
 
     // The three operational endpoints exist in every binary; the halves
@@ -965,6 +992,10 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // binary can be asked to log is not something the program's source
     // decides.
     source.push_str(super::PRELUDE_ACCESS_LOG_CORE);
+    // Unconditional, like the access log: `jwc_add` and `jwc_sub` are in
+    // the base prelude and call into it, so it is not something a program
+    // opts into by using a date.
+    source.push_str(super::PRELUDE_INTERVAL_CORE);
     source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);

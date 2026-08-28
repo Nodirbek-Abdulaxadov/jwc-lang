@@ -2657,3 +2657,176 @@ async fn a_main_that_serves_is_distinguishable_from_one_that_does_not() {
     let cmd = include_str!("../src/cmd/mod.rs");
     assert!(cmd.contains("if let Some(port) = crate::serve::declared_port(&program).await?"));
 }
+
+/// types.md §12 gives `+` and `-` three overloads on timestamps. The
+/// interpreter had all three. The native prelude had none — and the
+/// interesting half is not the two that panicked, it is the one that did
+/// not: `jwc_add`'s string arm caught `timestamptz + interval` and
+/// answered `"2026-08-28T15:44:14ZPT720H"`, a value that is wrong, is not
+/// reported, and only becomes an error when Postgres refuses to bind it.
+///
+/// A shortener asking for "the last 24 hours" is what walked into it, so
+/// the arithmetic now lives in one file both backends are handed, and
+/// this pins the wiring: same bytes, no second copy, and — the part that
+/// actually bit — the timestamp arm is consulted *before* the string arm.
+#[test]
+fn both_backends_do_the_same_timestamp_arithmetic() {
+    let core = include_str!("../src/interval_core.rs.in");
+    for f in [
+        "fn jwc_parse_iso_duration(",
+        "fn jwc_shift_secs(",
+        "fn jwc_ts_diff_secs(",
+    ] {
+        assert!(core.contains(f), "the shared file must hold `{f}`");
+    }
+    assert!(
+        jwc::native::PRELUDE_INTERVAL_CORE == core,
+        "the generated crate must be handed the same bytes the CLI includes"
+    );
+
+    let exec = include_str!("../src/exec.rs");
+    assert!(exec.contains(r#"include!("interval_core.rs.in")"#));
+    assert!(
+        !exec.contains("fn parse_iso_duration("),
+        "exec.rs must not keep its own copy of the duration reader"
+    );
+
+    // Every overload the type table gives, on both sides.
+    let base = include_str!("../src/native/prelude/base.rs.in");
+    assert!(
+        base.contains("fn jwc_ts_shift("),
+        "the native prelude must implement `timestamptz ± interval`"
+    );
+    assert!(
+        base.contains("jwc_ts_diff_secs(x, y)"),
+        "the native prelude must implement `timestamptz - timestamptz`"
+    );
+    for (name, hay) in [("interpreter", exec), ("native", base)] {
+        assert!(
+            hay.contains("jwc_shift_secs") && hay.contains("jwc_ts_diff_secs"),
+            "the {name} backend must reach the shared arithmetic"
+        );
+    }
+
+    // The ordering bug, pinned: in `jwc_add` the timestamp arm has to come
+    // first, or the string arm swallows the pair and concatenates it.
+    let add = base
+        .split_once("fn jwc_add(")
+        .expect("jwc_add")
+        .1
+        .split_once("\n}\n")
+        .expect("body")
+        .0;
+    let shift = add
+        .find("jwc_ts_shift")
+        .expect("jwc_add must try the shift");
+    let concat = add.find("V::Str(x), b").expect("jwc_add has a string arm");
+    assert!(
+        shift < concat,
+        "`timestamptz + interval` must be decided before the string arm"
+    );
+
+    // And codegen must actually paste it, unconditionally: `jwc_add` and
+    // `jwc_sub` are in the base prelude and call into it, so a program
+    // that uses no date at all still needs the definitions present.
+    let codegen = include_str!("../src/native/codegen.rs");
+    assert!(
+        codegen.contains("source.push_str(super::PRELUDE_INTERVAL_CORE);"),
+        "codegen must paste the shared arithmetic"
+    );
+}
+
+/// `jwc build` is the command that produces the artefact you deploy, and
+/// it was the one command that did not run the checker.
+///
+/// It tested `has_parse_errors` and went straight to codegen, so a program
+/// with five type errors — one `jwc check` exits 1 on and `jwc serve`
+/// refuses to boot — compiled to a release binary and ran. Codegen does
+/// not need the types to be right to emit something that happens to
+/// build, which is exactly why it cannot be the thing that decides.
+#[test]
+fn build_does_not_ship_what_check_refuses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("jwcproj.json"),
+        r#"{ "name": "bad", "type": "app", "version": "0.1.0" }"#,
+    )
+    .expect("manifest");
+    // E0320: `date.parse` answers `timestamptz?`, and arithmetic on a
+    // nullable is refused. Parses cleanly, so only the checker catches it.
+    std::fs::write(
+        dir.path().join("app.jwc"),
+        "namespace bad;\n\
+         function main() {\n\
+         \x20   let t = date.parse(\"2026-01-01T00:00:00Z\");\n\
+         \x20   console.writeln(string.of(t - date.hours(24)));\n\
+         }\n",
+    )
+    .expect("write");
+
+    // `--emit-rust` stops before cargo, so this costs a parse and not a
+    // release build — and it is the same gate, because the gate is the
+    // first thing `build` does.
+    let err = jwc::cmd::build(dir.path().to_path_buf(), false, true, None)
+        .expect_err("a program with a type error must not build");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("error"),
+        "the failure should be the diagnostic count, got: {msg}"
+    );
+
+    // And the same program, with the nullable handled, does build.
+    std::fs::write(
+        dir.path().join("app.jwc"),
+        "namespace bad;\n\
+         function main() {\n\
+         \x20   let t = date.parse(\"2026-01-01T00:00:00Z\") ?? date.now();\n\
+         \x20   console.writeln(string.of(t - date.hours(24)));\n\
+         }\n",
+    )
+    .expect("write");
+    jwc::cmd::build(dir.path().to_path_buf(), false, true, None).expect("the fixed program builds");
+}
+
+/// A native binary is a server when the program is one, and not otherwise.
+///
+/// The generated `main` used to call the listener unconditionally, with
+/// `JWC_SERVE_PORT` defaulting to 8080 — so `jwc build` on a console
+/// program produced a binary that printed its output and then bound a
+/// socket, or, on a box already using the port, printed its output and
+/// then a bind error. `jwc run` on the same source returns when `main`
+/// does; the two now agree.
+#[test]
+fn a_native_console_program_does_not_bind_a_port() {
+    fn emit(src: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        jwc::native::codegen_for_test(&ws).expect("codegen")
+    }
+
+    let console = emit("namespace n;\nfunction main() { console.writeln(\"hi\"); }\n");
+    assert!(
+        console.contains("if __port != 0 {"),
+        "a program with no routes must only listen when `serve(...)` ran"
+    );
+
+    // `serve(...)` in `main` still listens, on the port the program named.
+    let server = emit("namespace n;\nfunction main() { serve(9000); }\n");
+    assert!(server.contains("JWC_SERVE_PORT.store("));
+    assert!(server.contains("if __port != 0 {"));
+
+    // Routes with no `main` listen on the documented default.
+    let routed =
+        emit("namespace n;\nroutes \"/x\" { route GET \"\" { return json({ ok: true }); } }\n");
+    assert!(
+        routed.contains("if __port == 0 { 8080 } else { __port }"),
+        "a program with routes is a server whether or not it calls `serve`"
+    );
+
+    // The sentinel is what makes \"never called\" expressible at all.
+    assert!(
+        console.contains("AtomicU16::new(0)"),
+        "the port must start at the sentinel, not at 8080"
+    );
+}
