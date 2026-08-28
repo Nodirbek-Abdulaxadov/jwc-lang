@@ -490,8 +490,8 @@ named `healthz` does not answer the probe. Two mounts on one prefix is
 `E0742`: which directory answered would otherwise depend on the order the
 files happened to load in.
 
-Rows 3 and 4 are the same rule as §4.2, extended to mounts. §4.3 ranks
-candidates by **literal segments**: a file under a mount is all-literal and
+Rows 3 and 4 are the same rule as §4.2, extended to mounts: §4.2 ranks
+candidates by **literal segments**, a file under a mount is all-literal and
 a `{slot}` route has none, so the mount is the more specific candidate.
 Until 0.9.942 every route came ahead of every mount, which meant a
 `/{code}` catch-all took `/robots.txt` and `/favicon.ico` away from the
