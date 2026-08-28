@@ -613,20 +613,10 @@ fn jwc_jwt_verify_rs256(token: &str, n_b64: &str, e_b64: &str) -> Result<String,
 }
 
 async fn jwc_b_jwt_verify_jwks(token: V, jwks_url: V) -> V {
-    let token = match token {
-        V::Str(s) => s.to_string(),
-        other => panic!(
-            "jwt_verify_jwks(token, jwks_url): token must be a string, got {:?}",
-            other
-        ),
+    let (Some(token), Some(jwks_url)) = (jwc_str_view(&token), jwc_str_view(&jwks_url)) else {
+        return V::Null;
     };
-    let jwks_url = match jwks_url {
-        V::Str(s) => s.to_string(),
-        other => panic!(
-            "jwt_verify_jwks(token, jwks_url): jwks_url must be a string, got {:?}",
-            other
-        ),
-    };
+    let (token, jwks_url) = (token.to_string(), jwks_url.to_string());
     // Same outbound gate as every other HTTP built-in. Note that an
     // identity provider on a private network needs
     // `JWC_HTTP_BLOCK_PRIVATE` left off, or the JWKS fetch is refused.
@@ -634,33 +624,77 @@ async fn jwc_b_jwt_verify_jwks(token: V, jwks_url: V) -> V {
         panic!("{}", msg);
     }
 
-    let kid = match jwc_jwt_header(&token) {
-        Ok(h) => h.get("kid").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        Err(e) => panic!("{}", e),
+    // A malformed header is a bad token, not a fault: null, like every
+    // other way `jwt.verify` can fail.
+    let Ok(header) = jwc_jwt_header(&token) else {
+        return V::Null;
     };
+    let kid = header
+        .get("kid")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // A JWKS that cannot be fetched is *not* a bad token — it is the
+    // identity provider being unreachable, and answering null would turn
+    // an outage into "everyone's credentials are wrong". That one stays a
+    // fault, and `exec_call.rs` raises it the same way.
     let key = match jwc_jwks_key_for(&jwks_url, kid.as_deref()).await {
         Ok(k) => k,
         Err(e) => panic!("{}", e),
     };
-    match jwc_jwt_verify_rs256(&token, &key.n, &key.e) {
-        Ok(payload) => v_str(payload),
-        Err(e) => panic!("{}", e),
-    }
+    let Ok(payload) = jwc_jwt_verify_rs256(&token, &key.n, &key.e) else {
+        return V::Null;
+    };
+    jwc_jwt_claims_record(&payload)
 }
 
+/// `jwt.verify(token, secret)` — `Record{sub, exp, iat}?`, null on an
+/// invalid or expired token (builtins.md §6).
+///
+/// This used to return the raw payload **string** and `panic!` on a bad
+/// signature, which is two ways of disagreeing with `jwc serve` at once:
+/// the checker types the call as `Record?`, and the interpreter answers
+/// null where this crashed. In a native build a request carrying a
+/// tampered token — ordinary traffic on any public endpoint — took the
+/// unwind path instead of the 401 the auth template's middleware writes.
 fn jwc_b_jwt_verify(token: V, secret: V) -> V {
-    let token = match token {
-        V::Str(s) => s.to_string(),
-        other => panic!("jwt_verify(token, secret): token must be a string, got {:?}", other),
+    let (Some(token), Some(secret)) = (jwc_str_view(&token), jwc_str_view(&secret)) else {
+        return V::Null;
     };
-    let secret = match secret {
-        V::Str(s) => s.to_string(),
-        other => panic!("jwt_verify(token, secret): secret must be a string, got {:?}", other),
+    let Ok(payload) = jwc_jwt_verify_hs256(token, secret) else {
+        return V::Null;
     };
-    match jwc_jwt_verify_hs256(&token, &secret) {
-        Ok(payload) => v_str(payload),
-        Err(e) => panic!("{}", e),
+    jwc_jwt_claims_record(&payload)
+}
+
+/// The `{sub, exp, iat}` record both verifying built-ins answer with, and
+/// the expiry check that turns a still-signed but stale token into null.
+///
+/// `serve.rs` does this in `exec_call.rs`; keeping it in one function here
+/// is what stops HS256 and RS256 drifting on the shape.
+fn jwc_jwt_claims_record(payload: &str) -> V {
+    let Ok(j) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return V::Null;
+    };
+    let exp = j.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
+    // A token that verifies its signature and has passed `exp` fails the
+    // same way one with a bad signature does: null, not an error.
+    if exp != 0 && exp < chrono::Utc::now().timestamp() {
+        return V::Null;
     }
+    let names: Arc<Vec<JwcStr>> = Arc::new(vec!["sub".into(), "exp".into(), "iat".into()]);
+    v_record(
+        names,
+        vec![
+            v_str(
+                j.get("sub")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+            V::Int(exp),
+            V::Int(j.get("iat").and_then(|v| v.as_i64()).unwrap_or(0)),
+        ],
+    )
 }
 
 // ── the 1.0 crypto built-ins ────────────────────────────────────────────────

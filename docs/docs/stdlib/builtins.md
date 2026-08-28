@@ -87,7 +87,8 @@ Most of the time the answer is that the aggregate belongs in the query.
 | `crypto.token(n)` | `n` CSPRNG bytes, base64url |
 | `crypto.constant_time_eq(a, b)` | |
 | `jwt.sign(claims, secret, ttl_minutes)` | HS256 |
-| `jwt.verify(token, secret)` | `Record?`; strips an optional `Bearer ` |
+| `jwt.verify(token, secret)` | HS256. `Record?`; strips an optional `Bearer ` |
+| `jwt.verify_jwks(token, jwks_url)` | RS256 against an OIDC provider's key set. Same `Record?` |
 
 `jwt.sign` fixes the claim set: `sub` from the record, `iat` now, `exp`
 `ttl_minutes` later. A caller cannot set `exp` itself, which is what
@@ -99,6 +100,22 @@ one-liner:
 ```jwc no-compile
 let claims = jwt.verify(token, secret) or throw Unauthorized("token yaroqsiz");
 ```
+
+`jwt.verify_jwks` answers the same record, against an OIDC provider's
+published key set instead of a secret you hold — so a service that starts
+with its own tokens and later moves behind an identity provider changes
+one line, not the code that reads the claims:
+
+```jwc no-compile
+let claims = jwt.verify_jwks(token, env("JWKS_URL"))
+    or throw Unauthorized("token yaroqsiz");
+```
+
+It picks the signing key by the token header's `kid` and caches the key
+set. A token that does not verify is null; a `jwks_url` that cannot be
+reached **raises** — the provider being down is not the same fact as the
+token being wrong, and reporting it as one turns an outage into a
+site-wide "your credentials are invalid".
 
 ## The request
 

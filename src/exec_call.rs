@@ -92,6 +92,14 @@ impl<'a> Vm<'a> {
             return self.http_call(name, &vals).await;
         }
 
+        // `jwt.verify_jwks` fetches the provider's key set — a network
+        // round trip on the first call and on a rotation, cached in
+        // between. The synchronous `builtin` table below cannot await, so
+        // it is dispatched here beside the other three.
+        if path == "jwt.verify_jwks" {
+            return self.jwt_verify_jwks(&vals).await;
+        }
+
         // Yields the runtime rather than blocking a worker thread, which
         // is the whole difference between a script pausing and a server
         // stalling. The checker refuses it inside a request anyway.
@@ -176,6 +184,48 @@ impl<'a> Vm<'a> {
     /// refusing it, DNS failing, the timeout expiring. `BadRequest` so it
     /// is catchable, because a remote service being unreachable is not the
     /// program being wrong.
+    /// `jwt.verify_jwks(token, jwks_url)` — RS256 against an OIDC
+    /// provider's published key set.
+    ///
+    /// `src/jwks.rs` — 395 lines with a cache, a negative cache and a
+    /// refetch-storm guard — has shipped in every binary since it was
+    /// written and no program could call it: the checker had no arm, so
+    /// `jwt.verify_jwks(...)` was `E0204`, "unknown function". The native
+    /// prelude carries the whole thing a second time, equally unreachable.
+    ///
+    /// The answer is `jwt.verify`'s: `Record{sub, exp, iat}?`, null for a
+    /// token that does not verify. A **fetch** failure is not null — an
+    /// unreachable identity provider is an outage, and answering null
+    /// would report it as "every credential is wrong".
+    async fn jwt_verify_jwks(&mut self, a: &[Value]) -> Exec<Value> {
+        let token = text(a.first().unwrap_or(&Value::Null));
+        let url = text(a.get(1).unwrap_or(&Value::Null));
+
+        // Same outbound gate as `http.*`: a JWKS URL is a URL the program
+        // supplies, and an identity provider on a private network needs
+        // the block left off.
+        if let Err(e) = crate::http::check_url(&url) {
+            return Err(fault(e.to_string()));
+        }
+
+        // The `kid` selects the key and comes from the *unverified*
+        // header. `jwks::rsa_key_for` is what keeps an attacker-chosen
+        // `kid` from turning into an outbound fetch per request.
+        let kid = crate::jwt::split_token(&token)
+            .ok()
+            .and_then(|t| t.kid().map(str::to_string));
+
+        let key = match crate::jwks::rsa_key_for(&url, kid.as_deref()).await {
+            Ok(k) => k,
+            Err(e) => return Err(fault(format!("jwt.verify_jwks: {e}"))),
+        };
+
+        Ok(match crate::jwt::verify_rs256(&token, &key.n, &key.e) {
+            Ok(payload) => jwt_claims_record(&payload),
+            Err(_) => Value::Null,
+        })
+    }
+
     async fn http_call(&mut self, name: &str, a: &[Value]) -> Exec<Value> {
         let s = |i: usize| text(a.get(i).unwrap_or(&Value::Null));
         let (method, body) = match name {
@@ -735,37 +785,7 @@ impl<'a> Vm<'a> {
                 )
             }
             "jwt.verify" => match crate::jwt::verify_hs256(&s(0), &s(1)) {
-                Ok(payload) => match serde_json::from_str::<serde_json::Value>(&payload) {
-                    Ok(j) => {
-                        let exp = j.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
-                        // An expired token verifies its signature and still
-                        // fails: `jwt.verify` returns null for both
-                        // (builtins.md §6).
-                        if exp != 0 && exp < chrono::Utc::now().timestamp() {
-                            Value::Null
-                        } else {
-                            Value::Record(vec![
-                                (
-                                    "sub".into(),
-                                    Value::Text(
-                                        j.get("sub")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or_default()
-                                            .to_string(),
-                                    ),
-                                ),
-                                ("exp".into(), Value::Bigint(exp)),
-                                (
-                                    "iat".into(),
-                                    Value::Bigint(
-                                        j.get("iat").and_then(|v| v.as_i64()).unwrap_or(0),
-                                    ),
-                                ),
-                            ])
-                        }
-                    }
-                    Err(_) => Value::Null,
-                },
+                Ok(payload) => jwt_claims_record(&payload),
                 Err(_) => Value::Null,
             },
 
@@ -854,6 +874,39 @@ impl<'a> Vm<'a> {
             _ => return Ok(None),
         }))
     }
+}
+
+/// `{sub, exp, iat}?` from a verified JWT payload — the answer both
+/// `jwt.verify` (HS256) and `jwt.verify_jwks` (RS256) give, so a caller
+/// can move from a shared secret to an identity provider without
+/// rewriting the code that reads the claims.
+///
+/// A token whose signature checks out and whose `exp` has passed is null,
+/// not an error: builtins.md §6 makes invalid and expired the same answer.
+fn jwt_claims_record(payload: &str) -> Value {
+    let Ok(j) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Value::Null;
+    };
+    let exp = j.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
+    if exp != 0 && exp < chrono::Utc::now().timestamp() {
+        return Value::Null;
+    }
+    Value::Record(vec![
+        (
+            "sub".into(),
+            Value::Text(
+                j.get("sub")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
+        ),
+        ("exp".into(), Value::Bigint(exp)),
+        (
+            "iat".into(),
+            Value::Bigint(j.get("iat").and_then(|v| v.as_i64()).unwrap_or(0)),
+        ),
+    ])
 }
 
 fn items(v: &Value) -> Vec<Value> {

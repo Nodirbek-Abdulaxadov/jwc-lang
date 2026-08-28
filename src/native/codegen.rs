@@ -151,6 +151,7 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "hash.hmac_sha256" => "jwc_b_hmac_sha256",
         "jwt.sign" => "jwc_b_v1_jwt_sign",
         "jwt.verify" => "jwc_b_jwt_verify",
+        "jwt.verify_jwks" => "jwc_b_jwt_verify_jwks",
 
         // The request — builtins.md §7.
         "request.header" => "jwc_b_header",

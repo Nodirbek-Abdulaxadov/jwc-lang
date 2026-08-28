@@ -139,7 +139,24 @@ Anything these do not cover is written as `for` plus an accumulator.
 | `crypto.token(n)` | `text` | `n` bytes from the CSPRNG, base64url |
 | `crypto.constant_time_eq(a, b)` | `boolean` | no early exit on the first differing byte |
 | `jwt.sign(claims, secret, ttl_minutes)` | `text` | HS256 |
-| `jwt.verify(token, secret)` | `Record{sub: text, exp: bigint, iat: bigint}?` | null on invalid/expired |
+| `jwt.verify(token, secret)` | `Record{sub: text, exp: bigint, iat: bigint}?` | HS256; null on invalid/expired |
+| `jwt.verify_jwks(token, jwks_url)` | `Record{sub: text, exp: bigint, iat: bigint}?` | RS256 against a published key set; null on invalid/expired |
+
+**`jwt.verify_jwks` answers the same record as `jwt.verify`**, so moving
+from a shared secret to an identity provider does not change the code that
+reads the claims. It selects the key by the token header's `kid`, fetches
+`jwks_url` and caches the result.
+
+The `kid` comes from the token header, which is *unauthenticated*. An
+implementation that refetched on every unknown `kid` would be a
+denial-of-service amplifier pointed at the identity provider, so the fetch
+is rate-limited and unknown `kid`s are negatively cached.
+
+A token that does not verify is null. An **unreachable** `jwks_url` is
+not — that is the provider being down, and answering null would report an
+outage as "every credential is wrong". It raises, and the outbound URL
+gate (§7c) applies: a provider on a private network needs
+`JWC_HTTP_BLOCK_PRIVATE` left off.
 
 **`hash.sha256` exists to make hashed-token lookup possible (#38).** Three
 sample tables declare `token_hash varchar(255) private, unique` and then need

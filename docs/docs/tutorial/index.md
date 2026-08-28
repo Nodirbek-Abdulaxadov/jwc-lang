@@ -169,9 +169,16 @@ jwc migrate up .
 jwc serve .
 ```
 
+On Windows:
+
+```powershell
+$env:DATABASE_URL = "postgres://localhost/linkbin"
+$env:CURSOR_SECRET = -join ((1..32) | ForEach-Object { "{0:x2}" -f (Get-Random -Max 256) })
+```
+
 ```
 4 routes
-listening on http://0.0.0.0:8080
+listening on http://localhost:8080  (bound to 0.0.0.0 — every interface)
 ```
 
 ## Try it

@@ -2677,7 +2677,12 @@ impl<'a> Checker<'a> {
                 arity(self, 3);
                 Ty::text()
             }
-            "jwt.verify" => {
+            // Same answer for both: `jwt.verify` is HS256 against a shared
+            // secret, `jwt.verify_jwks` is RS256 against an OIDC provider's
+            // published keys. One shape, so a caller can switch from a
+            // symmetric secret to a provider without rewriting the code
+            // that reads the claims.
+            "jwt.verify" | "jwt.verify_jwks" => {
                 arity(self, 2);
                 Ty::Record(vec![
                     ("sub".into(), Ty::text()),

@@ -164,6 +164,36 @@ the rest is how a program connects to the wrong database.
 Both backends run the same parser, pasted into the generated crate at
 build time, so a file that works under `jwc serve` works in the binary.
 
+### Setting one without a file
+
+A `.env` is the convenient form, not the only one. The environment always
+wins over the file, so these override it:
+
+```bash
+# bash / zsh — Linux, macOS, WSL, Git Bash
+export DATABASE_URL=postgres://postgres@localhost:5432/app
+jwc serve .
+
+# or for one command only
+DATABASE_URL=postgres://postgres@localhost:5432/app jwc serve .
+```
+
+```powershell
+# PowerShell — Windows
+$env:DATABASE_URL = "postgres://postgres@localhost:5432/app"
+jwc serve .
+```
+
+```bat
+:: cmd.exe — Windows
+set DATABASE_URL=postgres://postgres@localhost:5432/app
+jwc serve .
+```
+
+`export` is a **bash** word, not a JWC one. PowerShell rejects it, which
+is why the `.env` file tolerates the prefix but never requires it — a file
+written without `export` is read identically by both shells.
+
 ## The three operational endpoints
 
 Every JWC program answers these, at these names, without declaring them:

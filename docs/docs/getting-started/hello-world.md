@@ -100,6 +100,15 @@ jwc migrate up .           # applies it
 jwc migrate verify .       # every constraint and index is where it should be
 ```
 
+On Windows, `export` is not a command — PowerShell sets it like this:
+
+```powershell
+$env:DATABASE_URL = "postgres://jwc:jwc@localhost:5432/app"
+```
+
+Or put the line in a `.env` beside the project, without `export`, and
+every `jwc` command reads it.
+
 Read `migrations/0001_init.up.sql` before applying it. It is ordinary DDL,
 generated so you can review it — not a black box.
 
@@ -108,7 +117,7 @@ generated so you can review it — not a black box.
 ```bash
 jwc serve .
 # 2 routes
-# listening on http://0.0.0.0:8080
+# listening on http://localhost:8080  (bound to 0.0.0.0 — every interface)
 ```
 
 ```bash

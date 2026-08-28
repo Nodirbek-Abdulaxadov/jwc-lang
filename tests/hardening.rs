@@ -2009,3 +2009,175 @@ fn the_catalogue_answers_for_every_documented_code() {
         "a mistyped code should still list its band"
     );
 }
+
+/// `jwt.verify` disagreed with itself across the two backends in two ways
+/// at once, and both were reachable from the auth template's middleware.
+///
+/// The checker types the call `Record{sub, exp, iat}?`. `jwc serve`
+/// answered that. A `jwc build` binary returned the raw payload **string**
+/// on success and `panic!`ed on a bad signature — so a request carrying a
+/// tampered token, which is ordinary traffic on any public endpoint, took
+/// the unwind path instead of the 401 the middleware writes.
+#[test]
+fn both_backends_answer_jwt_verify_with_the_same_shape() {
+    let prelude = jwc::native::PRELUDE_CRYPTO;
+
+    // The success path builds the same three-field record the interpreter
+    // does, rather than handing back the payload text.
+    assert!(
+        prelude.contains("fn jwc_jwt_claims_record(payload: &str) -> V {"),
+        "the native side must build the record"
+    );
+    assert!(
+        prelude.contains("jwc_jwt_claims_record(&payload)"),
+        "and jwt_verify must go through it"
+    );
+
+    // The failure path is null on both, not a panic on one.
+    let verify = prelude
+        .split("fn jwc_b_jwt_verify(")
+        .nth(1)
+        .expect("jwc_b_jwt_verify is in the crypto prelude");
+    let body = verify.split("\nfn ").next().unwrap_or(verify);
+    assert!(
+        !body.contains("panic!"),
+        "a token that does not verify is null on `jwc serve`; it must not \
+         crash a native build:\n{body}"
+    );
+
+    // And the interpreter has one function for it, so HS256 and the JWKS
+    // path cannot drift on the shape.
+    let exec = include_str!("../src/exec_call.rs");
+    assert_eq!(
+        exec.matches("fn jwt_claims_record(").count(),
+        1,
+        "one definition, two callers"
+    );
+    assert_eq!(exec.matches("jwt_claims_record(&payload)").count(), 2);
+}
+
+/// `src/jwks.rs` is 395 lines with a key cache, a negative cache and a
+/// refetch-storm guard; the native prelude carries the whole thing again.
+/// Both shipped in every binary and no program could call either — the
+/// checker had no arm, so `jwt.verify_jwks(...)` was `E0204`.
+#[test]
+fn jwt_verify_jwks_is_reachable_from_the_language() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         service S {\n\
+         \x20   function who(token: text) {\n\
+         \x20       let claims = jwt.verify_jwks(token, \"https://idp.example/jwks\")\n\
+         \x20           or throw Unauthorized(\"token yaroqsiz\");\n\
+         \x20       return claims.sub;\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // The native backend has to map the name too, or a program that
+    // checks would be refused at build time.
+    let codegen = include_str!("../src/native/codegen.rs");
+    assert!(codegen.contains(r#""jwt.verify_jwks" => "jwc_b_jwt_verify_jwks""#));
+    // It awaits, so it has to be in the async list — a mapping without
+    // that emits a call with no `.await` and the generated crate does not
+    // compile.
+    assert!(codegen.contains(r#""jwc_b_jwt_verify_jwks","#));
+}
+
+/// Every version this documentation tells a reader to install is the one
+/// this tree *is*.
+///
+/// The install page and the deployment Dockerfile both pinned `0.9.914`
+/// — seventeen releases behind — so following either got a binary from
+/// before `.env` was read at all, before `static` mounts, and before
+/// `text()` came back. A version in a copy-pasteable command is an
+/// instruction, and a stale one sends people to a build whose bugs are
+/// already fixed here.
+#[test]
+fn the_documented_install_version_is_this_version() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let want = env!("CARGO_PKG_VERSION");
+
+    // `vX.Y.Z` placeholders are fine — they are naming a shape, not an
+    // instruction. Concrete `0.9.NNN` in a command is what goes stale.
+    let re_pages = [
+        "docs/docs/getting-started/install.md",
+        "docs/docs/deployment/index.md",
+    ];
+    for page in re_pages {
+        let text = std::fs::read_to_string(root.join(page)).unwrap_or_else(|_| panic!("{page}"));
+        for line in text.lines() {
+            let t = line.trim();
+            // Only lines that pin a version for a download.
+            if !t.contains("JWC_VERSION") {
+                continue;
+            }
+            // The line either names this version, or names none at all
+            // (`JWC_VERSION` used as a variable, or a `vX.Y.Z` shape).
+            let names_a_version = t.contains("0.9.") || t.contains("v0.9.");
+            if !names_a_version {
+                continue;
+            }
+            assert!(
+                t.contains(want),
+                "{page} pins a version that is not {want}:\n  {t}"
+            );
+        }
+    }
+}
+
+/// What the docs show the server printing is what it prints.
+///
+/// The banner said `http://0.0.0.0:8080` until 0.9.926 — an address a
+/// browser refuses on Windows and that resolves to nothing useful
+/// anywhere. It was fixed in both backends; two pages went on quoting the
+/// old line, so a reader on Windows was still being shown a URL that
+/// cannot be clicked as if it were the expected output.
+#[test]
+fn the_documented_boot_banner_is_the_one_that_is_printed() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut pages = Vec::new();
+    let mut stack = vec![root.join("docs/docs")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                pages.push(p);
+            }
+        }
+    }
+    assert!(!pages.is_empty());
+
+    let mut stale = Vec::new();
+    for p in &pages {
+        let text = std::fs::read_to_string(p).unwrap_or_default();
+        for (n, line) in text.lines().enumerate() {
+            if line.contains("listening on")
+                && line.contains("0.0.0.0")
+                && !line.contains("bound to")
+            {
+                stale.push(format!("{}:{}", p.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "these quote the pre-0.9.926 banner: {stale:?}"
+    );
+}
