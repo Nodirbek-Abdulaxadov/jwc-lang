@@ -1576,6 +1576,16 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
                         rust_str_literal(&i.name)
                     ));
                 }
+                crate::ast::AssignTarget::Field { base, path, .. } => {
+                    let keys: Vec<String> =
+                        path.iter().map(|p| rust_str_literal(&p.name)).collect();
+                    out.push_str(&format!(
+                        "{pad}jwc_set_field_path(&mut {}, &[{}], {v});\n",
+                        local(&base.name),
+                        keys.join(", ")
+                    ));
+                    ctx.used.insert("jwc_set_field_path".to_string());
+                }
             }
         }
         Stmt::If {
@@ -1742,6 +1752,13 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
         // names.md §5.3 — outside a query clause the sigil is optional, so
         // a bare name that is bound is the local it names.
         ExprKind::Name(i) if ctx.is_local(&i.name) => format!("{}.clone()", local(&i.name)),
+        // A `const` is a constant expression, so it is emitted where it is
+        // used rather than as a global: no initialisation order to get
+        // wrong, and the same value the interpreter computes.
+        ExprKind::Name(i) if ctx.symbols.consts.contains_key(&i.name) => {
+            let c = ctx.symbols.consts[&i.name].clone();
+            emit_expr(&c.value, ctx)?
+        }
         ExprKind::Name(i) => bail!(
             "native build cannot resolve the bare name `{}` outside a query",
             i.name

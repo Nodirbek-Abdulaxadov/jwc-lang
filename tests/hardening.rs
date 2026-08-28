@@ -1651,3 +1651,61 @@ fn a_while_condition_that_is_not_boolean_is_reported() {
             .collect::<Vec<_>>()
     );
 }
+
+/// `const` and `x.field = v`, the other two 0.9 had and the 1.0 front-end
+/// never grew.
+#[test]
+fn a_const_and_a_field_assignment_check_and_are_refused_when_wrong() {
+    fn diags(src: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        let mut out: Vec<String> = ws
+            .files
+            .iter()
+            .flat_map(|f| f.diags.iter().map(|d| d.code.to_string()))
+            .collect();
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        out.extend(sym.diags.iter().map(|(_, d)| d.code.to_string()));
+        out.extend(
+            jwc::check::check(&ws, &sym, &built.model)
+                .diags
+                .iter()
+                .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+                .map(|(_, d)| d.code.to_string()),
+        );
+        out
+    }
+
+    // The shapes that work.
+    let ok = diags(
+        "namespace n;\n\
+         const PI = 3;\n\
+         const TAU = PI * 2;\n\
+         const NAMES = [\"a\", \"b\"];\n\
+         function main() {\n\
+         \x20   let o = { \"a\": 1, \"b\": { \"c\": 2 } };\n\
+         \x20   o.a = TAU;\n\
+         \x20   o.b.c = 20;\n\
+         \x20   o.fresh = PI;\n\
+         }\n",
+    );
+    assert!(ok.is_empty(), "{ok:?}");
+
+    // A `const` that reaches outside itself.
+    assert!(
+        diags("namespace n;\nconst BAD = env(\"X\");\n").contains(&"E0216".to_string()),
+        "a call in a const should be E0216"
+    );
+    // Two with one name.
+    assert!(
+        diags("namespace n;\nconst A = 1;\nconst A = 2;\n").contains(&"E0215".to_string()),
+        "a duplicate const should be E0215"
+    );
+    // Writing a field of something that was never declared.
+    assert!(
+        diags("namespace n;\nfunction main() { nope.a = 1; }\n").contains(&"E0211".to_string()),
+        "an unknown base should be E0211"
+    );
+}

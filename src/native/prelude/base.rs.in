@@ -881,6 +881,38 @@ fn jwc_has_field(v: &V, k: &str) -> bool {
     }
 }
 
+/// Write `value` at `path` inside `v`, creating objects on the way.
+///
+/// The interpreter's `set_field_path`, in this crate's value shape. A
+/// `Record` is converted to an `Object` on write: `Record` is the compact
+/// form a projection produces and its field list is fixed, so adding a key
+/// to one has to change its representation — `x.a = 1` on a shape without
+/// an `a` adds one, which is what the interpreter does and what 0.9 did.
+fn jwc_set_field_path(v: &mut V, path: &[&str], value: V) {
+    let Some((head, rest)) = path.split_first() else {
+        *v = value;
+        return;
+    };
+    if let V::Record { field_names, values } = v {
+        let mut m: JwcObj = JwcObj::default();
+        for (i, name) in field_names.iter().enumerate() {
+            m.insert(name.as_ref().to_string(), values[i].clone());
+        }
+        *v = v_obj(m);
+    }
+    if !matches!(v, V::Object(_)) {
+        *v = v_obj(JwcObj::default());
+    }
+    let V::Object(m) = v else { return };
+    let m = std::sync::Arc::make_mut(m);
+    let slot = m.entry((*head).to_string()).or_insert(V::Null);
+    if rest.is_empty() {
+        *slot = value;
+    } else {
+        jwc_set_field_path(slot, rest, value);
+    }
+}
+
 fn jwc_get_field(v: &V, k: &str) -> V {
     match v {
         V::Object(m) => m.get(k).cloned().unwrap_or(V::Null),

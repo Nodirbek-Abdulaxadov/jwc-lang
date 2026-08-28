@@ -18,6 +18,25 @@ There is no `+=`. A binding is declared with `let` and written by name. The
 inside a query clause, where a bare name is a column — see
 [Syntax](./syntax.md#sigils).
 
+## `const`
+
+```jwc no-compile
+const PAGE_SIZE = 50;
+```
+
+Top-level, read-only, visible everywhere. The right-hand side is a constant
+expression — literals, operators, `? :`, array and object literals, and
+other consts. A call, a query or request data is `E0216`.
+
+## Writing a field
+
+```jwc no-compile
+let o = { "a": 1, "b": { "c": 2 } };
+o.a = 10;
+o.b.c = 20;
+o.fresh = 30;      -- a key that was not there is added
+```
+
 ## `if`
 
 ```jwc no-compile

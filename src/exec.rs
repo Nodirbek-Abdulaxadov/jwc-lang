@@ -245,6 +245,32 @@ pub struct Request {
 /// running and far short of "wait forever".
 pub const MAX_WHILE_TURNS: u64 = 10_000_000;
 
+/// Write `value` at `path` inside `root`, creating records on the way.
+///
+/// A JWC record is a list of pairs, not a reference, so this rebuilds the
+/// spine rather than mutating through a pointer — which is also why
+/// `x.a = 1` on a record with no `a` adds one instead of failing: there is
+/// no declared shape here to violate.
+fn set_field_path(root: &mut Value, path: &[crate::ast::Ident], value: Value) -> Exec<()> {
+    let Some((head, rest)) = path.split_first() else {
+        *root = value;
+        return Ok(());
+    };
+    let Value::Record(fields) = root else {
+        return Err(fault(format!(
+            "`.{}` written on a value that is not a record",
+            head.name
+        )));
+    };
+    if let Some(slot) = fields.iter_mut().find(|(k, _)| *k == head.name) {
+        return set_field_path(&mut slot.1, rest, value);
+    }
+    let mut fresh = Value::Record(Vec::new());
+    set_field_path(&mut fresh, rest, value)?;
+    fields.push((head.name.clone(), fresh));
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct Response {
     pub status: u16,
@@ -492,6 +518,13 @@ impl<'a> Vm<'a> {
                     AssignTarget::Local { name, .. } => self.assign(&name.name, v),
                     AssignTarget::Context(k) => {
                         self.context.insert(k.name.clone(), v);
+                    }
+                    AssignTarget::Field { base, path, .. } => {
+                        let Some(mut root) = self.lookup(&base.name).cloned() else {
+                            return Err(fault(format!("unknown local `{}`", base.name)));
+                        };
+                        set_field_path(&mut root, path, v)?;
+                        self.assign(&base.name, root);
                     }
                 }
                 Ok(Flow::Normal)
@@ -757,10 +790,18 @@ impl<'a> Vm<'a> {
             // scope — the sigil is optional there (names.md §5.3). Anything
             // else keeps the previous reading, its own text: the checker has
             // already rejected a bare name that is neither.
-            ExprKind::Name(i) => self
-                .lookup(&i.name)
-                .cloned()
-                .unwrap_or_else(|| Value::Text(i.name.clone())),
+            ExprKind::Name(i) => {
+                if let Some(v) = self.lookup(&i.name) {
+                    v.clone()
+                } else if let Some(c) = self.program.symbols.consts.get(&i.name).cloned() {
+                    // Evaluated at the use rather than cached: a `const` is
+                    // a constant expression, so this is arithmetic over
+                    // literals and cheaper than the machinery to memoise it.
+                    Box::pin(self.eval(&c.value)).await?
+                } else {
+                    Value::Text(i.name.clone())
+                }
+            }
 
             ExprKind::Field { base, field } => self.field(base, field).await?,
 

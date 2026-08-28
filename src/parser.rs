@@ -45,6 +45,7 @@ const DECL_STARTS: &[&str] = &[
     "errorHandler",
     "server",
     "static",
+    "const",
     "function",
     "test",
 ];
@@ -345,6 +346,7 @@ impl Parser {
             "errorHandler" => Decl::ErrorHandler(self.parse_error_handler(at, start)?),
             "server" => Decl::Server(self.parse_server(at, start)?),
             "static" => Decl::Static(self.parse_static(at, start)?),
+            "const" => Decl::Const(self.parse_const(at, start)?),
             "function" => Decl::Function(self.parse_function(at, start)?),
             "job" => Decl::Job(self.parse_job(at, start)?),
             "test" => Decl::Test(self.parse_test(at, start)?),
@@ -1541,6 +1543,21 @@ impl Parser {
         })
     }
 
+    /// `const NAME = <expr>;` (names.md §5.6).
+    fn parse_const(&mut self, at: Attached, start: Span) -> PResult<ConstDecl> {
+        self.bump();
+        let name = self.expect_ident()?;
+        self.expect(Tok::Eq)?;
+        let value = self.parse_expr()?;
+        let end = self.expect(Tok::Semi)?.span;
+        Ok(ConstDecl {
+            at,
+            name,
+            value,
+            span: start.to(end),
+        })
+    }
+
     /// `static "/assets" from "public" cache 3600;` (routing.md §10).
     fn parse_static(&mut self, at: Attached, start: Span) -> PResult<StaticDecl> {
         self.bump();
@@ -2072,6 +2089,49 @@ impl Parser {
                 });
             }
         }
+        // `x.field = …`, `$x.a.b = …`. Tried before the `context.k` form
+        // below, which is the same shape on a name the runtime owns, so
+        // that one keeps its own branch and this one never sees it.
+        if !self.at_word("context") {
+            if let Tok::Local(name) | Tok::Ident(name) = self.peek().tok.clone() {
+                if self.peek_at(1).is(&Tok::Dot) {
+                    // Look ahead across `.name` pairs for a `=` that is not
+                    // `==`: anything else is an ordinary expression
+                    // statement and must parse as one.
+                    let mut k = 1;
+                    let mut path_len = 0;
+                    while self.peek_at(k).is(&Tok::Dot)
+                        && matches!(self.peek_at(k + 1).tok, Tok::Ident(_))
+                    {
+                        k += 2;
+                        path_len += 1;
+                    }
+                    if path_len > 0 && self.peek_at(k).is(&Tok::Eq) {
+                        let sigil = matches!(self.peek().tok, Tok::Local(_));
+                        let nspan = self.bump().span;
+                        let mut path = Vec::new();
+                        for _ in 0..path_len {
+                            self.expect(Tok::Dot)?;
+                            path.push(self.expect_ident()?);
+                        }
+                        self.expect(Tok::Eq)?;
+                        let value = self.parse_expr()?;
+                        let end = self.expect(Tok::Semi)?.span;
+                        return Ok(Stmt::Assign {
+                            at,
+                            target: AssignTarget::Field {
+                                base: Ident::new(name, nspan),
+                                sigil,
+                                path,
+                            },
+                            value,
+                            span: start.to(end),
+                        });
+                    }
+                }
+            }
+        }
+
         if self.at_word("context") && self.peek_at(1).is(&Tok::Dot) && self.peek_at(3).is(&Tok::Eq)
         {
             self.bump();

@@ -95,7 +95,7 @@ At the top level a file may declare:
 namespace   import      database    schema      table       view
 enum        class       error       errorHandler
 service     function    middleware  routes      test
-job         server      static
+job         server      static      const
 ```
 
 Statements — `let`, assignment, `if`, `for`, `while`, `return`, `throw`,

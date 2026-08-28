@@ -3,6 +3,49 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.929] — `const`, and writing a field — 2026-08-28
+
+The last two of the four the grammar diff turned up.
+
+```jwc
+const PAGE_SIZE = 50;
+const LIMITS = [10, 50, 100];
+
+let o = { "a": 1, "b": { "c": 2 } };
+o.a = PAGE_SIZE;
+o.b.c = 20;
+o.fresh = 1;          -- a key that was not there is added
+```
+
+### `const`
+
+Top-level, read-only, one name for the whole program — two with one name is
+`E0215`, the same ambiguity two tables with one name would be. A local of
+the same name shadows it, the way a parameter shadows one.
+
+The right-hand side is a **constant expression**: literals, operators,
+`? :`, array and object literals, and other consts. Anything else is
+`E0216`. A whitelist, not a list of forbidden things — a blacklist has to
+name every way to reach the outside world and is wrong the moment one is
+added, and the failure mode of this direction is a diagnostic rather than a
+program that reads the database while it loads.
+
+Neither backend initialises anything: the interpreter evaluates at the use,
+codegen emits the expression where the name appears. There is no
+initialisation order to get wrong because there is no initialisation.
+
+### `x.field = v`
+
+Nested (`o.b.c`) and creating (`o.fresh`). A JWC record is a list of pairs
+rather than a reference, so the write rebuilds the spine — which is also
+why writing a key that was not there adds it: there is no declared shape
+here to violate, and that is what 0.9 did.
+
+The native backend converts a `Record` to an `Object` on write, because
+`Record` is the compact form a projection produces and its field list is
+fixed. `{"a":10,"b":{"c":20},"fresh":30}` from the interpreter and from the
+compiled binary, identically.
+
 ## [0.9.928] — `while`, and `x += 1` — 2026-08-28
 
 Two things 0.9 had that the 1.0 front-end never grew. Neither was removed

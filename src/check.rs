@@ -394,6 +394,21 @@ impl<'a> Checker<'a> {
                 self.block(&t.body);
                 self.pop_scope();
             }
+            Decl::Const(c) => {
+                // Checked once at the declaration, so a mistake is reported
+                // where it was written rather than at every use.
+                self.expr(&c.value);
+                if let Some(bad) = non_const_expr(&c.value) {
+                    self.err_note(
+                        bad,
+                        "E0216",
+                        "a `const` is a constant expression",
+                        "literals, operators, array and object literals, and \
+                         other consts — no calls, no queries, no request data",
+                        "names.md §5.6",
+                    );
+                }
+            }
             Decl::View(v) => self.view(v),
             Decl::Class(_) | Decl::Table(_) | Decl::Enum(_) => {}
             _ => {}
@@ -799,6 +814,24 @@ impl<'a> Checker<'a> {
                             "names.md §5.5",
                         ),
                     },
+                    AssignTarget::Field { base, path, .. } => {
+                        // The value written is not checked against the
+                        // field's declared type: a record's shape is
+                        // structural here, and `x.a = 1` on a record that
+                        // has no `a` adds one, which is what 0.9 did.
+                        // What is checked is that the base exists.
+                        if self.lookup(&base.name).is_none() {
+                            self.err_note(
+                                base.span,
+                                "E0211",
+                                format!("unknown local `{}`", base.name),
+                                "declare it with `let` first",
+                                "names.md §5.5",
+                            );
+                        }
+                        let _ = path;
+                        let _ = got;
+                    }
                     AssignTarget::Context(_) => {
                         // middleware.md §6.4 is a v0.24 rule; the value is
                         // still type-checked above.
@@ -1581,6 +1614,11 @@ impl<'a> Checker<'a> {
         // and `string.of($attempt)` are the same reference (names.md §5.3).
         if let Some(t) = self.lookup(&i.name) {
             return t;
+        }
+        // A `const` is a name in the same space, shadowed by a local of the
+        // same name the way a parameter shadows one (names.md §5.6).
+        if let Some(c) = self.sym.consts.get(&i.name).cloned() {
+            return self.expr(&c.value);
         }
         // Enum / service / builtin namespaces resolve through `Field`, so a
         // bare name that is not a local is either a declaration or a mistake.
@@ -4699,3 +4737,43 @@ fn callee_path(e: &Expr) -> Option<String> {
 }
 
 use crate::token::Span;
+
+/// The span of the first thing in a `const` that is not a constant
+/// expression, or `None`.
+///
+/// Deliberately a whitelist. A blacklist would have to name every way to
+/// reach the outside world and would be wrong the moment one is added;
+/// this is wrong only in the direction of refusing something harmless,
+/// which is a diagnostic rather than a program that reads the database at
+/// load time.
+fn non_const_expr(e: &Expr) -> Option<Span> {
+    match &*e.kind {
+        ExprKind::Int(_)
+        | ExprKind::Decimal(_)
+        | ExprKind::Str(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Null
+        // A bare name here is another `const`; the checker reports it as
+        // unknown if it is not one.
+        | ExprKind::Name(_) => None,
+        ExprKind::Unary { rhs, .. } => non_const_expr(rhs),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            non_const_expr(lhs).or_else(|| non_const_expr(rhs))
+        }
+        ExprKind::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => non_const_expr(cond)
+            .or_else(|| non_const_expr(then))
+            .or_else(|| non_const_expr(otherwise)),
+        ExprKind::Array(items) => items.iter().find_map(non_const_expr),
+        ExprKind::Object(entries) => entries.iter().find_map(|k| match k {
+            ObjEntry::Field { value, .. } => non_const_expr(value),
+            // A spread reads a local, and a `const` has no locals.
+            ObjEntry::Spread { span, .. } => Some(*span),
+        }),
+        _ => Some(e.span),
+    }
+}
