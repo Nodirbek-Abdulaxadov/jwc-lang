@@ -888,21 +888,67 @@ fn jwc_has_field(v: &V, k: &str) -> bool {
 /// form a projection produces and its field list is fixed, so adding a key
 /// to one has to change its representation — `x.a = 1` on a shape without
 /// an `a` adds one, which is what the interpreter does and what 0.9 did.
+/// `o.a.b = v` — writes a field, creating it and any missing level.
+///
+/// A `V::Record` **stays** a `V::Record`, and a new key is appended to
+/// `field_names`. It used to be converted to a `V::Object` so the key
+/// could be inserted, and that was a cross-backend divergence: an
+/// `FxHashMap` has no order, so `jwc_write_json` sorts it, while
+/// `exec.rs::set_field_path` pushes onto a `Vec` and keeps insertion
+/// order. So
+///
+///     let o = { a: 1 }; o.fresh = 30; o.deep = { x: 1 };
+///
+/// serialised as `{"a":1,"fresh":30,"deep":{"x":1}}` under `jwc serve`
+/// and `{"a":1,"deep":{"x":1},"fresh":30}` from a native binary — the
+/// same program answering two different response bodies.
+///
+/// 0.9.929 shipped it and its test did not catch it: the fixture was
+/// `{"a":…,"b":…,"fresh":…}`, already in alphabetical order, so sorted
+/// and insertion-ordered were the same string.
 fn jwc_set_field_path(v: &mut V, path: &[&str], value: V) {
     let Some((head, rest)) = path.split_first() else {
         *v = value;
         return;
     };
+
+    // Anything that is not a record or an object becomes a fresh record:
+    // `exec.rs` refuses that case at run time, and the checker refuses it
+    // before either backend sees it, so this arm is unreachable in a
+    // program that checks.
+    if !matches!(v, V::Record { .. } | V::Object(_)) {
+        *v = v_record(std::sync::Arc::new(Vec::new()), Vec::new());
+    }
+
     if let V::Record { field_names, values } = v {
-        let mut m: JwcObj = JwcObj::default();
-        for (i, name) in field_names.iter().enumerate() {
-            m.insert(name.as_ref().to_string(), values[i].clone());
+        let names = std::sync::Arc::make_mut(field_names);
+        let vals = std::sync::Arc::make_mut(values);
+        match names.iter().position(|n| n.as_ref() == *head) {
+            Some(i) => {
+                if rest.is_empty() {
+                    vals[i] = value;
+                } else {
+                    jwc_set_field_path(&mut vals[i], rest, value);
+                }
+            }
+            None => {
+                // Appended, not inserted: the order a reader sees is the
+                // order the program wrote.
+                // Owned: `JwcStr` is `Cow<'static, str>` and `head`
+                // borrows from the caller's path slice.
+                names.push(std::borrow::Cow::Owned((*head).to_string()));
+                if rest.is_empty() {
+                    vals.push(value);
+                } else {
+                    let mut fresh = v_record(std::sync::Arc::new(Vec::new()), Vec::new());
+                    jwc_set_field_path(&mut fresh, rest, value);
+                    vals.push(fresh);
+                }
+            }
         }
-        *v = v_obj(m);
+        return;
     }
-    if !matches!(v, V::Object(_)) {
-        *v = v_obj(JwcObj::default());
-    }
+
     let V::Object(m) = v else { return };
     let m = std::sync::Arc::make_mut(m);
     let slot = m.entry((*head).to_string()).or_insert(V::Null);

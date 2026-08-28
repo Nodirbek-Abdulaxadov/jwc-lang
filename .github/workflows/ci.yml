@@ -116,6 +116,65 @@ jobs:
       - name: Cargo check (x86_64 cross)
         run: cargo check --workspace --features redis --target x86_64-apple-darwin
 
+  # The generated crate, actually compiled.
+  #
+  # `--test native` string-matches the Rust codegen emits and deliberately
+  # never invokes cargo on it, so the `.rs.in` preludes — ~6,000 lines that
+  # are pasted into that crate and compiled nowhere else — were type-checked
+  # by no job in this workflow. `cargo build` at the top of this file builds
+  # the *compiler*; a prelude that does not compile is invisible to it.
+  #
+  # Two of them shipped that way. 0.9.929's `jwc_set_field_path` turned a
+  # record into a hash map, which sorts on serialisation, so a native binary
+  # answered a different JSON key order than `jwc serve` — and the release
+  # was green. The first attempt at the fix did not compile at all, and
+  # every job here still passed.
+  #
+  # This builds one program per template so the four starter trees are
+  # covered, then runs the smallest of them and checks it answers.
+  native-build:
+    name: the generated crate compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the compiler
+        run: cargo build --release
+
+      # `empty` and `api` between them reach the base, v1, db, crypto and
+      # asset preludes. `auth` adds the JWT and password paths; `jobs` adds
+      # the queue driver.
+      - name: Compile a native binary from every template
+        run: |
+          set -euo pipefail
+          for t in empty api auth jobs; do
+            echo "::group::$t"
+            rm -rf "/tmp/nb-$t"
+            ./target/release/jwc new "nb-$t" --template "$t" --path "/tmp/nb-$t"
+            ./target/release/jwc build "/tmp/nb-$t" --release
+            test -x "/tmp/nb-$t/bin/release/nb-$t"
+            echo "::endgroup::"
+          done
+
+      # Compiling is not running. A binary that links and then dies on the
+      # first request is the failure this is really about.
+      - name: Run the binary and check it answers
+        run: |
+          set -euo pipefail
+          /tmp/nb-empty/bin/release/nb-empty &
+          pid=$!
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/healthz && break || sleep 1
+          done
+          echo
+          curl -fsS http://127.0.0.1:8080/healthz | grep -q '"status":"ok"'
+          kill $pid
+
   postgres:
     name: against a real Postgres
     runs-on: ubuntu-latest

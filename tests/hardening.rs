@@ -2484,3 +2484,68 @@ fn the_else_branch_of_a_null_test_narrows() {
         codes(bad)
     );
 }
+
+/// A key added by `o.x = v` keeps its place on both backends.
+///
+/// 0.9.929 shipped `jwc_set_field_path` converting a `V::Record` to a
+/// `V::Object` so the key could be inserted — and an `FxHashMap` has no
+/// order, so `jwc_write_json` sorts it, while `exec.rs::set_field_path`
+/// pushes onto a `Vec` and keeps insertion order. The same program
+/// answered two different response bodies:
+///
+///     jwc serve   {"a":1,"fresh":30,"deep":{"x":1}}
+///     jwc build   {"a":1,"deep":{"x":1},"fresh":30}
+///
+/// The test that shipped with it used `{"a":…,"b":…,"fresh":…}`, which is
+/// already alphabetical — sorted and insertion-ordered are the same
+/// string for that fixture, so it passed on both and proved nothing. The
+/// fixture here is deliberately anti-alphabetical.
+#[test]
+fn a_field_added_by_assignment_keeps_its_place_on_both_backends() {
+    // The interpreter, run for real.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         function main() {\n\
+         \x20   let o = { zebra: 1, apple: 2 };\n\
+         \x20   o.mango = 3;\n\
+         \x20   o.deep = { z: 1 };\n\
+         \x20   o.deep.a = 2;\n\
+         \x20   console.writeln(json.stringify(o));\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+
+    // And the text codegen pastes, which is where the divergence lived.
+    let prelude = jwc::native::PRELUDE_BASE;
+    let f = prelude
+        .split("fn jwc_set_field_path(")
+        .nth(1)
+        .expect("jwc_set_field_path is in the base prelude");
+    let body = f.split("\nfn ").next().unwrap_or(f);
+    assert!(
+        !body.contains("v_obj(m)"),
+        "a record must not become an FxHashMap to gain a key — that is \
+         what sorts it:\n{body}"
+    );
+    assert!(
+        body.contains("names.push("),
+        "a new key is appended to `field_names`, so the order a reader \
+         sees is the order the program wrote"
+    );
+
+    // The interpreter's side of the contract, stated the same way.
+    let exec = include_str!("../src/exec.rs");
+    let g = exec
+        .split("fn set_field_path(")
+        .nth(1)
+        .expect("set_field_path is in exec.rs");
+    let gbody = g.split("\nfn ").next().unwrap_or(g);
+    assert!(
+        gbody.contains("fields.push("),
+        "and the interpreter appends too"
+    );
+}
