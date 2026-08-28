@@ -32,6 +32,15 @@ use crate::ast::*;
 
 const INDENT: &str = "    ";
 
+/// The column a printed line tries not to pass.
+///
+/// Advisory, not a guarantee: an identifier chain or a single long string
+/// literal has no place to break, and a printer that broke one anyway
+/// would be inventing syntax. What it *is* is a budget the constructs that
+/// do have a place to break — an array, a record literal, an argument list
+/// — measure themselves against before choosing one line or several.
+const MARGIN: usize = 92;
+
 /// Every `--` and `---` comment in a source text, in order, rendered the
 /// way `Writer::attached` renders one.
 ///
@@ -900,7 +909,7 @@ impl Writer {
                 let one_line = format!("{prefix}{body}{suffix}");
                 // `or throw` on a non-query value: break at the boundary
                 // rather than run past the margin.
-                if one_line.len() + self.depth * INDENT.len() > 92 {
+                if one_line.len() + self.depth * INDENT.len() > MARGIN {
                     if let Some(cut) = suffix.find(" or throw ") {
                         self.line(&format!("{prefix}{body}"));
                         self.depth += 1;
@@ -908,9 +917,175 @@ impl Writer {
                         self.depth -= 1;
                         return;
                     }
+                    if self.wide(prefix, e, suffix) {
+                        return;
+                    }
                 }
                 self.line(&one_line);
             }
+        }
+    }
+
+    /// Prints `prefix<expr>suffix` broken across lines, or answers `false`
+    /// when the expression has nowhere to break.
+    ///
+    /// A query breaks at its clauses and an `insert` breaks at its columns,
+    /// both since 0.24. Nothing else did, so every other expression was one
+    /// line however long it got. Measured on jwc-shortener's `robots.txt`
+    /// route: a `string.join([...], "\n")` over 36 short strings printed as
+    /// **one 1608-character line**, and `jwc fmt` produced it — a formatter
+    /// making a file less readable than the input is a formatter people
+    /// stop running.
+    ///
+    /// Three constructs have a place to break and they are the three that
+    /// grow: an array, a record literal, an argument list. Everything else
+    /// answers `false` and stays on one line, deliberately. Breaking a `+`
+    /// chain or a ternary is a claim about which half matters, and this
+    /// printer does not have an opinion to express; a long identifier chain
+    /// or a single long string has no place to break at all.
+    ///
+    /// Recursive, and the recursion is what keeps the rule honest: an item
+    /// that still does not fit at the deeper indent is broken again, so the
+    /// margin holds for a record inside an array inside a call.
+    ///
+    /// The comment problem in this module's header is *adjacent* and is not
+    /// fixed here: `ObjEntry` carries no `Attached`, so the parser never
+    /// kept a comment between two fields and there is nothing for a
+    /// multi-line record printer to emit. This is the half that had to
+    /// exist first — the other half is a parser change.
+    fn wide(&mut self, prefix: &str, e: &Expr, suffix: &str) -> bool {
+        if !self.over(prefix, &expr(e), suffix) {
+            return false;
+        }
+        match &*e.kind {
+            ExprKind::Array(items) if !items.is_empty() => {
+                self.line(&format!("{prefix}["));
+                self.depth += 1;
+                self.items(items.len(), |w, n| {
+                    let comma = Self::comma(n, items.len());
+                    if !w.wide("", &items[n], comma) {
+                        w.line(&format!("{}{comma}", expr(&items[n])));
+                    }
+                });
+                self.depth -= 1;
+                self.line(&format!("]{suffix}"));
+                true
+            }
+            ExprKind::Object(entries) if !entries.is_empty() => {
+                self.line(&format!("{prefix}{{"));
+                self.depth += 1;
+                self.items(entries.len(), |w, n| {
+                    let comma = Self::comma(n, entries.len());
+                    w.obj_entry(&entries[n], comma);
+                });
+                self.depth -= 1;
+                self.line(&format!("}}{suffix}"));
+                true
+            }
+            // `filter` is the `where` of a `count(x) where …`, which reads
+            // as part of the call rather than as another argument, so a
+            // call carrying one is left alone.
+            ExprKind::Call { callee, args, filter } if filter.is_none() && !args.is_empty() => {
+                let head = format!("{prefix}{}(", wrap(callee, 10));
+                // The common shape, and the one a person writes by hand:
+                // `string.join([` … `], "\n");`. Hug when the first
+                // argument is the one that grew and the rest still fit
+                // beside the closing bracket.
+                let rest: String = args[1..]
+                    .iter()
+                    .map(|a| format!(", {}", expr(a)))
+                    .collect();
+                let bracketed = matches!(&*args[0].kind, ExprKind::Array(i) if !i.is_empty())
+                    || matches!(&*args[0].kind, ExprKind::Object(i) if !i.is_empty());
+                if bracketed && !self.over("]", &rest, &format!("){suffix}")) {
+                    let (open, close) = match &*args[0].kind {
+                        ExprKind::Array(_) => ("[", "]"),
+                        _ => ("{", "}"),
+                    };
+                    let inner: Vec<&Expr> = match &*args[0].kind {
+                        ExprKind::Array(items) => items.iter().collect(),
+                        _ => Vec::new(),
+                    };
+                    if !inner.is_empty() {
+                        self.line(&format!("{head}{open}"));
+                        self.depth += 1;
+                        self.items(inner.len(), |w, n| {
+                            let comma = Self::comma(n, inner.len());
+                            if !w.wide("", inner[n], comma) {
+                                w.line(&format!("{}{comma}", expr(inner[n])));
+                            }
+                        });
+                        self.depth -= 1;
+                        self.line(&format!("{close}{rest}){suffix}"));
+                        return true;
+                    }
+                    if let ExprKind::Object(entries) = &*args[0].kind {
+                        self.line(&format!("{head}{open}"));
+                        self.depth += 1;
+                        self.items(entries.len(), |w, n| {
+                            let comma = Self::comma(n, entries.len());
+                            w.obj_entry(&entries[n], comma);
+                        });
+                        self.depth -= 1;
+                        self.line(&format!("{close}{rest}){suffix}"));
+                        return true;
+                    }
+                }
+                // Otherwise every argument goes on its own line. Verbose,
+                // and unambiguous: there is no argument the reader has to
+                // find at the end of a line somebody else wrapped.
+                self.line(&head);
+                self.depth += 1;
+                self.items(args.len(), |w, n| {
+                    let comma = Self::comma(n, args.len());
+                    if !w.wide("", &args[n], comma) {
+                        w.line(&format!("{}{comma}", expr(&args[n])));
+                    }
+                });
+                self.depth -= 1;
+                self.line(&format!("){suffix}"));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `prefix<body>suffix` would pass the margin at this depth.
+    fn over(&self, prefix: &str, body: &str, suffix: &str) -> bool {
+        prefix.len() + body.len() + suffix.len() + self.depth * INDENT.len() > MARGIN
+    }
+
+    fn comma(n: usize, len: usize) -> &'static str {
+        if n + 1 < len { "," } else { "" }
+    }
+
+    fn items(&mut self, len: usize, mut f: impl FnMut(&mut Self, usize)) {
+        for n in 0..len {
+            f(self, n);
+        }
+    }
+
+    /// One entry of a record literal, on its own line, breaking again if
+    /// its value is what did not fit.
+    fn obj_entry(&mut self, entry: &ObjEntry, comma: &str) {
+        match entry {
+            ObjEntry::Field {
+                key, value, assign, ..
+            } => {
+                let k = if key.name.contains('-') || key.name.contains(' ') {
+                    quote(&key.name)
+                } else {
+                    key.name.clone()
+                };
+                let head = format!("{k}{} ", if *assign { " =" } else { ":" });
+                if !self.wide(&head, value, comma) {
+                    self.line(&format!("{head}{}{comma}", expr(value)));
+                }
+            }
+            other => self.line(&format!(
+                "{}{comma}",
+                obj_entries_text(std::slice::from_ref(other))
+            )),
         }
     }
 

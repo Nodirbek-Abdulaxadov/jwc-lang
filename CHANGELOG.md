@@ -3,7 +3,7 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.9.942] — a mount is not behind a catch-all, and `return;` is not an outcome — 2026-08-28
+## [0.9.942] — three things the source said and the code did not — 2026-08-28
 
 ### Fixed
 
@@ -36,6 +36,17 @@ All notable changes to JWC are documented here. This project adheres to
   endpoint off, because the route body never runs. Now `E0812`, naming
   all three fixes. A bare `return;` in an `after` block or a socket
   handler is a different body and stays legal.
+
+- **`jwc fmt` had no line-width rule outside a query and an `insert`.**
+  Measured: jwc-shortener's `robots.txt` route was a `string.join([...])`
+  over 36 short strings and the formatter printed it as **one
+  1608-column line** — a formatter that makes a file less readable than
+  the input is one people stop running. An array, a record literal and an
+  argument list now break one item per line when the one-line form passes
+  92 columns at its indent, recursively, and the bracket hugs its call so
+  `string.join([` … `], "\n")` reads the way a person writes it. Anything
+  with no natural place to break — a `+` chain, a ternary, a long
+  identifier chain — still stays on one line, deliberately.
 
 ### Changed
 

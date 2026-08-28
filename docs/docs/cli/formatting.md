@@ -103,14 +103,38 @@ above. Nothing is lost, but the comment moves.
 
 **Your line breaks inside an expression.** A long query is printed with
 one clause per line, whatever you wrote, and a short one stays on one
-line however you broke it. There is no line-width rule for an array or a
-record literal outside an `insert`, so a long one comes back as one long
-line.
+line however you broke it.
+
+Since 0.9.942 the same holds for the three constructs that grow — an
+array, a record literal and an argument list. Each is one line when it
+fits inside **92 columns** at its indent, and broken one item per line
+when it does not:
+
+```jwc no-compile
+return content("text/plain; charset=utf-8", string.join([
+    "User-agent: *",
+    "Allow: /",
+    "Disallow: /api/"
+], "\n"));
+```
+
+The bracket hugs its call and the remaining arguments ride the closing
+line, which is what a person writes by hand. When that does not fit
+either, every argument goes on its own line. Anything else — a `+` chain,
+a ternary, a long identifier chain, a single long string — stays on one
+line however far it runs: breaking one is a claim about which half
+matters, and the printer does not have an opinion to express.
+
+Until 0.9.942 there was no rule at all outside a query and an `insert`.
+jwc-shortener's `robots.txt` route was a `string.join` over 36 short
+strings and `jwc fmt` printed it as one **1608-column** line.
 
 **A comment written *inside* a record literal, a `server { }` body or an
 `insert` value list.** The AST carries a comment on a declaration or a
 statement — `Attached` — and those three are neither, so there is nowhere
-in the tree for the text to be.
+in the tree for the text to be. A multi-line record printer now exists,
+so there is somewhere to *put* one; what is still missing is the parser
+keeping it.
 
 `jwc fmt` will not delete it. It compares the comments in the file against
 the comments in what it would write, and if any would be lost it leaves

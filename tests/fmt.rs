@@ -318,3 +318,59 @@ table Child of App.s {
     }
     assert_eq!(out, fmt("key_docs.jwc", &out), "not a fixed point");
 }
+
+/// The margin, and the three constructs that can meet it.
+///
+/// Measured before this: jwc-shortener's `robots.txt` route was a
+/// `string.join([...], "\n")` over 36 short strings, and `jwc fmt` printed
+/// it as **one 1608-character line**. Queries and `insert` broke at their
+/// clauses; every other expression was one line however long it grew, so
+/// running the formatter on that file made it less readable than the hand
+/// written input — which is a formatter people stop running.
+#[test]
+fn a_value_that_would_run_past_the_margin_is_broken() {
+    let src = concat!(
+        "routes \"/\" {\n",
+        "    route GET \"a\" {\n",
+        "        return content(\"text/plain\", string.join([\"aaaaaaaaaa\", \"bbbbbbbbbb\", ",
+        "\"cccccccccc\", \"dddddddddd\", \"eeeeeeeeee\", \"ffffffffff\", \"gggggggggg\"], \"\\n\"));\n",
+        "    }\n",
+        "    route GET \"b\" {\n",
+        "        return json({ alpha: 1, beta: 2, gamma: 3, delta: 4, epsilon: 5, zeta: 6, ",
+        "eta: 7, theta: 8, iota: 9, kappa: 10, lambda: 11 });\n",
+        "    }\n",
+        "    route GET \"c\" {\n",
+        "        return json({ ok: true, items: [1, 2, 3] });\n",
+        "    }\n",
+        "}\n",
+    );
+    let once = fmt("margin.jwc", src);
+
+    for (n, line) in once.lines().enumerate() {
+        assert!(
+            line.len() <= 92,
+            "line {} is {} columns:\n{line}\n--- whole file ---\n{once}",
+            n + 1,
+            line.len()
+        );
+    }
+    // The shape a person writes by hand: the bracket hugs the call, and
+    // the arguments after it ride on the closing line.
+    assert!(
+        once.contains("string.join([\n"),
+        "the array argument must hug its call:\n{once}"
+    );
+    assert!(
+        once.contains("], \"\\n\")"),
+        "the trailing arguments must ride the closing bracket:\n{once}"
+    );
+    // A record that fits is still one line — the rule is a budget, not a
+    // style that breaks everything it can.
+    assert!(
+        once.contains("return json({ ok: true, items: [1, 2, 3] });"),
+        "a value that fits must not be broken:\n{once}"
+    );
+    // And it is still a fixed point, which is the property the whole
+    // printer is built on.
+    assert_eq!(once, fmt("margin.jwc (2nd)", &once));
+}

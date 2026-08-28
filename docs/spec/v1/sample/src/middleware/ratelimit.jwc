@@ -33,7 +33,11 @@ middleware StrictRateLimit {
     -- Both are evaluated before either is read. Short-circuiting would let
     -- a caller learn which bucket tripped from how long the answer took.
     let by_ip = redis.rate_limit("rl:auth:ip:" + $route + ":" + string.of($ip), 20, 300);
-    let by_identity = redis.rate_limit("rl:auth:id:" + $route + ":" + hash.sha256($who.email), 5, 300);
+    let by_identity = redis.rate_limit(
+        "rl:auth:id:" + $route + ":" + hash.sha256($who.email),
+        5,
+        300
+    );
 
     if (!$by_ip or !$by_identity) {
         throw TooManyRequests("juda ko'p urinish, keyinroq qayting");
