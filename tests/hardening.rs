@@ -2348,3 +2348,87 @@ fn the_documented_metrics_are_the_exported_ones() {
          would stay empty forever: {invented:?}"
     );
 }
+
+/// Every registered variable is read by something, and the three that
+/// were not are now.
+///
+/// `every_env_var_the_code_reads_is_registered_and_the_other_way_round`
+/// enforces the pair. This one pins the *decisions* made about the twelve
+/// that were registered, documented, printed in the boot table and read
+/// by nothing — so that "we looked at this and chose" does not decay back
+/// into "nobody noticed".
+#[test]
+fn the_settings_that_did_nothing_were_wired_or_removed() {
+    let names: Vec<&str> = jwc::config::REGISTRY.iter().map(|v| v.name).collect();
+
+    // Wired.
+    for wired in ["JWC_SERVER_WORKERS", "JWC_PRINT_CONFIG", "JWC_HOME"] {
+        assert!(names.contains(&wired), "{wired} should still be registered");
+    }
+
+    // Removed, each because the language already says the thing:
+    //   the queue three  -> `job X retries N backoff "30s"` (jobs.md §2)
+    //   REQUEST_TIMEOUT  -> `server { request_timeout }` (config.md §3)
+    //   the registry two -> JWC_REGISTRY, and `jwc login`
+    //   SERVER_METRICS   -> /metrics
+    //   ADMIN_DB         -> `jwc migrate` never creates a database
+    for gone in [
+        "JWC_ADMIN_DB",
+        "JWC_SERVER_METRICS",
+        "JWC_SERVER_METRICS_INTERVAL_SECS",
+        "JWC_REQUEST_TIMEOUT",
+        "JWC_QUEUE_MAX_ATTEMPTS",
+        "JWC_QUEUE_BACKOFF_MS",
+        "JWC_QUEUE_DLQ_MAX",
+        "JWC_REGISTRY_URL",
+        "JWC_REGISTRY_TOKEN",
+    ] {
+        assert!(
+            !names.contains(&gone),
+            "{gone} is back in the registry — if it was implemented, drop \
+             this row; if not, it is a setting that silently does nothing"
+        );
+    }
+
+    // Nothing is marked as not implemented any more. A row that does
+    // nothing is a row that should not be there.
+    let config = include_str!("../src/config.rs");
+    assert!(
+        !config.contains("NOT IMPLEMENTED"),
+        "a registered variable that does nothing is worse than an absent \
+         one: it is documented, printed at boot, and a lie"
+    );
+}
+
+/// The boot fence runs.
+///
+/// `config::validate_or_bail` is called "the boot fence" by `jwt.rs` and
+/// was never called by anything, so `JWC_DB_POOL_SIZE=twenty` was
+/// swallowed by an `unwrap_or(64)` deeper in the call graph and the pool
+/// was quietly the wrong size. Same for `config::render` and
+/// `config::snapshot`, which had no caller at all.
+#[test]
+fn the_boot_fence_and_the_config_table_have_a_caller() {
+    let cmd = include_str!("../src/cmd/mod.rs");
+    assert!(
+        cmd.contains("crate::config::validate_or_bail()?"),
+        "serve must refuse to start on an unparseable setting"
+    );
+    assert!(
+        cmd.contains("crate::config::render(&crate::config::snapshot())"),
+        "JWC_PRINT_CONFIG must reach the renderer"
+    );
+    assert!(cmd.contains(r#""JWC_PRINT_CONFIG""#));
+
+    // And the fence really rejects. A parse failure is the whole point.
+    let restore = std::env::var("JWC_DB_POOL_SIZE").ok();
+    // SAFETY: single-threaded test body, restored before it returns.
+    unsafe { std::env::set_var("JWC_DB_POOL_SIZE", "twenty") };
+    let verdict = jwc::config::validate_or_bail();
+    match restore {
+        Some(v) => unsafe { std::env::set_var("JWC_DB_POOL_SIZE", v) },
+        None => unsafe { std::env::remove_var("JWC_DB_POOL_SIZE") },
+    }
+    let err = verdict.expect_err("`twenty` is not a usize");
+    assert!(format!("{err:?}").contains("JWC_DB_POOL_SIZE"));
+}

@@ -45,6 +45,30 @@ mod jwc_v1_paths {
 /// `--parse-only` stops after the front-end, which is what the parse corpus
 /// exercises. The full pass adds the schema model (schema.md §11) and the
 /// type checker (types.md, queries.md, writes.md).
+/// The tokio runtime every subcommand blocks on.
+///
+/// `Runtime::new()` sizes the pool from `available_parallelism()`, which
+/// on Linux reads the cgroup CPU limit — so a container capped at 2 cores
+/// gets 2 threads, not the host's 96. That default is right, and
+/// `JWC_SERVER_WORKERS` is for the cases it is not: a pinned thread count
+/// for a benchmark, or 1 to make a scheduling bug reproducible.
+///
+/// The variable was registered, documented and printed in the boot table
+/// since the registry was written, and read by nothing.
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    let n = std::env::var("JWC_SERVER_WORKERS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0);
+    match n {
+        Some(n) => Ok(tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(n)
+            .enable_all()
+            .build()?),
+        None => Ok(tokio::runtime::Runtime::new()?),
+    }
+}
+
 pub fn check(path: PathBuf, quiet: bool, parse_only: bool, deny_warnings: bool) -> Result<()> {
     use crate::diag::Severity;
 
@@ -507,7 +531,7 @@ fn analyze_statements(statements: &[String]) -> Result<()> {
         return Ok(());
     }
     let url = crate::engine::database_url_from_env()?;
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = runtime()?;
     rt.block_on(async move {
         let client = crate::engine::connect_for_migrations(&url).await?;
         for sql in statements {
@@ -642,7 +666,7 @@ pub fn run(path: PathBuf, dev: bool, request_logging: bool) -> Result<()> {
             .any(|d| matches!(d, crate::ast::Decl::Database(_)))
     });
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = runtime()?;
     rt.block_on(async move {
         if needs_db {
             crate::engine::init_engine_from_env()?;
@@ -675,6 +699,19 @@ pub fn serve(
 
     crate::exec::set_dev_mode(dev);
 
+    // `jwt.rs` calls this "the boot fence" and it was never called, so a
+    // typo in `JWC_DB_POOL_SIZE=twenty` was swallowed by an
+    // `unwrap_or(64)` deeper in the call graph and the pool was quietly
+    // the wrong size. Before the listener, so the failure is a refusal to
+    // start rather than a surprise under load.
+    crate::config::validate_or_bail()?;
+    // `JWC_PRINT_CONFIG=1` — every registered variable, its value, and
+    // where the value came from, with secrets redacted. The renderer has
+    // shipped since the registry was written with no caller.
+    if matches!(std::env::var("JWC_PRINT_CONFIG").as_deref(), Ok("1")) {
+        print!("{}", crate::config::render(&crate::config::snapshot()));
+    }
+
     // A program that declares no `database` has no tables, no queries and
     // nothing to connect to, and `serve` demanded `DATABASE_URL` from it
     // anyway. The first program anyone writes is that program, so the
@@ -687,7 +724,7 @@ pub fn serve(
             .any(|d| matches!(d, crate::ast::Decl::Database(_)))
     });
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = runtime()?;
     rt.block_on(async move {
         if needs_db {
             crate::engine::init_engine_from_env()?;
@@ -974,7 +1011,7 @@ fn migrations_dir(path: &Path, dir: Option<PathBuf>) -> PathBuf {
 
 fn migration_client() -> Result<(tokio::runtime::Runtime, tokio_postgres::Client)> {
     let url = crate::engine::database_url_from_env()?;
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = runtime()?;
     let client = rt.block_on(crate::engine::connect_for_migrations(&url))?;
     Ok((rt, client))
 }
@@ -1113,7 +1150,7 @@ pub fn test(path: PathBuf, filter: Option<String>, no_rollback: bool) -> Result<
         return Ok(());
     }
 
-    let rt = tokio::runtime::Runtime::new()?;
+    let rt = runtime()?;
     rt.block_on(async move {
         crate::engine::init_engine_from_env()?;
         // `jwc test` runs the same program bodies as `serve`, so a test
@@ -1337,7 +1374,7 @@ pub fn swagger(
         return Ok(());
     }
 
-    tokio::runtime::Runtime::new()?.block_on(crate::swagger::serve(doc, port))
+    runtime()?.block_on(crate::swagger::serve(doc, port))
 }
 
 fn middleware_body<'a>(

@@ -144,12 +144,6 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "100",
         doc: "Base retry backoff (ms); doubles each attempt.",
     },
-    EnvVar {
-        name: "JWC_ADMIN_DB",
-        parse_kind: ParseKind::Str,
-        default: "postgres",
-        doc: "NOT IMPLEMENTED — Admin DB used by `migrate` to create the target DB.",
-    },
     // --- Redis -------------------------------------------------------------
     EnvVar {
         name: "JWC_REDIS_URL",
@@ -206,19 +200,8 @@ pub const REGISTRY: &[EnvVar] = &[
         name: "JWC_SERVER_WORKERS",
         parse_kind: ParseKind::Usize,
         default: "0",
-        doc: "NOT IMPLEMENTED — Tokio worker threads; 0 = available_parallelism().",
-    },
-    EnvVar {
-        name: "JWC_SERVER_METRICS",
-        parse_kind: ParseKind::Bool,
-        default: "false",
-        doc: "NOT IMPLEMENTED — Periodically log in-flight / completed / failed counters.",
-    },
-    EnvVar {
-        name: "JWC_SERVER_METRICS_INTERVAL_SECS",
-        parse_kind: ParseKind::DurationSecs,
-        default: "10",
-        doc: "NOT IMPLEMENTED — Metrics log cadence.",
+        doc: "Tokio worker threads. 0 or unset = one per available core, \
+              which in a container means the *cgroup* limit, not the host.",
     },
     EnvVar {
         name: "JWC_REQUEST_LOG",
@@ -234,12 +217,6 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "text",
         doc: "Access-log shape: `text` or `json`. Read only when \
               JWC_REQUEST_LOG is on.",
-    },
-    EnvVar {
-        name: "JWC_REQUEST_TIMEOUT",
-        parse_kind: ParseKind::DurationSecs,
-        default: "30",
-        doc: "NOT IMPLEMENTED — Per-request watchdog; 0 disables the cap.",
     },
     EnvVar {
         name: "JWC_MAX_BODY_BYTES",
@@ -311,7 +288,7 @@ pub const REGISTRY: &[EnvVar] = &[
         name: "JWC_PRINT_CONFIG",
         parse_kind: ParseKind::Bool,
         default: "true",
-        doc: "NOT IMPLEMENTED — Print this config table at server boot; set off to suppress.",
+        doc: "Print this table at boot, with secrets redacted.",
     },
     // --- Read by the code, and until 0.9.927 in no registry, so absent
     // from the boot table and from config.md. Found by
@@ -385,24 +362,6 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "1000",
         doc: "How often a worker polls an empty queue, in milliseconds.",
     },
-    EnvVar {
-        name: "JWC_QUEUE_MAX_ATTEMPTS",
-        parse_kind: ParseKind::U32,
-        default: "3",
-        doc: "NOT IMPLEMENTED — Per-job retry ceiling; 0 = single attempt.",
-    },
-    EnvVar {
-        name: "JWC_QUEUE_BACKOFF_MS",
-        parse_kind: ParseKind::DurationMs,
-        default: "1000",
-        doc: "NOT IMPLEMENTED — Base retry backoff in milliseconds.",
-    },
-    EnvVar {
-        name: "JWC_QUEUE_DLQ_MAX",
-        parse_kind: ParseKind::Usize,
-        default: "1024",
-        doc: "NOT IMPLEMENTED — Dead-letter queue cap; 0 disables eviction.",
-    },
     // --- Email -------------------------------------------------------------
     EnvVar {
         name: "JWC_SMTP_HOST",
@@ -446,24 +405,11 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "10000",
         doc: "Entry ceiling for the process-local `cache.*` store.",
     },
-    // --- Registry / packaging ---------------------------------------------
-    EnvVar {
-        name: "JWC_REGISTRY_URL",
-        parse_kind: ParseKind::Str,
-        default: "https://registry-jwc.1kb.uz/",
-        doc: "NOT IMPLEMENTED — Package registry endpoint.",
-    },
-    EnvVar {
-        name: "JWC_REGISTRY_TOKEN",
-        parse_kind: ParseKind::Str,
-        default: "",
-        doc: "NOT IMPLEMENTED — Bearer token sent when publishing.",
-    },
     EnvVar {
         name: "JWC_HOME",
         parse_kind: ParseKind::Str,
         default: "",
-        doc: "NOT IMPLEMENTED — Override the per-user data dir (default platform-specific).",
+        doc: "Where `jwc login` keeps its credentials. Default `~/.jwc`.",
     },
     // --- Outbound HTTP / SSRF ----------------------------------------------
     EnvVar {
@@ -697,7 +643,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Boot fence — returns `Err` listing every parse failure from
 /// [`snapshot`]. Wire this into the server boot path BEFORE the
-/// listening line so a typo in `JWC_REQUEST_TIMEOUT=thirty` fails fast
+/// listening line so a typo in `JWC_DB_POOL_SIZE=twenty` fails fast
 /// instead of being swallowed by an `unwrap_or(30)` deeper in the call
 /// graph.
 pub fn validate_or_bail() -> Result<()> {
@@ -766,7 +712,6 @@ mod tests {
         for must in [
             "JWC_DATABASE_URL",
             "JWC_DB_POOL_SIZE",
-            "JWC_REQUEST_TIMEOUT",
             "JWC_LOG_FORMAT",
             "JWC_SMTP_PASSWORD",
             "JWC_TRUSTED_PROXIES",
@@ -778,14 +723,14 @@ mod tests {
     #[test]
     fn snapshot_missing_var_is_default() {
         let _l = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::unset("JWC_REQUEST_TIMEOUT");
+        let _g = EnvGuard::unset("JWC_DB_POOL_SIZE");
         let rows = snapshot();
         let row = rows
             .iter()
-            .find(|r| r.name == "JWC_REQUEST_TIMEOUT")
+            .find(|r| r.name == "JWC_DB_POOL_SIZE")
             .expect("row");
         assert_eq!(row.source, Source::Default);
-        assert_eq!(row.parsed, "30 seconds");
+        assert_eq!(row.parsed, "64");
         assert!(row.error.is_none());
     }
 
@@ -817,11 +762,11 @@ mod tests {
     #[test]
     fn validate_or_bail_errors_on_bad_numeric() {
         let _l = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("JWC_REQUEST_TIMEOUT", "thirty");
+        let _g = EnvGuard::set("JWC_DB_POOL_SIZE", "twenty");
         let err = validate_or_bail().expect_err("should fail");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("JWC_REQUEST_TIMEOUT"),
+            msg.contains("JWC_DB_POOL_SIZE"),
             "expected var name in error, got: {msg}"
         );
     }
@@ -854,7 +799,7 @@ mod tests {
 
     #[test]
     fn redaction_covers_token_key_jwt_and_database_url() {
-        assert!(name_is_secret("JWC_REGISTRY_TOKEN"));
+        assert!(name_is_secret("JWC_SMTP_PASSWORD"));
         assert!(name_is_secret("JWC_DATABASE_URL"));
         assert!(name_is_secret("JWC_API_KEY"));
         assert!(name_is_secret("JWC_JWT_SIGNING"));
