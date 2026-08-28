@@ -960,6 +960,10 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // thing in the file. Order does not matter to the call — `main` reaches
     // `load_dotenv` wherever it is defined in the module.
     source.push_str(super::PRELUDE_DOTENV_CORE);
+    // Unconditional: the switch is an environment variable, so whether a
+    // binary can be asked to log is not something the program's source
+    // decides.
+    source.push_str(super::PRELUDE_ACCESS_LOG_CORE);
     source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);

@@ -79,7 +79,8 @@ does not have, or miss one it does.
 | `JWC_SERVER_WORKERS` | `0` | NOT IMPLEMENTED — Tokio worker threads; 0 = available_parallelism(). |
 | `JWC_SERVER_METRICS` | `false` | NOT IMPLEMENTED — Periodically log in-flight / completed / failed counters. |
 | `JWC_SERVER_METRICS_INTERVAL_SECS` | `10` | NOT IMPLEMENTED — Metrics log cadence. |
-| `JWC_LOG_FORMAT` | `text` | NOT IMPLEMENTED — Access-log shape: `text` or `json`. |
+| `JWC_REQUEST_LOG` | `0` | One access line per answered request, on stderr. `jwc serve --request-logging` sets it; a native binary has no flags, so this is how `jwc build` output is turned on. |
+| `JWC_LOG_FORMAT` | `text` | Access-log shape: `text` or `json`. Read only when JWC_REQUEST_LOG is on. |
 | `JWC_REQUEST_TIMEOUT` | `30` | NOT IMPLEMENTED — Per-request watchdog; 0 disables the cap. |
 | `JWC_MAX_BODY_BYTES` | `2097152` | Request body cap (bytes); 0 disables. |
 | `JWC_SHUTDOWN_TIMEOUT` | `5` | Graceful shutdown budget before force-exit. |

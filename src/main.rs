@@ -276,6 +276,10 @@ enum Command {
         /// Development mode: `debug.dump` prints.
         #[arg(long)]
         dev: bool,
+        /// One line per answered request on stderr, for a `main` that
+        /// calls `serve(...)`. Nothing to log otherwise.
+        #[arg(long)]
+        request_logging: bool,
     },
     Serve {
         #[arg(default_value = ".")]
@@ -292,6 +296,16 @@ enum Command {
         /// what it prints is request data.
         #[arg(long)]
         dev: bool,
+        /// One line per answered request on stderr: method, path, status,
+        /// latency, request id. `JWC_LOG_FORMAT=json` makes each line a
+        /// JSON object.
+        #[arg(long)]
+        request_logging: bool,
+        /// Restart the server whenever a `.jwc` file under the project
+        /// changes. Development only: the restart drops in-flight
+        /// requests.
+        #[arg(long)]
+        watch: bool,
     },
     /// Generate and apply schema migrations.
     Migrate {
@@ -517,13 +531,19 @@ fn run() -> Result<()> {
             deny_warnings,
         } => cmd::lint(path, constraints, deny_warnings),
         Command::Routes { path } => cmd::routes(path),
-        Command::Run { path, dev } => cmd::run(path, dev),
+        Command::Run {
+            path,
+            dev,
+            request_logging,
+        } => cmd::run(path, dev, request_logging),
         Command::Serve {
             path,
             port,
             skip_schema_check,
             dev,
-        } => cmd::serve(path, port, skip_schema_check, dev),
+            request_logging,
+            watch,
+        } => cmd::serve(path, port, skip_schema_check, dev, request_logging, watch),
         Command::Build {
             path,
             release,

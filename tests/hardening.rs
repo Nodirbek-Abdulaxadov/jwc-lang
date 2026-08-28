@@ -1844,3 +1844,82 @@ fn not_exists_and_not_in_survive_the_prefix_rule() {
         .collect();
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+/// The access line's two shapes. A log pipeline is configured against
+/// these strings, so a silent change to either breaks a dashboard and
+/// nothing else — which is why the formatter is pure and pinned here
+/// rather than observed on stderr.
+#[test]
+fn the_access_line_has_one_shape_per_format() {
+    let text = jwc::serve::format_request_log_line("GET", "/a/b", 200, 1234, "abc", false);
+    assert_eq!(text, "[jwc] GET /a/b -> 200 1.2ms rid=abc");
+
+    let json = jwc::serve::format_request_log_line("POST", "/x", 500, 7, "d1", true);
+    let v: serde_json::Value = serde_json::from_str(&json).expect("the json form must parse");
+    assert_eq!(v["kind"], "access");
+    assert_eq!(v["method"], "POST");
+    assert_eq!(v["path"], "/x");
+    assert_eq!(v["status"], 500);
+    assert_eq!(v["latency_us"], 7);
+    assert_eq!(v["request_id"], "d1");
+
+    // A path is the one field a client controls, so it is the one that
+    // can break the envelope.
+    let hostile = jwc::serve::format_request_log_line("GET", "/\"a\\b", 200, 0, "r", true);
+    let v: serde_json::Value =
+        serde_json::from_str(&hostile).expect("a quote in the path must not break the envelope");
+    assert_eq!(v["path"], "/\"a\\b");
+}
+
+/// W3C Trace Context §3.2.2. An id that is not a trace-id is not
+/// repaired: a made-up id that looks like the caller's is worse than one
+/// that is visibly ours.
+#[test]
+fn a_request_id_comes_from_traceparent_only_when_it_is_one() {
+    let good = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    assert_eq!(
+        jwc::serve::request_id_from_traceparent(Some(good)),
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
+
+    for bad in [
+        "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", // uppercase
+        "00-00000000000000000000000000000000-00f067aa0ba902b7-01", // all zero
+        "00-4bf92f35-00f067aa0ba902b7-01",                         // too short
+        "not-a-traceparent",
+        "",
+    ] {
+        let got = jwc::serve::request_id_from_traceparent(Some(bad));
+        assert_eq!(got.len(), 16, "a generated id is 16 hex digits: {got}");
+        assert!(got.chars().all(|c| c.is_ascii_hexdigit()), "{got}");
+    }
+
+    // Two calls never collide inside one process.
+    let a = jwc::serve::request_id_from_traceparent(None);
+    let b = jwc::serve::request_id_from_traceparent(None);
+    assert_ne!(a, b);
+}
+
+/// The access line is one text, included by the CLI and pasted into the
+/// generated crate. Two copies would drift, and the drift would show up
+/// as a log pipeline that parses `jwc serve` and drops `jwc build`.
+#[test]
+fn both_backends_format_the_access_line_from_the_same_text() {
+    let core = include_str!("../src/access_log_core.rs.in");
+    assert!(
+        core.contains("pub fn format_request_log_line("),
+        "the shared file must hold the formatter"
+    );
+    assert!(
+        jwc::native::PRELUDE_ACCESS_LOG_CORE == core,
+        "the generated crate must be handed the same bytes the CLI includes"
+    );
+    // And `serve.rs` must reach it by including that file, not by holding
+    // a second copy.
+    let serve = include_str!("../src/serve.rs");
+    assert!(serve.contains(r#"include!("access_log_core.rs.in")"#));
+    assert!(
+        !serve.contains("pub fn format_request_log_line("),
+        "serve.rs must not define its own copy"
+    );
+}

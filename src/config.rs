@@ -221,10 +221,19 @@ pub const REGISTRY: &[EnvVar] = &[
         doc: "NOT IMPLEMENTED — Metrics log cadence.",
     },
     EnvVar {
+        name: "JWC_REQUEST_LOG",
+        parse_kind: ParseKind::Bool,
+        default: "0",
+        doc: "One access line per answered request, on stderr. \
+              `jwc serve --request-logging` sets it; a native binary has \
+              no flags, so this is how `jwc build` output is turned on.",
+    },
+    EnvVar {
         name: "JWC_LOG_FORMAT",
         parse_kind: ParseKind::Enum,
         default: "text",
-        doc: "NOT IMPLEMENTED — Access-log shape: `text` or `json`.",
+        doc: "Access-log shape: `text` or `json`. Read only when \
+              JWC_REQUEST_LOG is on.",
     },
     EnvVar {
         name: "JWC_REQUEST_TIMEOUT",

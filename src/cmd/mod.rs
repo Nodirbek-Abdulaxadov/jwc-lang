@@ -4,7 +4,7 @@
 //! cutover removed the older one, so the prefix is gone and these are the
 //! ordinary commands (ROADMAP §2).
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use jwc_v1_paths::collect_sources;
 use std::path::{Path, PathBuf};
 
@@ -577,7 +577,8 @@ pub fn routes(path: PathBuf) -> Result<()> {
 /// A program with no `database` connects to nothing, exactly as in
 /// `serve`. One that queries still needs `DATABASE_URL`, because the query
 /// does.
-pub fn run(path: PathBuf, dev: bool) -> Result<()> {
+pub fn run(path: PathBuf, dev: bool, request_logging: bool) -> Result<()> {
+    crate::serve::set_request_logging(request_logging);
     let ws = crate::workspace::Workspace::load(&path)?;
     let program = std::sync::Arc::new(crate::serve::load(&ws)?);
 
@@ -619,7 +620,18 @@ pub fn run(path: PathBuf, dev: bool) -> Result<()> {
     })
 }
 
-pub fn serve(path: PathBuf, port: Option<u16>, skip_schema_check: bool, dev: bool) -> Result<()> {
+pub fn serve(
+    path: PathBuf,
+    port: Option<u16>,
+    skip_schema_check: bool,
+    dev: bool,
+    request_logging: bool,
+    watch: bool,
+) -> Result<()> {
+    if watch {
+        return serve_with_watch(&path, port, skip_schema_check, dev, request_logging);
+    }
+    crate::serve::set_request_logging(request_logging);
     let ws = crate::workspace::Workspace::load(&path)?;
     let program = std::sync::Arc::new(crate::serve::load(&ws)?);
     let snap = crate::snapshot::of(&crate::model::build(&ws).model);
@@ -695,6 +707,110 @@ pub fn serve(path: PathBuf, port: Option<u16>, skip_schema_check: bool, dev: boo
         println!("{} routes", program.routes.len());
         crate::serve::serve(program, port).await
     })
+}
+
+/// `jwc serve --watch` — supervise a child `jwc serve` and replace it when
+/// a `.jwc` file under the project changes.
+///
+/// A child process rather than an in-process reload. Reloading in place
+/// would mean dropping a `Program` that the running handlers still borrow,
+/// re-running `main`, and re-opening the pool — three things whose failure
+/// modes are all "the old server is half gone". Killing a process has one.
+///
+/// `notify = "6"` has been a dependency the whole time, pulling `inotify`
+/// into every build; until now nothing in `src/` used it.
+fn serve_with_watch(
+    root: &Path,
+    port: Option<u16>,
+    skip_schema_check: bool,
+    dev: bool,
+    request_logging: bool,
+) -> Result<()> {
+    use notify::{event::EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // `jwc serve --watch app.jwc` watches the directory holding it: an
+    // editor that writes through a temp file replaces the inode, and a
+    // watch on the file itself would follow the deleted one.
+    let dir = if root.is_file() {
+        root.parent().unwrap_or(Path::new(".")).to_path_buf()
+    } else {
+        root.to_path_buf()
+    };
+
+    let exe = std::env::current_exe()?;
+    let (tx, rx) = mpsc::channel::<notify::Event>();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+        if let Ok(event) = res {
+            let _ = tx.send(event);
+        }
+    })?;
+    watcher.watch(&dir, RecursiveMode::Recursive)?;
+    println!("watching {} for .jwc changes", display_relative(&dir));
+
+    loop {
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("serve").arg(root);
+        if let Some(p) = port {
+            cmd.arg("--port").arg(p.to_string());
+        }
+        if skip_schema_check {
+            cmd.arg("--skip-schema-check");
+        }
+        if dev {
+            cmd.arg("--dev");
+        }
+        if request_logging {
+            cmd.arg("--request-logging");
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow!("watch: could not start the server: {e}"))?;
+
+        // Drain whatever arrived while the child was starting, so the
+        // first edit after a restart is what triggers the next one.
+        while rx.try_recv().is_ok() {}
+
+        loop {
+            let Ok(event) = rx.recv() else {
+                // The watcher thread is gone — nothing will ever restart
+                // the child again, so stop supervising and take it down
+                // rather than leaving an unwatched server behind.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(());
+            };
+            if !matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) {
+                continue;
+            }
+            if event.paths.iter().any(|p| is_jwc_path(p)) {
+                break;
+            }
+        }
+
+        println!("change detected — restarting");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // One save is several filesystem events, and an editor's
+        // write-temp-then-rename is several more. Without the debounce the
+        // server restarts once per event and never finishes booting.
+        std::thread::sleep(Duration::from_millis(250));
+        while rx.try_recv().is_ok() {}
+    }
+}
+
+/// Only `.jwc` sources restart the server. A `.env` change does not: the
+/// child reads it at boot, and restarting on it would mean restarting
+/// every time an editor touched a dotfile in the tree.
+fn is_jwc_path(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("jwc"))
 }
 
 /// `jwc v1 ast <file>` — the parse tree, for debugging the front-end and

@@ -1,0 +1,92 @@
+// Shared verbatim by the CLI and by the crate `jwc build` generates:
+// `src/serve.rs` includes it, and codegen pastes the same text into the
+// binary's prelude. An access line whose shape depends on which backend
+// answered is a log pipeline that parses one of them and drops the other.
+//
+// Do not add a `crate::` path or a `use` to this file.
+
+/// The access line's shape. `JWC_LOG_FORMAT=json` gives one JSON object
+/// per line for a collector; anything else gives the human form.
+///
+/// Pure so the wire shape can be pinned by a test rather than by reading
+/// stderr, and so both backends can be pinned by the *same* test.
+pub fn format_request_log_line(
+    method: &str,
+    path: &str,
+    status: u16,
+    latency_us: u64,
+    request_id: &str,
+    json: bool,
+) -> String {
+    if json {
+        // `method` is an HTTP token and `status`/`latency_us` are numbers,
+        // so only the path can carry a quote or a backslash. Control bytes
+        // cannot reach here: axum rejects them in the request line.
+        let path = path.replace('\\', "\\\\").replace('"', "\\\"");
+        format!(
+            "{{\"level\":\"info\",\"kind\":\"access\",\"request_id\":\"{request_id}\",\"method\":\"{method}\",\"path\":\"{path}\",\"status\":{status},\"latency_us\":{latency_us}}}"
+        )
+    } else {
+        let ms = latency_us as f64 / 1000.0;
+        format!("[jwc] {method} {path} -> {status} {ms:.1}ms rid={request_id}")
+    }
+}
+
+/// Whether `JWC_LOG_FORMAT` selects the JSON shape.
+pub fn access_log_is_json() -> bool {
+    std::env::var("JWC_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
+/// `JWC_REQUEST_LOG=1` — the switch a native binary has.
+///
+/// `jwc serve --request-logging` is the interpreter's, and it sets the
+/// same thing; a binary built by `jwc build` has no flags at all, so
+/// without the variable the AOT backend could not be made to log and the
+/// two backends would differ in what they can be asked to do.
+pub fn request_log_from_env() -> bool {
+    matches!(std::env::var("JWC_REQUEST_LOG").as_deref(), Ok("1"))
+}
+
+/// The id that ties an access line to the caller's trace.
+///
+/// `observability/otlp.rs` has said since it was written that "the
+/// server's request handler already parses `traceparent` for the request
+/// id". It did not: the handler that parsed it went with the 0.9
+/// front-end and the comment outlived it. This is that parse.
+///
+/// W3C Trace Context §3.2.2: `version-traceid-spanid-flags`, the trace-id
+/// 32 lowercase hex digits and not all zero. A header that does not match
+/// is not repaired — a made-up id that looks like the caller's is worse
+/// than one that is visibly ours.
+pub fn request_id_from_traceparent(traceparent: Option<&str>) -> String {
+    if let Some(tp) = traceparent {
+        let mut parts = tp.split('-');
+        if let (Some(_ver), Some(trace)) = (parts.next(), parts.next()) {
+            if trace.len() == 32
+                && trace
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                && trace.bytes().any(|b| b != b'0')
+            {
+                return trace.to_string();
+            }
+        }
+    }
+    generated_request_id()
+}
+
+/// 16 hex digits from the clock and a per-process counter. Not a UUID and
+/// not claimed to be one: it exists to correlate one process's lines with
+/// each other, and a request that arrives without a `traceparent` has no
+/// wider trace to join.
+pub fn generated_request_id() -> String {
+    static JWC_RID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = JWC_RID_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
+    format!("{:012x}{:04x}", t & 0xffff_ffff_ffff, n & 0xffff)
+}

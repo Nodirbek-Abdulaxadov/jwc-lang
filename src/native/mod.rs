@@ -60,6 +60,10 @@ pub const PRELUDE_BASE: &str = include_str!("prelude/base.rs.in");
 /// `jwc serve` and a native binary refusing the same URLs (routing.md §10.6).
 pub const PRELUDE_DOTENV_CORE: &str = include_str!("../dotenv_core.rs.in");
 pub const PRELUDE_ASSETS_CORE: &str = include_str!("../assets_core.rs.in");
+/// The access line, its id and its switch — the same text `src/serve.rs`
+/// includes, so `--request-logging` and `JWC_REQUEST_LOG=1` produce
+/// byte-identical lines from either backend.
+pub const PRELUDE_ACCESS_LOG_CORE: &str = include_str!("../access_log_core.rs.in");
 pub const PRELUDE_ASSETS: &str = include_str!("prelude/assets.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");
 pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");

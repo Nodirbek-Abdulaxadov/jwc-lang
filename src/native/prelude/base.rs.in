@@ -2911,7 +2911,26 @@ impl HttpServer {
                 },
             },
         };
-        eprintln!("[jwc] listening on http://{}", addr);
+        // The wildcard is what the socket is bound to, not an address
+        // anyone can open. Printing it verbatim gave
+        // `http://0.0.0.0:8080`, which a browser refuses on Windows and
+        // resolves to nothing useful anywhere; the line exists to be
+        // clicked, so it names a host that answers and says separately
+        // what the bind actually is. `serve.rs` fixed this in 0.9.926 and
+        // the native banner kept the old text — the same URL from the two
+        // backends is the whole promise.
+        let shown = match addr.ip() {
+            std::net::IpAddr::V4(v4) if v4.is_unspecified() => format!(
+                "http://localhost:{}  (bound to 0.0.0.0 — every interface)",
+                addr.port()
+            ),
+            std::net::IpAddr::V6(v6) if v6.is_unspecified() => format!(
+                "http://localhost:{}  (bound to [::] — every interface)",
+                addr.port()
+            ),
+            _ => format!("http://{}", addr),
+        };
+        eprintln!("[jwc] listening on {}", shown);
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(jwc_shutdown_signal())
             .await
@@ -2997,7 +3016,53 @@ async fn jwc_operational(method: &str, path: &str) -> Option<axum::response::Res
     }
 }
 
+/// The access log and the request id, around the dispatch.
+///
+/// A wrapper rather than a line before each `return`: the dispatcher has
+/// a dozen early exits — 404, 405, the socket refusals, the body-limit
+/// answers — and an access log that recorded some of them would be worse
+/// than none, because the missing ones are the interesting ones.
+/// `serve.rs` wraps its dispatcher in the same place for the same reason.
 async fn handle_axum_request(
+    state: axum::extract::State<Arc<Router>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    upgrade: Option<axum::extract::ws::WebSocketUpgrade>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let rid = request_id_from_traceparent(
+        headers.get("traceparent").and_then(|v| v.to_str().ok()),
+    );
+    let started = std::time::Instant::now();
+    let method_for_log = method.as_str().to_string();
+    let path_for_log = uri.path().to_string();
+
+    let mut resp = jwc_dispatch(state, method, uri, headers, upgrade, body).await;
+
+    if request_log_from_env() {
+        eprintln!(
+            "{}",
+            format_request_log_line(
+                &method_for_log,
+                &path_for_log,
+                resp.status().as_u16(),
+                started.elapsed().as_micros() as u64,
+                &rid,
+                access_log_is_json(),
+            )
+        );
+    }
+    // Echoed whether or not the log is on, exactly as `serve.rs` does:
+    // correlating a client's report with a server line is the point, and
+    // a client cannot turn the switch on.
+    if let Ok(v) = axum::http::HeaderValue::from_str(&rid) {
+        resp.headers_mut().insert("x-request-id", v);
+    }
+    resp
+}
+
+async fn jwc_dispatch(
     axum::extract::State(router): axum::extract::State<Arc<Router>>,
     method: axum::http::Method,
     uri: axum::http::Uri,
