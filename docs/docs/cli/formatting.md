@@ -120,10 +120,22 @@ return content("text/plain; charset=utf-8", string.join([
 
 The bracket hugs its call and the remaining arguments ride the closing
 line, which is what a person writes by hand. When that does not fit
-either, every argument goes on its own line. Anything else — a `+` chain,
-a ternary, a long identifier chain, a single long string — stays on one
-line however far it runs: breaking one is a claim about which half
-matters, and the printer does not have an opinion to express.
+either, every argument goes on its own line.
+
+A chain of **one** operator — `+`, `and`, `or` — breaks at its joints for
+the same reason: the operands are a list and the operator is the same at
+every joint, so one per line is the only shape available.
+
+```jwc no-compile
+return "<img src='https://barcodeapi.org/api/qr/"
+    + $encoded
+    + "?format=svg' alt='QR Code'/>";
+```
+
+Everything else stays on one line however far it runs — a ternary, a
+mixed chain, a long identifier chain, a single long string. Breaking one
+of those is a claim about which half matters, and the printer does not
+have an opinion to express.
 
 Until 0.9.942 there was no rule at all outside a query and an `insert`.
 jwc-shortener's `robots.txt` route was a `string.join` over 36 short

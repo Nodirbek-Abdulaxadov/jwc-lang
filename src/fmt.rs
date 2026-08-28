@@ -1046,8 +1046,51 @@ impl Writer {
                 self.line(&format!("){suffix}"));
                 true
             }
+            // A chain of one operator — `a + b + c`, `x and y and z`.
+            //
+            // Breaking this is not a claim about which half matters, which
+            // is why it is here and a ternary is not: the operands are a
+            // list, the operator is the same at every joint, and putting
+            // one per line after the first is the only shape available.
+            // Restricted to the three that actually chain — `+` for
+            // building a string, `and`/`or` for building a condition. A
+            // broken `==` would read as two statements.
+            ExprKind::Binary { op, .. }
+                if matches!(op, BinOp::Add | BinOp::And | BinOp::Or) =>
+            {
+                let op = *op;
+                let mut parts: Vec<&Expr> = Vec::new();
+                Self::chain(e, op, &mut parts);
+                if parts.len() < 2 {
+                    return false;
+                }
+                let p = prec(&e.kind);
+                self.line(&format!("{prefix}{}", wrap(parts[0], p)));
+                self.depth += 1;
+                for (n, part) in parts.iter().enumerate().skip(1) {
+                    let end = if n + 1 == parts.len() { suffix } else { "" };
+                    self.line(&format!("{} {}{end}", op.as_str(), wrap(part, p + 1)));
+                }
+                self.depth -= 1;
+                true
+            }
             _ => false,
         }
+    }
+
+    /// The operands of a left-nested chain of one operator, in order.
+    fn chain<'a>(e: &'a Expr, op: BinOp, out: &mut Vec<&'a Expr>) {
+        if let ExprKind::Binary {
+            op: o, lhs, rhs, ..
+        } = &*e.kind
+        {
+            if *o == op {
+                Self::chain(lhs, op, out);
+                out.push(rhs);
+                return;
+            }
+        }
+        out.push(e);
     }
 
     /// Whether `prefix<body>suffix` would pass the margin at this depth.
@@ -1108,7 +1151,11 @@ impl Writer {
         }
 
         let buffered = if i.buffered { " buffered" } else { "" };
-        if inline.len() + head.len() <= 76 && tail.is_empty() && i.projection.is_none() {
+        // Measured against the margin including the indent *and* the
+        // suffix: an `insert … catch Conflict (err) {` counted only the
+        // columns before the `catch` and printed 96 of them.
+        let fits = !self.over(&format!("{head} {{ "), &inline, &format!(" }}{buffered}{suffix}"));
+        if fits && tail.is_empty() && i.projection.is_none() {
             self.line(&format!("{head} {{ {inline} }}{buffered}{suffix}"));
             return;
         }

@@ -44,9 +44,16 @@ All notable changes to JWC are documented here. This project adheres to
   the input is one people stop running. An array, a record literal and an
   argument list now break one item per line when the one-line form passes
   92 columns at its indent, recursively, and the bracket hugs its call so
-  `string.join([` … `], "\n")` reads the way a person writes it. Anything
-  with no natural place to break — a `+` chain, a ternary, a long
-  identifier chain — still stays on one line, deliberately.
+  `string.join([` … `], "\n")` reads the way a person writes it. A chain
+  of one operator — `+`, `and`, `or` — breaks at its joints on the same
+  rule. A ternary, a mixed chain and a long identifier chain still stay on
+  one line, deliberately: breaking one is a claim about which half
+  matters.
+
+  An `insert`'s own width check was wrong in the same direction — it
+  counted the head and the values and ignored both the indent and a
+  ` catch Conflict (err) {` riding on the end, so jwc-shortener's insert
+  printed at 96 columns. It measures the whole line now.
 
 ### Changed
 

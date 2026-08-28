@@ -374,3 +374,78 @@ fn a_value_that_would_run_past_the_margin_is_broken() {
     // printer is built on.
     assert_eq!(once, fmt("margin.jwc (2nd)", &once));
 }
+
+
+/// A chain of one operator breaks at its joints; a ternary does not.
+///
+/// The distinction is the whole rule. `a + b + c` is a list with the same
+/// operator at every joint, so one operand per line is the only shape
+/// available and choosing it is not a claim about anything. A ternary has
+/// two branches and putting one of them on line 2 says which one matters,
+/// which is an opinion this printer does not have.
+#[test]
+fn a_long_chain_breaks_at_its_operator_and_a_ternary_does_not() {
+    let src = concat!(
+        "service S {\n",
+        "    function a(x: text) -> text {\n",
+        "        return \"<img src='https://barcodeapi.org/api/qr/\" + $x",
+        " + \"?format=svg' alt='QR Code'/>\";\n",
+        "    }\n",
+        "    function b(x: int) -> text {\n",
+        "        return $x > 100000 ? \"a rather long branch here for width\" :",
+        " \"another rather long branch\";\n",
+        "    }\n",
+        "}\n",
+    );
+    let once = fmt("chain.jwc", src);
+    assert!(
+        once.contains("\n            + $x\n"),
+        "the `+` chain must break at its operator:\n{once}"
+    );
+    // The ternary has no place to break, so it stays on one line even
+    // though that line passes the margin. That is the honest outcome: the
+    // alternative is the printer picking a branch.
+    assert!(
+        once.lines().any(|l| l.contains(" ? ") && l.contains(" : ")),
+        "a ternary must stay on one line:\n{once}"
+    );
+    assert_eq!(once, fmt("chain.jwc (2nd)", &once));
+}
+
+/// The `insert` width check counted the columns before its suffix.
+///
+/// Measured on jwc-shortener: `insert into App.public.Links { code = $code,
+/// url = $req.url } catch Conflict (err) {` printed as 96 columns, because
+/// the check summed the head and the inline values and ignored both the
+/// indent and the ` catch … {` riding on the end.
+#[test]
+fn an_inserts_width_check_counts_its_indent_and_its_suffix() {
+    let src = concat!(
+        "database App : Postgres;\n",
+        "schema public of App;\n",
+        "table Links of App.public {\n",
+        "    id bigint primary key identity;\n",
+        "    code varchar(8) unique;\n",
+        "    url varchar(2048);\n",
+        "}\n",
+        "service S {\n",
+        "    function make(code: text, url: text) {\n",
+        "        for (n in [1, 2]) {\n",
+        "            insert into App.public.Links { code = $code, url = $url }",
+        " catch Conflict (err) {\n",
+        "                continue;\n",
+        "            };\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let once = fmt("insert_width.jwc", src);
+    for line in once.lines() {
+        assert!(
+            line.len() <= 92,
+            "line is {} columns:\n{line}\n--- whole file ---\n{once}",
+            line.len()
+        );
+    }
+    assert_eq!(once, fmt("insert_width.jwc (2nd)", &once));
+}
