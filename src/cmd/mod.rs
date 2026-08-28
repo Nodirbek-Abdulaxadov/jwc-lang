@@ -142,6 +142,25 @@ pub fn check(path: PathBuf, quiet: bool, parse_only: bool, deny_warnings: bool) 
 ///
 /// `--check` reports which files would change and exits non-zero without
 /// writing, which is the CI shape.
+/// Name the comments a re-print would lose, and where they can live instead.
+fn report_lost_comments(file: &Path, lost: &[String]) {
+    eprintln!(
+        "{}: not formatted — {} comment{} would be lost:",
+        display_relative(file),
+        lost.len(),
+        plural(lost.len())
+    );
+    for c in lost {
+        eprintln!("    {}", c.trim_end());
+    }
+    eprintln!(
+        "  the printer re-emits from the AST, which carries a comment on a \
+         declaration or a statement but not inside a record literal, a \
+         `server {{ }}` body or an `insert` value list. Move it above the \
+         statement and the file formats."
+    );
+}
+
 pub fn fmt(paths: Vec<PathBuf>, check_only: bool, to_stdout: bool) -> Result<()> {
     let paths = if paths.is_empty() {
         vec![PathBuf::from(".")]
@@ -181,12 +200,23 @@ pub fn fmt(paths: Vec<PathBuf>, check_only: bool, to_stdout: bool) -> Result<()>
             eprint!("{}", parsed.render_all());
             bail!("source did not parse — nothing printed");
         }
-        print!("{}", crate::fmt::format_program(&parsed.program));
+        let printed = crate::fmt::format_program(&parsed.program);
+        let lost = crate::fmt::comments_lost(&parsed.source.text, &printed);
+        if !lost.is_empty() {
+            report_lost_comments(&files[0], &lost);
+            bail!(
+                "formatting would drop {} comment{}",
+                lost.len(),
+                plural(lost.len())
+            );
+        }
+        print!("{printed}");
         return Ok(());
     }
 
     let mut changed: Vec<PathBuf> = Vec::new();
     let mut failed = 0usize;
+    let mut refused = 0usize;
 
     for f in &files {
         let parsed = crate::parse_file(f)?;
@@ -199,14 +229,40 @@ pub fn fmt(paths: Vec<PathBuf>, check_only: bool, to_stdout: bool) -> Result<()>
         if printed == parsed.source.text {
             continue;
         }
+        // Never trade a comment for a layout. The printer re-emits from the
+        // AST, and the AST does not carry a comment written between the
+        // fields of a record literal or the keys of `server { }` — so
+        // formatting such a file used to delete the paragraph explaining
+        // why the code is the way it is, with nothing said. Refusing the
+        // file loses nothing and says which comment is in the way.
+        let lost = crate::fmt::comments_lost(&parsed.source.text, &printed);
+        if !lost.is_empty() {
+            report_lost_comments(f, &lost);
+            refused += 1;
+            continue;
+        }
         changed.push(f.clone());
         if !check_only {
             std::fs::write(f, &printed)?;
         }
     }
 
+    // Two different failures, and reporting them as one told the reader the
+    // wrong thing to go and look at.
+    if failed > 0 && refused > 0 {
+        bail!(
+            "{failed} file{} did not parse, {refused} would lose a comment",
+            plural(failed)
+        );
+    }
     if failed > 0 {
         bail!("{failed} file{} did not parse", plural(failed));
+    }
+    if refused > 0 {
+        bail!(
+            "{refused} file{} left alone rather than lose a comment",
+            plural(refused)
+        );
     }
 
     if check_only {

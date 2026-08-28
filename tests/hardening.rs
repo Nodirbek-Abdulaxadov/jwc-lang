@@ -2830,3 +2830,74 @@ fn a_native_console_program_does_not_bind_a_port() {
         "the port must start at the sentinel, not at 8080"
     );
 }
+
+/// A formatter that deletes comments is worse than no formatter, and this
+/// one did — silently, on the most ordinary construct in the language.
+///
+/// `fmt` re-prints from the AST, and `Attached` hangs on declarations and
+/// statements. `ObjEntry` has none, so a `--` written between the fields
+/// of a record literal, between the keys of `server { }`, or in an
+/// `insert` value list simply was not in the tree to print. Formatting
+/// `jwc-shortener` deleted thirteen lines of reasoning across three files
+/// and reported success.
+///
+/// The printer still cannot hold them. What it no longer does is lose
+/// them without saying so.
+#[test]
+fn fmt_refuses_a_file_rather_than_drop_a_comment() {
+    // A comment the AST carries: survives, as it always did.
+    let kept = "namespace n;\n\n-- why this function exists\nfunction f() {\n    return 1;\n}\n";
+    let parsed = jwc::parse_str(std::path::Path::new("a.jwc"), kept);
+    let printed = jwc::fmt::format_program(&parsed.program);
+    assert!(printed.contains("-- why this function exists"));
+    assert!(jwc::fmt::comments_lost(kept, &printed).is_empty());
+
+    // A comment inside a record literal: the printer drops it, and the
+    // check is what turns that into a refusal instead of a deletion.
+    let lossy = "namespace n;\n\
+                 function f() {\n\
+                 \x20   return {\n\
+                 \x20       -- the reason for the next line\n\
+                 \x20       a: 1\n\
+                 \x20   };\n\
+                 }\n";
+    let parsed = jwc::parse_str(std::path::Path::new("a.jwc"), lossy);
+    assert!(!parsed.has_errors(), "the sample must parse");
+    let printed = jwc::fmt::format_program(&parsed.program);
+    let lost = jwc::fmt::comments_lost(lossy, &printed);
+    assert_eq!(
+        lost,
+        vec!["-- the reason for the next line".to_string()],
+        "the dropped comment must be named, not merely counted"
+    );
+
+    // Lexed, not grepped: a `--` inside a string is not a comment, and a
+    // file full of them must still format.
+    let strings = "namespace n;\nfunction f() {\n    return \"a -- b\";\n}\n";
+    let parsed = jwc::parse_str(std::path::Path::new("a.jwc"), strings);
+    let printed = jwc::fmt::format_program(&parsed.program);
+    assert!(jwc::fmt::comments_lost(strings, &printed).is_empty());
+    assert!(jwc::fmt::comment_texts(strings).is_empty());
+
+    // A multiset, not a set: two identical comments, one dropped, is one
+    // comment lost.
+    let twice = "namespace n;\n\
+                 function f() {\n\
+                 \x20   return {\n\
+                 \x20       -- same text\n\
+                 \x20       a: 1,\n\
+                 \x20       -- same text\n\
+                 \x20       b: 2\n\
+                 \x20   };\n\
+                 }\n";
+    let parsed = jwc::parse_str(std::path::Path::new("a.jwc"), twice);
+    let printed = jwc::fmt::format_program(&parsed.program);
+    assert_eq!(jwc::fmt::comments_lost(twice, &printed).len(), 2);
+
+    // And the module doc must not go back to promising more than this.
+    let doc = include_str!("../src/fmt.rs");
+    assert!(
+        doc.contains("What the AST does *not* carry"),
+        "fmt.rs must say which comments it cannot keep"
+    );
+}

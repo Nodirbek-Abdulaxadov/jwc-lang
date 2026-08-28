@@ -103,7 +103,27 @@ above. Nothing is lost, but the comment moves.
 
 **Your line breaks inside an expression.** A long query is printed with
 one clause per line, whatever you wrote, and a short one stays on one
-line however you broke it.
+line however you broke it. There is no line-width rule for an array or a
+record literal outside an `insert`, so a long one comes back as one long
+line.
+
+**A comment written *inside* a record literal, a `server { }` body or an
+`insert` value list.** The AST carries a comment on a declaration or a
+statement — `Attached` — and those three are neither, so there is nowhere
+in the tree for the text to be.
+
+`jwc fmt` will not delete it. It compares the comments in the file against
+the comments in what it would write, and if any would be lost it leaves
+the file alone and says which:
+
+```
+./src/app.jwc: not formatted — 4 comments would be lost:
+    -- `request.client_ip()` walks `X-Forwarded-For` right to left and
+    …
+```
+
+Move the comment above the enclosing statement and the file formats.
+Until 0.9.936 it was deleted and the run reported success.
 
 ## In a pre-commit hook
 

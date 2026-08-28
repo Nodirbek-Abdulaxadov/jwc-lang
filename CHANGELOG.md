@@ -3,6 +3,31 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.936] — `jwc fmt` was deleting comments — 2026-08-28
+
+Running `jwc fmt` on `jwc-shortener` removed thirteen lines of comment
+across three files and reported success.
+
+`fmt` re-prints from the AST, and comments are carried by `Attached`,
+which hangs on a declaration or a statement. Nothing else has one — so a
+`--` written between the fields of a record literal, between the keys of
+`server { }`, or in an `insert` value list was never in the tree to print.
+The module doc said comments survive. They survive *where the AST carries
+them*, which is not the same sentence, and the difference is the paragraph
+explaining why a column is `int`.
+
+The printer still cannot hold those. What it no longer does is lose them
+quietly: `jwc fmt` lexes the comments out of the input, compares them
+against what it is about to write, and leaves the file alone rather than
+drop one — naming the comment and where it can live instead. Lexed and not
+grepped, because `"a -- b"` is a string.
+
+Known and not fixed: the printer has no line-width awareness for an array
+or a record literal outside an `insert`. `string.join([…], "\n")` over
+thirty-six elements comes back as one 1608-character line. `expr()`
+returns a `String` with no indent context, which is the same structural
+reason it cannot place a comment, so the two want the same fix.
+
 ## [0.9.935] — `jwc build` did not run the checker — 2026-08-28
 
 Rewriting `jwc-shortener` against the 1.0 language, three more.

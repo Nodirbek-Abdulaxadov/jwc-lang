@@ -5,14 +5,84 @@
 //! normalise is already normalised on the second pass. The test that matters
 //! is `fmt(fmt(x)) == fmt(x)` over the corpus and the sample.
 //!
-//! Doc comments (`---`) and line comments (`--`) survive: the parser hangs
-//! them on the AST node that follows them (`Attached`), and the printer
-//! emits them back in place. Trailing comments on the same line as code are
-//! not preserved — they become leading comments of the next item.
+//! Doc comments (`---`) and line comments (`--`) survive **where the AST
+//! carries them**: the parser hangs them on the declaration or statement
+//! that follows (`Attached`), and the printer emits them back in place.
+//! Trailing comments on the same line as code are not preserved — they
+//! become leading comments of the next item.
+//!
+//! What the AST does *not* carry is a comment inside a construct that is
+//! not a declaration or a statement: between the fields of a record
+//! literal, between the keys of `server { }`, between the columns of an
+//! `insert`. `ObjEntry` has no `Attached`, and a record literal has no
+//! multi-line printer to put one on — `expr()` returns a `String` with no
+//! indent to hang a comment line off.
+//!
+//! Re-printing from the AST therefore *drops* those, and it used to drop
+//! them silently, which for a formatter run on save is data loss. So
+//! `jwc fmt` compares the comments it lexed out of the input against the
+//! ones in what it is about to write, and refuses the file rather than
+//! losing one — see `comment_texts` and `cmd::fmt`. The refusal names the
+//! comment, which is more use than a correct-looking file with a
+//! paragraph missing from it.
+
+use crate::token::Trivia;
 
 use crate::ast::*;
 
 const INDENT: &str = "    ";
+
+/// Every `--` and `---` comment in a source text, in order, rendered the
+/// way `Writer::attached` renders one.
+///
+/// Rendered the same way on purpose: the comparison is between the input
+/// and the output of this printer, so a comment that only differs by the
+/// space the lexer strips is the *same* comment and must not read as a
+/// loss.
+///
+/// Lexed rather than grepped: `"a -- b"` is a string, and a formatter that
+/// refused a file over a hyphen inside a literal would be its own kind of
+/// wrong.
+pub fn comment_texts(src: &str) -> Vec<String> {
+    fn render(marker: &str, body: &str) -> String {
+        if body.is_empty() {
+            marker.to_string()
+        } else {
+            format!("{marker} {body}")
+        }
+    }
+    let (tokens, _) = crate::lexer::Lexer::new(src).tokenize();
+    let mut out = Vec::new();
+    for t in &tokens {
+        for tr in &t.leading {
+            match tr {
+                Trivia::Doc(s) => out.push(render("---", s)),
+                Trivia::Line(s) => out.push(render("--", s)),
+                Trivia::Blank => {}
+            }
+        }
+    }
+    out
+}
+
+/// The comments in `before` that are not in `after`, as a multiset.
+///
+/// A multiset and not a set: two identical `-- TODO` lines are two
+/// comments, and losing one of them is still losing one.
+pub fn comments_lost(before: &str, after: &str) -> Vec<String> {
+    let mut have: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for c in comment_texts(after) {
+        *have.entry(c).or_default() += 1;
+    }
+    let mut lost = Vec::new();
+    for c in comment_texts(before) {
+        match have.get_mut(&c) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => lost.push(c),
+        }
+    }
+    lost
+}
 
 pub fn format_program(p: &Program) -> String {
     let mut w = Writer::default();
