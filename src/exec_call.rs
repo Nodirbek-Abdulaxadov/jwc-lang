@@ -546,11 +546,21 @@ impl<'a> Vm<'a> {
                 let code = n(0) as u16;
                 self.respond(code, &arg(1))
             }
-            "redirect" => {
+            "redirect" | "redirectExternal" => {
                 let code = n(0) as u16;
+                let target = s(1);
+                match redirect_target(&target) {
+                    RedirectTarget::Malformed => {
+                        return Err(fault(redirect_malformed(&target)));
+                    }
+                    RedirectTarget::External if path == "redirect" => {
+                        return Err(fault(redirect_refusal(&target)));
+                    }
+                    _ => {}
+                }
                 let mut r = self.respond_empty(code);
                 if let Value::Response { headers, .. } = &mut r {
-                    headers.push(("location".into(), s(1)));
+                    headers.push(("location".into(), target));
                 }
                 r
             }
@@ -1073,3 +1083,8 @@ mod raw_tests {
 // generates, so an escaped string is the same string from either backend
 // (builtins.md §4a).
 include!("escape_core.rs.in");
+
+// Where a `Location` may point. The rule is a file the native backend
+// pastes into the crate it generates, so both backends draw the line in
+// the same place (routing.md §6.4).
+include!("redirect_core.rs.in");

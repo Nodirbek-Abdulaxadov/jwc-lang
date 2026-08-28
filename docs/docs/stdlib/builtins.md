@@ -153,8 +153,15 @@ site-wide "your credentials are invalid".
 
 `json`, `created`, `accepted`, `noContent`, `badRequest`, `unauthorized`,
 `forbidden`, `notFound`, `conflict`, `tooManyRequests`, `internalError`,
-`statusCode`, `redirect`, `content`, and the suffixes `with { … }` and
+`statusCode`, `redirect`, `redirectExternal`, `content`, and the suffixes `with { … }` and
 `cookie(name, value, opts)`.
+
+`redirect(status, url)` goes to a path on **this** service and refuses a
+target that can leave it — a scheme, an authority, or a protocol-relative
+`//host`. `redirectExternal(status, url)` is the same builder without the
+restriction, and its name is the point: an open redirect is a phishing
+primitive for most services and the whole product for a shortener, and the
+split makes which one you are is greppable.
 
 From inside an `after` block: `response.status()`,
 `response.duration_ms()`, `response.duration_us()`,

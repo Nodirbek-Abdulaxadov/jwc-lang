@@ -2531,13 +2531,32 @@ fn jwc_b_status_code(code: V, v: V) -> V {
     jwc_respond(jwc_to_int(&code).unwrap_or(200) as u16, v)
 }
 
+/// routing.md §6.4 — a path on **this** service. An off-site target is a
+/// fault naming `redirectExternal`, because the language cannot tell an
+/// open redirect from a shortener and the author can.
 fn jwc_b_redirect(code: V, location: V) -> V {
+    let target = jwc_str_view(&location).unwrap_or("").to_string();
+    match redirect_target(&target) {
+        RedirectTarget::Malformed => panic!("{}", redirect_malformed(&target)),
+        RedirectTarget::External => panic!("{}", redirect_refusal(&target)),
+        RedirectTarget::SameOrigin => {}
+    }
+    jwc_redirect_response(code, target)
+}
+
+/// The same builder without the restriction. The name is the audit trail.
+fn jwc_b_redirect_external(code: V, location: V) -> V {
+    let target = jwc_str_view(&location).unwrap_or("").to_string();
+    if redirect_target(&target) == RedirectTarget::Malformed {
+        panic!("{}", redirect_malformed(&target));
+    }
+    jwc_redirect_response(code, target)
+}
+
+fn jwc_redirect_response(code: V, target: String) -> V {
     let status = jwc_to_int(&code).unwrap_or(302) as u16;
     let mut headers = JwcObj::default();
-    headers.insert(
-        "location".to_string(),
-        v_str(jwc_str_view(&location).unwrap_or("").to_string()),
-    );
+    headers.insert("location".to_string(), v_str(target));
     make_response_with_headers(status, String::new(), "", headers)
 }
 

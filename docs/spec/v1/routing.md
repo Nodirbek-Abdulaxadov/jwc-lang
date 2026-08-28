@@ -273,6 +273,36 @@ the log naming the cookie — rather than a header that splits the response.
 Nothing is encoded on the author's behalf: a value silently percent-encoded
 here is one the reader has to guess the encoding of.
 
+### 6.4 `redirect` and `redirectExternal`
+
+```jwc no-compile
+return redirect(302, "/dashboard");                 -- a path on this service
+return redirectExternal(302, $link.url);            -- anywhere
+```
+
+`redirect` sends a caller to a path on **this** service. A target that can
+leave — a scheme, an authority, a protocol-relative `//host` or `/\host`,
+or anything not rooted at `/` — is refused. A literal one is `E0745`; a
+value discovered at run time is a **fault**, 500 with the target named in
+the log.
+
+`redirectExternal` is the same builder without the restriction.
+
+Two builders because the language cannot tell the two cases apart and the
+author can. An open redirect is the primitive behind a phishing link that
+starts on your domain, and behind stealing an OAuth code from a
+`redirect_uri`. It is also, for a URL shortener, the entire product. What
+the split buys is that "where can this service send someone off-site" is a
+question `grep` answers in one line, which reading every `redirect(` could
+not settle.
+
+The classification is syntactic and does not need to know this service's
+own host — behind a proxy it does not reliably have one. `//evil.example`,
+`/\evil.example` and `\\evil.example` are all external: browsers
+normalise the backslash, and a check that only looked for `http:` lets
+every one of them through. A target carrying a control character or a
+newline is refused by **both** builders — it cannot be a header value.
+
 ### 6.3 Headers from `after`
 
 `response.set_header(k, v)`, `response.add_header(k, v)` and
@@ -541,6 +571,7 @@ run the same text.
 | `E0737` | unknown key in a `cookie(...)` options record |
 | `E0738` | a cookie attribute of the wrong type, or a `same_site` that is not `Strict` / `Lax` / `None` |
 | `E0739` | `same_site: "None"` without `secure: true` |
+| `E0745` | `redirect` given a literal target that leaves this service |
 | `E0740` | a `static` prefix is not a literal path beginning with `/` |
 | `E0741` | a `static` root is missing, or is not a directory |
 | `E0742` | two `static` mounts on one prefix |

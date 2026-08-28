@@ -3307,3 +3307,76 @@ fn wildcard_cors_with_credentials_is_refused() {
                   server { cors { origins = [\"https://app.example.com\"]; credentials = true; } }\n";
     assert!(!codes(listed).contains(&"E1207".to_string()));
 }
+
+/// `redirect(302, $url)` sent a caller wherever the value said.
+///
+/// Measured: a route reading `request.query("to")` answered
+/// `location: https://evil.example`, with nothing checked anywhere. That
+/// is the primitive behind a phishing link that starts on your domain, and
+/// behind stealing an OAuth code from a `redirect_uri`.
+///
+/// It is also, for a URL shortener, the entire product — which is why this
+/// is a split and not a ban. `redirect` goes to a path on this service;
+/// `redirectExternal` goes anywhere, and its name is what makes "where can
+/// this service send someone off-site" a question `grep` answers.
+#[test]
+fn a_redirect_off_this_service_has_to_say_so() {
+    use jwc::exec_call::{redirect_target, RedirectTarget};
+
+    // The bypasses. A check that only looked for `http:` lets every one of
+    // these through, and every one of them leaves the site.
+    for u in [
+        "https://evil.example",
+        "//evil.example",
+        r"/\evil.example",
+        r"\\evil.example",
+        "javascript:alert(1)",
+        "evil.example/x",
+    ] {
+        assert_eq!(redirect_target(u), RedirectTarget::External, "{u}");
+    }
+    for u in ["/", "/dashboard", "/a?b=1#c", "?p=2", "#top"] {
+        assert_eq!(redirect_target(u), RedirectTarget::SameOrigin, "{u}");
+    }
+    // Neither builder may send one of these — it is not a header value.
+    assert_eq!(redirect_target("/a\r\nX: y"), RedirectTarget::Malformed);
+
+    // One rule, handed to both backends.
+    let core = include_str!("../src/redirect_core.rs.in");
+    assert!(jwc::native::PRELUDE_REDIRECT_CORE == core);
+    let exec = include_str!("../src/exec_call.rs");
+    assert!(exec.contains(r#"include!("redirect_core.rs.in")"#));
+    let base = include_str!("../src/native/prelude/base.rs.in");
+    assert!(base.contains("fn jwc_b_redirect_external("));
+    assert!(
+        base.contains("RedirectTarget::External => panic!"),
+        "the native `redirect` must refuse an off-site target too"
+    );
+
+    // A literal one is a compile error, not a fault a request discovers.
+    fn codes(src: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        jwc::check::check(&ws, &sym, &built.model)
+            .diags
+            .iter()
+            .map(|(_, d)| d.code.to_string())
+            .collect()
+    }
+    fn route(body: &str) -> String {
+        format!("namespace n;\nroutes \"/r\" {{ route GET \"\" {{ return {body}; }} }}\n")
+    }
+    assert!(
+        codes(&route(r#"redirect(302, "https://evil.example")"#)).contains(&"E0745".to_string())
+    );
+    assert!(codes(&route(r#"redirect(302, "//evil.example")"#)).contains(&"E0745".to_string()));
+    assert!(codes(&route(r#"redirect(302, "/dashboard")"#)).is_empty());
+    // The escape hatch compiles, which is the whole point of naming it.
+    assert!(
+        codes(&route(r#"redirectExternal(302, "https://example.com")"#)).is_empty(),
+        "`redirectExternal` is how a shortener says what it is"
+    );
+}

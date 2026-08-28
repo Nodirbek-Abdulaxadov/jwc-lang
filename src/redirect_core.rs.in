@@ -1,0 +1,176 @@
+// Where a `Location` may point — routing.md §6.4.
+//
+// `include!`d by `src/exec_call.rs` and pasted into the crate `jwc build`
+// generates, so both backends draw the line in the same place.
+//
+// ## The problem this splits in two
+//
+// `redirect(302, $url)` sent the caller wherever the value said. Measured:
+// a route reading `request.query("to")` answered
+// `location: https://evil.example`, with nothing checked anywhere. That is
+// an open redirect — the primitive behind a phishing link that starts on
+// your domain, and behind stealing an OAuth code from a `redirect_uri`.
+//
+// It is also, for some services, the entire product: a URL shortener's job
+// is to send a caller to an address it was given. The language cannot tell
+// those two apart. The author can.
+//
+// So there are two builders. `redirect` goes to **this** service — a path
+// on the same origin — and refuses anything else. `redirectExternal` goes
+// anywhere, and the name is the audit trail: `jwc explain` and `grep` both
+// answer "where can this service send someone off-site" in one line, which
+// is a question no amount of reading `redirect(` could settle before.
+
+/// A `Location` target, classified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedirectTarget {
+    /// A path on this service: `/x`, `/x?y=1`, `?y=1`, `#frag`, or empty.
+    SameOrigin,
+    /// Anything that can leave: a scheme, an authority, or a
+    /// protocol-relative `//host`.
+    External,
+    /// A target that cannot be a header value at all — a newline, a
+    /// control character. Neither builder sends one.
+    Malformed,
+}
+
+/// Which of the three `url` is.
+///
+/// Syntactic, and deliberately so: it does not need to know this service's
+/// own host, which behind a proxy it does not reliably have. A target that
+/// begins with a single `/` and does not continue with `/` or `\` is a path
+/// on whatever host answered, whichever host that is.
+///
+/// The cases that matter and why each is external:
+///
+/// * `//evil.example` — protocol-relative. The browser fills in the current
+///   scheme and goes to `evil.example`. This is the classic bypass of a
+///   check that only looked for `http:`.
+/// * `/\evil.example` and `\\evil.example` — browsers normalise the
+///   backslash to `/` and treat these as protocol-relative too, so a check
+///   that only knew about `/` lets them through.
+/// * `https://x`, `javascript:…`, `data:…`, `mailto:…` — any scheme.
+/// * ` /path` with leading whitespace or a control character — refused
+///   rather than trimmed, because trimming is a repair that has to be
+///   exactly as clever as the caller.
+pub fn redirect_target(url: &str) -> RedirectTarget {
+    // A header value cannot carry these at all, and a `Location` built from
+    // one splits the response.
+    if url.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return RedirectTarget::Malformed;
+    }
+
+    let bytes = url.as_bytes();
+    match bytes.first() {
+        // Empty, a query, or a fragment: this page, this origin.
+        None => RedirectTarget::SameOrigin,
+        Some(b'?') | Some(b'#') => RedirectTarget::SameOrigin,
+        Some(b'/') => {
+            // `//host` and `/\host` leave; `/path` does not.
+            match bytes.get(1) {
+                Some(b'/') | Some(b'\\') => RedirectTarget::External,
+                _ => RedirectTarget::SameOrigin,
+            }
+        }
+        // A backslash where a browser reads a slash.
+        Some(b'\\') => RedirectTarget::External,
+        _ => {
+            // A scheme, or a bare host, or a relative path like `x/y`.
+            // Every one of them can leave: `evil.example/path` with no
+            // scheme is resolved against the *directory* of the current
+            // URL, which for `/` is the root — so it stays — but
+            // `example.com:80` parses as a scheme. Rather than model the
+            // whole of RFC 3986 resolution, anything that is not rooted at
+            // `/` is external, and an author who meant a path writes the
+            // leading slash. That is one character, and it makes the rule
+            // one a reader can hold.
+            RedirectTarget::External
+        }
+    }
+}
+
+/// The sentence for a `redirect` that was handed an off-site target.
+///
+/// Names the builder to use, because the fix is one word and the author
+/// should not have to search for it.
+pub fn redirect_refusal(url: &str) -> String {
+    format!(
+        "`redirect` sends a caller to a path on this service, and {url:?} leaves it. \
+         Use `redirectExternal` if that is deliberate — it is the same builder \
+         without the restriction, and the name is what makes an open redirect \
+         reviewable."
+    )
+}
+
+/// The sentence for a target that cannot be a header value.
+pub fn redirect_malformed(url: &str) -> String {
+    format!("a redirect target cannot contain a control character or a newline: {url:?}")
+}
+
+#[cfg(test)]
+mod redirect_core_tests {
+    use super::*;
+    use RedirectTarget::*;
+
+    #[test]
+    fn a_path_on_this_service_is_same_origin() {
+        for u in ["/", "/dashboard", "/a/b?c=1#d", "?page=2", "#top", ""] {
+            assert_eq!(redirect_target(u), SameOrigin, "{u}");
+        }
+    }
+
+    #[test]
+    fn anything_with_a_scheme_leaves() {
+        for u in [
+            "https://example.com",
+            "http://example.com",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "mailto:a@b.c",
+        ] {
+            assert_eq!(redirect_target(u), External, "{u}");
+        }
+    }
+
+    /// The bypasses. A check that only looked for `http:` lets every one of
+    /// these through, and every one of them leaves the site.
+    #[test]
+    fn the_protocol_relative_forms_leave() {
+        for u in [
+            "//evil.example",
+            "//evil.example/path",
+            r"/\evil.example",
+            r"\\evil.example",
+            r"\evil.example",
+        ] {
+            assert_eq!(redirect_target(u), External, "{u}");
+        }
+    }
+
+    /// Not rooted at `/` is external. `evil.example/x` with no scheme is a
+    /// relative reference a browser resolves against the current directory,
+    /// and `example.com:80` parses as a scheme — modelling which is which
+    /// is more subtlety than a security rule should carry.
+    #[test]
+    fn an_unrooted_target_is_external() {
+        for u in ["evil.example", "evil.example/x", "example.com:80", "a/b"] {
+            assert_eq!(redirect_target(u), External, "{u}");
+        }
+    }
+
+    #[test]
+    fn a_target_that_would_split_the_response_is_malformed() {
+        assert_eq!(redirect_target("/a\r\nX-Injected: yes"), Malformed);
+        assert_eq!(redirect_target("/a\nb"), Malformed);
+        assert_eq!(redirect_target("/a\u{7f}b"), Malformed);
+        // Leading whitespace is refused rather than trimmed — but a space
+        // is not a control character, so it falls out as `External`, which
+        // is also a refusal for `redirect`.
+        assert_eq!(redirect_target(" /path"), External);
+    }
+
+    #[test]
+    fn the_refusal_names_the_builder_that_would_work() {
+        assert!(redirect_refusal("https://evil.example").contains("redirectExternal"));
+    }
+}

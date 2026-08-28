@@ -77,6 +77,9 @@ pub const PRELUDE_COOKIE_CORE: &str = include_str!("../cookie_core.rs.in");
 /// `string.escape_html` / `string.escape_url` — the same text
 /// `src/exec_call.rs` includes.
 pub const PRELUDE_ESCAPE_CORE: &str = include_str!("../escape_core.rs.in");
+/// Where a `Location` may point — the same text `src/exec_call.rs`
+/// includes, so `redirect` refuses the same targets on both backends.
+pub const PRELUDE_REDIRECT_CORE: &str = include_str!("../redirect_core.rs.in");
 /// `pattern()` and `string.matches`, with the compiled regexes kept — the
 /// same text `src/validate.rs` includes. Pasted only when the program
 /// reaches for a regex at all, so a crate that does not carries neither

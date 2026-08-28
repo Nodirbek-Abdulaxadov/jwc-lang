@@ -3,6 +3,40 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.941] — `redirect` goes here, `redirectExternal` goes anywhere — 2026-08-28
+
+`redirect(302, $url)` sent a caller wherever the value said. Measured: a
+route reading `request.query("to")` answered
+`location: https://evil.example`, with nothing checked. That is the
+primitive behind a phishing link that starts on your domain and behind
+stealing an OAuth code from a `redirect_uri`.
+
+It is also, for a URL shortener, the entire product. The language cannot
+tell those apart; the author can. So there are two builders now.
+`redirect` goes to a path on **this** service and refuses anything that
+can leave — a scheme, an authority, a protocol-relative `//host` or
+`/\host`, or a target not rooted at `/`. `redirectExternal` is the same
+builder without the restriction.
+
+The name is the point. "Where can this service send someone off-site" is
+now a question `grep` answers in one line, which reading every `redirect(`
+could not settle.
+
+A literal off-site target is `E0745` — a mistake the compiler sees rather
+than one a request discovers. A value found at run time is a fault, 500,
+with the target named in the log. A target carrying a control character or
+a newline is refused by **both** builders: it cannot be a header value.
+
+The classification is syntactic and needs no knowledge of this service's
+own host, which behind a proxy it does not reliably have. The bypasses are
+covered by construction: `//evil.example`, `/\evil.example` and
+`\\evil.example` all leave, and a check that only looked for `http:` lets
+every one of them through.
+
+`jwc-shortener` says `redirectExternal` now, which is the correct answer
+for a service whose job is to redirect anywhere — and the diff is the first
+time its source has said so.
+
 ## [0.9.940] — the rest of the security pass — 2026-08-28
 
 **`jwc build` dropped the program's `cors { }` block.** The native runtime

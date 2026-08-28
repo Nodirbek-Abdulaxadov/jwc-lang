@@ -41,7 +41,7 @@ every occurrence with a count.
 
 2.4 `JWC_LOG_SQL=1` prints each bound parameter's **length**, not its
 value. `=values` prints the values and warns at the first statement that it
-is doing so. Until 0.9.940 `=1` printed them, so switching the SQL log on
+is doing so. Until 0.9.941 `=1` printed them, so switching the SQL log on
 in production wrote passwords, session tokens and personal data into a file
 that is collected and kept. A bind is positional and has no name, so there
 is no way to filter by name the way a framework filters a params hash — the
@@ -111,7 +111,7 @@ and `hash.hmac_verify` are constant time already.
 nosniff`, `X-Frame-Options: DENY` and
 `Referrer-Policy: strict-origin-when-cross-origin`; HSTS, a CSP and a
 Permissions-Policy are available and off until asked for (config §3.9).
-Until 0.9.940 a route response carried **none** of them and a `static`
+Until 0.9.941 a route response carried **none** of them and a `static`
 mount carried the first.
 
 6.0.1 `html(body)` and `content(mime, body)` send their argument verbatim,
@@ -147,7 +147,7 @@ What the language does:
 * A cookie is `HttpOnly` and `SameSite=Lax` unless the author says
   otherwise. `Lax` is the cross-site defence: a cookie set this way is not
   sent on a cross-site `POST`, which is the shape a forged request takes.
-  Until 0.9.940 the attributes were documented and **discarded**, so every
+  Until 0.9.941 the attributes were documented and **discarded**, so every
   cookie was `Path=/` and nothing else.
 * `same_site: "None"` — the setting that turns that defence off — requires
   `secure: true` (`E0739`) and cannot be written by accident.

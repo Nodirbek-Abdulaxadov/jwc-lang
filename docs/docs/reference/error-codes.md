@@ -200,6 +200,7 @@ the same extraction, so neither can drift from it.
 | `E0742` | two `static` mounts on one prefix | `routing.md` |
 | `E0743` | a `static` `cache` value is not a number of seconds within the ceiling | `routing.md` |
 | `E0744` | a `static` root is outside the project | `routing.md` |
+| `E0745` | `redirect` given a literal target that leaves this service | `routing.md` |
 | `E0801` | undeclared `@name` in a middleware | `middleware.md` |
 | `E0802` | attachment site lacks a declared binder | `middleware.md` |
 | `E0803` | `requires` not satisfied by the resolved chain | `middleware.md` |

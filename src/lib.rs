@@ -28,7 +28,7 @@ pub mod ddl;
 pub mod diag;
 pub mod diff;
 pub mod exec;
-mod exec_call;
+pub mod exec_call;
 pub mod fmt;
 pub mod imports;
 pub mod lexer;

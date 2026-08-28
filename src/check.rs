@@ -2511,10 +2511,36 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Response
             }
-            "redirect" => {
+            // routing.md §6.4 — two builders, because the language cannot
+            // tell an open redirect from a shortener and the author can.
+            // `redirect` goes to a path on this service; `redirectExternal`
+            // goes anywhere, and its name is what makes that reviewable.
+            "redirect" | "redirectExternal" => {
                 arity(self, 2);
                 if let Some(n) = exprs.first().and_then(literal_status) {
                     self.record_response(n, Ty::Void);
+                }
+                // A literal target is decided here rather than left to the
+                // request that discovers it: `redirect(302, "https://x")`
+                // is a mistake the compiler can see.
+                if path == "redirect" {
+                    if let Some(ExprKind::Str(u) | ExprKind::RawStr(u)) =
+                        exprs.get(1).map(|e| &*e.kind)
+                    {
+                        if crate::exec_call::redirect_target(u)
+                            != crate::exec_call::RedirectTarget::SameOrigin
+                        {
+                            let span = exprs[1].span;
+                            self.err_note(
+                                span,
+                                "E0745",
+                                format!("`redirect` cannot send a caller to {u:?}"),
+                                "`redirect` goes to a path on this service. Use \
+                                 `redirectExternal` if leaving it is deliberate.",
+                                "routing.md §6.4",
+                            );
+                        }
+                    }
                 }
                 Ty::Response
             }
@@ -4909,6 +4935,7 @@ fn is_response_builder(path: &str) -> bool {
             | "internalError"
             | "statusCode"
             | "redirect"
+            | "redirectExternal"
             | "content"
     )
 }

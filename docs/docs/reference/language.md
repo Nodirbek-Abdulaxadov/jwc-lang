@@ -636,8 +636,15 @@ return text("hello");                       -- text/plain
 return html("<h1>hi</h1>");                 -- text/html
 return content("application/xml", $body);   -- anything else
 return noContent();
-return redirect(302, $url);
+return redirect(302, "/dashboard");          -- a path on this service
+return redirectExternal(302, $link.url);    -- anywhere, and named so
 ```
+
+`redirect` refuses a target that leaves this service — a scheme, an
+authority, a protocol-relative `//host`. `redirectExternal` is the same
+builder without the restriction. Two of them because an open redirect is a
+phishing primitive for most services and the entire product for a
+shortener, and the language cannot tell which you are.
 
 `with { … }` adds headers; a key the builder already set is *replaced*,
 not appended, because a repeated `Content-Type` is a malformed message that

@@ -121,6 +121,7 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "conflict" => "jwc_b_conflict",
         "tooManyRequests" => "jwc_b_too_many_requests",
         "redirect" => "jwc_b_redirect",
+        "redirectExternal" => "jwc_b_redirect_external",
         "content" => "jwc_b_content",
         "text" => "jwc_b_text",
         "html" => "jwc_b_html",
@@ -1071,6 +1072,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // prelude and calls into it.
     source.push_str(super::PRELUDE_COOKIE_CORE);
     source.push_str(super::PRELUDE_ESCAPE_CORE);
+    source.push_str(super::PRELUDE_REDIRECT_CORE);
     source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);
