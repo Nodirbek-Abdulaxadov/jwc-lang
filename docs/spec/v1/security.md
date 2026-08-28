@@ -212,6 +212,14 @@ size is capped. This is an arbitrary file write from a package publisher
 to everyone who installs it, so it is stated rather than folded into a
 line about paths.
 
+8.4 `/healthz`, `/readyz` and `/metrics` are unauthenticated and run no
+middleware (config §4.0.7). Measured: with
+`JWC_DATABASE_URL=postgres://admin:...@db-internal.corp.local:5432/prod`
+and the database unreachable, `/readyz` answers
+`{"status":"unready","failed":["db_uninitialised"]}` — none of the user,
+password, host, port or database name appears. Keeping the three paths off
+the public listener is the operator's job, not the runtime's.
+
 ---
 
 ## 9. Outbound requests

@@ -1173,7 +1173,7 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
         // routing.md §10.2 — and a `static` mount, for the same reason, on
         // the same rule.
         //
-        // §4.3 says the router picks the candidate with the **most literal
+        // §4.2 says the router picks the candidate with the **most literal
         // segments**. A file under a mount is all-literal; a `{slot}` route
         // has none. So the mount is the more specific candidate and should
         // win — but §10.2 put every route ahead of every mount, which meant

@@ -3,6 +3,46 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.945] — the operational paths, stated — 2026-08-28
+
+### Documented
+
+- **`/healthz`, `/readyz` and `/metrics` are unauthenticated**, and the
+  spec had not said so. §4.0.2 explained why they are *not declarable*,
+  which is a different claim: a reader could finish that paragraph without
+  learning the paths are open to anyone who can reach the listener. Now
+  config §4.0.7 and security §8.4 say it outright, along with whose job it
+  is — the operator's, at the ingress.
+
+  The reason they stay open is in the same paragraph: a probe an operator
+  must authenticate to is a probe that fails when the credential does, and
+  middleware in front of `/healthz` makes liveness depend on the thing
+  liveness watches.
+
+### Verified, not changed
+
+Four areas were attacked this round and three held. What held:
+
+- **`static` mount traversal.** Ten payloads against a live mount —
+  `../`, `%2e%2e/`, `%2e%2e%2f`, `....//`, `..%5c`, double-encoded
+  `%252e%252e%252f`, and `sub/../../` — all 404. So did a **symlink
+  inside the mount root pointing outside it**, which is the same class of
+  bug as the tar unpack fixed in 0.9.943; here the canonical containment
+  check in `assets::resolve` already caught it. The path is never
+  percent-decoded before the check, so an encoded `..` stays a filename
+  that does not exist.
+- **CORS `origins = ["*"]` with `credentials = true`** is `E1207`, and it
+  fires: the reflection bypass it exists to stop — answering `*` by
+  echoing the caller's origin, which satisfies the browser and hands any
+  site the authenticated responses — cannot be configured. `origins`
+  accepts only literal strings, so `env()` cannot smuggle a `*` past the
+  compile-time check.
+- **`/readyz` discloses nothing.** Measured with a connection string
+  carrying a user, password, internal hostname, port and database name,
+  against an unreachable database: the answer is
+  `{"status":"unready","failed":["db_uninitialised"]}` and none of the six
+  appears in it.
+
 ## [0.9.944] — `max_body_bytes` now covers the socket — 2026-08-28
 
 ### Fixed

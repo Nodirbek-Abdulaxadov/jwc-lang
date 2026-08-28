@@ -269,6 +269,23 @@ outside: `available` pinned at zero while `waiting` climbs. Per-request
 counters would need bookkeeping on the hot path and are what a real
 metrics exporter is for.
 
+4.0.7 All three are **unauthenticated**, and no `use` chain runs on them.
+That follows from §4.0.2: a probe an operator has to authenticate to is a
+probe that fails when the credential does, and middleware that runs before
+`/healthz` makes liveness depend on the thing liveness is supposed to
+watch. It is stated here because "not declarable" does not by itself tell
+a reader that the paths are open, and the operator is the one who has to
+act on it — reach them from inside the cluster, or keep them off the
+public listener at the ingress.
+
+What each one gives away was chosen with that in mind, and measured:
+`/readyz` names the dependency that failed as a symbolic token —
+`db_uninitialised`, not the driver's error string — so a caller learns
+that Postgres is unreachable and not the host, port, user or password it
+was reached with. `/metrics` carries pool gauges and a route count, no
+route names and no per-path timings. Neither answer widens as the
+deployment grows.
+
 ---
 
 ## 5. Environment variables read by the runtime
