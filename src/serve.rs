@@ -1590,6 +1590,13 @@ pub async fn start_job_workers(program: Arc<Program>) {
         return;
     }
     let n = crate::jobs::worker_count();
+    if n == 0 {
+        // Deliberate: this process serves and does not drain. Said out
+        // loud, because a queue nobody is polling looks exactly like a
+        // broken one from the outside.
+        println!("0 job workers (JWC_JOB_WORKERS=0) — this process does not drain the queue");
+        return;
+    }
     for _ in 0..n {
         let p = program.clone();
         tokio::spawn(async move { job_worker(p).await });

@@ -2181,3 +2181,170 @@ fn the_documented_boot_banner_is_the_one_that_is_printed() {
         "these quote the pre-0.9.926 banner: {stale:?}"
     );
 }
+
+/// The diagnostic reference page is the catalogue, rendered.
+///
+/// `build.rs` extracts the rows from `docs/spec/v1/*.md`; `--explain` and
+/// this page read that one extraction, so a code cannot be explainable at
+/// the command line and missing from the reference, or the other way
+/// round.
+///
+/// `JWC_UPDATE_DOCS=1 cargo test the_diagnostic_reference_is_generated`
+/// regenerates it.
+#[test]
+fn the_diagnostic_reference_is_generated_from_the_catalogue() {
+    use std::fmt::Write as _;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let page_path = root.join("docs/docs/reference/error-codes.md");
+    let page = std::fs::read_to_string(&page_path).expect("error-codes.md");
+
+    const OPEN: &str = "<!-- generated:diagnostic-table -->";
+    const CLOSE: &str = "<!-- /generated:diagnostic-table -->";
+
+    let mut table = String::from("\n| Code | Meaning | Defined in |\n|---|---|---|\n");
+    for (code, file, meaning) in jwc::codes::DIAGNOSTIC_CATALOGUE {
+        // A pipe inside a cell would end it. Nothing in the spec has one
+        // today; escaping keeps that from becoming a silent break.
+        let meaning = meaning.replace('|', "\\|");
+        let _ = writeln!(table, "| `{code}` | {meaning} | `{file}` |");
+    }
+
+    let (before, rest) = page
+        .split_once(OPEN)
+        .unwrap_or_else(|| panic!("{OPEN} is missing from error-codes.md"));
+    let (_, after) = rest
+        .split_once(CLOSE)
+        .unwrap_or_else(|| panic!("{CLOSE} is missing from error-codes.md"));
+
+    let want = format!("{before}{OPEN}{table}{CLOSE}{after}");
+    if page == want {
+        return;
+    }
+    if std::env::var("JWC_UPDATE_DOCS").is_ok() {
+        std::fs::write(&page_path, &want).expect("rewrite error-codes.md");
+        return;
+    }
+    panic!(
+        "the diagnostic reference is out of step with the catalogue \
+         ({} codes). Run `JWC_UPDATE_DOCS=1 cargo test \
+         the_diagnostic_reference_is_generated` to regenerate it.",
+        jwc::codes::DIAGNOSTIC_CATALOGUE.len()
+    );
+}
+
+/// `JWC_JOB_WORKERS=0` means zero.
+///
+/// It used to fall through to the default of 2 in both backends, so a web
+/// deployment told not to drain the queue drained it with two workers —
+/// the setting did the opposite of what it said, identically on both
+/// sides. A value that is not a number still defaults, because "not a
+/// number" is a typo and "zero" is a decision.
+#[test]
+fn zero_job_workers_means_zero_on_both_backends() {
+    // The interpreter's reader, directly.
+    let restore = std::env::var("JWC_JOB_WORKERS").ok();
+    // SAFETY: single-threaded test body; restored before it returns.
+    unsafe { std::env::set_var("JWC_JOB_WORKERS", "0") };
+    assert_eq!(jwc::jobs::worker_count(), 0);
+    unsafe { std::env::set_var("JWC_JOB_WORKERS", "5") };
+    assert_eq!(jwc::jobs::worker_count(), 5);
+    unsafe { std::env::set_var("JWC_JOB_WORKERS", "not-a-number") };
+    assert_eq!(jwc::jobs::worker_count(), 2, "a typo still defaults");
+    match restore {
+        Some(v) => unsafe { std::env::set_var("JWC_JOB_WORKERS", v) },
+        None => unsafe { std::env::remove_var("JWC_JOB_WORKERS") },
+    }
+
+    // And the generated crate's, which is a separate copy of the read.
+    let prelude = jwc::native::PRELUDE_JOBS;
+    let spawn = prelude
+        .split("JWC_JOB_WORKERS")
+        .nth(1)
+        .expect("the jobs prelude reads it");
+    assert!(
+        !spawn.contains(".filter(|x| *x > 0)"),
+        "the native side must not filter zero away"
+    );
+    assert!(
+        spawn.contains("if n == 0 {"),
+        "and must return rather than spawn"
+    );
+
+    // The starter in `serve.rs` has to short-circuit too, or the count is
+    // honoured and the loop still runs.
+    let serve = include_str!("../src/serve.rs");
+    assert!(serve.contains("if n == 0 {"));
+}
+
+/// The observability page lists the metrics that are exported, and only
+/// those.
+///
+/// A page naming a metric nobody emits sends someone to build a dashboard
+/// on a series that never appears; a metric emitted and undocumented is
+/// one nobody knows to alert on. Both directions, from the `# TYPE` lines
+/// the code actually writes.
+#[test]
+fn the_documented_metrics_are_the_exported_ones() {
+    use std::collections::BTreeSet;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // `# TYPE <name> <kind>` is the Prometheus declaration, so it is the
+    // exact set a scraper sees — narrower and more honest than every
+    // `jwc_…` string in the tree.
+    let mut exported: BTreeSet<String> = BTreeSet::new();
+    for f in ["src/serve.rs", "src/jobs.rs", "src/log_writer.rs"] {
+        let text = std::fs::read_to_string(root.join(f)).unwrap_or_default();
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("# TYPE ") else {
+                continue;
+            };
+            if let Some(name) = rest.split_whitespace().next() {
+                if name.starts_with("jwc_") {
+                    exported.insert(name.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        exported.len() > 10,
+        "found {} exported metrics — the `# TYPE` shape changed",
+        exported.len()
+    );
+
+    let page = std::fs::read_to_string(root.join("docs/docs/deployment/observability.md"))
+        .expect("observability.md");
+
+    let undocumented: Vec<&String> = exported
+        .iter()
+        .filter(|m| !page.contains(&format!("`{m}`")))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "exported and not on the page, so nobody knows to alert on them: {undocumented:?}"
+    );
+
+    // The other direction: every `jwc_…` in a table cell on the page has
+    // to be a series that exists.
+    let mut invented: Vec<String> = Vec::new();
+    for line in page.lines() {
+        if !line.trim_start().starts_with("| `jwc_") {
+            continue;
+        }
+        let name = line
+            .trim_start()
+            .trim_start_matches("| `")
+            .split('`')
+            .next()
+            .unwrap_or("");
+        if !name.is_empty() && !exported.contains(name) {
+            invented.push(name.to_string());
+        }
+    }
+    assert!(
+        invented.is_empty(),
+        "on the page, exported by nothing — a dashboard built on these \
+         would stay empty forever: {invented:?}"
+    );
+}

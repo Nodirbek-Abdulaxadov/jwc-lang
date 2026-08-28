@@ -376,7 +376,8 @@ pub const REGISTRY: &[EnvVar] = &[
         name: "JWC_JOB_WORKERS",
         parse_kind: ParseKind::Usize,
         default: "2",
-        doc: "Worker tasks polling the job queue.",
+        doc: "Worker tasks polling the job queue. 0 = none in this \
+              process; another deployment of the same sources drains it.",
     },
     EnvVar {
         name: "JWC_JOB_POLL_MS",

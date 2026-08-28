@@ -248,12 +248,18 @@ pub async fn metrics_text() -> String {
     )
 }
 
-/// How many worker tasks poll the queue, and how often.
+/// How many worker tasks poll the queue. `0` means none *in this
+/// process* — the queue is a Postgres table, so a second deployment of
+/// the same sources drains it.
+///
+/// `0` used to fall through to the default of 2, so setting it did the
+/// opposite of what it says: a web deployment told not to run workers ran
+/// two. An unparseable value still defaults, because "not a number" is a
+/// typo and "zero" is a decision.
 pub fn worker_count() -> usize {
     std::env::var("JWC_JOB_WORKERS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|n| *n > 0)
         .unwrap_or(2)
 }
 
@@ -316,8 +322,18 @@ mod tests {
     fn defaults_are_read_from_the_environment_and_bounded() {
         std::env::remove_var("JWC_JOB_WORKERS");
         assert_eq!(worker_count(), 2);
+        // `0` means zero. It used to fall through to this default, on the
+        // reasoning that "zero workers would silently stall" — but the
+        // queue is a Postgres table, so a web deployment that sets 0 is
+        // asking a *different* deployment to drain it, and getting two
+        // workers instead was the setting doing the opposite of what it
+        // said. It is no longer silent either: the boot line names it.
         std::env::set_var("JWC_JOB_WORKERS", "0");
-        assert_eq!(worker_count(), 2, "zero workers would silently stall");
+        assert_eq!(worker_count(), 0);
+        // A value that is not a number still defaults — that is a typo,
+        // and a typo should not stop the queue.
+        std::env::set_var("JWC_JOB_WORKERS", "two");
+        assert_eq!(worker_count(), 2);
         std::env::set_var("JWC_JOB_WORKERS", "8");
         assert_eq!(worker_count(), 8);
         std::env::remove_var("JWC_JOB_WORKERS");

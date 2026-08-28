@@ -116,3 +116,12 @@ whatever is left. Set the platform's grace period above it.
 | `JWC_REDIS_URL` | to enable `redis.*` |
 | `JWC_DB_POOL_SIZE` | default 64; lower it on memory-constrained nodes |
 | `PORT` | only if `main` reads it |
+
+## The rest of it
+
+| | |
+|---|---|
+| [Kubernetes](./kubernetes.md) | the Deployment, the migration Job, the probes, pool size against replica count |
+| [CI and CD](./ci-cd.md) | what needs a database and what does not, and the rollout order |
+| [Observability](./observability.md) | every metric, the access log, and OTLP |
+| [Static builds](./static-builds.md) | musl, `--target`, and `FROM scratch` |

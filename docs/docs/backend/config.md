@@ -102,7 +102,7 @@ does not have, or miss one it does.
 | `JWC_SERVICE_NAME` | `jwc` | `service.name` on exported traces. |
 | `JWC_REGISTRY` | — | Package registry base URL; empty uses the default registry. |
 | `JWC_REQUEST_BODY` | `null` | Native builds only: what `request.body()` answers outside a request. |
-| `JWC_JOB_WORKERS` | `2` | Worker tasks polling the job queue. |
+| `JWC_JOB_WORKERS` | `2` | Worker tasks polling the job queue. 0 = none in this process; another deployment of the same sources drains it. |
 | `JWC_JOB_POLL_MS` | `1000` | How often a worker polls an empty queue, in milliseconds. |
 | `JWC_QUEUE_MAX_ATTEMPTS` | `3` | NOT IMPLEMENTED — Per-job retry ceiling; 0 = single attempt. |
 | `JWC_QUEUE_BACKOFF_MS` | `1000` | NOT IMPLEMENTED — Base retry backoff in milliseconds. |
