@@ -3305,6 +3305,16 @@ async fn jwc_dispatch(
         if let Some(r) = jwc_operational(&method_str, path_str).await {
             return r;
         }
+        // routing.md §10.2 — and a `static` mount, on the same rule. §4.3
+        // ranks candidates by **literal segments**: a file under a mount is
+        // all-literal and a `{slot}` route has none, so the mount is the
+        // more specific candidate. Only when the match bound a parameter,
+        // and only when the mount actually holds the file — a route whose
+        // segments are all literal still wins. `serve.rs` puts this in
+        // exactly the same place.
+        if let Some(r) = jwc_static_asset(&method_str, path_str, &header_map, true) {
+            return r;
+        }
     }
     let (kind, handler, socket_fns, route_pattern, path_params, param_types) = match matched {
         Some(found) => found,
@@ -3316,7 +3326,7 @@ async fn jwc_dispatch(
             // declared route wins over it, and so do the operational paths
             // above: a mount at `/` must not take `/readyz` away either.
             // `serve.rs` puts this in exactly the same place.
-            if let Some(r) = jwc_static_asset(&method_str, path_str, &header_map) {
+            if let Some(r) = jwc_static_asset(&method_str, path_str, &header_map, false) {
                 return r;
             }
             // `serve.rs` answers one thing for anything unmatched:

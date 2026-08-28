@@ -58,10 +58,17 @@ fn jwc_asset_response(
 ///
 /// Mirrors `serve.rs::static_asset` statement for statement: same order,
 /// same statuses, same header set.
+/// `only_hits` is what lets routing.md §10.2 rank a mount ahead of a
+/// parameterised route. In that position a mount that does not *hold* the
+/// file must fall through to the route, so every refusal — a missing file,
+/// a refused shape, a method the mount will not serve — answers `None`
+/// rather than its own 404 or 405. In the last-resort position nothing
+/// follows, so the refusals stand. `serve.rs` takes the same flag.
 fn jwc_static_asset(
     method: &str,
     path: &str,
     headers: &BTreeMap<String, String>,
+    only_hits: bool,
 ) -> Option<axum::response::Response> {
     let is_read = method == "GET" || method == "HEAD";
     for (i, (prefix, max_age)) in JWC_MOUNTS.iter().enumerate() {
@@ -69,6 +76,11 @@ fn jwc_static_asset(
             continue;
         };
         if !is_read {
+            if only_hits {
+                // A `POST "/{code}"` is the route's, not a 405 from a
+                // mount that happens to span the same prefix.
+                return None;
+            }
             return Some(jwc_asset_response(
                 405,
                 &[
@@ -79,6 +91,9 @@ fn jwc_static_asset(
             ));
         }
         let not_found = || {
+            if only_hits {
+                return None;
+            }
             Some(jwc_asset_response(
                 404,
                 &[("content-type", JWC_JSON_CT.to_string())],

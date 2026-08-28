@@ -254,12 +254,12 @@ See [Editor setup](../getting-started/editor-setup.md).
 ## Which build is this?
 
 ```bash
-jwc --version              # jwc 0.9.941
+jwc --version              # jwc 0.9.942
 jwc --version --verbose    # ...plus the triple, profile, commit and rustc
 ```
 
 ```
-jwc 0.9.941
+jwc 0.9.942
 build target:  x86_64-unknown-linux-gnu
 build profile: release
 git commit:    629ee9d3eaa2

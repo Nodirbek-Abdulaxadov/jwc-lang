@@ -478,16 +478,32 @@ per request is a `route`, which can read the file itself.
 
 A request is answered by the first of these that matches:
 
-1. a declared `route` or `socket`;
+1. a declared `route` or `socket` **whose segments are all literal**;
 2. `/healthz`, `/readyz`, `/metrics` (config.md §4.0.2);
 3. a `static` mount, in source order;
-4. 404.
+4. a declared `route` or `socket` that bound a path parameter;
+5. 404.
 
 A mount is therefore never able to take a declared path away, and a mount
 at `"/"` cannot capture the operational paths — a file that happens to be
 named `healthz` does not answer the probe. Two mounts on one prefix is
 `E0742`: which directory answered would otherwise depend on the order the
 files happened to load in.
+
+Rows 3 and 4 are the same rule as §4.2, extended to mounts. §4.3 ranks
+candidates by **literal segments**: a file under a mount is all-literal and
+a `{slot}` route has none, so the mount is the more specific candidate.
+Until 0.9.942 every route came ahead of every mount, which meant a
+`/{code}` catch-all took `/robots.txt` and `/favicon.ico` away from the
+mount sitting next to `index.html` — and answered 404 in the shape of "no
+such link", which is a wrong answer rather than a missing one. A crawler
+asking for `/robots.txt` was told the link did not exist.
+
+The mount only wins when it **has** the file: a miss under the mount falls
+through to the parameterised route, so `/abc123` still reaches `/{code}`.
+A route with no parameters is unaffected and stays ahead of a file of the
+same name (row 1), which is what keeps `/docs` a route even when
+`public/docs` exists.
 
 ### 10.3 What a mount will not serve
 

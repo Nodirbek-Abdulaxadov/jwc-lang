@@ -3,6 +3,35 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.942] — a `static` mount is not behind a catch-all — 2026-08-28
+
+### Fixed
+
+- **routing.md §10.2 contradicted §4.3, and the mount lost.** §4.3 says
+  the router picks the candidate with the **most literal segments**; §10.2
+  put every `route` ahead of every `static` mount. A file under a mount is
+  all-literal and a `{slot}` route has none, so the two rules disagreed
+  about exactly the case where it matters. Measured on jwc-shortener,
+  which declares `/{code}`: `GET /robots.txt` reached the redirect
+  handler, found no such link, and answered **404 with "bunday havola
+  yo'q"** — a wrong answer rather than a missing one — while
+  `public/robots.txt` sat unread beside `index.html`. The same for
+  `/favicon.ico`, `/sitemap.xml` and every other fixed crawler name.
+
+  §10.2 now reads: an all-literal route, then the operational paths, then
+  a mount, then a route that bound a path parameter. The mount only wins
+  when it **holds** the file — a miss falls through, so `/abc123` still
+  reaches `/{code}` — and a `POST` a route declares is the route's, not
+  the mount's 405. Both backends take the same `only_hits` flag through
+  the same lookup, so a native binary cannot keep the old order.
+
+### Changed
+
+- `jwc-shortener` serves `robots.txt`, `sitemap.xml` and `docs/index.html`
+  from `public/` again instead of from four routes built out of
+  `string.join([...])`. They gain an ETag, a 304 and `Cache-Control`; they
+  lose `MetricsTracker`, because a mount takes no middleware (§10.1).
+
 ## [0.9.941] — `redirect` goes here, `redirectExternal` goes anywhere — 2026-08-28
 
 `redirect(302, $url)` sent a caller wherever the value said. Measured: a

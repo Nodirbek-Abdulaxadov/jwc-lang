@@ -3380,3 +3380,60 @@ fn a_redirect_off_this_service_has_to_say_so() {
         "`redirectExternal` is how a shortener says what it is"
     );
 }
+
+/// routing.md §10.2 — a `static` mount ranks ahead of a route that bound a
+/// path parameter, on both backends.
+///
+/// Measured before this: jwc-shortener declares `/{code}`, which matched
+/// `/robots.txt`, so the mount holding `robots.txt` was never asked and a
+/// crawler was answered "no such link". §4.3 already said why that is
+/// wrong — the router picks the candidate with the most literal segments,
+/// and a file under a mount is all-literal while a `{slot}` has none — but
+/// §10.2 put every route ahead of every mount and the two disagreed.
+///
+/// The half that is easy to get wrong is the *fallthrough*: a mount at
+/// `"/"` covers every path, so consulting it ahead of a route must return
+/// `None` on a miss rather than the mount's own 404 or 405. Without that
+/// flag the change turns every parameterised route into a 404, which is a
+/// far worse bug than the one it fixes. `tests/static_assets.rs` proves
+/// the behaviour; this pins that both backends carry the same flag, since
+/// a native binary that kept the old order would ship the defect while
+/// every local run had the fix.
+#[test]
+fn a_mount_outranks_a_slot_route_on_both_backends() {
+    let serve = include_str!("../src/serve.rs");
+    assert!(
+        serve.contains("fn static_asset(program: &Program, incoming: &Incoming, only_hits: bool)"),
+        "the interpreter's lookup must be able to answer `None` on a miss"
+    );
+    assert!(
+        serve.contains("static_asset(&program, &incoming, true)"),
+        "the interpreter must consult the mount when the match bound a parameter"
+    );
+    assert!(
+        serve.contains("static_asset(&program, &incoming, false)"),
+        "and must keep the mount's own 404/405 in the last-resort position"
+    );
+
+    let assets = include_str!("../src/native/prelude/assets.rs.in");
+    assert!(
+        assets.contains("only_hits: bool,"),
+        "the generated crate's lookup must take the same flag"
+    );
+    let base = include_str!("../src/native/prelude/base.rs.in");
+    assert!(
+        base.contains("jwc_static_asset(&method_str, path_str, &header_map, true)"),
+        "the native dispatcher must consult the mount in the same place"
+    );
+    assert!(
+        base.contains("jwc_static_asset(&method_str, path_str, &header_map, false)"),
+        "and keep the last-resort call"
+    );
+    // The no-mount stub codegen emits instead has to have the same
+    // signature, or a program with no `static` fails to compile.
+    let codegen = include_str!("../src/native/codegen.rs");
+    assert!(
+        codegen.contains("_only_hits: bool"),
+        "the empty-mount stub must match the real signature"
+    );
+}

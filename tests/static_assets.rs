@@ -200,6 +200,72 @@ async fn a_mount_at_the_root_cannot_take_the_operational_paths_away() {
     assert_eq!(get(&p, "/").await.status, 200);
 }
 
+/// routing.md §10.2 rows 3 and 4 — the reason the ordering changed.
+///
+/// A `/{code}` catch-all matched `/robots.txt`, so the mount sitting next
+/// to `index.html` never got asked, and a crawler was told the link did
+/// not exist. §4.3 ranks by literal segments: a file under a mount is
+/// all-literal, a `{slot}` has none, so the mount is the more specific
+/// candidate. This is the whole rule, in one program.
+const CATCH_ALL: &str = "namespace s;\n\
+                         static \"/\" from \"public\" cache 60;\n\
+                         routes \"/\" {\n\
+                         \x20 route GET \"docs\" { return json({ where: \"route\" }); }\n\
+                         \x20 route GET \"{code}\" { return json({ where: \"slot\" }); }\n\
+                         \x20 route POST \"{code}\" { return json({ where: \"post\" }); }\n\
+                         }\n";
+
+fn catch_all_tree() -> Vec<(&'static str, &'static [u8])> {
+    vec![
+        ("public/index.html", b"<h1>home</h1>" as &[u8]),
+        ("public/robots.txt", b"User-agent: *\n"),
+        ("public/docs", b"NOT THE ROUTE"),
+    ]
+}
+
+#[tokio::test]
+async fn a_file_under_a_mount_beats_a_slot_route_that_spans_it() {
+    let p = project(CATCH_ALL, &catch_all_tree());
+    let r = get(&p, "/robots.txt").await;
+    assert_eq!(r.status, 200);
+    assert!(
+        r.bytes.is_some(),
+        "the mount answered, not `/{{code}}` — this is the 404-shaped-as-\
+         `no such link` that §10.2 row 3 exists to stop"
+    );
+}
+
+#[tokio::test]
+async fn a_mount_that_does_not_hold_the_file_falls_through_to_the_slot() {
+    let p = project(CATCH_ALL, &catch_all_tree());
+    // The mount at `/` spans every path, so a miss inside it must not be
+    // the answer: `/abc123` is still the shortener's code.
+    let r = get(&p, "/abc123").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, "{\"where\":\"slot\"}");
+    assert!(r.bytes.is_none());
+}
+
+#[tokio::test]
+async fn a_literal_route_still_beats_a_file_of_the_same_name() {
+    let p = project(CATCH_ALL, &catch_all_tree());
+    // Row 1. Nothing about the mount moving ahead of `{code}` moves it
+    // ahead of a route that was aimed at the path.
+    let r = get(&p, "/docs").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, "{\"where\":\"route\"}");
+}
+
+#[tokio::test]
+async fn a_write_that_a_slot_route_declares_is_not_the_mounts_405() {
+    let p = project(CATCH_ALL, &catch_all_tree());
+    // The mount covers `/robots.txt` and will not serve a POST — but the
+    // route declares one, and a 405 from a mount would take it away.
+    let r = call(&p, "POST", "/robots.txt", &[]).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body, "{\"where\":\"post\"}");
+}
+
 #[tokio::test]
 async fn a_matching_validator_is_a_304_with_no_body() {
     let p = project(MOUNT, &tree());

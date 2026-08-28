@@ -908,7 +908,14 @@ pub async fn run_socket_handler(
 /// point of `jwc serve` is that an edit shows on the next refresh. The
 /// native build embeds the same bytes instead, and `assets.rs` is what
 /// makes the two agree on every header.
-fn static_asset(program: &Program, incoming: &Incoming) -> Option<Response> {
+///
+/// `only_hits` is what lets §10.2 rank a mount ahead of a parameterised
+/// route. In that position a mount that does not *hold* the file must fall
+/// through to the route, so every refusal — a missing file, a refused
+/// shape, a method the mount will not serve — answers `None` rather than
+/// its own 404 or 405. In the last-resort position nothing follows, so a
+/// mount that covers the path owns the answer and the refusals stand.
+fn static_asset(program: &Program, incoming: &Incoming, only_hits: bool) -> Option<Response> {
     use crate::assets;
 
     let is_read = incoming.method == "GET" || incoming.method == "HEAD";
@@ -920,20 +927,26 @@ fn static_asset(program: &Program, incoming: &Incoming) -> Option<Response> {
         // error rather than a missing page. A 404 here would send the
         // caller looking for a typo in a path that is right.
         if !is_read {
+            if only_hits {
+                // A `POST "/{code}"` is the route's, not a 405 from a
+                // mount that happens to span the same prefix.
+                return None;
+            }
             let mut r = Response::message(405, "method not allowed");
             r.headers.push(("allow".into(), "GET, HEAD".into()));
             return Some(r);
         }
+        let miss = |r: Response| if only_hits { None } else { Some(r) };
         let Some(rel) = assets::safe_relative(rest) else {
             // A refused shape is 404, not 400: telling the caller their
             // traversal was *understood* is more than they need to know.
-            return Some(Response::message(404, "not found"));
+            return miss(Response::message(404, "not found"));
         };
         let Some(file) = assets::resolve(&mount.root, &rel) else {
-            return Some(Response::message(404, "not found"));
+            return miss(Response::message(404, "not found"));
         };
         let Ok(body) = std::fs::read(&file) else {
-            return Some(Response::message(404, "not found"));
+            return miss(Response::message(404, "not found"));
         };
 
         let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1152,9 +1165,27 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
     // nothing in the source mentioned `/readyz` for an operator to find.
     // §4.0.2 promises these three are reachable before reading anyone's
     // source; a pattern nobody aimed at them must not take that away.
-    let shadows_operational = matched.as_ref().is_some_and(|(_, binds)| !binds.is_empty());
-    if shadows_operational {
+    let shadows = matched.as_ref().is_some_and(|(_, binds)| !binds.is_empty());
+    if shadows {
         if let Some(r) = operational(&program, &incoming).await {
+            return r;
+        }
+        // routing.md §10.2 — and a `static` mount, for the same reason, on
+        // the same rule.
+        //
+        // §4.3 says the router picks the candidate with the **most literal
+        // segments**. A file under a mount is all-literal; a `{slot}` route
+        // has none. So the mount is the more specific candidate and should
+        // win — but §10.2 put every route ahead of every mount, which meant
+        // a catch-all took `/robots.txt` and `/favicon.ico` away from the
+        // mount sitting next to `index.html`, and answered 404 in the
+        // shape of "no such link".
+        //
+        // Only when the match used a path parameter, and only when the
+        // mount actually has the file: a route whose segments are all
+        // literal still wins, which is what keeps `/orgs/new` ahead of a
+        // file called `new`.
+        if let Some(r) = static_asset(&program, &incoming, true) {
             return r;
         }
     }
@@ -1164,10 +1195,11 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
         if let Some(r) = operational(&program, &incoming).await {
             return r;
         }
-        // routing.md §10.2 — a `static` mount is last but one. A declared
-        // route wins over it, and so do the operational paths above: a
-        // mount at `/` must not be able to take `/readyz` away either.
-        if let Some(r) = static_asset(&program, &incoming) {
+        // routing.md §10.2 — a mount is behind every *literal* route and
+        // behind the operational paths: a mount at `/` must not be able to
+        // take `/readyz` away, and a file called `healthz` does not answer
+        // the probe.
+        if let Some(r) = static_asset(&program, &incoming, false) {
             return r;
         }
         return Response::message(404, "not found");

@@ -1108,6 +1108,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
              \x20   _method: &str,\n\
              \x20   _path: &str,\n\
              \x20   _headers: &BTreeMap<String, String>,\n\
+             \x20   _only_hits: bool,\n\
              ) -> Option<axum::response::Response> {\n\
              \x20   None\n}\n",
         );
