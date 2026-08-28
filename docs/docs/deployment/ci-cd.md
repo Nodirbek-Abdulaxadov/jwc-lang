@@ -39,9 +39,9 @@ jobs:
       - run: |
           curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: jwc check . --deny-warnings
-      - run: jwc fmt . --check
-      - run: jwc lint . --deny-warnings
+      - run: jwc check --deny-warnings
+      - run: jwc fmt --check
+      - run: jwc lint --deny-warnings
 
   test:
     runs-on: ubuntu-latest
@@ -62,9 +62,9 @@ jobs:
       - run: |
           curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: jwc migrate up .
-      - run: jwc migrate verify .
-      - run: jwc test .
+      - run: jwc migrate up
+      - run: jwc migrate verify
+      - run: jwc test
 ```
 
 `jwc test` runs each `test` block in its own transaction and rolls it

@@ -67,7 +67,7 @@ same migration.
 Then, in the readiness gate:
 
 ```bash
-jwc migrate verify .
+jwc migrate verify
 ```
 
 which names any constraint or index the binary expects and the database

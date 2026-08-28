@@ -10,11 +10,11 @@ The schema in source is the truth. `jwc migrate new` diffs it against the
 last snapshot and writes the SQL that closes the gap.
 
 ```bash
-jwc migrate new add-published .     # write the next up/down pair
-jwc migrate up .                    # apply what is pending
-jwc migrate status .                # what is applied, pending, or drifted
-jwc migrate verify .                # every constraint and index, by name
-jwc migrate down .                  # roll back, newest first
+jwc migrate new add-published     # write the next up/down pair
+jwc migrate up                    # apply what is pending
+jwc migrate status                # what is applied, pending, or drifted
+jwc migrate verify                # every constraint and index, by name
+jwc migrate down                  # roll back, newest first
 ```
 
 ## Offline by design
@@ -73,7 +73,7 @@ one column and adds another, and the rows in it are gone.
 ## Verify
 
 ```bash
-jwc migrate verify .
+jwc migrate verify
 ```
 
 Compares the constraint and index names the binary expects against the

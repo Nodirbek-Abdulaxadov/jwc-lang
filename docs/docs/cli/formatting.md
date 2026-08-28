@@ -7,10 +7,10 @@ description: "What jwc fmt does, what it does not preserve, and why it re-prints
 # Formatting
 
 ```bash
-jwc fmt .                    # rewrite in place
+jwc fmt                    # rewrite in place
 jwc fmt src tests            # several inputs
 jwc fmt src/app.jwc --stdout # print it, rewrite nothing
-jwc fmt . --check            # report and exit non-zero; write nothing
+jwc fmt --check            # report and exit non-zero; write nothing
 ```
 
 `--check` is the CI shape: it names every file that would change and
@@ -108,7 +108,7 @@ line however you broke it.
 ## In a pre-commit hook
 
 ```bash
-jwc fmt . --check && jwc check . --deny-warnings
+jwc fmt --check && jwc check --deny-warnings
 ```
 
 Both are offline: the schema is in the source, so neither needs a

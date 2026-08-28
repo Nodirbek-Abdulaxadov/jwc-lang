@@ -140,9 +140,9 @@ response carries — while the physical name is what the database keeps.
 ## What the schema becomes
 
 ```bash
-jwc migrate new init .       # writes the up/down pair and a snapshot
-jwc migrate up .             # applies what is pending
-jwc migrate verify .         # every constraint and index, by name
+jwc migrate new init       # writes the up/down pair and a snapshot
+jwc migrate up             # applies what is pending
+jwc migrate verify         # every constraint and index, by name
 ```
 
 `jwc migrate verify` is the one that catches drift: it compares the

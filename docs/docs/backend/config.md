@@ -163,22 +163,22 @@ wins over the file, so these override it:
 ```bash
 # bash / zsh — Linux, macOS, WSL, Git Bash
 export DATABASE_URL=postgres://postgres@localhost:5432/app
-jwc serve .
+jwc serve
 
 # or for one command only
-DATABASE_URL=postgres://postgres@localhost:5432/app jwc serve .
+DATABASE_URL=postgres://postgres@localhost:5432/app jwc serve
 ```
 
 ```powershell
 # PowerShell — Windows
 $env:DATABASE_URL = "postgres://postgres@localhost:5432/app"
-jwc serve .
+jwc serve
 ```
 
 ```bat
 :: cmd.exe — Windows
 set DATABASE_URL=postgres://postgres@localhost:5432/app
-jwc serve .
+jwc serve
 ```
 
 `export` is a **bash** word, not a JWC one. PowerShell rejects it, which
@@ -188,7 +188,7 @@ written without `export` is read identically by both shells.
 ### Seeing what was read
 
 ```bash
-JWC_PRINT_CONFIG=1 jwc serve .
+JWC_PRINT_CONFIG=1 jwc serve
 ```
 
 prints every registered variable, its value, and whether the value came

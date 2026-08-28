@@ -51,7 +51,7 @@ cargo's:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
-jwc build . --release --target x86_64-unknown-linux-musl
+jwc build --release --target x86_64-unknown-linux-musl
 ```
 
 The binary lands under `bin/<triple>/<profile>/`, so several targets

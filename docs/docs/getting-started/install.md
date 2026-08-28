@@ -106,7 +106,7 @@ than silently degrading.
 
 ```bash
 jwc --version
-jwc check .          # type-check a project without touching the database
+jwc check          # type-check a project without touching the database
 ```
 
 `jwc check` needs no connection. Everything that talks to Postgres —

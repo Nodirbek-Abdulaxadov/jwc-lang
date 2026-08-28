@@ -164,9 +164,9 @@ createdb linkbin
 export DATABASE_URL=postgres://localhost/linkbin
 export CURSOR_SECRET=$(openssl rand -hex 32)
 
-jwc migrate new init .
-jwc migrate up .
-jwc serve .
+jwc migrate new init
+jwc migrate up
+jwc serve
 ```
 
 On Windows:
@@ -247,9 +247,9 @@ content-type: application/json; charset=utf-8
 ## What the compiler already knows
 
 ```bash
-jwc routes .      # method, path, middleware chain
-jwc explain .     # every query, with the SQL it lowers to
-jwc openapi .     # OpenAPI 3.1, from the types the checker inferred
+jwc routes      # method, path, middleware chain
+jwc explain     # every query, with the SQL it lowers to
+jwc openapi     # OpenAPI 3.1, from the types the checker inferred
 ```
 
 ## Then

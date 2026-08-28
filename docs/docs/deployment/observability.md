@@ -73,7 +73,7 @@ is the only trace of what was lost.
 Off by default. One line per answered request, on **stderr**:
 
 ```bash
-jwc serve . --request-logging          # the interpreter
+jwc serve --request-logging          # the interpreter
 JWC_REQUEST_LOG=1 ./bin/release/app    # a native binary has no flags
 ```
 

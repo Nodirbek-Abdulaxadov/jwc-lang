@@ -439,6 +439,17 @@ enum MigrateCommand {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// A signpost, not a command. Rails, EF Core and Django all spell
+    /// this `add`, so it is the first thing a newcomer types — and clap's
+    /// answer, "unrecognized subcommand 'add'", does not name the one
+    /// that exists. Hidden from `--help` so the list stays the real set.
+    #[command(hide = true)]
+    Add {
+        #[arg(default_value = "")]
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
+    },
 }
 
 /// Rust's runtime ignores `SIGPIPE` so that a write to a closed pipe
@@ -520,6 +531,8 @@ fn project_dir(c: &Command) -> Option<&std::path::Path> {
             | MigrateCommand::Status { path, .. }
             | MigrateCommand::Verify { path, .. }
             | MigrateCommand::List { path, .. } => Some(path.as_path()),
+            // A signpost that never touches a project.
+            MigrateCommand::Add { .. } => None,
         },
         // `new` creates the project, so there is no `.env` to read yet;
         // `login` and `lsp` are not run inside one.
@@ -664,6 +677,20 @@ fn run() -> Result<()> {
             MigrateCommand::Status { path, dir } => cmd::migrate_status(path, dir),
             MigrateCommand::Verify { path } => cmd::migrate_verify(path),
             MigrateCommand::List { path, dir } => cmd::migrate_list(path, dir),
+            MigrateCommand::Add { name, .. } => {
+                let name = if name.is_empty() { "<name>" } else { &name };
+                anyhow::bail!(
+                    "there is no `jwc migrate add`. The command is:\n\
+                     \n  \
+                     jwc migrate new {name}\n\
+                     \n\
+                     It diffs the sources against the last snapshot and \
+                     writes the up/down pair — `add` would suggest you \
+                     hand-write the SQL, and you do not.\n\
+                     \n\
+                     `jwc migrate` on its own lists every subcommand."
+                )
+            }
         },
         Command::Ast { path } => cmd::ast(path),
     }

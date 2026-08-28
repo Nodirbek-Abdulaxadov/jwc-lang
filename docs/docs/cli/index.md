@@ -27,9 +27,9 @@ than a surprise for you.
 ## Every day
 
 ```bash
-jwc check .        # parse and type-check
-jwc serve .        # run it
-jwc fmt .          # rewrite in canonical form
+jwc check        # parse and type-check
+jwc serve        # run it
+jwc fmt          # rewrite in canonical form
 jwc test           # run every `test` block
 ```
 
@@ -49,12 +49,12 @@ against it without connecting to anything.
 
 ```bash
 jwc run app.jwc                # call main() and exit — no listener
-jwc run . --dev                # ...with debug.dump printing
-jwc serve .                    # the interpreter — the whole language
-jwc build .                    # a native binary at bin/debug/<name>
-jwc build . --release          # optimised
-jwc build . --emit-rust        # the generated Rust, without compiling it
-jwc build . --release --target x86_64-unknown-linux-musl
+jwc run --dev                # ...with debug.dump printing
+jwc serve                    # the interpreter — the whole language
+jwc build                    # a native binary at bin/debug/<name>
+jwc build --release          # optimised
+jwc build --emit-rust        # the generated Rust, without compiling it
+jwc build --release --target x86_64-unknown-linux-musl
 ```
 
 `--target` cross-compiles to a Rust target triple; the toolchain has to
@@ -81,11 +81,17 @@ Anything `jwc build` cannot lower it **refuses**, naming the construct.
 A binary that quietly dropped a query would be a far worse outcome than
 one that will not build.
 
+The refusals that remain are about a **shape known only at run time**.
+`insert into T { ...$req }` and `update T set ...$req` both compile —
+which fields the value could carry is its declared `class`, and each
+combination of present optional fields becomes its own statement — but a
+spread of a local with no declared type does not, and says so by name.
+
 ### Watching, and logging what was asked
 
 ```bash
-jwc serve . --watch              # restart on any .jwc change
-jwc serve . --request-logging    # one line per answered request
+jwc serve --watch              # restart on any .jwc change
+jwc serve --request-logging    # one line per answered request
 ```
 
 `--watch` supervises a child `jwc serve` and replaces it whenever a `.jwc`
@@ -114,7 +120,7 @@ A native binary has no flags, so the switch there is the environment:
 
 ```bash
 JWC_REQUEST_LOG=1 ./bin/release/myapp
-JWC_REQUEST_LOG=1 jwc serve .        # works here too
+JWC_REQUEST_LOG=1 jwc serve        # works here too
 ```
 
 Both backends format the line from one shared source file, so a log
@@ -123,13 +129,13 @@ pipeline configured against `jwc serve` reads `jwc build` output unchanged.
 ## Schema
 
 ```bash
-jwc migrate new <name> .       # diff against the last snapshot
-jwc migrate list .             # the files on disk, in order — offline
-jwc migrate up .               # apply what is pending
-jwc migrate status .           # applied, pending, drifted
-jwc migrate verify .           # constraints and indexes, by name
-jwc migrate down .             # roll back, newest first
-jwc gen-sql .                  # the whole schema as DDL, to stdout
+jwc migrate new <name>       # diff against the last snapshot
+jwc migrate list             # the files on disk, in order — offline
+jwc migrate up               # apply what is pending
+jwc migrate status           # applied, pending, drifted
+jwc migrate verify           # constraints and indexes, by name
+jwc migrate down             # roll back, newest first
+jwc gen-sql                  # the whole schema as DDL, to stdout
 ```
 
 `migrate list` says what is **written**; `migrate status` says what is
@@ -140,11 +146,11 @@ contain" is a question you ask before you have a database.
 ## Seeing what the compiler sees
 
 ```bash
-jwc routes .                   # method, path, middleware chain
-jwc explain .                  # every query, with the SQL it lowers to
-jwc openapi . > openapi.json   # OpenAPI 3.1 for the route table
-jwc openapi . --compact        # one line, no indentation
-jwc ast .                      # the parsed AST — a debugging aid
+jwc routes                   # method, path, middleware chain
+jwc explain                  # every query, with the SQL it lowers to
+jwc openapi > openapi.json   # OpenAPI 3.1 for the route table
+jwc openapi --compact        # one line, no indentation
+jwc ast                      # the parsed AST — a debugging aid
 ```
 
 `jwc openapi` reads the types the checker already inferred rather than
@@ -152,9 +158,9 @@ re-deriving them. One type engine, one answer: a route returning
 `json(OrgService.get(...))` documents a shape rather than shrugging.
 
 ```bash
-jwc swagger .                  # a browsable reference on http://127.0.0.1:8099
-jwc swagger . --port 9000
-jwc swagger . --out api.html   # the page as one file, instead of serving
+jwc swagger                  # a browsable reference on http://127.0.0.1:8099
+jwc swagger --port 9000
+jwc swagger --out api.html   # the page as one file, instead of serving
 ```
 
 `jwc swagger` renders the same document `jwc openapi` emits — there is
@@ -170,10 +176,10 @@ network interface.
 ## Lints
 
 ```bash
-jwc lint .                     # check, plus the advisory whole-program lints
-jwc lint . --constraints       # every constraint each route can reach
-jwc lint . --deny-warnings     # the CI shape
-jwc lint . --json              # one JSON array on stdout, for editors and CI
+jwc lint                     # check, plus the advisory whole-program lints
+jwc lint --constraints       # every constraint each route can reach
+jwc lint --deny-warnings     # the CI shape
+jwc lint --json              # one JSON array on stdout, for editors and CI
 jwc lint --list-codes          # every diagnostic the spec documents
 jwc lint --explain E0211       # one of them, with the spec file that defines it
 ```

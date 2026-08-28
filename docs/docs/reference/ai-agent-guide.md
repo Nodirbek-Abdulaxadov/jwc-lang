@@ -623,18 +623,18 @@ cannot lower it **refuses by name** rather than dropping silently.
 
 ```bash
 jwc new myapp --template api    # empty | api | auth | jobs
-jwc check .                     # types, schema, routes — offline
-jwc fmt .                       # canonical form
-jwc lint . --deny-warnings      # + advisory whole-program lints
+jwc check                     # types, schema, routes — offline
+jwc fmt                       # canonical form
+jwc lint --deny-warnings      # + advisory whole-program lints
 jwc lint --explain E0211        # what a code means
-jwc migrate new init .          # diff the schema, write up/down SQL
-jwc migrate up .                # apply
-jwc routes .                    # the resolved route table
-jwc explain .                   # every query, with its SQL
-jwc openapi .                   # OpenAPI 3.1
-jwc test .                      # every `test` block, each rolled back
-jwc serve . --watch             # run, restart on change
-jwc build . --release           # a native binary
+jwc migrate new init          # diff the schema, write up/down SQL
+jwc migrate up                # apply
+jwc routes                    # the resolved route table
+jwc explain                   # every query, with its SQL
+jwc openapi                   # OpenAPI 3.1
+jwc test                      # every `test` block, each rolled back
+jwc serve --watch             # run, restart on change
+jwc build --release           # a native binary
 ```
 
 ---
