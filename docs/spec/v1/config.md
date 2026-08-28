@@ -213,7 +213,16 @@ that is right for every page, and a default that breaks a page teaches
 authors to delete the header rather than to write a policy. `Permissions-Policy`
 is the same, and its feature list keeps moving.
 
-3.9.3 The headers go on **every** answer, including the ones no response
+3.9.3 A duplicated request header is **joined**, not overwritten — with `; `
+for `Cookie`, which is what the cookie grammar puts between pairs, and
+`, ` for everything else (RFC 9110 §5.3). A byte that is not valid UTF-8
+is replaced rather than deleting the header. Both were measured as losses
+before 0.9.947: two `Cookie:` fields arrived as the second one alone, and
+one high byte made the whole header read as absent. Neither is exotic —
+RFC 9113 §8.2.3 lets an HTTP/2 client split the cookie list across
+fields, and browsers do.
+
+The headers go on **every** answer, including the ones no response
 builder made: a 413 refused before the chain, a preflight, a 404, a static
 asset, a fault. A header the program set itself — `with { … }`,
 `response.set_header` — **wins**: an author who wrote one meant that

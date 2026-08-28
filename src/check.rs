@@ -1655,11 +1655,100 @@ impl<'a> Checker<'a> {
                 // silent no-op. Until 0.9.939 the whole record was
                 // evaluated and discarded, which is the same failure with
                 // no way to notice it.
+                if let Some(name) = args.first() {
+                    self.check_cookie_prefix(name, args.get(2));
+                }
                 if let Some(opts) = args.get(2) {
                     self.check_cookie_opts(opts);
                 }
                 t
             }
+        }
+    }
+
+    /// `__Host-` and `__Secure-` are promises the attributes have to keep.
+    ///
+    /// Both prefixes are enforced by the browser, not by the server, and a
+    /// cookie that breaks the rule is **refused outright and silently** —
+    /// the same failure `E0739` exists to catch for `SameSite=None`
+    /// without `Secure`, which the note there calls "a cookie that is
+    /// silently never set — a failure with no error at the only layer that
+    /// could report one."
+    ///
+    /// Measured before 0.9.947, with `jwc check` reporting 0 warnings on
+    /// both:
+    ///
+    /// ```text
+    /// cookie("__Host-sid", "v", { path: "/admin", domain: "example.com" })
+    ///   → set-cookie: __Host-sid=v; Path=/admin; Domain=example.com; …
+    /// cookie("__Secure-sid", "v")
+    ///   → set-cookie: __Secure-sid=v; Path=/; SameSite=Lax; HttpOnly
+    /// ```
+    ///
+    /// Neither is stored by any current browser. An author who reaches for
+    /// a prefix is an author trying to be careful, and they got nothing.
+    ///
+    /// Only a literal name is judged: a computed one could be anything,
+    /// and the runtime is where that has to be caught.
+    fn check_cookie_prefix(&mut self, name: &Expr, opts: Option<&Expr>) {
+        let ExprKind::Str(n) = &*name.kind else {
+            return;
+        };
+        let host = n.starts_with("__Host-");
+        let secure_prefix = n.starts_with("__Secure-");
+        if !host && !secure_prefix {
+            return;
+        }
+
+        // What the opts record says, when it is a literal.
+        let (mut secure_true, mut has_domain, mut path_not_root) = (false, false, false);
+        if let Some(o) = opts {
+            if let ExprKind::Object(entries) = &*o.kind {
+                for entry in entries {
+                    let crate::ast::ObjEntry::Field { key, value, .. } = entry else {
+                        continue;
+                    };
+                    match key.name.as_str() {
+                        "secure" => secure_true = matches!(&*value.kind, ExprKind::Bool(true)),
+                        "domain" => has_domain = true,
+                        "path" => {
+                            if let ExprKind::Str(p) = &*value.kind {
+                                path_not_root = p != "/";
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let prefix = if host { "__Host-" } else { "__Secure-" };
+        if !secure_true {
+            self.err_note(
+                name.span,
+                "E0746",
+                format!("`{prefix}` needs `secure: true`"),
+                "every current browser refuses to store the cookie otherwise, and says nothing",
+                "routing.md §6.2",
+            );
+        }
+        if host && has_domain {
+            self.err_note(
+                name.span,
+                "E0746",
+                "`__Host-` cannot have a `domain`".to_string(),
+                "the prefix means \"this host only\"; a `domain` is what it exists to forbid",
+                "routing.md §6.2",
+            );
+        }
+        if host && path_not_root {
+            self.err_note(
+                name.span,
+                "E0746",
+                "`__Host-` needs `path: \"/\"`".to_string(),
+                "the prefix requires the root path; any other path is refused by the browser",
+                "routing.md §6.2",
+            );
         }
     }
 

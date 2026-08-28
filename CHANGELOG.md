@@ -3,6 +3,67 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.947] — four ways a cookie went missing — 2026-08-28
+
+`cookie(...)` itself holds: every injection attempt against its name,
+value, `path` and `domain` is refused with a readable fault, `HttpOnly`
+and `SameSite=Lax` really are the defaults, and `same_site: "None"`
+really does force `Secure`. The defects were all in the ring around it.
+
+### Fixed
+
+- **`with { "Set-Cookie": … }` deleted a cookie instead of setting one.**
+  `with { }` replaces on header name, and `Set-Cookie` is the one header
+  HTTP expects to repeat, so replacing on it throws away a cookie the
+  author set on purpose. Measured:
+  `created(json({…}) cookie("sid","inner")) with { "Set-Cookie": "outer=1" }`
+  answered `set-cookie: outer=1` alone — the validated
+  `Path=/; SameSite=Lax; HttpOnly` session cookie gone, no diagnostic
+  anywhere, while the same expression over `Cache-Control` kept it.
+  `Set-Cookie` now appends; every other header still replaces.
+
+- **A duplicated request header overwrote, and one bad byte deleted it.**
+  Both measured on `Cookie:`. Two `Cookie:` fields arrived as the second
+  one alone; `Cookie: a=\xff` read as *no cookie header at all*. Neither
+  is exotic — RFC 9113 §8.2.3 lets an HTTP/2 client split the cookie list
+  across fields and browsers do, and one high byte anywhere on the domain
+  was a silent, persistent logout. Repeats are now joined (`; ` for
+  `Cookie` per the cookie grammar, `, ` elsewhere per RFC 9110 §5.3) and a
+  non-UTF-8 byte is replaced rather than discarding the header.
+
+- **A CR or LF in a header value produced a naked 500.** No body, no
+  request id, and none of the three security headers — while config.md
+  §3.9.3 promises them on **every** answer including a fault. Reachable
+  from a query string through `with { }`. No header injection occurs
+  (hyper refuses the value, which is the part that matters), but the
+  answer that went out was stripped and nothing was logged. It is now the
+  ordinary fault envelope, built from parts that cannot themselves be
+  rejected, with a log line naming the likely cause.
+
+  The comment on that branch said it was "only reachable if a header value
+  the program produced is not a legal header value — which `Response`
+  already normalises." `Response` normalises nothing. Both halves of the
+  sentence were wrong.
+
+- **`__Host-` and `__Secure-` cookie names were unchecked (`E0746`).**
+  `cookie("__Host-sid", "v", { path: "/admin", domain: "example.com" })`
+  and a bare `__Secure-` cookie both checked clean and both are refused
+  outright by every current browser. That is the same silent failure
+  `E0739` exists for, and an author reaching for a prefix is an author
+  trying to be careful. Both prefixes now require `secure: true`, and
+  `__Host-` also requires `path: "/"` and no `domain`. A correctly formed
+  prefixed cookie still passes — the rule is a filter, not a wall.
+
+### Still open, named rather than quietly carried
+
+`with { }` and `response.set_header` can still write a `Set-Cookie` with
+none of `cookie(...)`'s defaults and no diagnostic; `response.set_header`
+appends where the native prelude's version replaces, so the two backends
+disagree; and JWC has no session facility, so a cookie value carries no
+integrity of its own. These are design questions, not one-line repairs,
+and they are listed here rather than left for the next reader to
+rediscover.
+
 ## [0.9.946] — one host could take the whole server down — 2026-08-28
 
 ### Fixed

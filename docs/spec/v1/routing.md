@@ -225,7 +225,18 @@ A key that the builder already set — `Content-Type` on any JSON response,
 Appending instead would send the header twice, which is a malformed message
 (RFC 9110 §8.3) and is resolved differently by different clients.
 
-Repeated headers (`Set-Cookie`) use a separate call, because a JSON object
+Repeated headers (`Set-Cookie`) use a separate call — and `with { }`
+**appends** on that one name rather than replacing, because replacing
+would delete a cookie instead of overriding a value. Measured before
+0.9.947: `created(json({…}) cookie("sid","inner")) with { "Set-Cookie":
+"outer=1" }` answered with `outer=1` alone, and the validated
+`Path=/; SameSite=Lax; HttpOnly` session cookie was gone with no
+diagnostic anywhere. Every other header still replaces
+
+`__Host-` and `__Secure-` cookie names are checked against the rule the
+prefix promises (`E0746`): both need `secure: true`, and `__Host-` also
+needs `path: "/"` and no `domain`. A browser refuses a cookie that breaks
+it and says nothing, which is the same silent failure `E0739` exists for, because a JSON object
 cannot carry a duplicate key:
 
 ```jwc
@@ -648,6 +659,7 @@ run the same text.
 | `E0745` | `redirect` given a literal target that leaves this service |
 | `E0740` | a `static` prefix is not a literal path beginning with `/` |
 | `E0741` | a `static` root is missing, or is not a directory |
+| `E0746` | a `__Host-` / `__Secure-` cookie whose attributes break the prefix's rule |
 | `E0742` | two `static` mounts on one prefix |
 | `E0743` | a `static` `cache` value is not a number of seconds within the ceiling |
 | `E0744` | a `static` root is outside the project |

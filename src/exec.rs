@@ -1163,6 +1163,25 @@ impl<'a> Vm<'a> {
                 let replace_into = |headers: &mut Vec<(String, String)>| {
                     for (k, val) in collected {
                         let lower = k.to_ascii_lowercase();
+                        // `Set-Cookie` is the exception, and it has to be:
+                        // it is the one header the HTTP spec expects to
+                        // repeat, so replacing on it *deletes* a cookie
+                        // rather than overriding a value. Measured before
+                        // 0.9.947:
+                        //
+                        //   created(json({...}) cookie("sid", "inner"))
+                        //     with { "Set-Cookie": "outer=1" }
+                        //
+                        // answered with `set-cookie: outer=1` alone — the
+                        // validated `Path=/; SameSite=Lax; HttpOnly`
+                        // session cookie was gone, silently, while the
+                        // same expression over `Cache-Control` kept it.
+                        // Appending is the only behaviour that does not
+                        // throw away a cookie the author set on purpose.
+                        if lower == "set-cookie" {
+                            headers.push((k, val));
+                            continue;
+                        }
                         match headers
                             .iter_mut()
                             .find(|(h, _)| h.to_ascii_lowercase() == lower)

@@ -1019,12 +1019,52 @@ fn into_axum(r: Response) -> axum::response::Response {
         None => axum::body::Body::from(r.body),
     };
     b.body(body).unwrap_or_else(|_| {
-        // Only reachable if a header value the program produced is not
-        // a legal header value — which `Response` already normalises.
-        axum::response::Response::builder()
+        // Reached when a header the program set is not a legal header —
+        // a CR or LF in a value, most of all. The old comment here said
+        // this was "only reachable if ... which `Response` already
+        // normalises"; `Response` normalises nothing, and the path was
+        // measured from a query string:
+        //
+        //   return content(...) with { "Set-Cookie": request.query("x") }
+        //   GET /d5?x=a%3D1%0D%0AX-Injected:%20yes
+        //
+        // No header injection happens — hyper refuses the value, which is
+        // the important part — but the answer that went out carried no
+        // security headers, no request id and no body, and nothing was
+        // logged. config.md §3.9.3 promises the security headers on
+        // **every** answer including a fault, so the bare builder was a
+        // hole in exactly the guarantee the section states.
+        //
+        // The reply is now the ordinary fault envelope, built from parts
+        // that cannot themselves be rejected: a fixed body and header
+        // names the program never touches.
+        let mut fb = axum::response::Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(axum::body::Body::empty())
-            .expect("a bodiless 500 always builds")
+            .header("content-type", "application/json; charset=utf-8")
+            .header("x-content-type-options", "nosniff")
+            .header("x-frame-options", "DENY")
+            .header("referrer-policy", "strict-origin-when-cross-origin");
+        // The request id is what ties the answer to the log line below.
+        if let Some(id) = r
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-request-id"))
+            .map(|(_, v)| v.clone())
+        {
+            fb = fb.header("x-request-id", id);
+        }
+        eprintln!(
+            "[fault] a header the program set could not be sent, so the \
+             response was replaced: check for a CR, an LF or a control \
+             character in a `with {{ }}` or `response.set_header` value"
+        );
+        fb.body(axum::body::Body::from("{\"error\":\"internal_error\"}"))
+            .unwrap_or_else(|_| {
+                axum::response::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(axum::body::Body::empty())
+                    .expect("a bodiless 500 always builds")
+            })
     })
 }
 
@@ -1767,6 +1807,45 @@ pub async fn start_job_workers(program: Arc<Program>) {
     println!("{n} job worker{}", if n == 1 { "" } else { "s" });
 }
 
+/// The request's headers, folded to one entry per name.
+///
+/// A `HeaderMap` may hold the same name more than once, and the two ways
+/// of losing that were both measured before 0.9.947, on a `Cookie:`
+/// header:
+///
+/// * **Repeats overwrote.** `Cookie: first=1` followed by
+///   `Cookie: second=2` arrived as `second=2` alone. That is not an exotic
+///   client: RFC 9113 §8.2.3 lets an HTTP/2 client split the cookie list
+///   across fields, and browsers do, so a program could lose the session
+///   cookie depending on how the request was framed. Repeats are now
+///   joined — with `; ` for `Cookie`, which is what the cookie grammar
+///   uses between pairs, and `, ` for everything else per RFC 9110 §5.3.
+///
+/// * **One bad byte deleted the whole header.** `to_str()` fails on any
+///   byte outside ASCII, and `filter_map` then dropped the entry, so
+///   `Cookie: a=\xff` read as *no cookie header at all* — a silent,
+///   persistent logout for anyone who could get one high byte into a
+///   cookie on the domain. The lossy conversion keeps the rest of the
+///   header instead of discarding the request's only copy of it.
+fn collect_headers(headers: &axum::http::HeaderMap) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (k, v) in headers.iter() {
+        let name = k.as_str().to_lowercase();
+        let text = String::from_utf8_lossy(v.as_bytes()).into_owned();
+        match out.entry(name) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let sep = if e.key() == "cookie" { "; " } else { ", " };
+                let joined = format!("{}{sep}{text}", e.get());
+                e.insert(joined);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(text);
+            }
+        }
+    }
+    out
+}
+
 pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     let job_program = program.clone();
     // A `tls { }` whose `cert`/`key` did not resolve — an unset
@@ -1798,14 +1877,7 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     ) -> axum::response::Response {
         let query = uri.query().map(parse_query).unwrap_or_default();
 
-        let hdrs: HashMap<String, String> = headers
-            .iter()
-            .filter_map(|(k, v)| {
-                v.to_str()
-                    .ok()
-                    .map(|s| (k.as_str().to_lowercase(), s.to_string()))
-            })
-            .collect();
+        let hdrs: HashMap<String, String> = collect_headers(&headers);
 
         // routing.md §9.2 — an upgrade request whose path is a declared
         // `socket` takes the socket path. Everything else, upgrade header
