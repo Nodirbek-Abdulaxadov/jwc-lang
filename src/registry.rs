@@ -36,10 +36,22 @@ pub struct Credentials {
     pub tokens: std::collections::BTreeMap<String, String>,
 }
 
+/// Where `jwc login` writes and `jwc publish` reads.
+///
+/// `JWC_HOME` names the directory outright — it is the whole `.jwc`
+/// directory, not a home to append it to — so a CI job or a sandbox can
+/// keep credentials somewhere writable without a fake `HOME`. It was in
+/// the registry, documented, and read by nothing.
 pub fn credentials_path() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("JWC_HOME") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir).join("credentials.json"));
+        }
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
-        .context("no HOME")?;
+        .context("no HOME, and no JWC_HOME")?;
     Ok(PathBuf::from(home).join(".jwc").join("credentials.json"))
 }
 

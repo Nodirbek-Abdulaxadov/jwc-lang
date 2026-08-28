@@ -144,12 +144,6 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "100",
         doc: "Base retry backoff (ms); doubles each attempt.",
     },
-    EnvVar {
-        name: "JWC_ADMIN_DB",
-        parse_kind: ParseKind::Str,
-        default: "postgres",
-        doc: "Admin DB used by `migrate` to create the target DB.",
-    },
     // --- Redis -------------------------------------------------------------
     EnvVar {
         name: "JWC_REDIS_URL",
@@ -206,31 +200,23 @@ pub const REGISTRY: &[EnvVar] = &[
         name: "JWC_SERVER_WORKERS",
         parse_kind: ParseKind::Usize,
         default: "0",
-        doc: "Tokio worker threads; 0 = available_parallelism().",
+        doc: "Tokio worker threads. 0 or unset = one per available core, \
+              which in a container means the *cgroup* limit, not the host.",
     },
     EnvVar {
-        name: "JWC_SERVER_METRICS",
+        name: "JWC_REQUEST_LOG",
         parse_kind: ParseKind::Bool,
-        default: "false",
-        doc: "Periodically log in-flight / completed / failed counters.",
-    },
-    EnvVar {
-        name: "JWC_SERVER_METRICS_INTERVAL_SECS",
-        parse_kind: ParseKind::DurationSecs,
-        default: "10",
-        doc: "Metrics log cadence.",
+        default: "0",
+        doc: "One access line per answered request, on stderr. \
+              `jwc serve --request-logging` sets it; a native binary has \
+              no flags, so this is how `jwc build` output is turned on.",
     },
     EnvVar {
         name: "JWC_LOG_FORMAT",
         parse_kind: ParseKind::Enum,
         default: "text",
-        doc: "Access-log shape: `text` or `json`.",
-    },
-    EnvVar {
-        name: "JWC_REQUEST_TIMEOUT",
-        parse_kind: ParseKind::DurationSecs,
-        default: "30",
-        doc: "Per-request watchdog; 0 disables the cap.",
+        doc: "Access-log shape: `text` or `json`. Read only when \
+              JWC_REQUEST_LOG is on.",
     },
     EnvVar {
         name: "JWC_MAX_BODY_BYTES",
@@ -302,32 +288,79 @@ pub const REGISTRY: &[EnvVar] = &[
         name: "JWC_PRINT_CONFIG",
         parse_kind: ParseKind::Bool,
         default: "true",
-        doc: "Print this config table at server boot; set off to suppress.",
+        doc: "Print this table at boot, with secrets redacted.",
     },
+    // --- Read by the code, and until 0.9.927 in no registry, so absent
+    // from the boot table and from config.md. Found by
+    // `every_env_var_the_code_reads_is_registered_and_the_other_way_round`,
+    // not by anyone reading the code.
+    EnvVar {
+        name: "JWC_BIND_HOST",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "Native builds only: override the listen address (`server { bind }` in the source).",
+    },
+    EnvVar {
+        name: "JWC_DEV",
+        parse_kind: ParseKind::Bool,
+        default: "false",
+        doc: "Development mode: `debug.dump` prints. Never in production — it prints request data.",
+    },
+    EnvVar {
+        name: "JWC_HTTP_TIMEOUT_SECS",
+        parse_kind: ParseKind::U64,
+        default: "10",
+        doc: "Whole-request ceiling for outbound `http.*` calls.",
+    },
+    EnvVar {
+        name: "JWC_LOG_SQL",
+        parse_kind: ParseKind::Bool,
+        default: "false",
+        doc: "Print every SQL statement the program issues, with its parameters.",
+    },
+    EnvVar {
+        name: "JWC_OTLP_ENDPOINT",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "OTLP collector URL; empty disables tracing export.",
+    },
+    EnvVar {
+        name: "JWC_SERVICE_NAME",
+        parse_kind: ParseKind::Str,
+        default: "jwc",
+        doc: "`service.name` on exported traces.",
+    },
+    EnvVar {
+        name: "JWC_REGISTRY",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "Package registry base URL; empty uses the default registry.",
+    },
+    EnvVar {
+        name: "JWC_REQUEST_BODY",
+        parse_kind: ParseKind::Str,
+        default: "null",
+        doc: "Native builds only: what `request.body()` answers outside a request.",
+    },
+
     // --- Queue -------------------------------------------------------------
+    // `JWC_JOB_WORKERS`, not `JWC_QUEUE_WORKERS`: the registry carried the
+    // second name and `jobs.rs` read the first, so the documented knob did
+    // nothing and the working knob was documented nowhere. The names now
+    // come from one place, and `every_env_var_the_code_reads_is_registered`
+    // keeps them there.
     EnvVar {
-        name: "JWC_QUEUE_WORKERS",
+        name: "JWC_JOB_WORKERS",
         parse_kind: ParseKind::Usize,
-        default: "0",
-        doc: "Background queue worker count; 0 = auto.",
+        default: "2",
+        doc: "Worker tasks polling the job queue. 0 = none in this \
+              process; another deployment of the same sources drains it.",
     },
     EnvVar {
-        name: "JWC_QUEUE_MAX_ATTEMPTS",
-        parse_kind: ParseKind::U32,
-        default: "3",
-        doc: "Per-job retry ceiling; 0 = single attempt.",
-    },
-    EnvVar {
-        name: "JWC_QUEUE_BACKOFF_MS",
-        parse_kind: ParseKind::DurationMs,
+        name: "JWC_JOB_POLL_MS",
+        parse_kind: ParseKind::U64,
         default: "1000",
-        doc: "Base retry backoff in milliseconds.",
-    },
-    EnvVar {
-        name: "JWC_QUEUE_DLQ_MAX",
-        parse_kind: ParseKind::Usize,
-        default: "1024",
-        doc: "Dead-letter queue cap; 0 disables eviction.",
+        doc: "How often a worker polls an empty queue, in milliseconds.",
     },
     // --- Email -------------------------------------------------------------
     EnvVar {
@@ -372,24 +405,11 @@ pub const REGISTRY: &[EnvVar] = &[
         default: "10000",
         doc: "Entry ceiling for the process-local `cache.*` store.",
     },
-    // --- Registry / packaging ---------------------------------------------
-    EnvVar {
-        name: "JWC_REGISTRY_URL",
-        parse_kind: ParseKind::Str,
-        default: "https://registry-jwc.1kb.uz/",
-        doc: "Package registry endpoint.",
-    },
-    EnvVar {
-        name: "JWC_REGISTRY_TOKEN",
-        parse_kind: ParseKind::Str,
-        default: "",
-        doc: "Bearer token sent when publishing.",
-    },
     EnvVar {
         name: "JWC_HOME",
         parse_kind: ParseKind::Str,
         default: "",
-        doc: "Override the per-user data dir (default platform-specific).",
+        doc: "Where `jwc login` keeps its credentials. Default `~/.jwc`.",
     },
     // --- Outbound HTTP / SSRF ----------------------------------------------
     EnvVar {
@@ -623,7 +643,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Boot fence — returns `Err` listing every parse failure from
 /// [`snapshot`]. Wire this into the server boot path BEFORE the
-/// listening line so a typo in `JWC_REQUEST_TIMEOUT=thirty` fails fast
+/// listening line so a typo in `JWC_DB_POOL_SIZE=twenty` fails fast
 /// instead of being swallowed by an `unwrap_or(30)` deeper in the call
 /// graph.
 pub fn validate_or_bail() -> Result<()> {
@@ -692,7 +712,6 @@ mod tests {
         for must in [
             "JWC_DATABASE_URL",
             "JWC_DB_POOL_SIZE",
-            "JWC_REQUEST_TIMEOUT",
             "JWC_LOG_FORMAT",
             "JWC_SMTP_PASSWORD",
             "JWC_TRUSTED_PROXIES",
@@ -704,14 +723,14 @@ mod tests {
     #[test]
     fn snapshot_missing_var_is_default() {
         let _l = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::unset("JWC_REQUEST_TIMEOUT");
+        let _g = EnvGuard::unset("JWC_DB_POOL_SIZE");
         let rows = snapshot();
         let row = rows
             .iter()
-            .find(|r| r.name == "JWC_REQUEST_TIMEOUT")
+            .find(|r| r.name == "JWC_DB_POOL_SIZE")
             .expect("row");
         assert_eq!(row.source, Source::Default);
-        assert_eq!(row.parsed, "30 seconds");
+        assert_eq!(row.parsed, "64");
         assert!(row.error.is_none());
     }
 
@@ -743,11 +762,11 @@ mod tests {
     #[test]
     fn validate_or_bail_errors_on_bad_numeric() {
         let _l = ENV_LOCK.lock().unwrap();
-        let _g = EnvGuard::set("JWC_REQUEST_TIMEOUT", "thirty");
+        let _g = EnvGuard::set("JWC_DB_POOL_SIZE", "twenty");
         let err = validate_or_bail().expect_err("should fail");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("JWC_REQUEST_TIMEOUT"),
+            msg.contains("JWC_DB_POOL_SIZE"),
             "expected var name in error, got: {msg}"
         );
     }
@@ -780,7 +799,7 @@ mod tests {
 
     #[test]
     fn redaction_covers_token_key_jwt_and_database_url() {
-        assert!(name_is_secret("JWC_REGISTRY_TOKEN"));
+        assert!(name_is_secret("JWC_SMTP_PASSWORD"));
         assert!(name_is_secret("JWC_DATABASE_URL"));
         assert!(name_is_secret("JWC_API_KEY"));
         assert!(name_is_secret("JWC_JWT_SIGNING"));
@@ -791,5 +810,81 @@ mod tests {
         assert!(!name_is_secret("JWC_REDIS_POOL_SIZE"));
         assert!(!name_is_secret("JWC_PORT"));
         assert!(!name_is_secret("JWC_LOG_FORMAT"));
+    }
+}
+
+// ---------------------------------------------------------------- dotenv
+
+// The `.env` rules, shared with the crate `jwc build` generates so a
+// native binary reads the same file the same way (config.md §5.1).
+include!("dotenv_core.rs.in");
+
+#[cfg(test)]
+mod dotenv_tests {
+    use super::*;
+
+    fn in_dir(body: &str) -> (tempfile::TempDir, DotenvReport) {
+        let d = tempfile::tempdir().expect("tempdir");
+        std::fs::write(d.path().join(".env"), body).expect("write");
+        let r = load_dotenv(d.path());
+        (d, r)
+    }
+
+    #[test]
+    fn a_missing_file_is_not_an_error() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let r = load_dotenv(d.path());
+        assert!(r.path.is_none() && r.set.is_empty() && r.malformed.is_empty());
+    }
+
+    #[test]
+    fn the_ordinary_shapes_all_read() {
+        let (_d, r) = in_dir(
+            "# a comment\n\
+             \n\
+             DOTENV_T_PLAIN=one\n\
+             export DOTENV_T_EXPORTED=two\n\
+             DOTENV_T_DQ=\"three four\"\n\
+             DOTENV_T_SQ='five'\n\
+             DOTENV_T_SPACED = six \n",
+        );
+        assert!(r.malformed.is_empty(), "{:?}", r.malformed);
+        assert_eq!(std::env::var("DOTENV_T_PLAIN").as_deref(), Ok("one"));
+        assert_eq!(std::env::var("DOTENV_T_EXPORTED").as_deref(), Ok("two"));
+        assert_eq!(std::env::var("DOTENV_T_DQ").as_deref(), Ok("three four"));
+        assert_eq!(std::env::var("DOTENV_T_SQ").as_deref(), Ok("five"));
+        assert_eq!(std::env::var("DOTENV_T_SPACED").as_deref(), Ok("six"));
+    }
+
+    #[test]
+    fn nothing_inside_a_value_is_interpreted() {
+        let (_d, r) = in_dir("DOTENV_T_PW=p$ss\\w0rd#not-a-comment\n");
+        assert!(r.malformed.is_empty());
+        // A password is a password. No expansion, no escape, and the `#`
+        // is not a trailing comment — treating it as one silently changes
+        // the secret.
+        assert_eq!(
+            std::env::var("DOTENV_T_PW").as_deref(),
+            Ok("p$ss\\w0rd#not-a-comment")
+        );
+    }
+
+    #[test]
+    fn the_environment_wins_over_the_file() {
+        // SAFETY: single-threaded test setup.
+        unsafe { std::env::set_var("DOTENV_T_WINS", "from-env") };
+        let (_d, r) = in_dir("DOTENV_T_WINS=from-file\n");
+        assert_eq!(std::env::var("DOTENV_T_WINS").as_deref(), Ok("from-env"));
+        assert_eq!(r.kept_from_env, vec!["DOTENV_T_WINS".to_string()]);
+        assert!(r.set.is_empty());
+    }
+
+    #[test]
+    fn a_line_that_is_not_a_setting_is_reported_not_swallowed() {
+        let (_d, r) = in_dir("DOTENV_T_OK=1\nthis is not a setting\nBAD-NAME=2\n");
+        assert_eq!(r.set, vec!["DOTENV_T_OK".to_string()]);
+        assert_eq!(r.malformed.len(), 2, "{:?}", r.malformed);
+        assert_eq!(r.malformed[0].0, 2);
+        assert_eq!(r.malformed[1].0, 3);
     }
 }

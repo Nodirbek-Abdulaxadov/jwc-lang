@@ -122,6 +122,8 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "tooManyRequests" => "jwc_b_too_many_requests",
         "redirect" => "jwc_b_redirect",
         "content" => "jwc_b_content",
+        "text" => "jwc_b_text",
+        "html" => "jwc_b_html",
 
         // Text — builtins.md §4.
         "string.lower" => "jwc_b_lower",
@@ -144,9 +146,12 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         // Hashing and tokens — builtins.md §6.
         "hash.password" => "jwc_b_hash_password",
         "hash.sha256" => "jwc_b_sha256",
+        "hash.sha1" => "jwc_b_sha1",
+        "hash.md5" => "jwc_b_md5",
         "hash.hmac_sha256" => "jwc_b_hmac_sha256",
         "jwt.sign" => "jwc_b_v1_jwt_sign",
         "jwt.verify" => "jwc_b_jwt_verify",
+        "jwt.verify_jwks" => "jwc_b_jwt_verify_jwks",
 
         // The request — builtins.md §7.
         "request.header" => "jwc_b_header",
@@ -951,6 +956,15 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
 
     let mut source = String::new();
     source.push_str(super::PRELUDE_BASE);
+    // After the base prelude, never before: that file opens with the
+    // crate's `#![allow(...)]`, and an inner attribute has to be the first
+    // thing in the file. Order does not matter to the call — `main` reaches
+    // `load_dotenv` wherever it is defined in the module.
+    source.push_str(super::PRELUDE_DOTENV_CORE);
+    // Unconditional: the switch is an environment variable, so whether a
+    // binary can be asked to log is not something the program's source
+    // decides.
+    source.push_str(super::PRELUDE_ACCESS_LOG_CORE);
     source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);
@@ -1571,6 +1585,16 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
                         rust_str_literal(&i.name)
                     ));
                 }
+                crate::ast::AssignTarget::Field { base, path, .. } => {
+                    let keys: Vec<String> =
+                        path.iter().map(|p| rust_str_literal(&p.name)).collect();
+                    out.push_str(&format!(
+                        "{pad}jwc_set_field_path(&mut {}, &[{}], {v});\n",
+                        local(&base.name),
+                        keys.join(", ")
+                    ));
+                    ctx.used.insert("jwc_set_field_path".to_string());
+                }
             }
         }
         Stmt::If {
@@ -1604,6 +1628,27 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
             emit_block(out, body, indent + 1, ctx)?;
             ctx.pop_scope();
             out.push_str(&format!("{pad}}}\n"));
+        }
+        // The turn ceiling is the interpreter's (`exec::MAX_WHILE_TURNS`),
+        // emitted here too so a runaway loop fails the same way in a built
+        // binary as it does under `jwc serve` rather than hanging.
+        Stmt::While { cond, body, .. } => {
+            out.push_str(&format!("{pad}{{\n{pad}    let mut __turns: u64 = 0;\n"));
+            out.push_str(&format!("{pad}    loop {{\n"));
+            let c = emit_expr(cond, ctx)?;
+            out.push_str(&format!(
+                "{pad}        if !jwc_truthy(&{c}) {{ break; }}\n\
+                 {pad}        __turns += 1;\n\
+                 {pad}        if __turns > {} {{\n\
+                 {pad}            return Err(JwcThrown::new(\"internal_error\", 500, v_str(\"`while` ran {} times without its condition going false\".to_string())));\n\
+                 {pad}        }}\n",
+                crate::exec::MAX_WHILE_TURNS,
+                crate::exec::MAX_WHILE_TURNS,
+            ));
+            ctx.push_scope();
+            emit_block(out, body, indent + 2, ctx)?;
+            ctx.pop_scope();
+            out.push_str(&format!("{pad}    }}\n{pad}}}\n"));
         }
         // middleware.md §4.2 — `return <Response>` short-circuits the chain;
         // a bare `return` short-circuits it with a 204, which is what
@@ -1716,6 +1761,13 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
         // names.md §5.3 — outside a query clause the sigil is optional, so
         // a bare name that is bound is the local it names.
         ExprKind::Name(i) if ctx.is_local(&i.name) => format!("{}.clone()", local(&i.name)),
+        // A `const` is a constant expression, so it is emitted where it is
+        // used rather than as a global: no initialisation order to get
+        // wrong, and the same value the interpreter computes.
+        ExprKind::Name(i) if ctx.symbols.consts.contains_key(&i.name) => {
+            let c = ctx.symbols.consts[&i.name].clone();
+            emit_expr(&c.value, ctx)?
+        }
         ExprKind::Name(i) => bail!(
             "native build cannot resolve the bare name `{}` outside a query",
             i.name
@@ -2028,27 +2080,116 @@ fn emit_select(sel: &crate::ast::SelectExpr, ctx: &mut Ctx) -> Result<String> {
 fn emit_insert(i: &crate::ast::InsertExpr, ctx: &mut Ctx) -> Result<String> {
     // `write_fields`: the values are evaluated *here*, once, and bound. An
     // `insert` whose value calls `uuid()` must not have it called twice.
-    let mut names: Vec<(String, Expr)> = Vec::new();
-    let mut preset: Vec<String> = Vec::new();
+    //
+    // `Certain` is a field written outright, or a **required** class field
+    // reached through a spread: both are in every statement this can emit.
+    // `Maybe` is an optional class field, which may or may not be in the
+    // record at run time — one presence bit each, exactly as `update`'s
+    // `=?` and spread do.
+    enum Col {
+        Certain(String, String, crate::token::Span),
+        Maybe(String, String, String, crate::token::Span),
+    }
+
+    let mut plan: Vec<Col> = Vec::new();
     for e in &i.values {
         match e {
             ObjEntry::Field {
                 key, value, span, ..
             } => {
-                names.push((key.name.clone(), placeholder(*span)));
-                preset.push(emit_expr(value, ctx)?);
+                plan.push(Col::Certain(
+                    key.name.clone(),
+                    emit_expr(value, ctx)?,
+                    *span,
+                ));
             }
-            // A spread's column list depends on which fields the source
-            // record actually carries, which is a runtime fact. The
-            // statement's column list is compile-time here, so the two
-            // cannot be reconciled without building the SQL at run time.
-            ObjEntry::Spread { .. } => bail!(
-                "native build does not lower `...` spread in an `insert` — the \
-                 column list depends on the value's shape at run time. \
-                 `jwc serve` runs it."
-            ),
+            // types.md §9.2 — a spread writes the fields the value carries.
+            // *Which* fields it could carry is the source's declared type,
+            // and that is in the AST. `emit_update` has read it this way
+            // since spreads were lowered there; this used to refuse, so
+            // `insert into T { ...$req }` — the shape the `api` template
+            // and writes.md both teach — could not be built natively.
+            ObjEntry::Spread {
+                source,
+                except,
+                span,
+            } => {
+                let Some(class) = ctx.class_of_local(&source.name) else {
+                    bail!(
+                        "native build cannot see the shape of `${}` — a `...` \
+                         spread's columns come from the value's declared type, \
+                         and this one is neither a typed parameter nor a \
+                         `request.body() as <Class>`. `jwc serve` reads the \
+                         shape at run time.",
+                        source.name
+                    );
+                };
+                let Some(sym) = ctx.symbols.classes.get(&class).cloned() else {
+                    bail!("`{class}` is not a declared class");
+                };
+                for f in &sym.fields {
+                    if except.iter().any(|x| x.name == f.name) {
+                        continue;
+                    }
+                    let get = format!(
+                        "jwc_get_field(&{}, {})",
+                        local(&source.name),
+                        rust_str_literal(&f.name)
+                    );
+                    // A required field is in every valid body — validation
+                    // ran before the handler — so it costs no bit.
+                    if f.ty.is_optional() {
+                        plan.push(Col::Maybe(
+                            f.name.clone(),
+                            get,
+                            format!(
+                                "jwc_has_field(&{}, {})",
+                                local(&source.name),
+                                rust_str_literal(&f.name)
+                            ),
+                            *span,
+                        ));
+                    } else {
+                        plan.push(Col::Certain(f.name.clone(), get, *span));
+                    }
+                }
+            }
         }
     }
+
+    let maybe_count = plan.iter().filter(|c| matches!(c, Col::Maybe(..))).count();
+    if maybe_count > 0 {
+        return emit_insert_with_optionals(i, plan_into_parts(plan), ctx);
+    }
+
+    let mut names: Vec<(String, Expr)> = Vec::new();
+    let mut preset: Vec<String> = Vec::new();
+    for c in &plan {
+        if let Col::Certain(name, value, span) = c {
+            names.push((name.clone(), placeholder(*span)));
+            preset.push(value.clone());
+        }
+    }
+
+    fn plan_into_parts(plan: Vec<Col>) -> Vec<InsertCol> {
+        plan.into_iter()
+            .map(|c| match c {
+                Col::Certain(n, v, s) => InsertCol {
+                    name: n,
+                    value: v,
+                    present: None,
+                    span: s,
+                },
+                Col::Maybe(n, v, p, s) => InsertCol {
+                    name: n,
+                    value: v,
+                    present: Some(p),
+                    span: s,
+                },
+            })
+            .collect()
+    }
+
     let mut b = crate::sql::Builder::new(ctx.model);
     let Some(built) = b.insert(i, &names) else {
         bail!("this insert is not expressible yet");
@@ -2087,6 +2228,101 @@ fn emit_insert(i: &crate::ast::InsertExpr, ctx: &mut Ctx) -> Result<String> {
     // hands the values straight to `run_sql_with`, bypassing `bind_params`.
     // Re-deriving them from the placeholder would bind `null` for each.
     emit_built_with(&built, &preset, true, ctx)
+}
+
+/// One column an `insert` may write. `present` is `Some(expr)` when the
+/// column comes from an **optional** class field reached through a `...`
+/// spread: whether it is in the record is a run-time fact, so it costs a
+/// presence bit and doubles the statements compiled.
+struct InsertCol {
+    name: String,
+    value: String,
+    present: Option<String>,
+    span: crate::token::Span,
+}
+
+/// `insert into T { ...$req }` where the class has optional fields.
+///
+/// The column list of an `INSERT` is part of its text, and a column left
+/// out is a column that takes its **default** — which is not the same as
+/// binding null, and is exactly the distinction `body text?` relies on.
+/// So each combination of present fields is a different statement, and
+/// this compiles all of them and picks by mask at run time. `emit_update`
+/// does the same for `=?`; the bound is shared.
+fn emit_insert_with_optionals(
+    i: &crate::ast::InsertExpr,
+    plan: Vec<InsertCol>,
+    ctx: &mut Ctx,
+) -> Result<String> {
+    let opt_slots: Vec<usize> = plan
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.present.is_some())
+        .map(|(n, _)| n)
+        .collect();
+
+    if opt_slots.len() > MAX_OPTIONAL_SETS {
+        bail!(
+            "native build does not lower an `insert` spreading {} optional \
+             fields — each combination is a different statement and this \
+             compiles all of them, which stops being reasonable past {}. \
+             `jwc serve` builds the statement per request.",
+            opt_slots.len(),
+            MAX_OPTIONAL_SETS
+        );
+    }
+
+    // Every value is read once, before the branch: a field whose value
+    // calls `uuid()` must not be called once to test presence and again to
+    // bind.
+    let mut out = String::from("{\n");
+    for (n, c) in plan.iter().enumerate() {
+        out.push_str(&format!("    let __ins{n} = {};\n", c.value));
+        if let Some(p) = &c.present {
+            out.push_str(&format!("    let __hasi{n} = {p};\n"));
+        }
+    }
+
+    out.push_str("    let __mask: usize = 0");
+    for (bit, slot) in opt_slots.iter().enumerate() {
+        out.push_str(&format!(
+            "\n        | if __hasi{slot} {{ 1 << {bit} }} else {{ 0 }}"
+        ));
+    }
+    out.push_str(";\n");
+
+    out.push_str("    match __mask {\n");
+    let variants = 1usize << opt_slots.len();
+    for mask in 0..variants {
+        let mut names: Vec<(String, Expr)> = Vec::new();
+        let mut preset: Vec<String> = Vec::new();
+        for (n, c) in plan.iter().enumerate() {
+            let included = match &c.present {
+                None => true,
+                Some(_) => {
+                    let bit = opt_slots.iter().position(|s| *s == n).unwrap_or(0);
+                    mask & (1 << bit) != 0
+                }
+            };
+            if included {
+                names.push((c.name.clone(), placeholder(c.span)));
+                preset.push(format!("__ins{n}.clone()"));
+            }
+        }
+        let mut b = crate::sql::Builder::new(ctx.model);
+        let Some(built) = b.insert(i, &names) else {
+            bail!("this insert is not expressible yet");
+        };
+        let e = emit_built_with(&built, &preset, true, ctx)?;
+        let arm = if mask == variants - 1 {
+            "_".to_string()
+        } else {
+            mask.to_string()
+        };
+        out.push_str(&format!("        {arm} => {e},\n"));
+    }
+    out.push_str("    }\n}");
+    Ok(out)
 }
 
 /// The most optional (`=?`) assignments one `update` may carry.

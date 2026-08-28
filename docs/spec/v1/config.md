@@ -225,6 +225,35 @@ variable at runtime has no effect.
 
 ---
 
+## 5.1 The `.env` file
+
+A `.env` in the project directory is read into the process environment
+before anything reads a variable. `jwc build` binaries read one too: the
+working directory first, then beside the executable and up to three levels
+above it.
+
+`KEY=VALUE` per line; a leading `export ` is tolerated; `#` begins a
+comment only at the start of a line; a value may be wrapped in `'` or `"`
+and nothing inside is interpreted — no `$VAR` expansion and no escapes. A
+line that is not `KEY=VALUE` is reported on stderr rather than skipped.
+
+**A variable already present in the environment is never overwritten.**
+The file is a convenience for a developer's machine; a deployment that
+exports its own configuration is unaffected by one that happens to be
+lying in the directory.
+
+## 5.2 `PG_*`
+
+When neither `DATABASE_URL` nor `JWC_DATABASE_URL` is set, `PG_USER`,
+`PG_PASSWORD`, `PG_HOST`, `PG_PORT` and `PG_DATABASE` are assembled into
+one. All five are required.
+
+Both are one implementation — `src/dotenv_core.rs.in`, which the CLI
+includes and codegen pastes into the generated crate — because until
+0.9.927 the native backend assembled `PG_*` and read `.env`, and the
+interpreter did neither: the same file worked in a built binary and failed
+under `jwc serve`.
+
 ## 6. Secrets never appear in output
 
 `env()` values used as `secret`, `key`, `password`, `token` or `cursor_secret`

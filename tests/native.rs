@@ -677,3 +677,87 @@ fn a_program_with_no_mount_does_not_carry_the_asset_runtime() {
     );
     assert_calls_resolve(&rust);
 }
+
+/// `insert into T { ...$req }` compiles.
+///
+/// It is the shape the `api` template writes, and the one writes.md
+/// teaches — and the native backend refused it: "the column list depends
+/// on the value's shape at run time". It does not. Which fields the value
+/// *could* carry is its declared class, and `emit_update` has read the
+/// declared class for its own spread since spreads were lowered there.
+/// The consequence was that `jwc build` could not compile the flagship
+/// starter template at all.
+#[test]
+fn an_insert_spreading_a_class_lowers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         database App : Postgres { init() { pool_size = 4; } }\n\
+         schema s of App;\n\
+         table Notes of App.s {\n\
+         \x20   id    bigint primary key identity;\n\
+         \x20   title varchar(200);\n\
+         \x20   body  text;\n\
+         }\n\
+         class NoteNew {\n\
+         \x20   title varchar(200) required;\n\
+         \x20   body  text?;\n\
+         }\n\
+         service S {\n\
+         \x20   function make(req: NoteNew) {\n\
+         \x20       return insert into App.s.Notes { ...$req } as { id, title };\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+
+    // A required field costs no presence bit — validation ran before the
+    // handler, so it is in every valid body.
+    assert!(rust.contains(r#"jwc_get_field(&v_req, "title")"#));
+    // An optional one does, and both statements are compiled.
+    assert!(rust.contains(r#"jwc_has_field(&v_req, "body")"#));
+    assert!(
+        rust.contains(r#"INSERT INTO s.notes (title) VALUES"#),
+        "the body-absent statement must exist — an omitted column takes \
+         its default, which is not the same as binding null"
+    );
+    assert!(rust.contains(r#"INSERT INTO s.notes (title, body) VALUES"#));
+}
+
+/// A spread whose source has no declared class is still refused, by name.
+/// The lowering reads the *declared* type; without one there is nothing to
+/// read, and guessing would be worse than refusing.
+#[test]
+fn an_insert_spreading_an_untyped_local_is_refused_by_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         database App : Postgres { init() { pool_size = 4; } }\n\
+         schema s of App;\n\
+         table Notes of App.s {\n\
+         \x20   id    bigint primary key identity;\n\
+         \x20   title varchar(200);\n\
+         }\n\
+         service S {\n\
+         \x20   function make() {\n\
+         \x20       let row = { title: \"x\" };\n\
+         \x20       return insert into App.s.Notes { ...$row } as { id };\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let err = jwc::native::codegen_for_test(&ws).expect_err("no declared shape");
+    let msg = format!("{err}");
+    assert!(msg.contains("cannot see the shape of `$row`"), "{msg}");
+    assert!(
+        msg.contains("jwc serve"),
+        "and it must name the way out: {msg}"
+    );
+}

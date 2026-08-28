@@ -95,10 +95,10 @@ At the top level a file may declare:
 namespace   import      database    schema      table       view
 enum        class       error       errorHandler
 service     function    middleware  routes      test
-job         server      static
+job         server      static      const
 ```
 
-Statements — `let`, assignment, `if`, `for`, `return`, `throw`,
+Statements — `let`, assignment, `if`, `for`, `while`, `return`, `throw`,
 `transaction`, `break`, `continue` — live inside bodies. See
 [control flow](./control-flow).
 
@@ -108,6 +108,7 @@ Statements — `let`, assignment, `if`, `for`, `return`, `throw`,
 or  and  not          -- logical (`!x` is also `not`)
 ==  !=  <  <=  >  >=  -- comparison
 +  -  *  /  %         -- arithmetic; `+` also concatenates text
++= -= *= /=           -- compound assignment; `x += 1` is `x = x + 1`
 ??                    -- null coalescing
 ? :                   -- conditional
 ...                   -- spread, in an object or a `set`
@@ -115,3 +116,6 @@ or  and  not          -- logical (`!x` is also `not`)
 
 `+` does not coerce: `text + int` is `E0370`, and the fix is
 `string.of(…)`. `/` on two integers is integer division.
+
+`not x` and `!x` are the same node, so `jwc fmt` writes one of them: `!x`.
+Both parse everywhere; only the formatted spelling is fixed.

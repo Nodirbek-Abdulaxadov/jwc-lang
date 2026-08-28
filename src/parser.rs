@@ -45,6 +45,7 @@ const DECL_STARTS: &[&str] = &[
     "errorHandler",
     "server",
     "static",
+    "const",
     "function",
     "test",
 ];
@@ -345,6 +346,7 @@ impl Parser {
             "errorHandler" => Decl::ErrorHandler(self.parse_error_handler(at, start)?),
             "server" => Decl::Server(self.parse_server(at, start)?),
             "static" => Decl::Static(self.parse_static(at, start)?),
+            "const" => Decl::Const(self.parse_const(at, start)?),
             "function" => Decl::Function(self.parse_function(at, start)?),
             "job" => Decl::Job(self.parse_job(at, start)?),
             "test" => Decl::Test(self.parse_test(at, start)?),
@@ -1541,6 +1543,21 @@ impl Parser {
         })
     }
 
+    /// `const NAME = <expr>;` (names.md §5.6).
+    fn parse_const(&mut self, at: Attached, start: Span) -> PResult<ConstDecl> {
+        self.bump();
+        let name = self.expect_ident()?;
+        self.expect(Tok::Eq)?;
+        let value = self.parse_expr()?;
+        let end = self.expect(Tok::Semi)?.span;
+        Ok(ConstDecl {
+            at,
+            name,
+            value,
+            span: start.to(end),
+        })
+    }
+
     /// `static "/assets" from "public" cache 3600;` (routing.md §10).
     fn parse_static(&mut self, at: Attached, start: Span) -> PResult<StaticDecl> {
         self.bump();
@@ -1840,6 +1857,22 @@ impl Parser {
             });
         }
 
+        // `while (cond) { … }` — 0.9 had it, the 1.0 front-end shipped only
+        // `for`, and a loop whose end is a condition had no spelling.
+        if self.at_word("while") {
+            self.bump();
+            self.expect(Tok::LParen)?;
+            let cond = self.parse_expr()?;
+            self.expect(Tok::RParen)?;
+            let (body, end) = self.parse_block()?;
+            return Ok(Stmt::While {
+                at,
+                cond,
+                body,
+                span: start.to(end),
+            });
+        }
+
         // Loop control. `at_word` and not a keyword check, because v1 has
         // no reserved words (names.md §2.6): `break` is a legal column
         // name, and only the statement position gives it this meaning.
@@ -1995,6 +2028,47 @@ impl Parser {
             });
         }
 
+        // `x += 1` is `x = x + 1`, desugared here so that the checker, both
+        // backends and the formatter never learn a second assignment form.
+        // 0.9 had these; the 1.0 front-end simply never grew them.
+        if let Tok::Local(name) | Tok::Ident(name) = self.peek().tok.clone() {
+            if let Tok::OpAssign(op) = self.peek_at(1).tok {
+                let sigil = matches!(self.peek().tok, Tok::Local(_));
+                let nspan = self.bump().span;
+                self.bump();
+                let rhs = self.parse_expr()?;
+                let end = self.expect(Tok::Semi)?.span;
+                let binop = match op {
+                    b'+' => BinOp::Add,
+                    b'-' => BinOp::Sub,
+                    b'*' => BinOp::Mul,
+                    _ => BinOp::Div,
+                };
+                let ident = Ident::new(name, nspan);
+                let current = Expr::new(
+                    if sigil {
+                        ExprKind::Local(ident.clone())
+                    } else {
+                        ExprKind::Name(ident.clone())
+                    },
+                    nspan,
+                );
+                return Ok(Stmt::Assign {
+                    at,
+                    target: AssignTarget::Local { name: ident, sigil },
+                    value: Expr::new(
+                        ExprKind::Binary {
+                            op: binop,
+                            lhs: current,
+                            rhs,
+                        },
+                        start.to(end),
+                    ),
+                    span: start.to(end),
+                });
+            }
+        }
+
         // `x = …;`, `$x = …;` and `context.k = …;` — the sigil is optional
         // outside a query clause (names.md §5.3).
         if let Tok::Local(name) | Tok::Ident(name) = self.peek().tok.clone() {
@@ -2015,6 +2089,49 @@ impl Parser {
                 });
             }
         }
+        // `x.field = …`, `$x.a.b = …`. Tried before the `context.k` form
+        // below, which is the same shape on a name the runtime owns, so
+        // that one keeps its own branch and this one never sees it.
+        if !self.at_word("context") {
+            if let Tok::Local(name) | Tok::Ident(name) = self.peek().tok.clone() {
+                if self.peek_at(1).is(&Tok::Dot) {
+                    // Look ahead across `.name` pairs for a `=` that is not
+                    // `==`: anything else is an ordinary expression
+                    // statement and must parse as one.
+                    let mut k = 1;
+                    let mut path_len = 0;
+                    while self.peek_at(k).is(&Tok::Dot)
+                        && matches!(self.peek_at(k + 1).tok, Tok::Ident(_))
+                    {
+                        k += 2;
+                        path_len += 1;
+                    }
+                    if path_len > 0 && self.peek_at(k).is(&Tok::Eq) {
+                        let sigil = matches!(self.peek().tok, Tok::Local(_));
+                        let nspan = self.bump().span;
+                        let mut path = Vec::new();
+                        for _ in 0..path_len {
+                            self.expect(Tok::Dot)?;
+                            path.push(self.expect_ident()?);
+                        }
+                        self.expect(Tok::Eq)?;
+                        let value = self.parse_expr()?;
+                        let end = self.expect(Tok::Semi)?.span;
+                        return Ok(Stmt::Assign {
+                            at,
+                            target: AssignTarget::Field {
+                                base: Ident::new(name, nspan),
+                                sigil,
+                                path,
+                            },
+                            value,
+                            span: start.to(end),
+                        });
+                    }
+                }
+            }
+        }
+
         if self.at_word("context") && self.peek_at(1).is(&Tok::Dot) && self.peek_at(3).is(&Tok::Eq)
         {
             self.bump();
@@ -2203,7 +2320,8 @@ impl Parser {
                 span,
             ));
         }
-        // `not exists (…)` / `not in (…)` are handled in parse_compare.
+        // `not exists (…)` first: `exists` is the operand's own grammar, not
+        // a name, so the general prefix rule below would parse it as a call.
         if self.at_word("not") && self.word_at(1, "exists") {
             self.bump();
             self.bump();
@@ -2216,6 +2334,22 @@ impl Parser {
                     negated: true,
                 },
                 start.to(end),
+            ));
+        }
+        // `not <expr>` — the word spelling of `!`, and the one names.md's
+        // keyword table promises. `not in` is *infix*, so it is reached
+        // through `parse_compare` with a left-hand side already parsed and
+        // never arrives here.
+        if self.at_word("not") && !self.word_at(1, "in") {
+            self.bump();
+            let rhs = self.parse_not()?;
+            let span = start.to(rhs.span);
+            return Ok(Expr::new(
+                ExprKind::Unary {
+                    op: UnaryOp::Not,
+                    rhs,
+                },
+                span,
             ));
         }
         if self.at_word("exists") && self.peek_at(1).is(&Tok::LParen) {

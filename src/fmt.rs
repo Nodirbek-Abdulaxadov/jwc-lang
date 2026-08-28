@@ -18,11 +18,13 @@ pub fn format_program(p: &Program) -> String {
     let mut w = Writer::default();
     for (i, d) in p.decls.iter().enumerate() {
         if i > 0 {
-            let solo = matches!(d, Decl::Import(_) | Decl::Namespace(_) | Decl::Static(_))
-                && matches!(
-                    p.decls[i - 1],
-                    Decl::Import(_) | Decl::Namespace(_) | Decl::Static(_)
-                );
+            let solo = matches!(
+                d,
+                Decl::Import(_) | Decl::Namespace(_) | Decl::Static(_) | Decl::Const(_)
+            ) && matches!(
+                p.decls[i - 1],
+                Decl::Import(_) | Decl::Namespace(_) | Decl::Static(_) | Decl::Const(_)
+            );
             // Consecutive one-line declarations — imports, mounts — stay
             // together; everything else gets air.
             if solo && !d.attached().blank_before {
@@ -113,6 +115,9 @@ impl Writer {
             Decl::Routes(n) => self.routes(n),
             Decl::ErrorHandler(n) => self.error_handler(n),
             Decl::Server(n) => self.server(n),
+            Decl::Const(n) => {
+                self.assigned(&format!("const {} = ", n.name.name), &n.value, ";");
+            }
             Decl::Static(n) => {
                 let cache = if n.max_age_span.is_some() {
                     format!(" cache {}", n.max_age)
@@ -666,6 +671,15 @@ impl Writer {
                         }
                     }
                     AssignTarget::Context(i) => format!("context.{}", i.name),
+                    AssignTarget::Field { base, sigil, path } => {
+                        let head = if *sigil {
+                            format!("${}", base.name)
+                        } else {
+                            base.name.clone()
+                        };
+                        let rest: Vec<&str> = path.iter().map(|p| p.name.as_str()).collect();
+                        format!("{head}.{}", rest.join("."))
+                    }
                 };
                 self.assigned(&format!("{t} = "), value, ";");
             }
@@ -700,6 +714,13 @@ impl Writer {
                 ..
             } => {
                 self.line(&format!("for ({} in {}) {{", binder.name, expr(iterable)));
+                self.depth += 1;
+                self.block(body);
+                self.depth -= 1;
+                self.line("}");
+            }
+            Stmt::While { cond, body, .. } => {
+                self.line(&format!("while ({}) {{", expr(cond)));
                 self.depth += 1;
                 self.block(body);
                 self.depth -= 1;
@@ -1087,6 +1108,7 @@ fn stmt_attached(s: &Stmt) -> &Attached {
         | Stmt::Assign { at, .. }
         | Stmt::If { at, .. }
         | Stmt::For { at, .. }
+        | Stmt::While { at, .. }
         | Stmt::Return { at, .. }
         | Stmt::Throw { at, .. }
         | Stmt::Transaction { at, .. }

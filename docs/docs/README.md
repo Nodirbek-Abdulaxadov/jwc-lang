@@ -13,8 +13,12 @@ This tree is what jwc.1kb.uz serves. `docusaurus.config.ts` points at it.
 | `data/` | schema, queries, writes, migrations |
 | `backend/` | routing, middleware, errors, validation, sockets, jobs, config |
 | `stdlib/` | every built-in |
-| `packages/`, `cli/`, `deployment/` | one page each |
+| `packages/` | one page |
+| `cli/` | every subcommand, and formatting |
+| `deployment/` | Docker, Kubernetes, CI, observability, static builds |
 | `security.md` | what the language enforces, and what it does not |
+| `reference/ai-agent-guide.md` | the language in one file, for a coding agent's context |
+| `reference/error-codes.md` | every diagnostic, generated from the spec's tables |
 | `reference/removed.md` | what 0.9.x had that 1.0 does not |
 | `reference/not-in-1-0.md` | what 1.0 does not have, and what to do instead |
 
@@ -24,6 +28,11 @@ This tree is what jwc.1kb.uz serves. `docusaurus.config.ts` points at it.
 block that is prose rather than a program — an operator table, a `{ … }`
 elision — is marked ```` ```jwc no-compile ````, and the marker sits in
 the fence's info string, which the site ignores.
+
+**The agent guide's blocks are held higher: they must *check*, not just
+parse.** It is written to be pasted into a coding agent's context, so
+every program in it is one an agent will copy verbatim, and parsing is
+not enough — `as many` on a `select` parses and is `E0301`.
 
 **The spec is normative, this is not.** `docs/spec/v1/` is where the rules
 are decided. Where a page here disagrees with it, the page is wrong.

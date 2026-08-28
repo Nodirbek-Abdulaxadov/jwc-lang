@@ -171,6 +171,9 @@ pub struct Symbols {
     pub middleware: BTreeMap<String, MiddlewareSym>,
     pub jobs: BTreeMap<String, JobSym>,
     pub services: BTreeMap<String, Vec<String>>,
+    /// `const NAME = …` — the declaration expression, kept so the checker
+    /// can type it and both backends can evaluate it (names.md §5.6).
+    pub consts: BTreeMap<String, crate::ast::ConstDecl>,
     /// Qualified path (`App.auth.Accounts`) -> declared table or view name.
     pub by_path: BTreeMap<String, String>,
     pub diags: Vec<(Loc, Diagnostic)>,
@@ -259,6 +262,25 @@ pub fn build(ws: &Workspace, model: &SchemaModel) -> Symbols {
                 span: d.span(),
             };
             match d {
+                Decl::Const(c) => {
+                    // Two consts with one name is the same ambiguity two
+                    // tables with one name is: which value applies would
+                    // depend on the order the files happened to load in.
+                    if s.consts.contains_key(&c.name.name) {
+                        s.diags.push((
+                            loc,
+                            Diagnostic::error(
+                                "E0215",
+                                c.name.span,
+                                format!("`{}` is declared twice", c.name.name),
+                            )
+                            .note("a `const` name is global")
+                            .clause("names.md §5.6"),
+                        ));
+                    } else {
+                        s.consts.insert(c.name.name.clone(), c.clone());
+                    }
+                }
                 Decl::Class(c) => {
                     // The enum table is complete by now (pass 1), and a
                     // class field of enum type must resolve to `Enum`, not

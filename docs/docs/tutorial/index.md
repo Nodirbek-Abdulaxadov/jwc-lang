@@ -164,14 +164,21 @@ createdb linkbin
 export DATABASE_URL=postgres://localhost/linkbin
 export CURSOR_SECRET=$(openssl rand -hex 32)
 
-jwc migrate new init .
-jwc migrate up .
-jwc serve .
+jwc migrate new init
+jwc migrate up
+jwc serve
+```
+
+On Windows:
+
+```powershell
+$env:DATABASE_URL = "postgres://localhost/linkbin"
+$env:CURSOR_SECRET = -join ((1..32) | ForEach-Object { "{0:x2}" -f (Get-Random -Max 256) })
 ```
 
 ```
 4 routes
-listening on http://0.0.0.0:8080
+listening on http://localhost:8080  (bound to 0.0.0.0 — every interface)
 ```
 
 ## Try it
@@ -240,9 +247,9 @@ content-type: application/json; charset=utf-8
 ## What the compiler already knows
 
 ```bash
-jwc routes .      # method, path, middleware chain
-jwc explain .     # every query, with the SQL it lowers to
-jwc openapi .     # OpenAPI 3.1, from the types the checker inferred
+jwc routes      # method, path, middleware chain
+jwc explain     # every query, with the SQL it lowers to
+jwc openapi     # OpenAPI 3.1, from the types the checker inferred
 ```
 
 ## Then

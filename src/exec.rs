@@ -240,6 +240,37 @@ pub struct Request {
     pub id: String,
 }
 
+/// How many turns a `while` may take before the runtime calls it a
+/// runaway. Ten million is far past any loop a request has business
+/// running and far short of "wait forever".
+pub const MAX_WHILE_TURNS: u64 = 10_000_000;
+
+/// Write `value` at `path` inside `root`, creating records on the way.
+///
+/// A JWC record is a list of pairs, not a reference, so this rebuilds the
+/// spine rather than mutating through a pointer — which is also why
+/// `x.a = 1` on a record with no `a` adds one instead of failing: there is
+/// no declared shape here to violate.
+fn set_field_path(root: &mut Value, path: &[crate::ast::Ident], value: Value) -> Exec<()> {
+    let Some((head, rest)) = path.split_first() else {
+        *root = value;
+        return Ok(());
+    };
+    let Value::Record(fields) = root else {
+        return Err(fault(format!(
+            "`.{}` written on a value that is not a record",
+            head.name
+        )));
+    };
+    if let Some(slot) = fields.iter_mut().find(|(k, _)| *k == head.name) {
+        return set_field_path(&mut slot.1, rest, value);
+    }
+    let mut fresh = Value::Record(Vec::new());
+    set_field_path(&mut fresh, rest, value)?;
+    fields.push((head.name.clone(), fresh));
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct Response {
     pub status: u16,
@@ -488,6 +519,13 @@ impl<'a> Vm<'a> {
                     AssignTarget::Context(k) => {
                         self.context.insert(k.name.clone(), v);
                     }
+                    AssignTarget::Field { base, path, .. } => {
+                        let Some(mut root) = self.lookup(&base.name).cloned() else {
+                            return Err(fault(format!("unknown local `{}`", base.name)));
+                        };
+                        set_field_path(&mut root, path, v)?;
+                        self.assign(&base.name, root);
+                    }
                 }
                 Ok(Flow::Normal)
             }
@@ -530,6 +568,36 @@ impl<'a> Vm<'a> {
                         Flow::Normal | Flow::Continue => {}
                         // The loop is what `break` leaves; anything else
                         // is leaving the function and keeps travelling.
+                        Flow::Break => break,
+                        other => return Ok(other),
+                    }
+                }
+                Ok(Flow::Normal)
+            }
+            Stmt::While { cond, body, .. } => {
+                // Bounded, unlike 0.9's. A `while` whose condition never
+                // goes false is a request that never answers and a
+                // connection nobody can reclaim; the ceiling turns that
+                // into an error naming the loop instead of a hang nobody
+                // can diagnose from the outside.
+                let mut turns: u64 = 0;
+                loop {
+                    let c = self.eval(cond).await?;
+                    let Some(true) = c.truthy() else {
+                        break;
+                    };
+                    turns += 1;
+                    if turns > MAX_WHILE_TURNS {
+                        return Err(fault(format!(
+                            "`while` ran {MAX_WHILE_TURNS} times without its \
+                             condition going false"
+                        )));
+                    }
+                    self.push();
+                    let r = Box::pin(self.run_stmts(body)).await;
+                    self.pop();
+                    match r? {
+                        Flow::Normal | Flow::Continue => {}
                         Flow::Break => break,
                         other => return Ok(other),
                     }
@@ -722,10 +790,18 @@ impl<'a> Vm<'a> {
             // scope — the sigil is optional there (names.md §5.3). Anything
             // else keeps the previous reading, its own text: the checker has
             // already rejected a bare name that is neither.
-            ExprKind::Name(i) => self
-                .lookup(&i.name)
-                .cloned()
-                .unwrap_or_else(|| Value::Text(i.name.clone())),
+            ExprKind::Name(i) => {
+                if let Some(v) = self.lookup(&i.name) {
+                    v.clone()
+                } else if let Some(c) = self.program.symbols.consts.get(&i.name).cloned() {
+                    // Evaluated at the use rather than cached: a `const` is
+                    // a constant expression, so this is arithmetic over
+                    // literals and cheaper than the machinery to memoise it.
+                    Box::pin(self.eval(&c.value)).await?
+                } else {
+                    Value::Text(i.name.clone())
+                }
+            }
 
             ExprKind::Field { base, field } => self.field(base, field).await?,
 

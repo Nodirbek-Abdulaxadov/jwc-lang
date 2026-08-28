@@ -51,8 +51,8 @@ vim.lsp.start({
 `jwc fmt` is not configurable, on purpose:
 
 ```bash
-jwc fmt .            # rewrite in place
-jwc fmt --check .    # non-zero if anything would change — for CI
+jwc fmt            # rewrite in place
+jwc fmt --check    # non-zero if anything would change — for CI
 ```
 
 The formatter is idempotent and its output is what the corpus is pinned

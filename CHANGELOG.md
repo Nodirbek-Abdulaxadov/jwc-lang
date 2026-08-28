@@ -3,6 +3,203 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.930] — four names for code that was already here — 2026-08-28
+
+```jwc
+route GET "" { return text("Hello, World!"); }
+```
+
+That is the program the owner wrote first, and `text` was not a name. Nor
+was `html`, nor `hash.sha1`, nor `hash.md5`.
+
+None of the four needed implementing. `src/hash.rs` computed sha1 and md5
+already; the native prelude already defined `jwc_b_text`, `jwc_b_html`,
+`jwc_b_sha1` and `jwc_b_md5` — I found out by *duplicating* two of them and
+watching the generated crate refuse to compile with "defined multiple
+times". What was missing was the name: an arm in the checker, an arm in the
+interpreter, a row in codegen's mapping table.
+
+That is the third time this shape has turned up in this series — the HTTP
+prelude in 0.9.922, `src/jwks.rs`, and now these — so it is worth naming:
+**code that ships, compiles, and cannot be called from the language.** The
+cutover moved a front-end and left the runtime behind it whole, and nothing
+checks that the two agree on what exists.
+
+`text(s)` and `html(s)` are `content(mime, s)` with the media type filled
+in, which is correct and three times as long to write for the two bodies
+people actually send. A record body is `E0736`, the same code `content`
+already used for the same mistake.
+
+`hash.sha1` and `hash.md5` are for reading a checksum someone else
+produced. Neither is what a password goes through — `hash.password` is —
+and the docs row says so.
+
+Checked on both backends: `Hello, World! [text/plain; charset=utf-8]`,
+`<h1>salom</h1> [text/html; charset=utf-8]`, and the known-answer digests
+for `"abc"`, identical from `jwc serve` and from the compiled binary.
+
+## [0.9.929] — `const`, and writing a field — 2026-08-28
+
+The last two of the four the grammar diff turned up.
+
+```jwc
+const PAGE_SIZE = 50;
+const LIMITS = [10, 50, 100];
+
+let o = { "a": 1, "b": { "c": 2 } };
+o.a = PAGE_SIZE;
+o.b.c = 20;
+o.fresh = 1;          -- a key that was not there is added
+```
+
+### `const`
+
+Top-level, read-only, one name for the whole program — two with one name is
+`E0215`, the same ambiguity two tables with one name would be. A local of
+the same name shadows it, the way a parameter shadows one.
+
+The right-hand side is a **constant expression**: literals, operators,
+`? :`, array and object literals, and other consts. Anything else is
+`E0216`. A whitelist, not a list of forbidden things — a blacklist has to
+name every way to reach the outside world and is wrong the moment one is
+added, and the failure mode of this direction is a diagnostic rather than a
+program that reads the database while it loads.
+
+Neither backend initialises anything: the interpreter evaluates at the use,
+codegen emits the expression where the name appears. There is no
+initialisation order to get wrong because there is no initialisation.
+
+### `x.field = v`
+
+Nested (`o.b.c`) and creating (`o.fresh`). A JWC record is a list of pairs
+rather than a reference, so the write rebuilds the spine — which is also
+why writing a key that was not there adds it: there is no declared shape
+here to violate, and that is what 0.9 did.
+
+The native backend converts a `Record` to an `Object` on write, because
+`Record` is the compact form a projection produces and its field list is
+fixed. `{"a":10,"b":{"c":20},"fresh":30}` from the interpreter and from the
+compiled binary, identically.
+
+## [0.9.928] — `while`, and `x += 1` — 2026-08-28
+
+Two things 0.9 had that the 1.0 front-end never grew. Neither was removed
+by a decision anyone recorded: the redesign specified `for` and `=`, nobody
+diffed the new grammar against the old one, and a loop that ends on a
+condition simply had no spelling.
+
+```jwc
+let i = 0;
+while (i < 5) {
+    i += 1;
+}
+```
+
+### `while`
+
+`break` and `continue` behave as they do in a `for`. The condition is a
+boolean — `while (1)` is `E0371`, the code `if` already uses for the same
+mistake, rather than a new number for an old rule.
+
+**It is bounded, which 0.9's was not.** Ten million turns and the loop
+raises. A condition that never goes false is a request that never answers
+and a connection nobody can reclaim; the ceiling turns that into an error
+naming the loop instead of a hang only visible from outside. The number is
+`exec::MAX_WHILE_TURNS`, and codegen emits *that* constant into the
+generated crate, so a runaway fails the same way in a built binary as it
+does under `jwc serve` — a test asserts the emitted number is the
+interpreter's.
+
+### `+=` `-=` `*=` `/=`
+
+Desugared in the parser: `x += 1` becomes `x = x + 1` before the AST
+exists, so the checker, both backends and the formatter never learn a
+second assignment form. Works on text too, because `+` does — `s += "b"`.
+
+Checked on both backends with one program: `i=5 sum=12` and `n=3` from the
+interpreter and from the compiled binary, identically.
+
+## [0.9.927] — the `.env` nothing read — 2026-08-28
+
+`jwc new` writes a `.env.example` whose first line says the runtime reads
+these. Nothing did. `DATABASE_URL` in a `.env` was inert, the error said
+`DATABASE_URL (or JWC_DATABASE_URL) is required for db access`, and the
+only way through was to export it by hand — which the documentation showed
+as `export DATABASE_URL=…`, a line that does not run on Windows.
+
+So the documented path from `jwc new` to a running program did not exist.
+Every test in this repository passed, because every one of them set the
+variable the way CI does.
+
+### It was worse than absent: it was half-present
+
+A binary from `jwc build` **did** read a `.env`, and **did** assemble
+`DATABASE_URL` from a `PG_*` block. `jwc serve` did neither. The same
+project therefore worked when compiled and failed when interpreted — the
+one thing this project promises never happens.
+
+The two parsers also disagreed. The native one dropped surrounding quotes
+on the floor (`DATABASE_URL="postgres://…"` kept its quotes), did not know
+a leading `export `, and skipped a malformed line in silence.
+
+### One parser, both backends
+
+`src/dotenv_core.rs.in` — the CLI includes it, codegen pastes the same text
+into the generated crate, the same arrangement `assets_core.rs.in` uses.
+Verified by running one `.env` with an `export` line, a double-quoted
+value, a single-quoted value and a broken line under `jwc run` and as a
+built binary: identical output, identical warning, three identical values.
+
+| | |
+|---|---|
+| `KEY=VALUE`, one per line | a leading `export ` is tolerated |
+| `#` at line start | a comment; `#` inside a value stays in the value |
+| `'…'` / `"…"` | stripped; nothing inside is interpreted |
+| `$OTHER` | **not** expanded — a password containing `$` is a password |
+| not `KEY=VALUE` | **warned on stderr**, not skipped in silence |
+| already in the environment | **wins**; the file never overwrites it |
+
+The last row is the one that makes it safe to ship: a container's
+configuration is untouched by a file lying in the directory.
+
+`jwc run app.jwc` names a file, so the `.env` is looked for beside it
+rather than inside it.
+
+### The guard, which is the actual fix
+
+Two mechanical checks, because the defect was never in the loader — the
+loader did not exist, and nothing could notice.
+
+**`a_generated_env_example_names_nothing_that_is_never_read`.** Every
+variable in a template's `.env.example` must be in `config::REGISTRY` or
+read by that template's own sources with `env("NAME")`. It failed on its
+first run: `templates/jobs` names `JWC_JOB_WORKERS`, which is real, and the
+registry had `JWC_QUEUE_WORKERS`, which nothing reads.
+
+**`every_env_var_the_code_reads_is_registered_and_the_other_way_round`.**
+Both directions. It found eight variables the code reads that no registry
+knew — `JWC_BIND_HOST`, `JWC_DEV`, `JWC_HTTP_TIMEOUT_SECS`, `JWC_LOG_SQL`,
+`JWC_OTLP_ENDPOINT`, `JWC_SERVICE_NAME`, `JWC_REGISTRY`,
+`JWC_REQUEST_BODY` — so they were absent from the boot table and from
+`config.md`, discoverable only by reading the source. `JWC_OTLP_ENDPOINT`
+is how tracing is turned on.
+
+And thirteen the other way: registered, printed in the boot table,
+documented in `config.md`, **read by nothing**. `JWC_SERVER_WORKERS`,
+`JWC_REQUEST_TIMEOUT`, `JWC_QUEUE_MAX_ATTEMPTS`, `JWC_REGISTRY_TOKEN` and
+nine more do not appear anywhere in `src/`. Implementing thirteen features
+is not this change; their `doc` now begins `NOT IMPLEMENTED — `, the
+generated table carries it, and the guard enforces the pairing in both
+directions — a dead knob must be labelled, and a labelled knob must still
+be dead.
+
+### Also
+
+`listening on http://0.0.0.0:8080` was the bind address printed verbatim.
+A browser will not open it on Windows and it resolves to nothing useful
+anywhere; the line exists to be clicked. It now reads
+`listening on http://localhost:8080  (bound to 0.0.0.0 — every interface)`.
+
 ## [0.9.926] — the Intel Mac binary v0.9.925 did not ship — 2026-08-26
 
 v0.9.925 put `x86_64-apple-darwin` on `macos-13`, the last Intel image.

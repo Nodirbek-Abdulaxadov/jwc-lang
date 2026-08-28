@@ -1234,6 +1234,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Assign { span, .. }
         | Stmt::If { span, .. }
         | Stmt::For { span, .. }
+        | Stmt::While { span, .. }
         | Stmt::Return { span, .. }
         | Stmt::Throw { span, .. }
         | Stmt::Transaction { span, .. }
@@ -1254,7 +1255,9 @@ fn walk_block(b: &Block, f: &mut impl FnMut(&Stmt)) {
                     walk_block(alt, f);
                 }
             }
-            Stmt::For { body, .. } | Stmt::Transaction { body, .. } => walk_block(body, f),
+            Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Transaction { body, .. } => {
+                walk_block(body, f)
+            }
             Stmt::Assert {
                 kind: AssertKind::Fails { body, .. },
                 ..

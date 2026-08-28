@@ -18,6 +18,25 @@ There is no `+=`. A binding is declared with `let` and written by name. The
 inside a query clause, where a bare name is a column — see
 [Syntax](./syntax.md#sigils).
 
+## `const`
+
+```jwc no-compile
+const PAGE_SIZE = 50;
+```
+
+Top-level, read-only, visible everywhere. The right-hand side is a constant
+expression — literals, operators, `? :`, array and object literals, and
+other consts. A call, a query or request data is `E0216`.
+
+## Writing a field
+
+```jwc no-compile
+let o = { "a": 1, "b": { "c": 2 } };
+o.a = 10;
+o.b.c = 20;
+o.fresh = 30;      -- a key that was not there is added
+```
+
 ## `if`
 
 ```jwc no-compile
@@ -90,8 +109,27 @@ rolls it back. A postfix `catch` inside one compiles to a savepoint, because
 without it the connection would be in an aborted transaction and every later
 statement would fail.
 
-## No `while`, no early `else`, no `switch`
+## `while`
 
-`for` over an array is the only loop. A bounded retry is a `for` over a
-literal array, which makes the bound visible at the call site rather than in
-a counter someone has to read.
+```jwc no-compile
+let i = 0;
+while (i < 5) {
+    i += 1;
+}
+```
+
+The condition is a boolean — `while (1)` is `E0371`, the same rule `if`
+follows. `break` and `continue` work as they do in a `for`.
+
+A `while` stops after ten million turns and raises, in both backends. A
+condition that never goes false is a request that never answers and a
+connection nobody can reclaim; the ceiling turns that into an error naming
+the loop rather than a hang you can only see from outside.
+
+Prefer `for` over an array where you have one: the bound is then visible at
+the call site rather than in a counter someone has to read.
+
+## No early `else`, no `switch`
+
+`if` / `else` and `for` are the whole of the branching vocabulary besides
+`while`.

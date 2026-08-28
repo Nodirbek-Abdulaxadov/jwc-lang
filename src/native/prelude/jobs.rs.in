@@ -262,11 +262,21 @@ async fn jwc_start_job_workers() {
         eprintln!("[jobs] could not create the queue tables: {e}");
         return;
     }
+    // `0` means none *in this process*: the queue is a Postgres table, so
+    // a second deployment of the same sources drains it. It used to fall
+    // through to the default of 2 — the opposite of what it says — and
+    // `jobs.rs::worker_count` had the same bug, so both backends agreed
+    // on being wrong.
     let n = std::env::var("JWC_JOB_WORKERS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|x| *x > 0)
         .unwrap_or(2);
+    if n == 0 {
+        // Said out loud: a queue nobody is polling looks exactly like a
+        // broken one from the outside.
+        eprintln!("[jwc] 0 job workers (JWC_JOB_WORKERS=0) — this process does not drain the queue");
+        return;
+    }
     for _ in 0..n {
         tokio::spawn(jwc_job_worker());
     }

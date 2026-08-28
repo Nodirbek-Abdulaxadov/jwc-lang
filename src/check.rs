@@ -394,6 +394,21 @@ impl<'a> Checker<'a> {
                 self.block(&t.body);
                 self.pop_scope();
             }
+            Decl::Const(c) => {
+                // Checked once at the declaration, so a mistake is reported
+                // where it was written rather than at every use.
+                self.expr(&c.value);
+                if let Some(bad) = non_const_expr(&c.value) {
+                    self.err_note(
+                        bad,
+                        "E0216",
+                        "a `const` is a constant expression",
+                        "literals, operators, array and object literals, and \
+                         other consts — no calls, no queries, no request data",
+                        "names.md §5.6",
+                    );
+                }
+            }
             Decl::View(v) => self.view(v),
             Decl::Class(_) | Decl::Table(_) | Decl::Enum(_) => {}
             _ => {}
@@ -788,7 +803,7 @@ impl<'a> Checker<'a> {
                                     "types.md §10.3",
                                 );
                             }
-                            // Assignment resets narrowing (types.md §6.6.5).
+                            // Assignment resets narrowing (types.md §6.6.6).
                             self.rebind(&i.name, want);
                         }
                         None => self.err_note(
@@ -799,6 +814,24 @@ impl<'a> Checker<'a> {
                             "names.md §5.5",
                         ),
                     },
+                    AssignTarget::Field { base, path, .. } => {
+                        // The value written is not checked against the
+                        // field's declared type: a record's shape is
+                        // structural here, and `x.a = 1` on a record that
+                        // has no `a` adds one, which is what 0.9 did.
+                        // What is checked is that the base exists.
+                        if self.lookup(&base.name).is_none() {
+                            self.err_note(
+                                base.span,
+                                "E0211",
+                                format!("unknown local `{}`", base.name),
+                                "declare it with `let` first",
+                                "names.md §5.5",
+                            );
+                        }
+                        let _ = path;
+                        let _ = got;
+                    }
                     AssignTarget::Context(_) => {
                         // middleware.md §6.4 is a v0.24 rule; the value is
                         // still type-checked above.
@@ -830,8 +863,26 @@ impl<'a> Checker<'a> {
                 }
                 self.pop_scope();
 
+                // rule 3 — the else branch of a null test is the same
+                // fact the other way round. `if (x == null) { … } else {
+                // x.f }` was `E0320` while the early-return spelling of
+                // exactly that guard checked, so the shape a reader
+                // reaches for first was the one the compiler refused.
                 if let Some(alt) = otherwise {
-                    self.block(alt);
+                    let else_narrowed = narrowing_target(cond, true);
+                    self.push_scope();
+                    if let Some(name) = &else_narrowed {
+                        if let Some(t) = self.lookup(name) {
+                            self.scopes
+                                .last_mut()
+                                .expect("scope")
+                                .insert(name.clone(), t.strip_opt());
+                        }
+                    }
+                    for s in alt {
+                        self.stmt(s);
+                    }
+                    self.pop_scope();
                 }
 
                 // rule 1 — a divergent null-guard narrows after the `if`.
@@ -876,6 +927,25 @@ impl<'a> Checker<'a> {
                 }
                 self.push_scope();
                 self.declare(&binder.name, elem, binder.span);
+                self.loop_depth += 1;
+                for s in body {
+                    self.stmt(s);
+                }
+                self.loop_depth -= 1;
+                self.pop_scope();
+            }
+            Stmt::While { cond, body, .. } => {
+                let c = self.expr(cond);
+                if c != Ty::boolean() && !matches!(c, Ty::Unknown) {
+                    self.err_note(
+                        cond.span,
+                        "E0371",
+                        format!("`while` needs a boolean condition, found `{c}`"),
+                        "compare something: `while (i < 10)`",
+                        "types.md §6.3",
+                    );
+                }
+                self.push_scope();
                 self.loop_depth += 1;
                 for s in body {
                     self.stmt(s);
@@ -1562,6 +1632,11 @@ impl<'a> Checker<'a> {
         // and `string.of($attempt)` are the same reference (names.md §5.3).
         if let Some(t) = self.lookup(&i.name) {
             return t;
+        }
+        // A `const` is a name in the same space, shadowed by a local of the
+        // same name the way a parameter shadows one (names.md §5.6).
+        if let Some(c) = self.sym.consts.get(&i.name).cloned() {
+            return self.expr(&c.value);
         }
         // Enum / service / builtin namespaces resolve through `Field`, so a
         // bare name that is not a local is either a declaration or a mistake.
@@ -2358,6 +2433,31 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Response
             }
+            // `text(s)` and `html(s)` — `content(mime, s)` with the media
+            // type filled in. 0.9 had both and the cutover kept only the
+            // general form, which is correct and three times as long to
+            // write for the two bodies people actually send.
+            "text" | "html" => {
+                arity(self, 1);
+                let body = args.first().cloned().unwrap_or(Ty::Unknown);
+                if !matches!(body, Ty::Unknown) && !matches!(body, Ty::Scalar(sc) if sc.is_text()) {
+                    self.err_note(
+                        exprs.first().map(|e| e.span).unwrap_or(span),
+                        "E0736",
+                        format!("`{path}(...)` body is `{body}`, not `text`"),
+                        "the body is sent verbatim: build the string first, or \
+                         use `json(...)` for a structured body",
+                        "routing.md §6.5",
+                    );
+                }
+                let mime = if path == "text" {
+                    "text/plain; charset=utf-8"
+                } else {
+                    "text/html; charset=utf-8"
+                };
+                self.record_response_as(200, Ty::text(), Some(normalize_media(mime)));
+                Ty::Response
+            }
             "cookie" => Ty::Response,
             "serve" => {
                 arity(self, 1);
@@ -2567,6 +2667,14 @@ impl<'a> Checker<'a> {
                 arity(self, 1);
                 Ty::text()
             }
+            // Legacy digests. 0.9 had both and `src/hash.rs` still computes
+            // them; only the name was missing. They are here for reading a
+            // checksum someone else produced — `hash.password` is what a
+            // password goes through, and neither of these is that.
+            "hash.sha1" | "hash.md5" => {
+                arity(self, 1);
+                Ty::text()
+            }
             "hash.hmac_sha256" => {
                 arity(self, 2);
                 Ty::text()
@@ -2587,7 +2695,12 @@ impl<'a> Checker<'a> {
                 arity(self, 3);
                 Ty::text()
             }
-            "jwt.verify" => {
+            // Same answer for both: `jwt.verify` is HS256 against a shared
+            // secret, `jwt.verify_jwks` is RS256 against an OIDC provider's
+            // published keys. One shape, so a caller can switch from a
+            // symmetric secret to a provider without rewriting the code
+            // that reads the claims.
+            "jwt.verify" | "jwt.verify_jwks" => {
                 arity(self, 2);
                 Ty::Record(vec![
                     ("sub".into(), Ty::text()),
@@ -4680,3 +4793,43 @@ fn callee_path(e: &Expr) -> Option<String> {
 }
 
 use crate::token::Span;
+
+/// The span of the first thing in a `const` that is not a constant
+/// expression, or `None`.
+///
+/// Deliberately a whitelist. A blacklist would have to name every way to
+/// reach the outside world and would be wrong the moment one is added;
+/// this is wrong only in the direction of refusing something harmless,
+/// which is a diagnostic rather than a program that reads the database at
+/// load time.
+fn non_const_expr(e: &Expr) -> Option<Span> {
+    match &*e.kind {
+        ExprKind::Int(_)
+        | ExprKind::Decimal(_)
+        | ExprKind::Str(_)
+        | ExprKind::RawStr(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Null
+        // A bare name here is another `const`; the checker reports it as
+        // unknown if it is not one.
+        | ExprKind::Name(_) => None,
+        ExprKind::Unary { rhs, .. } => non_const_expr(rhs),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            non_const_expr(lhs).or_else(|| non_const_expr(rhs))
+        }
+        ExprKind::Ternary {
+            cond,
+            then,
+            otherwise,
+        } => non_const_expr(cond)
+            .or_else(|| non_const_expr(then))
+            .or_else(|| non_const_expr(otherwise)),
+        ExprKind::Array(items) => items.iter().find_map(non_const_expr),
+        ExprKind::Object(entries) => entries.iter().find_map(|k| match k {
+            ObjEntry::Field { value, .. } => non_const_expr(value),
+            // A spread reads a local, and a `const` has no locals.
+            ObjEntry::Spread { span, .. } => Some(*span),
+        }),
+        _ => Some(e.span),
+    }
+}

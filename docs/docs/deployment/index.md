@@ -18,7 +18,7 @@ install beside it.
 FROM debian:trixie-slim AS fetch
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates && rm -rf /var/lib/apt/lists/*
-ARG JWC_VERSION=0.9.914
+ARG JWC_VERSION=0.9.932
 RUN curl -fsSL https://github.com/just-web-code/jwc-lang/releases/download/v${JWC_VERSION}/jwc-v${JWC_VERSION}-x86_64-linux.tar.gz \
       | tar -xz -C /usr/local/bin \
     && chmod +x /usr/local/bin/jwc
@@ -67,7 +67,7 @@ same migration.
 Then, in the readiness gate:
 
 ```bash
-jwc migrate verify .
+jwc migrate verify
 ```
 
 which names any constraint or index the binary expects and the database
@@ -116,3 +116,12 @@ whatever is left. Set the platform's grace period above it.
 | `JWC_REDIS_URL` | to enable `redis.*` |
 | `JWC_DB_POOL_SIZE` | default 64; lower it on memory-constrained nodes |
 | `PORT` | only if `main` reads it |
+
+## The rest of it
+
+| | |
+|---|---|
+| [Kubernetes](./kubernetes.md) | the Deployment, the migration Job, the probes, pool size against replica count |
+| [CI and CD](./ci-cd.md) | what needs a database and what does not, and the rollout order |
+| [Observability](./observability.md) | every metric, the access log, and OTLP |
+| [Static builds](./static-builds.md) | musl, `--target`, and `FROM scratch` |

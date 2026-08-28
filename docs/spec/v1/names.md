@@ -62,18 +62,18 @@ The words with grammatical meaning are:
 ```
 after     and       as        asc       assert    backoff   break     buffered
 by        cache     cascade   catch     check     class     close     conflict
-continue  cross     database  default   delete    desc      dispatch  do
-else      enum      error     errorHandler except    exists    false     first
-for       foreign   from      full      function  group     having    identity
-if        ilike     import    in        index     inner     insert    into
-job       join      key       left      let       like      limit     max
-message   middleware namespace no        not       nothing   null      nulls
-of        on        open      or        orderby   page      primary   private
-provides  raises    references requires  restrict  retries   return    right
-route     routes    schema    select    server    service   set       size
-socket    static    table     test      throw     transaction transient true
-under     unique    update    use       using     view      was       where
-with
+const     continue  cross     database  default   delete    desc      dispatch
+do        else      enum      error     errorHandler except    exists    false
+first     for       foreign   from      full      function  group     having
+identity  if        ilike     import    in        index     inner     insert
+into      job       join      key       left      let       like      limit
+max       message   middleware namespace no        not       nothing   null
+nulls     of        on        open      or        orderby   page      primary
+private   provides  raises    references requires  restrict  retries   return
+right     route     routes    schema    select    server    service   set
+size      socket    static    table     test      throw     transaction transient
+true      under     unique    update    use       using     view      was
+where     while     with
 ```
 
 A word in a position where the grammar expects that keyword is that keyword.
@@ -349,6 +349,30 @@ rather than implemented as an unreachable check.)*
 
 ---
 
+
+## 5.6 `const`
+
+```jwc
+const PAGE_SIZE = 50;
+const LIMITS = [10, 50, 100];
+```
+
+Top-level, read-only, one namespace for the whole program: two with one
+name is `E0215`, the same ambiguity two tables with one name would be.
+
+The right-hand side is a **constant expression** — literals, operators,
+`? :`, array and object literals, and other consts. Anything else is
+`E0216`. The rule is a whitelist rather than a list of forbidden things: a
+blacklist has to name every way to reach the outside world and is wrong the
+moment one is added, and the failure mode of this direction is a diagnostic
+rather than a program that reads the database while it loads.
+
+A local of the same name shadows it, the way a parameter shadows one.
+
+Both backends evaluate it the same way: the interpreter at the use, codegen
+by emitting the expression where the name appears. There is no
+initialisation order, because there is nothing to initialise.
+
 ## 7. Diagnostics introduced here
 
 | Code | Meaning |
@@ -373,6 +397,8 @@ rather than implemented as an unreachable check.)*
 | `E0212` | duplicate binding name in one query |
 | `E0213` | unqualified column is ambiguous across bindings |
 | `E0214` | `let` shadows an existing binding |
+| `E0215` | two `const` declarations with one name |
+| `E0216` | a `const` right-hand side is not a constant expression |
 | `E0220` | `@name` outside a route or middleware |
 | `E0900` | removed keyword from the pre-1.0 language |
 | `W0101` | case convention |

@@ -155,7 +155,7 @@ forever.
 
 | Env var | Default | |
 |---|---|---|
-| `JWC_JOB_WORKERS` | 2 | worker tasks per process |
+| `JWC_JOB_WORKERS` | 2 | worker tasks per process; `0` = this process does not drain |
 | `JWC_JOB_POLL_MS` | 1000 | poll interval when the queue is empty |
 
 A program that declares no `job` starts no workers and creates no tables.

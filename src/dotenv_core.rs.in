@@ -1,0 +1,113 @@
+// Shared verbatim by the CLI and by the crate `jwc build` generates:
+// `src/config.rs` includes it, and codegen pastes the same text into the
+// binary's prelude. A `.env` that `jwc serve` reads and a native binary
+// ignores is the two backends disagreeing about configuration, which is
+// the one thing this project promises never happens.
+//
+// Do not add a `crate::` path or a `use` to this file.
+
+/// What reading a `.env` produced.
+pub struct DotenvReport {
+    /// The file that was read, if there was one.
+    pub path: Option<std::path::PathBuf>,
+    /// Names set from the file, in file order.
+    pub set: Vec<String>,
+    /// Names the file gave that the environment already had. The
+    /// environment wins — a `.env` is a convenience for a developer's
+    /// machine, and a value someone exported deliberately, or a
+    /// container's, must not be overwritten by a file that happens to be
+    /// in the directory.
+    pub kept_from_env: Vec<String>,
+    /// `(line number, the line)` for lines that are not `KEY=VALUE`.
+    /// Reported rather than skipped: a typo in a `.env` is otherwise a
+    /// variable that is silently not set.
+    pub malformed: Vec<(usize, String)>,
+}
+
+/// Read `<dir>/.env` into the process environment.
+///
+/// This exists because the file every `jwc new` generates says the runtime
+/// reads it, and until now nothing did: `DATABASE_URL` in a `.env` was
+/// inert, and the only way to reach the database was to export it by hand.
+///
+/// The rules are deliberately dull, because a configuration file that
+/// needs its own manual is a second language to get wrong:
+///
+/// - `KEY=VALUE`, one per line. A leading `export ` is tolerated, so a
+///   line copied out of a shell session works.
+/// - Blank lines and lines starting with `#` are skipped.
+/// - A value may be wrapped in `'` or `"`; the quotes are stripped and
+///   nothing inside them is interpreted. No `$VAR` expansion, no escapes:
+///   a password containing `$` is a password, not a reference.
+/// - **An existing environment variable is never overwritten.**
+pub fn load_dotenv(dir: &std::path::Path) -> DotenvReport {
+    let path = dir.join(".env");
+    let mut report = DotenvReport {
+        path: None,
+        set: Vec::new(),
+        kept_from_env: Vec::new(),
+        malformed: Vec::new(),
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return report;
+    };
+    report.path = Some(path);
+
+    for (i, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, value)) = line.split_once('=') else {
+            report.malformed.push((i + 1, raw.to_string()));
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            report.malformed.push((i + 1, raw.to_string()));
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+            .unwrap_or(value);
+
+        if std::env::var_os(key).is_some() {
+            report.kept_from_env.push(key.to_string());
+            continue;
+        }
+        // SAFETY: single-threaded CLI startup, before any runtime spawns.
+        unsafe { std::env::set_var(key, value) };
+        report.set.push(key.to_string());
+    }
+    report
+}
+
+/// `DATABASE_URL` assembled from the `PG_*` fields, when it was not given
+/// directly.
+///
+/// The native backend has done this since 0.9.x and the interpreter never
+/// did, so a `.env` written with `PG_HOST`/`PG_USER`/… worked in a
+/// `jwc build` binary and failed under `jwc serve` with "DATABASE_URL is
+/// required". One function, both callers, so the two cannot drift again.
+///
+/// All five are required: a partially-filled block is a half-written
+/// configuration, and guessing the rest is how a program connects to the
+/// wrong database.
+pub fn database_url_from_pg_fields() -> Option<String> {
+    let (Ok(user), Ok(password), Ok(host), Ok(port), Ok(database)) = (
+        std::env::var("PG_USER"),
+        std::env::var("PG_PASSWORD"),
+        std::env::var("PG_HOST"),
+        std::env::var("PG_PORT"),
+        std::env::var("PG_DATABASE"),
+    ) else {
+        return None;
+    };
+    Some(format!(
+        "postgresql://{user}:{password}@{host}:{port}/{database}"
+    ))
+}

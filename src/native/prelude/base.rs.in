@@ -78,57 +78,43 @@ fn v_record(field_names: Arc<Vec<JwcStr>>, values: Vec<V>) -> V {
 /// Load a `.env` from the current working directory or the binary's directory.
 /// Mirrors `project::load_dotenv` so a standalone native binary picks up the
 /// same env layout the `jwc run`/`jwc serve` CLI does.
+// The `.env`, read the same way `jwc serve` reads it: the rules are
+// `dotenv_core.rs.in`, pasted into this crate by codegen, so a file that
+// works under the interpreter works here. Before 0.9.927 there were two
+// parsers — this one dropped surrounding quotes on the floor and did not
+// know `export ` — and the interpreter had none at all.
 fn jwc_load_dotenv() {
-    let candidates: Vec<std::path::PathBuf> = {
-        let mut v = Vec::new();
-        if let Ok(cwd) = std::env::current_dir() {
-            v.push(cwd.join(".env"));
+    // The working directory first, then beside the binary and up a few
+    // levels: a deployed binary is often `bin/release/app` with the `.env`
+    // at the project root.
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut at = exe.parent().map(|p| p.to_path_buf());
+        for _ in 0..3 {
+            let Some(d) = at else { break };
+            dirs.push(d.clone());
+            at = d.parent().map(|p| p.to_path_buf());
         }
-        if let Ok(exe) = std::env::current_exe() {
-            // bin/release/app.exe → walk up to project root
-            if let Some(parent) = exe.parent() {
-                v.push(parent.join(".env"));
-                if let Some(g) = parent.parent() {
-                    v.push(g.join(".env"));
-                    if let Some(gg) = g.parent() {
-                        v.push(gg.join(".env"));
-                    }
-                }
+    }
+    for dir in dirs {
+        let report = load_dotenv(&dir);
+        if report.path.is_some() {
+            for (line, text) in &report.malformed {
+                eprintln!(
+                    "[jwc] warning: .env:{line} is not `KEY=VALUE` and was ignored: {}",
+                    text.trim()
+                );
             }
-        }
-        v
-    };
-    let mut content = None;
-    for c in &candidates {
-        if let Ok(s) = std::fs::read_to_string(c) {
-            content = Some(s);
             break;
         }
     }
-    let Some(content) = content else { return };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            let v = v.trim();
-            if std::env::var(k).is_err() {
-                std::env::set_var(k, v);
-            }
-        }
-    }
     if std::env::var("DATABASE_URL").is_err() {
-        if let (Ok(u), Ok(p), Ok(h), Ok(port), Ok(d)) = (
-            std::env::var("PG_USER"),
-            std::env::var("PG_PASSWORD"),
-            std::env::var("PG_HOST"),
-            std::env::var("PG_PORT"),
-            std::env::var("PG_DATABASE"),
-        ) {
-            std::env::set_var(
-                "DATABASE_URL",
-                format!("postgresql://{}:{}@{}:{}/{}", u, p, h, port, d),
-            );
+        if let Some(url) = database_url_from_pg_fields() {
+            // SAFETY: startup, before the runtime spawns anything.
+            unsafe { std::env::set_var("DATABASE_URL", url) };
         }
     }
 }
@@ -892,6 +878,38 @@ fn jwc_has_field(v: &V, k: &str) -> bool {
             Err(_) => false,
         },
         _ => false,
+    }
+}
+
+/// Write `value` at `path` inside `v`, creating objects on the way.
+///
+/// The interpreter's `set_field_path`, in this crate's value shape. A
+/// `Record` is converted to an `Object` on write: `Record` is the compact
+/// form a projection produces and its field list is fixed, so adding a key
+/// to one has to change its representation — `x.a = 1` on a shape without
+/// an `a` adds one, which is what the interpreter does and what 0.9 did.
+fn jwc_set_field_path(v: &mut V, path: &[&str], value: V) {
+    let Some((head, rest)) = path.split_first() else {
+        *v = value;
+        return;
+    };
+    if let V::Record { field_names, values } = v {
+        let mut m: JwcObj = JwcObj::default();
+        for (i, name) in field_names.iter().enumerate() {
+            m.insert(name.as_ref().to_string(), values[i].clone());
+        }
+        *v = v_obj(m);
+    }
+    if !matches!(v, V::Object(_)) {
+        *v = v_obj(JwcObj::default());
+    }
+    let V::Object(m) = v else { return };
+    let m = std::sync::Arc::make_mut(m);
+    let slot = m.entry((*head).to_string()).or_insert(V::Null);
+    if rest.is_empty() {
+        *slot = value;
+    } else {
+        jwc_set_field_path(slot, rest, value);
     }
 }
 
@@ -2893,7 +2911,26 @@ impl HttpServer {
                 },
             },
         };
-        eprintln!("[jwc] listening on http://{}", addr);
+        // The wildcard is what the socket is bound to, not an address
+        // anyone can open. Printing it verbatim gave
+        // `http://0.0.0.0:8080`, which a browser refuses on Windows and
+        // resolves to nothing useful anywhere; the line exists to be
+        // clicked, so it names a host that answers and says separately
+        // what the bind actually is. `serve.rs` fixed this in 0.9.926 and
+        // the native banner kept the old text — the same URL from the two
+        // backends is the whole promise.
+        let shown = match addr.ip() {
+            std::net::IpAddr::V4(v4) if v4.is_unspecified() => format!(
+                "http://localhost:{}  (bound to 0.0.0.0 — every interface)",
+                addr.port()
+            ),
+            std::net::IpAddr::V6(v6) if v6.is_unspecified() => format!(
+                "http://localhost:{}  (bound to [::] — every interface)",
+                addr.port()
+            ),
+            _ => format!("http://{}", addr),
+        };
+        eprintln!("[jwc] listening on {}", shown);
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(jwc_shutdown_signal())
             .await
@@ -2979,7 +3016,53 @@ async fn jwc_operational(method: &str, path: &str) -> Option<axum::response::Res
     }
 }
 
+/// The access log and the request id, around the dispatch.
+///
+/// A wrapper rather than a line before each `return`: the dispatcher has
+/// a dozen early exits — 404, 405, the socket refusals, the body-limit
+/// answers — and an access log that recorded some of them would be worse
+/// than none, because the missing ones are the interesting ones.
+/// `serve.rs` wraps its dispatcher in the same place for the same reason.
 async fn handle_axum_request(
+    state: axum::extract::State<Arc<Router>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    upgrade: Option<axum::extract::ws::WebSocketUpgrade>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let rid = request_id_from_traceparent(
+        headers.get("traceparent").and_then(|v| v.to_str().ok()),
+    );
+    let started = std::time::Instant::now();
+    let method_for_log = method.as_str().to_string();
+    let path_for_log = uri.path().to_string();
+
+    let mut resp = jwc_dispatch(state, method, uri, headers, upgrade, body).await;
+
+    if request_log_from_env() {
+        eprintln!(
+            "{}",
+            format_request_log_line(
+                &method_for_log,
+                &path_for_log,
+                resp.status().as_u16(),
+                started.elapsed().as_micros() as u64,
+                &rid,
+                access_log_is_json(),
+            )
+        );
+    }
+    // Echoed whether or not the log is on, exactly as `serve.rs` does:
+    // correlating a client's report with a server line is the point, and
+    // a client cannot turn the switch on.
+    if let Ok(v) = axum::http::HeaderValue::from_str(&rid) {
+        resp.headers_mut().insert("x-request-id", v);
+    }
+    resp
+}
+
+async fn jwc_dispatch(
     axum::extract::State(router): axum::extract::State<Arc<Router>>,
     method: axum::http::Method,
     uri: axum::http::Uri,

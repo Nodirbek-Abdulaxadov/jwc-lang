@@ -26,6 +26,49 @@ use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// `jwc serve --request-logging` / `JWC_REQUEST_LOG=1` — one line per
+/// answered request, on stderr.
+///
+/// Two switches rather than one because there are two backends. The flag
+/// is the interpreter's, and a native binary has no flags at all, so the
+/// variable is what makes `jwc build` output loggable — and it is the same
+/// variable the generated prelude reads, so the two cannot say different
+/// things.
+static REQUEST_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set from the CLI before the listener opens.
+pub fn set_request_logging(on: bool) {
+    REQUEST_LOG.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+// The shape of the access line, its id, and the variable that turns it
+// on — one text, included here and pasted into the generated crate.
+include!("access_log_core.rs.in");
+
+fn log_request_line(method: &str, path: &str, status: u16, latency_us: u64, request_id: &str) {
+    eprintln!(
+        "{}",
+        format_request_log_line(
+            method,
+            path,
+            status,
+            latency_us,
+            request_id,
+            access_log_is_json()
+        )
+    );
+}
+
+/// The flag, or the variable. Read once per request; an `Ordering::Relaxed`
+/// load of a value written before the socket opened.
+pub fn request_logging() -> bool {
+    REQUEST_LOG.load(std::sync::atomic::Ordering::Relaxed) || request_log_from_env()
+}
+
+fn request_id_from(headers: &HashMap<String, String>) -> String {
+    request_id_from_traceparent(headers.get("traceparent").map(|s| s.as_str()))
+}
+
 /// Build everything the runtime needs from parsed sources.
 pub fn load(ws: &Workspace) -> Result<Program> {
     if ws.has_parse_errors() {
@@ -1547,6 +1590,13 @@ pub async fn start_job_workers(program: Arc<Program>) {
         return;
     }
     let n = crate::jobs::worker_count();
+    if n == 0 {
+        // Deliberate: this process serves and does not drain. Said out
+        // loud, because a queue nobody is polling looks exactly like a
+        // broken one from the outside.
+        println!("0 job workers (JWC_JOB_WORKERS=0) — this process does not drain the queue");
+        return;
+    }
     for _ in 0..n {
         let p = program.clone();
         tokio::spawn(async move { job_worker(p).await });
@@ -1618,8 +1668,14 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
             }
         }
 
+        // Taken before the chain so the id is the same on the access
+        // line and on the response header, and so a request that times
+        // out still has one.
+        let rid = request_id_from(&hdrs);
+        let started = std::time::Instant::now();
+
         let limit = program.server.request_timeout;
-        let r = match tokio::time::timeout(
+        let mut r = match tokio::time::timeout(
             limit,
             handle(
                 program,
@@ -1642,6 +1698,20 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
             // waiting on.
             Err(_) => Response::message(504, "request timed out"),
         };
+
+        if request_logging() {
+            log_request_line(
+                method.as_str(),
+                uri.path(),
+                r.status,
+                started.elapsed().as_micros() as u64,
+                &rid,
+            );
+        }
+        // Echoed whether or not the log is on: correlating a client's
+        // report with a server line is the point, and a client cannot
+        // turn the flag on.
+        r.headers.push(("x-request-id".to_string(), rid));
 
         into_axum(r)
     }
@@ -1669,7 +1739,21 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
     let addr = std::net::SocketAddr::new(ip, port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let scheme = if acceptor.is_some() { "https" } else { "http" };
-    println!("listening on {scheme}://{addr}");
+    // The wildcard is what the socket is bound to, not an address anyone
+    // can open. Printing it verbatim gave `http://0.0.0.0:8080`, which a
+    // browser refuses on Windows and resolves to nothing useful anywhere;
+    // the line exists to be clicked, so it names a host that answers and
+    // says separately what the bind actually is.
+    let shown = match ip {
+        std::net::IpAddr::V4(v4) if v4.is_unspecified() => {
+            format!("{scheme}://localhost:{port}  (bound to 0.0.0.0 — every interface)")
+        }
+        std::net::IpAddr::V6(v6) if v6.is_unspecified() => {
+            format!("{scheme}://localhost:{port}  (bound to [::] — every interface)")
+        }
+        _ => format!("{scheme}://{addr}"),
+    };
+    println!("listening on {shown}");
 
     // After the bind, so a queue that cannot reach the database does not
     // stop the HTTP half from answering — and before the accept loop, so

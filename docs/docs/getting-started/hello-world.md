@@ -95,10 +95,19 @@ mismatch is `W0102`.
 ```bash
 export DATABASE_URL=postgres://jwc:jwc@localhost:5432/app
 
-jwc migrate new init .     # writes migrations/0001_init.{up,down}.sql
-jwc migrate up .           # applies it
-jwc migrate verify .       # every constraint and index is where it should be
+jwc migrate new init     # writes migrations/0001_init.{up,down}.sql
+jwc migrate up           # applies it
+jwc migrate verify       # every constraint and index is where it should be
 ```
+
+On Windows, `export` is not a command — PowerShell sets it like this:
+
+```powershell
+$env:DATABASE_URL = "postgres://jwc:jwc@localhost:5432/app"
+```
+
+Or put the line in a `.env` beside the project, without `export`, and
+every `jwc` command reads it.
 
 Read `migrations/0001_init.up.sql` before applying it. It is ordinary DDL,
 generated so you can review it — not a black box.
@@ -106,9 +115,9 @@ generated so you can review it — not a black box.
 ## Run it
 
 ```bash
-jwc serve .
+jwc serve
 # 2 routes
-# listening on http://0.0.0.0:8080
+# listening on http://localhost:8080  (bound to 0.0.0.0 — every interface)
 ```
 
 ```bash

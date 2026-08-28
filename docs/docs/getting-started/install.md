@@ -32,11 +32,11 @@ jwc --version
 ### Pinning a version
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | JWC_VERSION=v0.9.914 bash
+curl -fsSL https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.sh | JWC_VERSION=v0.9.932 bash
 ```
 
 ```powershell
-$env:JWC_VERSION = 'v0.9.914'
+$env:JWC_VERSION = 'v0.9.932'
 iwr -useb https://raw.githubusercontent.com/just-web-code/jwc-lang/main/install.ps1 | iex
 ```
 
@@ -106,7 +106,7 @@ than silently degrading.
 
 ```bash
 jwc --version
-jwc check .          # type-check a project without touching the database
+jwc check          # type-check a project without touching the database
 ```
 
 `jwc check` needs no connection. Everything that talks to Postgres —

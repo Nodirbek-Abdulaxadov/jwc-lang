@@ -1334,3 +1334,1153 @@ fn the_filesystem_is_out_of_reach_of_a_request() {
         "a script must be able to read a file"
     );
 }
+
+/// Every variable a generated `.env.example` names is one something reads.
+///
+/// `jwc new` writes this file and the first line tells the reader the
+/// runtime reads it. Until 0.9.927 nothing did — `DATABASE_URL` in a
+/// `.env` was inert, and a beginner who followed the file exactly got
+/// "DATABASE_URL is required" with no way forward. The loader is the fix;
+/// this is the guard, because the failure was never in the loader, it was
+/// in nobody checking that the file and the code agreed.
+///
+/// A name is legitimate when the runtime registry holds it, or when the
+/// template's own sources read it with `env("NAME")` — `CURSOR_SECRET` is
+/// the second kind: `server { cursor_secret = env("CURSOR_SECRET") }`.
+#[test]
+fn a_generated_env_example_names_nothing_that_is_never_read() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    let mut checked = 0;
+
+    for entry in std::fs::read_dir(&root).expect("templates/").flatten() {
+        let dir = entry.path();
+        let example = dir.join(".env.example");
+        let Ok(text) = std::fs::read_to_string(&example) else {
+            continue;
+        };
+        let template = dir.file_name().unwrap().to_string_lossy().to_string();
+
+        // Every `env("…")` the template's own sources read.
+        let mut read_by_source = std::collections::BTreeSet::new();
+        let mut stack = vec![dir.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("jwc") {
+                    let src = std::fs::read_to_string(&p).unwrap_or_default();
+                    let mut rest = src.as_str();
+                    while let Some(i) = rest.find("env(\"") {
+                        rest = &rest[i + 5..];
+                        if let Some(j) = rest.find('"') {
+                            read_by_source.insert(rest[..j].to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((name, _)) = line.split_once('=') else {
+                panic!("{template}/.env.example: `{line}` is not KEY=VALUE");
+            };
+            let name = name.trim();
+            let known_to_runtime = jwc::config::REGISTRY.iter().any(|v| v.name == name)
+                // Read by name outside the registry, which documents only
+                // the `JWC_*` surface.
+                || matches!(name, "DATABASE_URL" | "JWC_DATABASE_URL");
+            assert!(
+                known_to_runtime || read_by_source.contains(name),
+                "templates/{template}/.env.example names `{name}`, which is not in \
+                 config::REGISTRY and which no `.jwc` under templates/{template} \
+                 reads with env(\"{name}\") — the file would be telling a new user \
+                 to set something nothing looks at"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 8,
+        "expected several variables, checked {checked}"
+    );
+}
+
+/// A `.env` beside the sources reaches the code that asks for the database.
+///
+/// The unit tests cover the parser; this covers the wiring, which is where
+/// it was broken: the parser did not exist, so nothing downstream could
+/// have been wrong, and no test noticed the absence.
+#[test]
+fn a_dotenv_value_reaches_the_database_url_lookup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let name = "JWC_DATABASE_URL";
+    // The loader never overwrites, so the variable has to be clear first.
+    let restore = std::env::var_os(name);
+    // SAFETY: single-threaded test.
+    unsafe { std::env::remove_var(name) };
+    unsafe { std::env::remove_var("DATABASE_URL") };
+
+    std::fs::write(
+        dir.path().join(".env"),
+        "# a comment\nJWC_DATABASE_URL=postgres://u:p@h:5432/db\n",
+    )
+    .expect("write");
+
+    let report = jwc::config::load_dotenv(dir.path());
+    assert_eq!(
+        report.set,
+        vec![name.to_string()],
+        "{report:?}",
+        report = report.malformed
+    );
+
+    let url = jwc::engine::database_url_from_env().expect("the .env value");
+    assert_eq!(url, "postgres://u:p@h:5432/db");
+
+    // SAFETY: single-threaded test.
+    unsafe { std::env::remove_var(name) };
+    if let Some(v) = restore {
+        unsafe { std::env::set_var(name, v) };
+    }
+}
+
+/// The env-var registry and the code that reads the environment name the
+/// same variables.
+///
+/// `JWC_QUEUE_WORKERS` sat in the registry and in `config.md` while
+/// `jobs.rs` read `JWC_JOB_WORKERS`: the documented knob did nothing and
+/// the working knob was documented nowhere. Nothing could notice, because
+/// the registry was a hand-kept list beside the code rather than a
+/// statement about it.
+///
+/// Both directions, because each is a different lie: a registered name
+/// nothing reads is a setting that silently does nothing, and an unread
+/// name is a setting nobody can discover.
+#[test]
+fn every_env_var_the_code_reads_is_registered_and_the_other_way_round() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // Every `JWC_*` string literal under src/, minus the test-only ones.
+    let mut read_by_code: std::collections::BTreeSet<String> = Default::default();
+    let mut stack = vec![src];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext != "rs" && !p.to_string_lossy().ends_with(".rs.in") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            // The registry itself is the thing under test, so it does not
+            // get to vouch for its own entries.
+            if p.ends_with("config.rs") {
+                continue;
+            }
+            // Any `"JWC_…"` *string literal*. Not just `env::var("…")`:
+            // `mail.rs` passes the name to a helper and the CORS code
+            // builds its reads through one, and a scanner that only knew
+            // the direct form called both of them dead. A name inside a
+            // doc comment is not a literal and still does not count.
+            let mut rest = text.as_str();
+            while let Some(i) = rest.find("\"JWC_") {
+                // `env!("JWC_BUILD_TARGET")` is a *compile-time* constant
+                // emitted by build.rs, not a runtime knob: nobody sets it
+                // in an environment and the boot table has nothing to
+                // print. `option_env!` is the same.
+                let before = &rest[..i];
+                let compile_time = before.ends_with("env!(") || before.ends_with("option_env!(");
+                rest = &rest[i + 1..];
+                if compile_time {
+                    continue;
+                }
+                if let Some(j) = rest.find('"') {
+                    let name = &rest[..j];
+                    if name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        read_by_code.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let registered: std::collections::BTreeSet<String> = jwc::config::REGISTRY
+        .iter()
+        .map(|v| v.name.to_string())
+        .collect();
+
+    // Marker strings codegen emits into the generated crate to name a
+    // query's shape. They share the prefix and nothing else — no one sets
+    // them, and the environment never sees them.
+    const NOT_A_KNOB: &[&str] = &["JWC_SHAPE_FIRST", "JWC_SHAPE_NONE", "JWC_SHAPE_ROWS"];
+
+    let unregistered: Vec<&String> = read_by_code
+        .iter()
+        .filter(|n| !registered.contains(*n) && !NOT_A_KNOB.contains(&n.as_str()))
+        .collect();
+    assert!(
+        unregistered.is_empty(),
+        "read by the code, absent from config::REGISTRY (so undiscoverable, \
+         and missing from the boot table): {unregistered:?}"
+    );
+
+    // A registered name nothing reads is a setting that silently does
+    // nothing. Thirteen of them were shipped that way, documented in
+    // config.md and printed in the boot table. Implementing thirteen
+    // features is not what this test is for, so the registry says so in
+    // the entry itself and the generated table carries it — and this
+    // assertion is what keeps the two in step: a dead knob must be
+    // labelled, and a labelled knob must still be dead.
+    for name in registered.difference(&read_by_code) {
+        let entry = jwc::config::REGISTRY
+            .iter()
+            .find(|v| v.name == name.as_str())
+            .expect("from the registry");
+        assert!(
+            entry.doc.starts_with("NOT IMPLEMENTED"),
+            "`{name}` is in config::REGISTRY, is printed in the boot table and \
+             documented in config.md, and nothing in src/ reads it. Either wire \
+             it up, or start its `doc` with `NOT IMPLEMENTED — ` so the table \
+             stops promising it."
+        );
+    }
+    for v in jwc::config::REGISTRY {
+        if v.doc.starts_with("NOT IMPLEMENTED") {
+            assert!(
+                !read_by_code.contains(v.name),
+                "`{}` is labelled NOT IMPLEMENTED but the code reads it — drop \
+                 the label",
+                v.name
+            );
+        }
+    }
+}
+
+/// `while` and compound assignment, which 0.9 had and the 1.0 front-end
+/// never grew.
+///
+/// Neither was removed by a decision anyone wrote down: the redesign
+/// specified `for` and `=` and nobody diffed the new grammar against the
+/// old one, so a loop that ends on a condition and `i += 1` simply had no
+/// spelling. This pins them, and pins the runaway ceiling, which is the
+/// one thing 0.9's `while` did not have.
+#[test]
+fn a_while_loop_and_compound_assignment_parse_and_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         function main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let sum = 0;\n\
+         \x20   while (i < 5) {\n\
+         \x20       i += 1;\n\
+         \x20       if (i == 3) { continue; }\n\
+         \x20       sum += i;\n\
+         \x20   }\n\
+         \x20   sum -= 2;\n\
+         \x20   sum *= 3;\n\
+         \x20   sum /= 2;\n\
+         \x20   console.writeln(string.of(sum));\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// A `while` whose condition never goes false is a request that never
+/// answers. Both backends stop at the same count and say so.
+#[test]
+fn a_runaway_while_is_bounded_the_same_way_in_both_backends() {
+    // The interpreter's ceiling is the number codegen emits, so the two
+    // cannot drift into "one hangs, one errors".
+    let n = jwc::exec::MAX_WHILE_TURNS;
+    assert!(
+        n >= 1_000_000,
+        "a ceiling below a million would reject real loops"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\nfunction main() { while (true) { let x = 1; } }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    assert!(
+        rust.contains(&format!("__turns > {n}")),
+        "the generated crate should carry the interpreter's ceiling"
+    );
+}
+
+/// `while (1)` is not a condition. A loop that never ends because its
+/// condition is not a boolean is a typo, not a design.
+#[test]
+fn a_while_condition_that_is_not_boolean_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\nfunction main() { while (1) { break; } }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    assert!(
+        checked.diags.iter().any(|(_, d)| d.code == "E0371"),
+        "{:?}",
+        checked
+            .diags
+            .iter()
+            .map(|(_, d)| d.code)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `const` and `x.field = v`, the other two 0.9 had and the 1.0 front-end
+/// never grew.
+#[test]
+fn a_const_and_a_field_assignment_check_and_are_refused_when_wrong() {
+    fn diags(src: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        let mut out: Vec<String> = ws
+            .files
+            .iter()
+            .flat_map(|f| f.diags.iter().map(|d| d.code.to_string()))
+            .collect();
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        out.extend(sym.diags.iter().map(|(_, d)| d.code.to_string()));
+        out.extend(
+            jwc::check::check(&ws, &sym, &built.model)
+                .diags
+                .iter()
+                .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+                .map(|(_, d)| d.code.to_string()),
+        );
+        out
+    }
+
+    // The shapes that work.
+    let ok = diags(
+        "namespace n;\n\
+         const PI = 3;\n\
+         const TAU = PI * 2;\n\
+         const NAMES = [\"a\", \"b\"];\n\
+         function main() {\n\
+         \x20   let o = { \"a\": 1, \"b\": { \"c\": 2 } };\n\
+         \x20   o.a = TAU;\n\
+         \x20   o.b.c = 20;\n\
+         \x20   o.fresh = PI;\n\
+         }\n",
+    );
+    assert!(ok.is_empty(), "{ok:?}");
+
+    // A `const` that reaches outside itself.
+    assert!(
+        diags("namespace n;\nconst BAD = env(\"X\");\n").contains(&"E0216".to_string()),
+        "a call in a const should be E0216"
+    );
+    // Two with one name.
+    assert!(
+        diags("namespace n;\nconst A = 1;\nconst A = 2;\n").contains(&"E0215".to_string()),
+        "a duplicate const should be E0215"
+    );
+    // Writing a field of something that was never declared.
+    assert!(
+        diags("namespace n;\nfunction main() { nope.a = 1; }\n").contains(&"E0211".to_string()),
+        "an unknown base should be E0211"
+    );
+}
+
+/// `text`, `html`, `hash.sha1` and `hash.md5` — four names whose
+/// implementations were already in the tree and reachable from nothing.
+///
+/// `src/hash.rs` computed sha1 and md5, the native prelude defined
+/// `jwc_b_text`, `jwc_b_html`, `jwc_b_sha1` and `jwc_b_md5`, and no name in
+/// the language reached any of them. That is the same shape as `src/jwks.rs`
+/// and as the HTTP prelude before 0.9.922: code that ships, is compiled, and
+/// cannot be called.
+#[test]
+fn the_four_builtins_whose_implementations_were_already_here_are_reachable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         routes \"/\" {\n\
+         \x20   route GET \"t\" { return text(\"hi\"); }\n\
+         \x20   route GET \"h\" { return html(\"<b>x</b>\"); }\n\
+         \x20   route GET \"d\" { return json({ a: hash.md5(\"abc\"), b: hash.sha1(\"abc\") }); }\n\
+         }\n\
+         function main() { serve(8080); }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let errors: Vec<String> = jwc::check::check(&ws, &sym, &built.model)
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // And the native backend reaches the same four, by the names the
+    // prelude already defined.
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    for f in ["jwc_b_text", "jwc_b_html", "jwc_b_md5", "jwc_b_sha1"] {
+        assert!(rust.contains(f), "the generated crate never calls `{f}`");
+    }
+}
+
+/// A non-text body in `text(...)` is the same mistake `content(...)` already
+/// reports, and gets the same code.
+#[test]
+fn text_of_a_record_is_refused_the_way_content_is() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         routes \"/\" { route GET \"\" { return text({ a: 1 }); } }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    assert!(
+        jwc::check::check(&ws, &sym, &built.model)
+            .diags
+            .iter()
+            .any(|(_, d)| d.code == "E0736"),
+        "a record body should be E0736"
+    );
+}
+
+/// `docs/docs/language/syntax.md` has listed `not` among the operators since
+/// the operator table was written, and `names.md`'s keyword table lists it
+/// too — but `not x` did not parse. The two spellings are one node, so this
+/// pins that they stay one node rather than pinning the parse alone.
+#[test]
+fn the_word_spelling_of_the_logical_negation_parses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         function main() {\n\
+         \x20   let t = true;\n\
+         \x20   let a = not t;\n\
+         \x20   let b = !t;\n\
+         \x20   let c = not not t;\n\
+         \x20   if (not a) { console.writeln(\"ok\"); }\n\
+         \x20   console.writeln(string.of(a) + string.of(b) + string.of(c));\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// `not exists (…)` is its own node, not `not` applied to a call — so the
+/// prefix rule must not swallow it. Nor may `x not in (…)`, which is infix.
+#[test]
+fn not_exists_and_not_in_survive_the_prefix_rule() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         database App : Postgres { init() { pool_size = 4; } }\n\
+         schema public of App;\n\
+         table Users of App.public {\n\
+         \x20   id bigint identity primary key;\n\
+         \x20   name varchar(80);\n\
+         }\n\
+         service S {\n\
+         \x20   function pick(w: text) {\n\
+         \x20       return select U from App.public.Users\n\
+         \x20           where name not in (\"a\", \"b\") as { id };\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// The access line's two shapes. A log pipeline is configured against
+/// these strings, so a silent change to either breaks a dashboard and
+/// nothing else — which is why the formatter is pure and pinned here
+/// rather than observed on stderr.
+#[test]
+fn the_access_line_has_one_shape_per_format() {
+    let text = jwc::serve::format_request_log_line("GET", "/a/b", 200, 1234, "abc", false);
+    assert_eq!(text, "[jwc] GET /a/b -> 200 1.2ms rid=abc");
+
+    let json = jwc::serve::format_request_log_line("POST", "/x", 500, 7, "d1", true);
+    let v: serde_json::Value = serde_json::from_str(&json).expect("the json form must parse");
+    assert_eq!(v["kind"], "access");
+    assert_eq!(v["method"], "POST");
+    assert_eq!(v["path"], "/x");
+    assert_eq!(v["status"], 500);
+    assert_eq!(v["latency_us"], 7);
+    assert_eq!(v["request_id"], "d1");
+
+    // A path is the one field a client controls, so it is the one that
+    // can break the envelope.
+    let hostile = jwc::serve::format_request_log_line("GET", "/\"a\\b", 200, 0, "r", true);
+    let v: serde_json::Value =
+        serde_json::from_str(&hostile).expect("a quote in the path must not break the envelope");
+    assert_eq!(v["path"], "/\"a\\b");
+}
+
+/// W3C Trace Context §3.2.2. An id that is not a trace-id is not
+/// repaired: a made-up id that looks like the caller's is worse than one
+/// that is visibly ours.
+#[test]
+fn a_request_id_comes_from_traceparent_only_when_it_is_one() {
+    let good = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+    assert_eq!(
+        jwc::serve::request_id_from_traceparent(Some(good)),
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
+
+    for bad in [
+        "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01", // uppercase
+        "00-00000000000000000000000000000000-00f067aa0ba902b7-01", // all zero
+        "00-4bf92f35-00f067aa0ba902b7-01",                         // too short
+        "not-a-traceparent",
+        "",
+    ] {
+        let got = jwc::serve::request_id_from_traceparent(Some(bad));
+        assert_eq!(got.len(), 16, "a generated id is 16 hex digits: {got}");
+        assert!(got.chars().all(|c| c.is_ascii_hexdigit()), "{got}");
+    }
+
+    // Two calls never collide inside one process.
+    let a = jwc::serve::request_id_from_traceparent(None);
+    let b = jwc::serve::request_id_from_traceparent(None);
+    assert_ne!(a, b);
+}
+
+/// The access line is one text, included by the CLI and pasted into the
+/// generated crate. Two copies would drift, and the drift would show up
+/// as a log pipeline that parses `jwc serve` and drops `jwc build`.
+#[test]
+fn both_backends_format_the_access_line_from_the_same_text() {
+    let core = include_str!("../src/access_log_core.rs.in");
+    assert!(
+        core.contains("pub fn format_request_log_line("),
+        "the shared file must hold the formatter"
+    );
+    assert!(
+        jwc::native::PRELUDE_ACCESS_LOG_CORE == core,
+        "the generated crate must be handed the same bytes the CLI includes"
+    );
+    // And `serve.rs` must reach it by including that file, not by holding
+    // a second copy.
+    let serve = include_str!("../src/serve.rs");
+    assert!(serve.contains(r#"include!("access_log_core.rs.in")"#));
+    assert!(
+        !serve.contains("pub fn format_request_log_line("),
+        "serve.rs must not define its own copy"
+    );
+}
+
+/// `jwc lint --explain E0211` has to answer for every code the compiler
+/// can produce, or it is a lookup table with holes exactly where a reader
+/// needs it. The catalogue is generated from the spec by `build.rs`, so
+/// this is really a check that the extraction sees the same rows the
+/// documentation guard above sees.
+#[test]
+fn the_catalogue_answers_for_every_documented_code() {
+    use std::collections::BTreeSet;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut documented: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(root.join("docs/spec/v1"))
+        .expect("docs/spec/v1")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        for line in text.lines() {
+            let t = line.trim();
+            if !t.starts_with("| `E") && !t.starts_with("| `W") {
+                continue;
+            }
+            if let Some(code) = t.trim_start_matches("| `").split('`').next() {
+                let ok = code.len() == 5
+                    && (code.starts_with('E') || code.starts_with('W'))
+                    && code[1..].chars().all(|c| c.is_ascii_digit());
+                if ok {
+                    documented.insert(code.to_string());
+                }
+            }
+        }
+    }
+
+    assert!(
+        documented.len() > 50,
+        "found {} documented codes — the table format changed",
+        documented.len()
+    );
+
+    let missing: Vec<&String> = documented
+        .iter()
+        .filter(|c| jwc::codes::lookup(c).is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "documented but absent from the catalogue `--explain` reads: {missing:?}"
+    );
+
+    // And nothing extra: a row the spec does not have is a meaning
+    // invented by the extractor.
+    let extra: Vec<&str> = jwc::codes::DIAGNOSTIC_CATALOGUE
+        .iter()
+        .map(|(c, _, _)| *c)
+        .filter(|c| !documented.contains(*c))
+        .collect();
+    assert!(extra.is_empty(), "in the catalogue, in no spec: {extra:?}");
+
+    // Every row carries a meaning and the file that defines it — an empty
+    // one would print as a blank line and read as a code with no rule.
+    for (code, file, meaning) in jwc::codes::DIAGNOSTIC_CATALOGUE {
+        assert!(!meaning.trim().is_empty(), "{code} has no meaning");
+        assert!(file.ends_with(".md"), "{code} names {file}");
+    }
+
+    // A miss lands the reader in the right band rather than nowhere.
+    assert!(jwc::codes::lookup("E0211").is_some());
+    assert!(jwc::codes::lookup("e0211").is_some(), "case-insensitive");
+    assert!(jwc::codes::lookup("E0299").is_none());
+    assert!(
+        jwc::codes::in_same_band("E0299").len() > 3,
+        "a mistyped code should still list its band"
+    );
+}
+
+/// `jwt.verify` disagreed with itself across the two backends in two ways
+/// at once, and both were reachable from the auth template's middleware.
+///
+/// The checker types the call `Record{sub, exp, iat}?`. `jwc serve`
+/// answered that. A `jwc build` binary returned the raw payload **string**
+/// on success and `panic!`ed on a bad signature — so a request carrying a
+/// tampered token, which is ordinary traffic on any public endpoint, took
+/// the unwind path instead of the 401 the middleware writes.
+#[test]
+fn both_backends_answer_jwt_verify_with_the_same_shape() {
+    let prelude = jwc::native::PRELUDE_CRYPTO;
+
+    // The success path builds the same three-field record the interpreter
+    // does, rather than handing back the payload text.
+    assert!(
+        prelude.contains("fn jwc_jwt_claims_record(payload: &str) -> V {"),
+        "the native side must build the record"
+    );
+    assert!(
+        prelude.contains("jwc_jwt_claims_record(&payload)"),
+        "and jwt_verify must go through it"
+    );
+
+    // The failure path is null on both, not a panic on one.
+    let verify = prelude
+        .split("fn jwc_b_jwt_verify(")
+        .nth(1)
+        .expect("jwc_b_jwt_verify is in the crypto prelude");
+    let body = verify.split("\nfn ").next().unwrap_or(verify);
+    assert!(
+        !body.contains("panic!"),
+        "a token that does not verify is null on `jwc serve`; it must not \
+         crash a native build:\n{body}"
+    );
+
+    // And the interpreter has one function for it, so HS256 and the JWKS
+    // path cannot drift on the shape.
+    let exec = include_str!("../src/exec_call.rs");
+    assert_eq!(
+        exec.matches("fn jwt_claims_record(").count(),
+        1,
+        "one definition, two callers"
+    );
+    assert_eq!(exec.matches("jwt_claims_record(&payload)").count(), 2);
+}
+
+/// `src/jwks.rs` is 395 lines with a key cache, a negative cache and a
+/// refetch-storm guard; the native prelude carries the whole thing again.
+/// Both shipped in every binary and no program could call either — the
+/// checker had no arm, so `jwt.verify_jwks(...)` was `E0204`.
+#[test]
+fn jwt_verify_jwks_is_reachable_from_the_language() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         service S {\n\
+         \x20   function who(token: text) {\n\
+         \x20       let claims = jwt.verify_jwks(token, \"https://idp.example/jwks\")\n\
+         \x20           or throw Unauthorized(\"token yaroqsiz\");\n\
+         \x20       return claims.sub;\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // The native backend has to map the name too, or a program that
+    // checks would be refused at build time.
+    let codegen = include_str!("../src/native/codegen.rs");
+    assert!(codegen.contains(r#""jwt.verify_jwks" => "jwc_b_jwt_verify_jwks""#));
+    // It awaits, so it has to be in the async list — a mapping without
+    // that emits a call with no `.await` and the generated crate does not
+    // compile.
+    assert!(codegen.contains(r#""jwc_b_jwt_verify_jwks","#));
+}
+
+/// Every version this documentation tells a reader to install is the one
+/// this tree *is*.
+///
+/// The install page and the deployment Dockerfile both pinned `0.9.914`
+/// — seventeen releases behind — so following either got a binary from
+/// before `.env` was read at all, before `static` mounts, and before
+/// `text()` came back. A version in a copy-pasteable command is an
+/// instruction, and a stale one sends people to a build whose bugs are
+/// already fixed here.
+#[test]
+fn the_documented_install_version_is_this_version() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let want = env!("CARGO_PKG_VERSION");
+
+    // `vX.Y.Z` placeholders are fine — they are naming a shape, not an
+    // instruction. Concrete `0.9.NNN` in a command is what goes stale.
+    let re_pages = [
+        "docs/docs/getting-started/install.md",
+        "docs/docs/deployment/index.md",
+    ];
+    for page in re_pages {
+        let text = std::fs::read_to_string(root.join(page)).unwrap_or_else(|_| panic!("{page}"));
+        for line in text.lines() {
+            let t = line.trim();
+            // Only lines that pin a version for a download.
+            if !t.contains("JWC_VERSION") {
+                continue;
+            }
+            // The line either names this version, or names none at all
+            // (`JWC_VERSION` used as a variable, or a `vX.Y.Z` shape).
+            let names_a_version = t.contains("0.9.") || t.contains("v0.9.");
+            if !names_a_version {
+                continue;
+            }
+            assert!(
+                t.contains(want),
+                "{page} pins a version that is not {want}:\n  {t}"
+            );
+        }
+    }
+}
+
+/// What the docs show the server printing is what it prints.
+///
+/// The banner said `http://0.0.0.0:8080` until 0.9.926 — an address a
+/// browser refuses on Windows and that resolves to nothing useful
+/// anywhere. It was fixed in both backends; two pages went on quoting the
+/// old line, so a reader on Windows was still being shown a URL that
+/// cannot be clicked as if it were the expected output.
+#[test]
+fn the_documented_boot_banner_is_the_one_that_is_printed() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut pages = Vec::new();
+    let mut stack = vec![root.join("docs/docs")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                pages.push(p);
+            }
+        }
+    }
+    assert!(!pages.is_empty());
+
+    let mut stale = Vec::new();
+    for p in &pages {
+        let text = std::fs::read_to_string(p).unwrap_or_default();
+        for (n, line) in text.lines().enumerate() {
+            if line.contains("listening on")
+                && line.contains("0.0.0.0")
+                && !line.contains("bound to")
+            {
+                stale.push(format!("{}:{}", p.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "these quote the pre-0.9.926 banner: {stale:?}"
+    );
+}
+
+/// The diagnostic reference page is the catalogue, rendered.
+///
+/// `build.rs` extracts the rows from `docs/spec/v1/*.md`; `--explain` and
+/// this page read that one extraction, so a code cannot be explainable at
+/// the command line and missing from the reference, or the other way
+/// round.
+///
+/// `JWC_UPDATE_DOCS=1 cargo test the_diagnostic_reference_is_generated`
+/// regenerates it.
+#[test]
+fn the_diagnostic_reference_is_generated_from_the_catalogue() {
+    use std::fmt::Write as _;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let page_path = root.join("docs/docs/reference/error-codes.md");
+    let page = std::fs::read_to_string(&page_path).expect("error-codes.md");
+
+    const OPEN: &str = "<!-- generated:diagnostic-table -->";
+    const CLOSE: &str = "<!-- /generated:diagnostic-table -->";
+
+    let mut table = String::from("\n| Code | Meaning | Defined in |\n|---|---|---|\n");
+    for (code, file, meaning) in jwc::codes::DIAGNOSTIC_CATALOGUE {
+        // A pipe inside a cell would end it. Nothing in the spec has one
+        // today; escaping keeps that from becoming a silent break.
+        let meaning = meaning.replace('|', "\\|");
+        let _ = writeln!(table, "| `{code}` | {meaning} | `{file}` |");
+    }
+
+    let (before, rest) = page
+        .split_once(OPEN)
+        .unwrap_or_else(|| panic!("{OPEN} is missing from error-codes.md"));
+    let (_, after) = rest
+        .split_once(CLOSE)
+        .unwrap_or_else(|| panic!("{CLOSE} is missing from error-codes.md"));
+
+    let want = format!("{before}{OPEN}{table}{CLOSE}{after}");
+    if page == want {
+        return;
+    }
+    if std::env::var("JWC_UPDATE_DOCS").is_ok() {
+        std::fs::write(&page_path, &want).expect("rewrite error-codes.md");
+        return;
+    }
+    panic!(
+        "the diagnostic reference is out of step with the catalogue \
+         ({} codes). Run `JWC_UPDATE_DOCS=1 cargo test \
+         the_diagnostic_reference_is_generated` to regenerate it.",
+        jwc::codes::DIAGNOSTIC_CATALOGUE.len()
+    );
+}
+
+/// `JWC_JOB_WORKERS=0` means zero.
+///
+/// It used to fall through to the default of 2 in both backends, so a web
+/// deployment told not to drain the queue drained it with two workers —
+/// the setting did the opposite of what it said, identically on both
+/// sides. A value that is not a number still defaults, because "not a
+/// number" is a typo and "zero" is a decision.
+#[test]
+fn zero_job_workers_means_zero_on_both_backends() {
+    // The interpreter's reader, directly.
+    let restore = std::env::var("JWC_JOB_WORKERS").ok();
+    // SAFETY: single-threaded test body; restored before it returns.
+    unsafe { std::env::set_var("JWC_JOB_WORKERS", "0") };
+    assert_eq!(jwc::jobs::worker_count(), 0);
+    unsafe { std::env::set_var("JWC_JOB_WORKERS", "5") };
+    assert_eq!(jwc::jobs::worker_count(), 5);
+    unsafe { std::env::set_var("JWC_JOB_WORKERS", "not-a-number") };
+    assert_eq!(jwc::jobs::worker_count(), 2, "a typo still defaults");
+    match restore {
+        Some(v) => unsafe { std::env::set_var("JWC_JOB_WORKERS", v) },
+        None => unsafe { std::env::remove_var("JWC_JOB_WORKERS") },
+    }
+
+    // And the generated crate's, which is a separate copy of the read.
+    let prelude = jwc::native::PRELUDE_JOBS;
+    let spawn = prelude
+        .split("JWC_JOB_WORKERS")
+        .nth(1)
+        .expect("the jobs prelude reads it");
+    assert!(
+        !spawn.contains(".filter(|x| *x > 0)"),
+        "the native side must not filter zero away"
+    );
+    assert!(
+        spawn.contains("if n == 0 {"),
+        "and must return rather than spawn"
+    );
+
+    // The starter in `serve.rs` has to short-circuit too, or the count is
+    // honoured and the loop still runs.
+    let serve = include_str!("../src/serve.rs");
+    assert!(serve.contains("if n == 0 {"));
+}
+
+/// The observability page lists the metrics that are exported, and only
+/// those.
+///
+/// A page naming a metric nobody emits sends someone to build a dashboard
+/// on a series that never appears; a metric emitted and undocumented is
+/// one nobody knows to alert on. Both directions, from the `# TYPE` lines
+/// the code actually writes.
+#[test]
+fn the_documented_metrics_are_the_exported_ones() {
+    use std::collections::BTreeSet;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // `# TYPE <name> <kind>` is the Prometheus declaration, so it is the
+    // exact set a scraper sees — narrower and more honest than every
+    // `jwc_…` string in the tree.
+    let mut exported: BTreeSet<String> = BTreeSet::new();
+    for f in ["src/serve.rs", "src/jobs.rs", "src/log_writer.rs"] {
+        let text = std::fs::read_to_string(root.join(f)).unwrap_or_default();
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("# TYPE ") else {
+                continue;
+            };
+            if let Some(name) = rest.split_whitespace().next() {
+                if name.starts_with("jwc_") {
+                    exported.insert(name.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        exported.len() > 10,
+        "found {} exported metrics — the `# TYPE` shape changed",
+        exported.len()
+    );
+
+    let page = std::fs::read_to_string(root.join("docs/docs/deployment/observability.md"))
+        .expect("observability.md");
+
+    let undocumented: Vec<&String> = exported
+        .iter()
+        .filter(|m| !page.contains(&format!("`{m}`")))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "exported and not on the page, so nobody knows to alert on them: {undocumented:?}"
+    );
+
+    // The other direction: every `jwc_…` in a table cell on the page has
+    // to be a series that exists.
+    let mut invented: Vec<String> = Vec::new();
+    for line in page.lines() {
+        if !line.trim_start().starts_with("| `jwc_") {
+            continue;
+        }
+        let name = line
+            .trim_start()
+            .trim_start_matches("| `")
+            .split('`')
+            .next()
+            .unwrap_or("");
+        if !name.is_empty() && !exported.contains(name) {
+            invented.push(name.to_string());
+        }
+    }
+    assert!(
+        invented.is_empty(),
+        "on the page, exported by nothing — a dashboard built on these \
+         would stay empty forever: {invented:?}"
+    );
+}
+
+/// Every registered variable is read by something, and the three that
+/// were not are now.
+///
+/// `every_env_var_the_code_reads_is_registered_and_the_other_way_round`
+/// enforces the pair. This one pins the *decisions* made about the twelve
+/// that were registered, documented, printed in the boot table and read
+/// by nothing — so that "we looked at this and chose" does not decay back
+/// into "nobody noticed".
+#[test]
+fn the_settings_that_did_nothing_were_wired_or_removed() {
+    let names: Vec<&str> = jwc::config::REGISTRY.iter().map(|v| v.name).collect();
+
+    // Wired.
+    for wired in ["JWC_SERVER_WORKERS", "JWC_PRINT_CONFIG", "JWC_HOME"] {
+        assert!(names.contains(&wired), "{wired} should still be registered");
+    }
+
+    // Removed, each because the language already says the thing:
+    //   the queue three  -> `job X retries N backoff "30s"` (jobs.md §2)
+    //   REQUEST_TIMEOUT  -> `server { request_timeout }` (config.md §3)
+    //   the registry two -> JWC_REGISTRY, and `jwc login`
+    //   SERVER_METRICS   -> /metrics
+    //   ADMIN_DB         -> `jwc migrate` never creates a database
+    for gone in [
+        "JWC_ADMIN_DB",
+        "JWC_SERVER_METRICS",
+        "JWC_SERVER_METRICS_INTERVAL_SECS",
+        "JWC_REQUEST_TIMEOUT",
+        "JWC_QUEUE_MAX_ATTEMPTS",
+        "JWC_QUEUE_BACKOFF_MS",
+        "JWC_QUEUE_DLQ_MAX",
+        "JWC_REGISTRY_URL",
+        "JWC_REGISTRY_TOKEN",
+    ] {
+        assert!(
+            !names.contains(&gone),
+            "{gone} is back in the registry — if it was implemented, drop \
+             this row; if not, it is a setting that silently does nothing"
+        );
+    }
+
+    // Nothing is marked as not implemented any more. A row that does
+    // nothing is a row that should not be there.
+    let config = include_str!("../src/config.rs");
+    assert!(
+        !config.contains("NOT IMPLEMENTED"),
+        "a registered variable that does nothing is worse than an absent \
+         one: it is documented, printed at boot, and a lie"
+    );
+}
+
+/// The boot fence runs.
+///
+/// `config::validate_or_bail` is called "the boot fence" by `jwt.rs` and
+/// was never called by anything, so `JWC_DB_POOL_SIZE=twenty` was
+/// swallowed by an `unwrap_or(64)` deeper in the call graph and the pool
+/// was quietly the wrong size. Same for `config::render` and
+/// `config::snapshot`, which had no caller at all.
+#[test]
+fn the_boot_fence_and_the_config_table_have_a_caller() {
+    let cmd = include_str!("../src/cmd/mod.rs");
+    assert!(
+        cmd.contains("crate::config::validate_or_bail()?"),
+        "serve must refuse to start on an unparseable setting"
+    );
+    assert!(
+        cmd.contains("crate::config::render(&crate::config::snapshot())"),
+        "JWC_PRINT_CONFIG must reach the renderer"
+    );
+    assert!(cmd.contains(r#""JWC_PRINT_CONFIG""#));
+
+    // And the fence really rejects. A parse failure is the whole point.
+    let restore = std::env::var("JWC_DB_POOL_SIZE").ok();
+    // SAFETY: single-threaded test body, restored before it returns.
+    unsafe { std::env::set_var("JWC_DB_POOL_SIZE", "twenty") };
+    let verdict = jwc::config::validate_or_bail();
+    match restore {
+        Some(v) => unsafe { std::env::set_var("JWC_DB_POOL_SIZE", v) },
+        None => unsafe { std::env::remove_var("JWC_DB_POOL_SIZE") },
+    }
+    let err = verdict.expect_err("`twenty` is not a usize");
+    assert!(format!("{err:?}").contains("JWC_DB_POOL_SIZE"));
+}
+
+/// The else branch of a null test narrows (types.md §6.6 rule 3).
+///
+/// `if (x == null) { …; return; } x.f` checked, and
+/// `if (x == null) { … } else { x.f }` was `E0320` — so the shape a
+/// reader reaches for first was the one the compiler refused, for a fact
+/// it had already established.
+#[test]
+fn the_else_branch_of_a_null_test_narrows() {
+    let ok = "namespace n;\n\
+              function main() {\n\
+              \x20   let c = jwt.verify(\"t\", \"s\");\n\
+              \x20   if (c == null) {\n\
+              \x20       console.writeln(\"none\");\n\
+              \x20   } else {\n\
+              \x20       console.writeln(c.sub);\n\
+              \x20   }\n\
+              }\n";
+    // And the polarity has to be right: the *then* branch of `== null` is
+    // where the value is null, so a field read there is still E0320.
+    let bad = "namespace n;\n\
+               function main() {\n\
+               \x20   let c = jwt.verify(\"t\", \"s\");\n\
+               \x20   if (c == null) {\n\
+               \x20       console.writeln(c.sub);\n\
+               \x20   } else {\n\
+               \x20       console.writeln(\"some\");\n\
+               \x20   }\n\
+               }\n";
+
+    let codes = |src: &str| -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        jwc::check::check(&ws, &sym, &built.model)
+            .diags
+            .iter()
+            .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+            .map(|(_, d)| d.code.to_string())
+            .collect()
+    };
+
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+    assert!(
+        codes(bad).contains(&"E0320".to_string()),
+        "the then-branch of `== null` is where it *is* null: {:?}",
+        codes(bad)
+    );
+}

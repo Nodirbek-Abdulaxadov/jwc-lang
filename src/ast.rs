@@ -71,6 +71,7 @@ pub enum Decl {
     ErrorHandler(ErrorHandlerDecl),
     Server(ServerDecl),
     Static(StaticDecl),
+    Const(ConstDecl),
     Function(FunctionDecl),
     Job(JobDecl),
     Test(TestDecl),
@@ -95,6 +96,7 @@ impl Decl {
             Decl::ErrorHandler(d) => d.span,
             Decl::Server(d) => d.span,
             Decl::Static(d) => d.span,
+            Decl::Const(d) => d.span,
             Decl::Function(d) => d.span,
             Decl::Test(d) => d.span,
         }
@@ -118,6 +120,7 @@ impl Decl {
             Decl::ErrorHandler(d) => &d.at,
             Decl::Server(d) => &d.at,
             Decl::Static(d) => &d.at,
+            Decl::Const(d) => &d.at,
             Decl::Function(d) => &d.at,
             Decl::Test(d) => &d.at,
         }
@@ -536,6 +539,19 @@ pub struct CatchArm {
     pub span: Span,
 }
 
+/// `const NAME = <constant expression>;` (names.md §5.6).
+///
+/// Top-level, read-only, visible everywhere. 0.9 had it; the 1.0 front-end
+/// did not, so a value shared by several handlers had to be a function
+/// call or repeated at each site.
+#[derive(Clone, Debug)]
+pub struct ConstDecl {
+    pub at: Attached,
+    pub name: Ident,
+    pub value: Expr,
+    pub span: Span,
+}
+
 /// `static "/assets" from "public" cache 3600;` (routing.md §10).
 ///
 /// A mount, not a route: it has no body, takes no middleware, and is
@@ -637,6 +653,17 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    /// `while (cond) { … }`.
+    ///
+    /// 0.9 had it. The 1.0 front-end shipped `for` and nothing else, so a
+    /// loop whose end is a condition rather than a collection had no
+    /// spelling at all — not a decision anyone recorded, just a gap.
+    While {
+        at: Attached,
+        cond: Expr,
+        body: Block,
+        span: Span,
+    },
     Return {
         at: Attached,
         value: Option<Expr>,
@@ -697,6 +724,17 @@ pub enum AssignTarget {
     Local { name: Ident, sigil: bool },
     /// `context.k = …`
     Context(Ident),
+    /// `x.field = …`, and `x.a.b = …`.
+    ///
+    /// 0.9 had it; the 1.0 front-end parsed the left side as an expression
+    /// and stopped at the `=`. A record you cannot write a field of has to
+    /// be rebuilt whole every time one value changes.
+    Field {
+        base: Ident,
+        sigil: bool,
+        /// At least one; `x.a.b` is two.
+        path: Vec<Ident>,
+    },
 }
 
 #[derive(Clone, Debug)]

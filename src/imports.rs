@@ -418,6 +418,10 @@ fn block(b: &Block, out: &mut Vec<(String, Span)>) {
                 expr(iterable, out);
                 block(body, out);
             }
+            Stmt::While { cond, body, .. } => {
+                expr(cond, out);
+                block(body, out);
+            }
             Stmt::Return { value, .. } => {
                 for v in value.iter() {
                     expr(v, out);
