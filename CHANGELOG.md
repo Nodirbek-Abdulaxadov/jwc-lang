@@ -3,6 +3,44 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.928] — `while`, and `x += 1` — 2026-08-28
+
+Two things 0.9 had that the 1.0 front-end never grew. Neither was removed
+by a decision anyone recorded: the redesign specified `for` and `=`, nobody
+diffed the new grammar against the old one, and a loop that ends on a
+condition simply had no spelling.
+
+```jwc
+let i = 0;
+while (i < 5) {
+    i += 1;
+}
+```
+
+### `while`
+
+`break` and `continue` behave as they do in a `for`. The condition is a
+boolean — `while (1)` is `E0371`, the code `if` already uses for the same
+mistake, rather than a new number for an old rule.
+
+**It is bounded, which 0.9's was not.** Ten million turns and the loop
+raises. A condition that never goes false is a request that never answers
+and a connection nobody can reclaim; the ceiling turns that into an error
+naming the loop instead of a hang only visible from outside. The number is
+`exec::MAX_WHILE_TURNS`, and codegen emits *that* constant into the
+generated crate, so a runaway fails the same way in a built binary as it
+does under `jwc serve` — a test asserts the emitted number is the
+interpreter's.
+
+### `+=` `-=` `*=` `/=`
+
+Desugared in the parser: `x += 1` becomes `x = x + 1` before the AST
+exists, so the checker, both backends and the formatter never learn a
+second assignment form. Works on text too, because `+` does — `s += "b"`.
+
+Checked on both backends with one program: `i=5 sum=12` and `n=3` from the
+interpreter and from the compiled binary, identically.
+
 ## [0.9.927] — the `.env` nothing read — 2026-08-28
 
 `jwc new` writes a `.env.example` whose first line says the runtime reads

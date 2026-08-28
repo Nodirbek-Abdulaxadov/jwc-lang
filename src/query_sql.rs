@@ -1510,6 +1510,12 @@ fn collect_stmt<'a>(s: &'a Stmt, label: &str, out: &mut Vec<Site<'a>>) {
                 collect_stmt(s, label, out);
             }
         }
+        Stmt::While { cond, body, .. } => {
+            collect_expr(cond, label, out);
+            for s in body {
+                collect_stmt(s, label, out);
+            }
+        }
         Stmt::Return { value, .. } => {
             if let Some(v) = value {
                 collect_expr(v, label, out);

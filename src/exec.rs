@@ -240,6 +240,11 @@ pub struct Request {
     pub id: String,
 }
 
+/// How many turns a `while` may take before the runtime calls it a
+/// runaway. Ten million is far past any loop a request has business
+/// running and far short of "wait forever".
+pub const MAX_WHILE_TURNS: u64 = 10_000_000;
+
 #[derive(Clone, Debug)]
 pub struct Response {
     pub status: u16,
@@ -530,6 +535,36 @@ impl<'a> Vm<'a> {
                         Flow::Normal | Flow::Continue => {}
                         // The loop is what `break` leaves; anything else
                         // is leaving the function and keeps travelling.
+                        Flow::Break => break,
+                        other => return Ok(other),
+                    }
+                }
+                Ok(Flow::Normal)
+            }
+            Stmt::While { cond, body, .. } => {
+                // Bounded, unlike 0.9's. A `while` whose condition never
+                // goes false is a request that never answers and a
+                // connection nobody can reclaim; the ceiling turns that
+                // into an error naming the loop instead of a hang nobody
+                // can diagnose from the outside.
+                let mut turns: u64 = 0;
+                loop {
+                    let c = self.eval(cond).await?;
+                    let Some(true) = c.truthy() else {
+                        break;
+                    };
+                    turns += 1;
+                    if turns > MAX_WHILE_TURNS {
+                        return Err(fault(format!(
+                            "`while` ran {MAX_WHILE_TURNS} times without its \
+                             condition going false"
+                        )));
+                    }
+                    self.push();
+                    let r = Box::pin(self.run_stmts(body)).await;
+                    self.pop();
+                    match r? {
+                        Flow::Normal | Flow::Continue => {}
                         Flow::Break => break,
                         other => return Ok(other),
                     }

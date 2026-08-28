@@ -883,6 +883,25 @@ impl<'a> Checker<'a> {
                 self.loop_depth -= 1;
                 self.pop_scope();
             }
+            Stmt::While { cond, body, .. } => {
+                let c = self.expr(cond);
+                if c != Ty::boolean() && !matches!(c, Ty::Unknown) {
+                    self.err_note(
+                        cond.span,
+                        "E0371",
+                        format!("`while` needs a boolean condition, found `{c}`"),
+                        "compare something: `while (i < 10)`",
+                        "types.md §6.3",
+                    );
+                }
+                self.push_scope();
+                self.loop_depth += 1;
+                for s in body {
+                    self.stmt(s);
+                }
+                self.loop_depth -= 1;
+                self.pop_scope();
+            }
             Stmt::Return { value, span, .. } => {
                 let ty = match value {
                     Some(v) => self.expr(v),

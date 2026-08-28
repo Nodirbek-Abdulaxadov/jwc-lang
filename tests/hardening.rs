@@ -1557,3 +1557,97 @@ fn every_env_var_the_code_reads_is_registered_and_the_other_way_round() {
         }
     }
 }
+
+/// `while` and compound assignment, which 0.9 had and the 1.0 front-end
+/// never grew.
+///
+/// Neither was removed by a decision anyone wrote down: the redesign
+/// specified `for` and `=` and nobody diffed the new grammar against the
+/// old one, so a loop that ends on a condition and `i += 1` simply had no
+/// spelling. This pins them, and pins the runaway ceiling, which is the
+/// one thing 0.9's `while` did not have.
+#[test]
+fn a_while_loop_and_compound_assignment_parse_and_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         function main() {\n\
+         \x20   let i = 0;\n\
+         \x20   let sum = 0;\n\
+         \x20   while (i < 5) {\n\
+         \x20       i += 1;\n\
+         \x20       if (i == 3) { continue; }\n\
+         \x20       sum += i;\n\
+         \x20   }\n\
+         \x20   sum -= 2;\n\
+         \x20   sum *= 3;\n\
+         \x20   sum /= 2;\n\
+         \x20   console.writeln(string.of(sum));\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// A `while` whose condition never goes false is a request that never
+/// answers. Both backends stop at the same count and say so.
+#[test]
+fn a_runaway_while_is_bounded_the_same_way_in_both_backends() {
+    // The interpreter's ceiling is the number codegen emits, so the two
+    // cannot drift into "one hangs, one errors".
+    let n = jwc::exec::MAX_WHILE_TURNS;
+    assert!(
+        n >= 1_000_000,
+        "a ceiling below a million would reject real loops"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\nfunction main() { while (true) { let x = 1; } }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    assert!(
+        rust.contains(&format!("__turns > {n}")),
+        "the generated crate should carry the interpreter's ceiling"
+    );
+}
+
+/// `while (1)` is not a condition. A loop that never ends because its
+/// condition is not a boolean is a typo, not a design.
+#[test]
+fn a_while_condition_that_is_not_boolean_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\nfunction main() { while (1) { break; } }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    assert!(
+        checked.diags.iter().any(|(_, d)| d.code == "E0371"),
+        "{:?}",
+        checked
+            .diags
+            .iter()
+            .map(|(_, d)| d.code)
+            .collect::<Vec<_>>()
+    );
+}

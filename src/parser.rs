@@ -1840,6 +1840,22 @@ impl Parser {
             });
         }
 
+        // `while (cond) { … }` — 0.9 had it, the 1.0 front-end shipped only
+        // `for`, and a loop whose end is a condition had no spelling.
+        if self.at_word("while") {
+            self.bump();
+            self.expect(Tok::LParen)?;
+            let cond = self.parse_expr()?;
+            self.expect(Tok::RParen)?;
+            let (body, end) = self.parse_block()?;
+            return Ok(Stmt::While {
+                at,
+                cond,
+                body,
+                span: start.to(end),
+            });
+        }
+
         // Loop control. `at_word` and not a keyword check, because v1 has
         // no reserved words (names.md §2.6): `break` is a legal column
         // name, and only the statement position gives it this meaning.
@@ -1993,6 +2009,47 @@ impl Parser {
                 kind: AssertKind::Expr(e),
                 span: start.to(end),
             });
+        }
+
+        // `x += 1` is `x = x + 1`, desugared here so that the checker, both
+        // backends and the formatter never learn a second assignment form.
+        // 0.9 had these; the 1.0 front-end simply never grew them.
+        if let Tok::Local(name) | Tok::Ident(name) = self.peek().tok.clone() {
+            if let Tok::OpAssign(op) = self.peek_at(1).tok {
+                let sigil = matches!(self.peek().tok, Tok::Local(_));
+                let nspan = self.bump().span;
+                self.bump();
+                let rhs = self.parse_expr()?;
+                let end = self.expect(Tok::Semi)?.span;
+                let binop = match op {
+                    b'+' => BinOp::Add,
+                    b'-' => BinOp::Sub,
+                    b'*' => BinOp::Mul,
+                    _ => BinOp::Div,
+                };
+                let ident = Ident::new(name, nspan);
+                let current = Expr::new(
+                    if sigil {
+                        ExprKind::Local(ident.clone())
+                    } else {
+                        ExprKind::Name(ident.clone())
+                    },
+                    nspan,
+                );
+                return Ok(Stmt::Assign {
+                    at,
+                    target: AssignTarget::Local { name: ident, sigil },
+                    value: Expr::new(
+                        ExprKind::Binary {
+                            op: binop,
+                            lhs: current,
+                            rhs,
+                        },
+                        start.to(end),
+                    ),
+                    span: start.to(end),
+                });
+            }
         }
 
         // `x = …;`, `$x = …;` and `context.k = …;` — the sigil is optional

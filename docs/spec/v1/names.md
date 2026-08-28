@@ -73,7 +73,7 @@ provides  raises    references requires  restrict  retries   return    right
 route     routes    schema    select    server    service   set       size
 socket    static    table     test      throw     transaction transient true
 under     unique    update    use       using     view      was       where
-with
+while     with
 ```
 
 A word in a position where the grammar expects that keyword is that keyword.

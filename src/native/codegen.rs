@@ -1610,6 +1610,27 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
             ctx.pop_scope();
             out.push_str(&format!("{pad}}}\n"));
         }
+        // The turn ceiling is the interpreter's (`exec::MAX_WHILE_TURNS`),
+        // emitted here too so a runaway loop fails the same way in a built
+        // binary as it does under `jwc serve` rather than hanging.
+        Stmt::While { cond, body, .. } => {
+            out.push_str(&format!("{pad}{{\n{pad}    let mut __turns: u64 = 0;\n"));
+            out.push_str(&format!("{pad}    loop {{\n"));
+            let c = emit_expr(cond, ctx)?;
+            out.push_str(&format!(
+                "{pad}        if !jwc_truthy(&{c}) {{ break; }}\n\
+                 {pad}        __turns += 1;\n\
+                 {pad}        if __turns > {} {{\n\
+                 {pad}            return Err(JwcThrown::new(\"internal_error\", 500, v_str(\"`while` ran {} times without its condition going false\".to_string())));\n\
+                 {pad}        }}\n",
+                crate::exec::MAX_WHILE_TURNS,
+                crate::exec::MAX_WHILE_TURNS,
+            ));
+            ctx.push_scope();
+            emit_block(out, body, indent + 2, ctx)?;
+            ctx.pop_scope();
+            out.push_str(&format!("{pad}    }}\n{pad}}}\n"));
+        }
         // middleware.md §4.2 — `return <Response>` short-circuits the chain;
         // a bare `return` short-circuits it with a 204, which is what
         // `Flow::ReturnVoid` becomes in `serve.rs`.

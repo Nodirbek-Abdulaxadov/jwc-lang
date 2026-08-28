@@ -98,7 +98,7 @@ service     function    middleware  routes      test
 job         server      static
 ```
 
-Statements — `let`, assignment, `if`, `for`, `return`, `throw`,
+Statements — `let`, assignment, `if`, `for`, `while`, `return`, `throw`,
 `transaction`, `break`, `continue` — live inside bodies. See
 [control flow](./control-flow).
 
@@ -108,6 +108,7 @@ Statements — `let`, assignment, `if`, `for`, `return`, `throw`,
 or  and  not          -- logical (`!x` is also `not`)
 ==  !=  <  <=  >  >=  -- comparison
 +  -  *  /  %         -- arithmetic; `+` also concatenates text
++= -= *= /=           -- compound assignment; `x += 1` is `x = x + 1`
 ??                    -- null coalescing
 ? :                   -- conditional
 ...                   -- spread, in an object or a `set`

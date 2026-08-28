@@ -228,6 +228,10 @@ pub enum Tok {
     Eq,
     /// `=?` — skip-when-absent assignment (writes.md §3.3).
     EqOpt,
+    /// `+=` `-=` `*=` `/=`, carrying the operator byte. 0.9 had these and
+    /// the 1.0 front-end did not. The parser desugars `x += 1` into
+    /// `x = x + 1`, so nothing past the parser has to know they exist.
+    OpAssign(u8),
     EqEq,
     /// `==?` — optional predicate (queries.md §3.2).
     EqEqOpt,
@@ -280,6 +284,11 @@ pub fn punct_text(t: &Tok) -> &'static str {
         Tok::Question => "?",
         Tok::Eq => "=",
         Tok::EqOpt => "=?",
+        Tok::OpAssign(b'+') => "+=",
+        Tok::OpAssign(b'-') => "-=",
+        Tok::OpAssign(b'*') => "*=",
+        Tok::OpAssign(b'/') => "/=",
+        Tok::OpAssign(_) => "op=",
         Tok::EqEq => "==",
         Tok::EqEqOpt => "==?",
         Tok::Bang => "!",

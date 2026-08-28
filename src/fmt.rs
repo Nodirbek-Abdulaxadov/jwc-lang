@@ -705,6 +705,13 @@ impl Writer {
                 self.depth -= 1;
                 self.line("}");
             }
+            Stmt::While { cond, body, .. } => {
+                self.line(&format!("while ({}) {{", expr(cond)));
+                self.depth += 1;
+                self.block(body);
+                self.depth -= 1;
+                self.line("}");
+            }
             Stmt::Return { value, .. } => match value {
                 None => self.line("return;"),
                 Some(v) => self.assigned("return ", v, ";"),
@@ -1087,6 +1094,7 @@ fn stmt_attached(s: &Stmt) -> &Attached {
         | Stmt::Assign { at, .. }
         | Stmt::If { at, .. }
         | Stmt::For { at, .. }
+        | Stmt::While { at, .. }
         | Stmt::Return { at, .. }
         | Stmt::Throw { at, .. }
         | Stmt::Transaction { at, .. }

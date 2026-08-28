@@ -637,6 +637,17 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    /// `while (cond) { … }`.
+    ///
+    /// 0.9 had it. The 1.0 front-end shipped `for` and nothing else, so a
+    /// loop whose end is a condition rather than a collection had no
+    /// spelling at all — not a decision anyone recorded, just a gap.
+    While {
+        at: Attached,
+        cond: Expr,
+        body: Block,
+        span: Span,
+    },
     Return {
         at: Attached,
         value: Option<Expr>,

@@ -584,7 +584,10 @@ Overflow of the result type is a **fault** (500), never a wrap. Money is
 ### 12.4 There is no truthiness
 
 The condition of `if`, `and`, `or`, `!` and the ternary must be `boolean`.
-`if ($x)` where `x : text?` is `E0371`. Write `if ($x != null)`.
+`if ($x)` where `x : text?` is `E0371`. Write `if ($x != null)`. A `while`
+condition is held to the same rule: `while (1)` is `E0371`, because a loop
+that never ends on a value that is not a condition is a typo rather than a
+design.
 
 ### 12.5 Aggregating an array in code (#22)
 

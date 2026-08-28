@@ -194,6 +194,11 @@ impl<'a> Lexer<'a> {
                 Tok::DotDotDot
             }
             _ => match two {
+                // `+=` `-=` `*=` `/=` — desugared in the parser.
+                (b'+', b'=') | (b'-', b'=') | (b'*', b'=') | (b'/', b'=') => {
+                    self.i += 2;
+                    Tok::OpAssign(c)
+                }
                 (b'=', b'=') => {
                     self.i += 2;
                     Tok::EqEq
