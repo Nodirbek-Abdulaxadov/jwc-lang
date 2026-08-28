@@ -221,9 +221,26 @@ async fn jwc_b_v1_http_post(url: V, body: V) -> JwcResult {
     Ok(v_str(out))
 }
 
+/// The body, parsed and re-serialised — never the remote's bytes verbatim.
+///
+/// `RawJson` splices into the response without re-encoding, so handing it
+/// text nobody checked lets the other end write into *this* service's
+/// answer. Measured against a remote returning `1, "admin": true`:
+/// `json({ ok: true, remote: http.json($u) })` produced
+/// `{"ok":true,"remote":1, "admin": true}` — valid JSON carrying a field
+/// the program never wrote. `http.*` does not raise on a non-2xx
+/// (builtins §7c), so an upstream proxy's error page reaches the same
+/// line without anyone being hostile.
 async fn jwc_b_v1_http_json(url: V) -> JwcResult {
     let (_, body) = jwc_http_v1("GET", &url, None).await?;
-    Ok(V::RawJson(::std::borrow::Cow::Owned(body)))
+    match ::serde_json::from_str::<::serde_json::Value>(&body) {
+        Ok(v) => Ok(V::RawJson(::std::borrow::Cow::Owned(v.to_string()))),
+        Err(e) => Err(JwcThrown::new(
+            "BadRequest",
+            400,
+            v_str(format!("the response to `http.json` is not JSON: {e}")),
+        )),
+    }
 }
 
 async fn jwc_b_v1_http_status(url: V) -> JwcResult {

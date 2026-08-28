@@ -250,7 +250,34 @@ impl<'a> Vm<'a> {
         match crate::http::request(method, &s(0), body).await {
             Ok(reply) => Ok(match name {
                 "status" => Value::Int(reply.status as i64),
-                "json" => Value::Raw(reply.body),
+                // Parsed and re-serialised, exactly as `json.parse` does
+                // it, and for the same reason: a `Raw` splices into the
+                // response without re-encoding, so handing it bytes
+                // nobody checked lets the other end write whatever it
+                // likes into *this* service's answer.
+                //
+                // Measured with a remote returning the seven characters
+                // `1, "admin": true`:
+                //
+                //   return json({ ok: true, remote: http.json($u) });
+                //   → {"ok":true,"remote":1, "admin": true, "role":"owner"}
+                //
+                // which parses as valid JSON with two sibling fields the
+                // program never wrote. `http.*` deliberately does not
+                // raise on a non-2xx (§7c), so this does not need a
+                // hostile server — an upstream proxy's 502 HTML page
+                // reaches the same line.
+                "json" => match serde_json::from_str::<serde_json::Value>(&reply.body) {
+                    Ok(v) => Value::Raw(v.to_string()),
+                    Err(e) => {
+                        return Err(Abort::Thrown(Thrown {
+                            error: "BadRequest".into(),
+                            args: vec![Value::Text(format!(
+                                "the response to `http.json` is not JSON: {e}"
+                            ))],
+                        }))
+                    }
+                },
                 _ => Value::Text(reply.body),
             }),
             Err(e) => Err(Abort::Thrown(Thrown {

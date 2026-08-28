@@ -1491,7 +1491,40 @@ impl<'a> Vm<'a> {
     }
 
     async fn run_insert(&mut self, i: &InsertExpr) -> Exec<Value> {
-        let fields = self.write_fields(&i.values).await?;
+        let mut fields = self.write_fields(&i.values).await?;
+        // Drop a field the table has no column for, **and its value**.
+        //
+        // `sql::insert` skips such a name when it builds the statement, so
+        // leaving the value in the parallel vector sends the driver one
+        // bind too many. That is what `transient` did: a class field
+        // marked `transient` is deliberately not a column, and
+        //
+        //   class C { z text transient; a text; b text; }
+        //   insert into App.s.T { ...$req } as { id, a, b }
+        //
+        // answered 500 with `expected 2 parameters but got 3` — while the
+        // *other* remedy the same diagnostic offers, `except (z)`,
+        // returned 201. The compiler recommended the broken one.
+        //
+        // Dropping the value here rather than in `sql::insert` keeps the
+        // two vectors the single thing they are meant to be: names and
+        // the values that go with them, in step.
+        let target = self.program.model.tables.iter().find(|t| {
+            t.schema == i.table.schema.name && t.declared == i.table.object.name
+        });
+        if let Some(table) = target {
+            let keep: Vec<bool> = fields
+                .0
+                .iter()
+                .map(|(name, _): &(String, Expr)| table.column(name).is_some())
+                .collect();
+            if keep.iter().any(|k| !k) {
+                let mut it = keep.iter();
+                fields.0.retain(|_| *it.next().unwrap_or(&true));
+                let mut it = keep.iter();
+                fields.1.retain(|_| *it.next().unwrap_or(&true));
+            }
+        }
         let mut b = Builder::new(&self.program.model);
         let built = b
             .insert(i, &fields.0)

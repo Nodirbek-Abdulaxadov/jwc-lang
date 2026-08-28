@@ -3,6 +3,79 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.948] — `raw()` holds; the ring around it did not — 2026-08-28
+
+`raw()` itself is sound and was attacked to establish that. Six payloads
+through a live Postgres with `JWC_LOG_SQL` on — `' OR 1=1 --`, a `UNION
+SELECT` of a `private` column, a stacked `DROP TABLE`, `{}` as data, `$1`
+as data — produced a **byte-identical SQL string** every time, with only
+the bind length changing. Five ways of laundering caller data into the
+template (concatenation, a local, a helper function returning `text`,
+`string.of`, arity mismatch) are all `E0610` at compile time, and
+`run_raw` re-asserts the literal on the AST before touching the database,
+so the checker is not the only gate. Identifier position is not
+injectable: `{}` lowers to `($n::text)` and can only ever be a value.
+
+The defects were in the ring around it.
+
+### Fixed
+
+- **`http.json` spliced an unvalidated remote body into the response.**
+  The value became `Raw`, which splices without re-encoding, so a remote
+  returning the bytes `1, "admin": true, "role": "owner"` turned
+  `json({ ok: true, remote: http.json($u) })` into
+
+      {"ok":true,"remote":1, "admin": true, "role": "owner"}
+
+  — valid JSON carrying two top-level fields the program never wrote.
+  `json.parse`, ten lines away, has always parsed and re-serialised; now
+  `http.json` does the same and raises `BadRequest` when the body is not
+  JSON. This does not need a hostile server: `http.*` deliberately does
+  not raise on a non-2xx, so an upstream proxy's HTML error page reached
+  the same line. Fixed on both backends.
+
+- **`transient` — the remedy the compiler itself recommends — answered
+  500 on every request.** `E0305`'s help text says "mark the field
+  `transient`, or drop it at the site with `except (z)`". Measured with
+  `class C { z text transient; a text; b text; }`: the first produced
+  `{"error":"internal_error"}` and `[fault] expected 2 parameters but got
+  3`, while the second returned 201. The compiler was recommending the
+  broken one.
+
+  `write_fields` builds names and values as parallel vectors; `sql::insert`
+  skips a name the table has no column for — which is exactly what
+  `transient` means — and left the value behind, so the driver got one
+  bind too many. The value is now dropped with its name, in
+  `run_insert`, where the two vectors are still the single thing they are
+  meant to be. Both remedies now return 201 and neither writes the
+  transient field.
+
+### Documented
+
+- **`raw()` returns a `private` column**, and schema.md promised
+  otherwise in an unqualified line — "`private` | never in a response".
+  The guarantee is the query compiler's: a compiled `select` omits the
+  column, a hand-written one returns it, with no diagnostic. Both §3.1 and
+  the attribute table now say whose guarantee it is, and point at
+  `jwc explain`'s `raw()` count as the list to read before believing a
+  schema's `private` columns are unreachable.
+
+- **`raw(…) as { id, total }`** — the form writes.md §6 opened with — does
+  not parse (`E0001: expected ';', found 'as'`), and never has: the
+  grammar has `as { }` only inside a `select`. The fence was marked
+  `jwc no-compile`, so the docs test never ran it. §6 now shows the form
+  that works and §6.3 says a `raw` result is `Raw`, with the reason an
+  annotation would be a shape taken on trust.
+
+### Known, not fixed
+
+`'{}'` inside raw SQL is consumed as a placeholder, so `'{}'::jsonb` and
+`tags = '{}'` are unwritable through `raw()`. It fails loudly (`E0610`, or
+a Postgres type error) rather than silently. `JWC_DEBUG_ERRORS` is in the
+env registry and read only by the native prelude — `jwc serve` ignores it,
+which fails closed but makes the registry's "single source of truth" claim
+untrue for that row.
+
 ## [0.9.947] — four ways a cookie went missing — 2026-08-28
 
 `cookie(...)` itself holds: every injection attempt against its name,

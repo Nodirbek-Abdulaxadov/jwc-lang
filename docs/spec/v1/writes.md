@@ -151,7 +151,7 @@ into `if (n == 0)`.
 ## 6. `raw` escape hatch
 
 ```jwc no-compile
-let rows = raw("select … from … where x = {}", $x) as { id, total };
+let rows = raw("select … from … where x = {}", $x);
 ```
 
 6.1 `raw(sql, args…)` is the only way to write SQL by hand. `{}` are
@@ -174,10 +174,18 @@ answer later.
 6.2 `raw` is **forbidden inside a `view`** (`E0611`) — a view is a
 snapshotted object and a hand-written body cannot be diffed.
 
-6.3 `raw` results are `Raw` unless annotated with `as { }`, in which case the
-annotation is trusted and unchecked. This is the one unchecked boundary in
-the language and `jwc v1 explain` lists every occurrence with a count
-(queries §7.4).
+6.3 A `raw` result is **`Raw`**. There is no `as { }` on it: an annotation
+would be a shape the compiler has to take on trust, and the value would
+still be whatever the database sent. `Raw` splices into a response the way
+a `jsonb` column does and is not read field-wise, which is the honest shape
+for text whose structure the compiler cannot know (types §9).
+
+This is the one unchecked boundary in the language, and it is unchecked in
+both directions: what a `raw` query selects is not compared against the
+schema, so a `private` column named in one **is** returned (schema §3.1
+describes the guarantee the query compiler gives, not one `raw` inherits).
+`jwc explain` lists every occurrence with a count (queries §7.4); read it
+before trusting a program's `private` columns to have stayed private.
 
 The SQL itself must be a **literal** (`E0610`): a computed string cannot
 have its placeholders counted, and counting them is the only thing standing
