@@ -2320,7 +2320,8 @@ impl Parser {
                 span,
             ));
         }
-        // `not exists (…)` / `not in (…)` are handled in parse_compare.
+        // `not exists (…)` first: `exists` is the operand's own grammar, not
+        // a name, so the general prefix rule below would parse it as a call.
         if self.at_word("not") && self.word_at(1, "exists") {
             self.bump();
             self.bump();
@@ -2333,6 +2334,22 @@ impl Parser {
                     negated: true,
                 },
                 start.to(end),
+            ));
+        }
+        // `not <expr>` — the word spelling of `!`, and the one names.md's
+        // keyword table promises. `not in` is *infix*, so it is reached
+        // through `parse_compare` with a left-hand side already parsed and
+        // never arrives here.
+        if self.at_word("not") && !self.word_at(1, "in") {
+            self.bump();
+            let rhs = self.parse_not()?;
+            let span = start.to(rhs.span);
+            return Ok(Expr::new(
+                ExprKind::Unary {
+                    op: UnaryOp::Not,
+                    rhs,
+                },
+                span,
             ));
         }
         if self.at_word("exists") && self.peek_at(1).is(&Tok::LParen) {

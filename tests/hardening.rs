@@ -1774,3 +1774,73 @@ fn text_of_a_record_is_refused_the_way_content_is() {
         "a record body should be E0736"
     );
 }
+
+/// `docs/docs/language/syntax.md` has listed `not` among the operators since
+/// the operator table was written, and `names.md`'s keyword table lists it
+/// too — but `not x` did not parse. The two spellings are one node, so this
+/// pins that they stay one node rather than pinning the parse alone.
+#[test]
+fn the_word_spelling_of_the_logical_negation_parses() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         function main() {\n\
+         \x20   let t = true;\n\
+         \x20   let a = not t;\n\
+         \x20   let b = !t;\n\
+         \x20   let c = not not t;\n\
+         \x20   if (not a) { console.writeln(\"ok\"); }\n\
+         \x20   console.writeln(string.of(a) + string.of(b) + string.of(c));\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// `not exists (…)` is its own node, not `not` applied to a call — so the
+/// prefix rule must not swallow it. Nor may `x not in (…)`, which is infix.
+#[test]
+fn not_exists_and_not_in_survive_the_prefix_rule() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         database App : Postgres { init() { pool_size = 4; } }\n\
+         schema public of App;\n\
+         table Users of App.public {\n\
+         \x20   id bigint identity primary key;\n\
+         \x20   name varchar(80);\n\
+         }\n\
+         service S {\n\
+         \x20   function pick(w: text) {\n\
+         \x20       return select U from App.public.Users\n\
+         \x20           where name not in (\"a\", \"b\") as { id };\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let errors: Vec<String> = checked
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}

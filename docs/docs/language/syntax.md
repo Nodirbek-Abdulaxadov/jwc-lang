@@ -116,3 +116,6 @@ or  and  not          -- logical (`!x` is also `not`)
 
 `+` does not coerce: `text + int` is `E0370`, and the fix is
 `string.of(…)`. `/` on two integers is integer division.
+
+`not x` and `!x` are the same node, so `jwc fmt` writes one of them: `!x`.
+Both parse everywhere; only the formatted spelling is fixed.
