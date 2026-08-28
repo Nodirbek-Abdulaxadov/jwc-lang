@@ -13,7 +13,9 @@ This tree is what jwc.1kb.uz serves. `docusaurus.config.ts` points at it.
 | `data/` | schema, queries, writes, migrations |
 | `backend/` | routing, middleware, errors, validation, sockets, jobs, config |
 | `stdlib/` | every built-in |
-| `packages/`, `cli/`, `deployment/` | one page each |
+| `packages/` | one page |
+| `cli/` | every subcommand, and formatting |
+| `deployment/` | Docker, Kubernetes, CI, observability, static builds |
 | `security.md` | what the language enforces, and what it does not |
 | `reference/ai-agent-guide.md` | the language in one file, for a coding agent's context |
 | `reference/error-codes.md` | every diagnostic, generated from the spec's tables |
