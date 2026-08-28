@@ -132,6 +132,7 @@ the constraint. Routes do not build error responses by hand.
 | [CLI](./cli/index.md) | Every `jwc` subcommand |
 | [Deployment](./deployment/index.md) | Docker, the native build, probes |
 | [Security](./security) | What the language enforces, and what it does not |
+| [The language](./reference/language) | The whole language on one page, with the reasons |
 | [Reference](./reference/removed) | The 0.9.x → 1.0 map, and what 1.0 does not have |
 
 ## Status

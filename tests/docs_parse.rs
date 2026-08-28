@@ -198,9 +198,21 @@ fn the_spec_coverage_map_is_current() {
 /// Each block is a whole program on its own, so it is checked on its own.
 #[test]
 fn every_agent_guide_example_type_checks() {
+    for page in ["ai-agent-guide.md", "language.md"] {
+        check_page(page);
+    }
+}
+
+/// Every ```jwc``` block on a reference page, compiled as its own program.
+///
+/// Both pages say they are the language in one file, and both are copied
+/// verbatim — by a person into an editor and by an agent into a context
+/// window. A page whose examples do not check is worse than no page,
+/// because the reader trusts it first and debugs the language second.
+fn check_page(page: &str) {
     let root = repo_root();
-    let path = root.join("docs/docs/reference/ai-agent-guide.md");
-    let text = std::fs::read_to_string(&path).expect("ai-agent-guide.md");
+    let path = root.join("docs/docs/reference").join(page);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{page}: {e}"));
 
     let mut broken: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -216,15 +228,12 @@ fn every_agent_guide_example_type_checks() {
         let ws = match jwc::workspace::Workspace::load(dir.path()) {
             Ok(ws) => ws,
             Err(e) => {
-                broken.push(format!("ai-agent-guide.md:{line}: {e}"));
+                broken.push(format!("{page}:{line}: {e}"));
                 continue;
             }
         };
         if ws.has_parse_errors() {
-            broken.push(format!(
-                "ai-agent-guide.md:{line}: {}",
-                ws.parse_errors().join(" ")
-            ));
+            broken.push(format!("{page}:{line}: {}", ws.parse_errors().join(" ")));
             continue;
         }
         let built = jwc::model::build(&ws);
@@ -241,19 +250,19 @@ fn every_agent_guide_example_type_checks() {
             .map(|(_, d)| format!("{}: {}", d.code, d.message))
             .collect();
         if !errors.is_empty() {
-            broken.push(format!("ai-agent-guide.md:{line}: {}", errors.join("; ")));
+            broken.push(format!("{page}:{line}: {}", errors.join("; ")));
         }
     }
 
     assert!(
         checked >= 5,
-        "expected the guide's programs, saw {checked} — the block scanner \
+        "expected {page}'s programs, saw {checked} — the block scanner \
          or the page's fences changed"
     );
     assert!(
         broken.is_empty(),
-        "{} example(s) in the agent guide do not check. An agent copies \
-         these verbatim:\n  {}",
+        "{} example(s) in {page} do not check. A reader copies these \
+         verbatim:\n  {}",
         broken.len(),
         broken.join("\n  ")
     );

@@ -1,5 +1,5 @@
 ---
-sidebar_position: 3
+sidebar_position: 2
 title: "Diagnostic codes"
 description: "Every E and W code the compiler can produce, what each means, and which spec file defines it."
 ---

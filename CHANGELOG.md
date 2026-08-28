@@ -3,6 +3,27 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.938] — the language on one page — 2026-08-28
+
+`docs/docs/reference/language.md`: the whole language, in the order a
+person reads, with the reason for each rule — 1 100 lines covering what
+the agent guide's tables leave out, which is migrations, jobs, sockets,
+packages, tests, the runtime and the ceilings.
+
+Two reference pages now, and the difference is written on both: the agent
+guide is the same ground **compressed**, for a context window; this one is
+the same ground **explained**, for a person and for an agent with room to
+spare. Neither is normative — `docs/spec/v1/` is.
+
+Every ```` ```jwc ```` block on it type-checks, held by the test that
+already did that for the agent guide, extended to both. It found one
+mistake in the writing on its first run: `unique on (a, b)` is not the
+syntax, `unique (a, b)` is.
+
+Two claims were wrong and are fixed rather than softened: there is no
+`jwc config --print` — it is `JWC_PRINT_CONFIG=1` at boot — and the
+`server { }` key list was missing `shutdown_grace` and gave no defaults.
+
 ## [0.9.937] — the loop ceiling, and the three limits behind it — 2026-08-28
 
 Asked to look at the interpreter's loop limit, measured all of them. Three

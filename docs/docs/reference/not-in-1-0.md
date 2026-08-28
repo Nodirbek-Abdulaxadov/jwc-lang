@@ -1,5 +1,5 @@
 ---
-sidebar_position: 2
+sidebar_position: 3
 title: "What 1.0 does not have"
 description: "Server-Sent Events, sequences, generated columns and a module system are not in 1.0. What exists, what does not, and what to do instead."
 ---

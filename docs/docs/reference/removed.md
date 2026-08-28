@@ -1,5 +1,5 @@
 ---
-sidebar_position: 1
+sidebar_position: 4
 title: "What 0.9.x had that 1.0 does not"
 description: "The vocabulary the 1.0 cutover replaced, what each construct became, and the diagnostic that says so."
 ---

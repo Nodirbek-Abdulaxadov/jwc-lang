@@ -1,14 +1,19 @@
 ---
-sidebar_position: 0
+sidebar_position: 1
 title: "AI agent guide"
 description: "The whole JWC language in one file, written to be handed to a coding agent: every declaration, every statement, every built-in, and the mistakes agents actually make."
 ---
 
 # JWC for AI agents
 
-**This page is the language in one file.** Paste it into an agent's
-context, save it as `JWC.md` beside your code, or point a `CLAUDE.md` /
-`AGENTS.md` / `.cursorrules` at it.
+**This page is the language in one file, compressed.** Paste it into an
+agent's context, save it as `JWC.md` beside your code, or point a
+`CLAUDE.md` / `AGENTS.md` / `.cursorrules` at it.
+
+It is tables and rules with the explanations cut. [The
+language](./language.md) is the same ground covered with the reasons, plus
+migrations, jobs, sockets, packages, tests and the runtime — one page, for
+a person and for an agent with room to spare.
 
 Written against **JWC 1.0** (`0.9.9xx` pre-releases). Check with
 `jwc --version`.
@@ -16,8 +21,11 @@ Written against **JWC 1.0** (`0.9.9xx` pre-releases). Check with
 Every ```` ```jwc ```` block below is compiled by the test suite. If an
 example here does not work, that is a bug in this page and it fails CI.
 
-> **Human readers:** this is a dense reference. The narrative docs are
-> friendlier — start at [Hello world](../getting-started/hello-world.md).
+> **Human readers:** this is a dense reference, written to be *compressed*
+> rather than read. [The language](./language.md) is the same material with
+> the reasons, in an order a person can read top to bottom — start there,
+> or at [Hello world](../getting-started/hello-world.md) for the narrative
+> route.
 
 ---
 
