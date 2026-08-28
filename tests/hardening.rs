@@ -2432,3 +2432,55 @@ fn the_boot_fence_and_the_config_table_have_a_caller() {
     let err = verdict.expect_err("`twenty` is not a usize");
     assert!(format!("{err:?}").contains("JWC_DB_POOL_SIZE"));
 }
+
+/// The else branch of a null test narrows (types.md §6.6 rule 3).
+///
+/// `if (x == null) { …; return; } x.f` checked, and
+/// `if (x == null) { … } else { x.f }` was `E0320` — so the shape a
+/// reader reaches for first was the one the compiler refused, for a fact
+/// it had already established.
+#[test]
+fn the_else_branch_of_a_null_test_narrows() {
+    let ok = "namespace n;\n\
+              function main() {\n\
+              \x20   let c = jwt.verify(\"t\", \"s\");\n\
+              \x20   if (c == null) {\n\
+              \x20       console.writeln(\"none\");\n\
+              \x20   } else {\n\
+              \x20       console.writeln(c.sub);\n\
+              \x20   }\n\
+              }\n";
+    // And the polarity has to be right: the *then* branch of `== null` is
+    // where the value is null, so a field read there is still E0320.
+    let bad = "namespace n;\n\
+               function main() {\n\
+               \x20   let c = jwt.verify(\"t\", \"s\");\n\
+               \x20   if (c == null) {\n\
+               \x20       console.writeln(c.sub);\n\
+               \x20   } else {\n\
+               \x20       console.writeln(\"some\");\n\
+               \x20   }\n\
+               }\n";
+
+    let codes = |src: &str| -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        jwc::check::check(&ws, &sym, &built.model)
+            .diags
+            .iter()
+            .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+            .map(|(_, d)| d.code.to_string())
+            .collect()
+    };
+
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+    assert!(
+        codes(bad).contains(&"E0320".to_string()),
+        "the then-branch of `== null` is where it *is* null: {:?}",
+        codes(bad)
+    );
+}

@@ -44,6 +44,22 @@ always meant 404.
 `??` supplies a default; `x?.y` does not exist, because the narrowing above
 is the intended shape.
 
+When you want to handle the null rather than answer with it, three shapes
+narrow:
+
+```jwc no-compile
+if ($org == null) { throw NotFound("not found"); }
+-- org is Record{…} from here to the end of the block
+
+if ($org != null) { … $org.name … }          -- inside the then-branch
+
+if ($org == null) { … } else { … $org.name … }   -- inside the else-branch
+```
+
+The third is the same fact as the second, written the other way round. Its
+guard does not have to diverge — the branch that runs when the guard is
+false is the one being narrowed.
+
 ## `Raw` and `Record`
 
 A query with **no** `as { … }` projection returns `Raw` — a JSON fragment

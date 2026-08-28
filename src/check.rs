@@ -803,7 +803,7 @@ impl<'a> Checker<'a> {
                                     "types.md §10.3",
                                 );
                             }
-                            // Assignment resets narrowing (types.md §6.6.5).
+                            // Assignment resets narrowing (types.md §6.6.6).
                             self.rebind(&i.name, want);
                         }
                         None => self.err_note(
@@ -863,8 +863,26 @@ impl<'a> Checker<'a> {
                 }
                 self.pop_scope();
 
+                // rule 3 — the else branch of a null test is the same
+                // fact the other way round. `if (x == null) { … } else {
+                // x.f }` was `E0320` while the early-return spelling of
+                // exactly that guard checked, so the shape a reader
+                // reaches for first was the one the compiler refused.
                 if let Some(alt) = otherwise {
-                    self.block(alt);
+                    let else_narrowed = narrowing_target(cond, true);
+                    self.push_scope();
+                    if let Some(name) = &else_narrowed {
+                        if let Some(t) = self.lookup(name) {
+                            self.scopes
+                                .last_mut()
+                                .expect("scope")
+                                .insert(name.clone(), t.strip_opt());
+                        }
+                    }
+                    for s in alt {
+                        self.stmt(s);
+                    }
+                    self.pop_scope();
                 }
 
                 // rule 1 — a divergent null-guard narrows after the `if`.

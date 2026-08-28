@@ -319,10 +319,14 @@ The narrowing rules, exhaustively:
 
 1. `if (x == null) { <divergent> }` — narrows `x` after the `if`.
 2. `if (x != null) { … }` — narrows `x` inside the then-branch.
-3. `x ?? d` — the whole expression is non-null when `d` is non-null.
-4. `x or throw E(...)` — the expression is `T` (errors §5).
-5. Assignment to `x` resets narrowing to `x`'s declared type.
-6. Narrowing does not cross a function boundary or a `for` body.
+3. `if (x == null) { … } else { … }` — narrows `x` inside the
+   **else**-branch. The same fact as rule 2, stated the other way round;
+   the guard need not diverge, because the branch that runs when it does
+   not is the one being narrowed.
+4. `x ?? d` — the whole expression is non-null when `d` is non-null.
+5. `x or throw E(...)` — the expression is `T` (errors §5).
+6. Assignment to `x` resets narrowing to `x`'s declared type.
+7. Narrowing does not cross a function boundary or a `for` body.
 
 A guard is **divergent** if every path through it ends in `return`, `throw`,
 `break` or `continue`.
