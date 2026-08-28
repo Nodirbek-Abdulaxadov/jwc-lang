@@ -1,0 +1,265 @@
+// `Set-Cookie`, built once for both backends — routing.md §6.2.
+//
+// `include!`d by `src/exec.rs` and pasted verbatim into the crate
+// `jwc build` generates, so a cookie carries the same attributes whichever
+// backend answered. Before this file there was no agreement to keep: the
+// interpreter emitted `name=value; Path=/` and threw the options away, and
+// the native backend refused to compile a program that set a cookie at all.
+//
+// ## Why the defaults are the strict ones
+//
+// A cookie with no options used to be `Path=/` and nothing else — no
+// `HttpOnly`, so any script on the page could read a session; no
+// `SameSite`, so the browser's own default was the only thing standing
+// between the site and cross-site request forgery; no `Secure`, so it went
+// out over plain HTTP.
+//
+// The options were *documented* the whole time (routing.md §6.2 shows
+// `{ http_only: true, max_age: 3600 }`), which is the worst version of
+// this: an author who read the page and wrote the safe thing got the
+// unsafe cookie anyway, with nothing said.
+//
+// So the defaults are now `HttpOnly` and `SameSite=Lax`, and an author who
+// needs a cookie a script can read writes `http_only: false`. A default
+// that is wrong is a defect in every program that did not think about it;
+// an opt-out that is wrong is a defect in the one program that asked.
+
+/// The attributes `cookie(name, value, opts)` accepts.
+///
+/// `expires` is deliberately absent: `Max-Age` says the same thing in
+/// seconds, and an absolute date has to be formatted in one exact spelling
+/// (RFC 7231 §7.1.1.1) that a caller has no way to get right from JWC.
+#[derive(Clone, Debug)]
+pub struct CookieOpts {
+    pub http_only: bool,
+    pub secure: bool,
+    /// `Strict` / `Lax` / `None`, already validated.
+    pub same_site: &'static str,
+    pub max_age: Option<i64>,
+    pub path: String,
+    pub domain: Option<String>,
+}
+
+impl Default for CookieOpts {
+    fn default() -> Self {
+        Self {
+            http_only: true,
+            secure: false,
+            same_site: "Lax",
+            max_age: None,
+            path: "/".to_string(),
+            domain: None,
+        }
+    }
+}
+
+/// The keys `opts` may carry. The checker reports anything else, so a
+/// misspelled `httponly` is a diagnostic rather than an attribute that
+/// silently did not apply.
+pub const COOKIE_OPT_KEYS: &[&str] = &[
+    "http_only",
+    "secure",
+    "same_site",
+    "max_age",
+    "path",
+    "domain",
+];
+
+/// `SameSite` spelled the way the browser expects, or `None` for a value
+/// that is not one of the three.
+pub fn same_site_value(s: &str) -> Option<&'static str> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "strict" => Some("Strict"),
+        "lax" => Some("Lax"),
+        "none" => Some("None"),
+        _ => None,
+    }
+}
+
+/// A cookie name is a `token` (RFC 6265 §4.1.1): no controls, no space, and
+/// none of the separators.
+fn cookie_name_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            (0x21..0x7f).contains(&b)
+                && !matches!(
+                    b,
+                    b'(' | b')'
+                        | b'<'
+                        | b'>'
+                        | b'@'
+                        | b','
+                        | b';'
+                        | b':'
+                        | b'\\'
+                        | b'"'
+                        | b'/'
+                        | b'['
+                        | b']'
+                        | b'?'
+                        | b'='
+                        | b'{'
+                        | b'}'
+                )
+        })
+}
+
+/// A cookie value is `cookie-octet*`: printable ASCII without space, comma,
+/// semicolon or backslash. Quoted form is not produced — a caller who needs
+/// arbitrary bytes encodes them, and guessing an encoding here would mean
+/// the reader has to guess the same one back.
+fn cookie_value_ok(s: &str) -> bool {
+    s.bytes()
+        .all(|b| (0x21..0x7f).contains(&b) && !matches!(b, b'"' | b',' | b';' | b'\\'))
+}
+
+/// An attribute value goes after `; Path=` / `; Domain=`, so a `;` or a
+/// newline in one splits the header. Refused rather than stripped: a
+/// silently-truncated `Domain` is a cookie scoped somewhere the author did
+/// not intend.
+fn attr_value_ok(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| (0x20..0x7f).contains(&b) && !matches!(b, b';' | b','))
+}
+
+/// The header value, or the reason it cannot be one.
+///
+/// The error is a sentence for the author, not for the caller: reaching it
+/// means a value with a `;` or a newline in it got as far as the response,
+/// and before this that produced a **500** — hyper rejects the header and
+/// the request dies with no explanation. A named error is the difference
+/// between "the server is broken" and "this cookie value needs encoding".
+pub fn format_set_cookie(name: &str, value: &str, o: &CookieOpts) -> Result<String, String> {
+    if !cookie_name_ok(name) {
+        return Err(format!(
+            "cookie name {name:?} is not a token: no spaces, controls or separators (RFC 6265 §4.1.1)"
+        ));
+    }
+    if !cookie_value_ok(value) {
+        return Err(format!(
+            "cookie {name:?} has a value that cannot be sent unencoded: no spaces, commas, \
+             semicolons, quotes, backslashes or controls. Encode it first."
+        ));
+    }
+    if !attr_value_ok(&o.path) {
+        return Err(format!("cookie {name:?} has a `path` that cannot be sent"));
+    }
+    if let Some(d) = &o.domain {
+        if !attr_value_ok(d) {
+            return Err(format!("cookie {name:?} has a `domain` that cannot be sent"));
+        }
+    }
+
+    let mut s = String::with_capacity(name.len() + value.len() + 64);
+    s.push_str(name);
+    s.push('=');
+    s.push_str(value);
+
+    s.push_str("; Path=");
+    s.push_str(&o.path);
+
+    if let Some(d) = &o.domain {
+        s.push_str("; Domain=");
+        s.push_str(d);
+    }
+    if let Some(age) = o.max_age {
+        s.push_str("; Max-Age=");
+        s.push_str(&age.to_string());
+    }
+
+    s.push_str("; SameSite=");
+    s.push_str(o.same_site);
+
+    // `SameSite=None` without `Secure` is rejected outright by every current
+    // browser, which turns the cookie into one that is simply never stored
+    // — a failure with no error anywhere. The checker reports the pair, and
+    // this is the second line of defence for a value that reached here.
+    if o.secure || o.same_site == "None" {
+        s.push_str("; Secure");
+    }
+    if o.http_only {
+        s.push_str("; HttpOnly");
+    }
+    Ok(s)
+}
+
+#[cfg(test)]
+mod cookie_core_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_cookie_is_the_safe_one() {
+        let s = format_set_cookie("sid", "abc123", &CookieOpts::default()).expect("cookie");
+        assert_eq!(s, "sid=abc123; Path=/; SameSite=Lax; HttpOnly");
+    }
+
+    #[test]
+    fn every_attribute_lands_in_the_order_a_browser_reads() {
+        let o = CookieOpts {
+            http_only: true,
+            secure: true,
+            same_site: "Strict",
+            max_age: Some(3600),
+            path: "/app".to_string(),
+            domain: Some("example.com".to_string()),
+        };
+        assert_eq!(
+            format_set_cookie("sid", "v", &o).expect("cookie"),
+            "sid=v; Path=/app; Domain=example.com; Max-Age=3600; SameSite=Strict; Secure; HttpOnly"
+        );
+    }
+
+    /// The whole point of the opt-out: an author who says so gets a cookie
+    /// a script can read, and nobody else does.
+    #[test]
+    fn http_only_can_be_turned_off_and_nothing_else_changes() {
+        let o = CookieOpts {
+            http_only: false,
+            ..CookieOpts::default()
+        };
+        assert_eq!(
+            format_set_cookie("t", "v", &o).expect("cookie"),
+            "t=v; Path=/; SameSite=Lax"
+        );
+    }
+
+    #[test]
+    fn same_site_none_carries_secure_even_when_it_was_not_asked_for() {
+        let o = CookieOpts {
+            same_site: "None",
+            ..CookieOpts::default()
+        };
+        assert!(format_set_cookie("t", "v", &o).expect("cookie").contains("; Secure"));
+    }
+
+    /// This is the one that used to be a 500.
+    #[test]
+    fn a_value_that_would_split_the_response_is_a_sentence_not_a_fault() {
+        for bad in ["a\r\nX-Injected: yes", "a; Path=/evil", "a b", "a,b", "a\"b"] {
+            let e = format_set_cookie("sid", bad, &CookieOpts::default())
+                .expect_err("must be refused");
+            assert!(e.contains("sid"), "the error must name the cookie: {e}");
+        }
+        // And the name, and the attributes.
+        assert!(format_set_cookie("a b", "v", &CookieOpts::default()).is_err());
+        assert!(format_set_cookie("a;b", "v", &CookieOpts::default()).is_err());
+        let o = CookieOpts {
+            path: "/a\r\nX: y".to_string(),
+            ..CookieOpts::default()
+        };
+        assert!(format_set_cookie("sid", "v", &o).is_err());
+        let o = CookieOpts {
+            domain: Some("evil;Secure".to_string()),
+            ..CookieOpts::default()
+        };
+        assert!(format_set_cookie("sid", "v", &o).is_err());
+    }
+
+    #[test]
+    fn same_site_is_read_case_insensitively_and_nothing_else_is_accepted() {
+        assert_eq!(same_site_value("strict"), Some("Strict"));
+        assert_eq!(same_site_value("LAX"), Some("Lax"));
+        assert_eq!(same_site_value(" None "), Some("None"));
+        assert_eq!(same_site_value("yes"), None);
+        assert_eq!(same_site_value(""), None);
+    }
+}

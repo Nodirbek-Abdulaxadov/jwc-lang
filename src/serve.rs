@@ -201,6 +201,7 @@ pub(crate) fn read_server_config(s: &ServerDecl) -> ServerConfig {
             ServerEntry::Group { name, entries, .. } => {
                 match name.name.as_str() {
                     "cors" => c.cors = Some(read_cors(entries)),
+                    "headers" => c.headers = read_security_headers(entries),
                     "tls" => {
                         c.tls_declared = true;
                         c.tls = read_tls(entries);
@@ -289,6 +290,34 @@ fn read_tls(entries: &[crate::ast::Assignment]) -> Option<crate::exec::TlsConfig
         cert: cert?,
         key: key?,
     })
+}
+
+/// `server { headers { … } }` — config.md §3.7.
+///
+/// An empty string is how a default is turned off, so there is no second
+/// spelling for "do not send this one".
+fn read_security_headers(entries: &[crate::ast::Assignment]) -> crate::exec::SecurityHeaders {
+    let mut h = crate::exec::SecurityHeaders::default();
+    for a in entries {
+        match a.key.name.as_str() {
+            "nosniff" => {
+                if let crate::ast::ExprKind::Bool(b) = &*a.value.kind {
+                    h.nosniff = *b;
+                }
+            }
+            "frame_options" => h.frame_options = config_string(&a.value).unwrap_or_default(),
+            "referrer_policy" => h.referrer_policy = config_string(&a.value).unwrap_or_default(),
+            "hsts" => h.hsts = config_string(&a.value).unwrap_or_default(),
+            "content_security_policy" => {
+                h.content_security_policy = config_string(&a.value).unwrap_or_default()
+            }
+            "permissions_policy" => {
+                h.permissions_policy = config_string(&a.value).unwrap_or_default()
+            }
+            _ => {}
+        }
+    }
+    h
 }
 
 fn read_cors(entries: &[crate::ast::Assignment]) -> crate::exec::CorsConfig {
@@ -532,10 +561,13 @@ pub async fn handle(program: Arc<Program>, incoming: Incoming) -> Response {
     // server was going to reject anyway is work an attacker chose.
     let origin = incoming.headers.get("origin").cloned();
     if incoming.body.len() > program.server.max_body_bytes {
-        return with_cors(
+        return with_security_headers(
             &program,
-            origin.as_deref(),
-            Response::message(413, "request body too large"),
+            with_cors(
+                &program,
+                origin.as_deref(),
+                Response::message(413, "request body too large"),
+            ),
         );
     }
 
@@ -543,10 +575,13 @@ pub async fn handle(program: Arc<Program>, incoming: Incoming) -> Response {
     // `OPTIONS` reaches no handler and the browser is asking about the
     // route, not calling it.
     if incoming.method.eq_ignore_ascii_case("OPTIONS") && program.server.cors.is_some() {
-        return with_cors(&program, origin.as_deref(), Response::empty(204));
+        return with_security_headers(
+            &program,
+            with_cors(&program, origin.as_deref(), Response::empty(204)),
+        );
     }
     let answer = handle_inner(program.clone(), incoming).await;
-    with_cors(&program, origin.as_deref(), answer)
+    with_security_headers(&program, with_cors(&program, origin.as_deref(), answer))
 }
 
 /// `/healthz`, `/readyz`, `/metrics` — config.md §4.
@@ -692,6 +727,26 @@ async fn metrics_text(program: &Program) -> String {
     );
     out.push_str(&format!("jwc_routes {}\n", program.routes.len()));
     out
+}
+
+/// The security headers, on **every** answer — config.md §3.7.
+///
+/// Here rather than in the response builders because the set has to reach
+/// the answers no builder made: a 413 refused before the chain, a preflight,
+/// a 404, a static asset, a fault. Measured before this existed, a JSON
+/// route response carried none of them and a `static` mount carried one.
+///
+/// A header the program already set wins. An author who wrote
+/// `with { "X-Frame-Options": "SAMEORIGIN" }` on one response meant that
+/// response, and a default that overwrote it would be a default that cannot
+/// be escaped.
+fn with_security_headers(program: &Program, mut r: Response) -> Response {
+    for (name, value) in program.server.headers.to_headers() {
+        if !r.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            r.headers.push((name.to_string(), value));
+        }
+    }
+    r
 }
 
 /// The CORS headers for a request, when a `cors { }` block is declared.

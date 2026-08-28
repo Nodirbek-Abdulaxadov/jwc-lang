@@ -3074,3 +3074,236 @@ fn a_recursive_function_compiles_natively() {
         "nor carry the guard"
     );
 }
+
+/// A cookie carried none of the attributes the author wrote.
+///
+/// routing.md §6.2 documents `cookie(name, value, opts)` and shows
+/// `{ http_only: true, max_age: 3600 }`. The interpreter evaluated that
+/// record and dropped it: every cookie was `name=value; Path=/`, so a
+/// session cookie was readable by any script on the page, rode along on
+/// every cross-site request, and went out over plain HTTP. An author who
+/// read the page and wrote the safe thing got the unsafe cookie anyway,
+/// with nothing said — which is worse than not having the option at all.
+///
+/// `jwc build` meanwhile refused the program outright ("native build does
+/// not cover `cookie(...)` yet"), so a cookie-setting service could not be
+/// built at all, and the native path that would have run had a second bug:
+/// it put `Set-Cookie` into a header *map*, where a second cookie
+/// overwrites the first.
+#[test]
+fn a_cookie_carries_the_attributes_it_was_given() {
+    let core = include_str!("../src/cookie_core.rs.in");
+    assert!(
+        jwc::native::PRELUDE_COOKIE_CORE == core,
+        "both backends must be handed the same formatter"
+    );
+    let exec = include_str!("../src/exec.rs");
+    assert!(exec.contains(r#"include!("cookie_core.rs.in")"#));
+    assert!(
+        !exec.contains("; Path=/\", value_text"),
+        "exec.rs must not keep the old hand-built cookie line"
+    );
+
+    // The default is the safe one, and it is the *shared* function that
+    // says so — so neither backend can have its own idea of a default.
+    let line = jwc::exec::format_set_cookie("sid", "v", &jwc::exec::CookieOpts::default())
+        .expect("a plain cookie");
+    assert!(line.contains("; HttpOnly"), "{line}");
+    assert!(line.contains("; SameSite=Lax"), "{line}");
+
+    // Every attribute reaches the header.
+    let all = jwc::exec::CookieOpts {
+        http_only: true,
+        secure: true,
+        same_site: "Strict",
+        max_age: Some(3600),
+        path: "/app".into(),
+        domain: Some("example.com".into()),
+    };
+    let line = jwc::exec::format_set_cookie("sid", "v", &all).expect("cookie");
+    for part in [
+        "Path=/app",
+        "Domain=example.com",
+        "Max-Age=3600",
+        "SameSite=Strict",
+        "Secure",
+        "HttpOnly",
+    ] {
+        assert!(line.contains(part), "{part} missing from {line}");
+    }
+
+    // A value that would split the response is a named error, not the 500
+    // hyper used to produce with nothing in the log.
+    let e = jwc::exec::format_set_cookie("sid", "a\r\nX-Injected: yes", &Default::default())
+        .expect_err("must be refused");
+    assert!(e.contains("sid"), "{e}");
+
+    // And the native backend emits the call rather than refusing to build.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         routes \"/s\" {\n\
+         \x20   route GET \"\" {\n\
+         \x20       return json({ ok: true })\n\
+         \x20           cookie(\"a\", \"1\", { secure: true })\n\
+         \x20           cookie(\"b\", \"2\");\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let rust = jwc::native::codegen_for_test(&ws).expect("a cookie must build");
+    assert!(
+        rust.contains("jwc_b_v1_cookie("),
+        "codegen must emit the call"
+    );
+    assert!(
+        rust.contains("PRELUDE") || rust.contains("format_set_cookie"),
+        "and the crate must carry the shared formatter"
+    );
+    // The repeat bug: cookies travel in a list, because a map holds one.
+    assert!(
+        rust.contains("__jwc_set_cookies"),
+        "`Set-Cookie` repeats, so it cannot live in the header map"
+    );
+}
+
+/// The attributes are checked, so a misspelling is a diagnostic and not a
+/// cookie that quietly lost its `HttpOnly`.
+#[test]
+fn a_misspelled_cookie_attribute_is_reported() {
+    fn codes(src: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        jwc::check::check(&ws, &sym, &built.model)
+            .diags
+            .iter()
+            .map(|(_, d)| d.code.to_string())
+            .collect()
+    }
+    fn route(opts: &str) -> String {
+        format!(
+            "namespace n;\nroutes \"/s\" {{ route GET \"\" {{ return json({{ ok: true }}) cookie(\"s\", \"v\", {opts}); }} }}\n"
+        )
+    }
+
+    assert!(codes(&route("{ httponly: true }")).contains(&"E0737".to_string()));
+    assert!(codes(&route("{ same_site: \"Loose\" }")).contains(&"E0738".to_string()));
+    assert!(codes(&route("{ max_age: \"an hour\" }")).contains(&"E0738".to_string()));
+    // `SameSite=None` without `Secure` is a cookie the browser silently
+    // refuses to store — the one failure no layer would have reported.
+    assert!(codes(&route("{ same_site: \"None\" }")).contains(&"E0739".to_string()));
+    assert!(
+        codes(&route(
+            "{ same_site: \"None\", secure: true, max_age: 60, path: \"/a\" }"
+        ))
+        .is_empty(),
+        "the valid form must check clean"
+    );
+}
+
+/// A route response carried no security header at all.
+///
+/// Measured before this existed: a JSON route answered with
+/// `content-type`, `x-request-id`, `content-length` and `date`. A `static`
+/// mount sent `nosniff`; a route did not. No `X-Frame-Options`, no
+/// `Referrer-Policy`, and no way for a program to ask for HSTS or a CSP.
+///
+/// Three are on by default because there is no deployment they are wrong
+/// for, and three stay opt-in because a wrong value is worse than none —
+/// an HSTS max-age sent by mistake pins a domain to HTTPS in every browser
+/// that saw it, and cannot be taken back.
+#[test]
+fn every_response_carries_the_security_headers() {
+    let core = include_str!("../src/security_headers_core.rs.in");
+    let serve = include_str!("../src/serve.rs");
+    let exec = include_str!("../src/exec.rs");
+    assert!(exec.contains(r#"include!("security_headers_core.rs.in")"#));
+    assert!(core.contains("pub fn to_headers"));
+
+    let names: Vec<&str> = jwc::exec::SecurityHeaders::default()
+        .to_headers()
+        .iter()
+        .map(|(n, _)| *n)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "x-content-type-options",
+            "x-frame-options",
+            "referrer-policy"
+        ],
+        "the default set is the three that are always right"
+    );
+
+    // Applied where every answer passes, not in the response builders —
+    // a 413 refused before the chain and a 404 have no builder.
+    assert!(
+        serve.contains("fn with_security_headers("),
+        "the interpreter must apply them centrally"
+    );
+
+    // And the native backend must bake the *same* function's output rather
+    // than grow a second opinion about the set or its order.
+    let codegen = include_str!("../src/native/codegen.rs");
+    assert!(codegen.contains("server.headers.to_headers()"));
+    let base = include_str!("../src/native/prelude/base.rs.in");
+    assert!(
+        base.contains("for (name, value) in JWC_SECURITY_HEADERS"),
+        "the generated crate must apply them on the way out"
+    );
+
+    // A program's own header wins over a default, on both sides.
+    assert!(serve.contains("if !r.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))"));
+    assert!(base.contains("if !own.iter().any(|k| k == name)"));
+
+    // The block is a real `server { }` group, so a misspelled key is E1206.
+    let wiring = include_str!("../src/wiring.rs");
+    assert!(wiring.contains(r#"const GROUPS: [&str; 3] = ["cors", "tls", "headers"];"#));
+    assert!(wiring.contains("crate::exec::SECURITY_HEADER_KEYS"));
+}
+
+/// `origins = ["*"]` with `credentials = true` is the CORS misconfiguration
+/// that reads every authenticated response back to any site on the
+/// internet.
+///
+/// A browser refuses the literal pair, but a server that answers `*` by
+/// *reflecting* the caller's origin satisfies the browser and defeats the
+/// check — and reflecting is what `jwc serve` did. Measured: a request
+/// carrying `Origin: https://evil.example` came back with that origin
+/// allowed and `access-control-allow-credentials: true`, and `jwc check`
+/// reported nothing.
+///
+/// The native binary refused the same pair at boot, so the two backends
+/// disagreed about whether the program could exist at all. The compiler is
+/// where that belongs.
+#[test]
+fn wildcard_cors_with_credentials_is_refused() {
+    fn codes(src: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        jwc::wiring::wire(&ws, &sym)
+            .diags
+            .iter()
+            .map(|(_, d)| d.code.to_string())
+            .collect()
+    }
+
+    let bad = "namespace n;\nserver { cors { origins = [\"*\"]; credentials = true; } }\n";
+    assert!(codes(bad).contains(&"E1207".to_string()));
+
+    // Either alone is fine: `*` without credentials is an ordinary public
+    // API, and credentials with a real origin list is the normal shape.
+    let star_only = "namespace n;\nserver { cors { origins = [\"*\"]; } }\n";
+    assert!(!codes(star_only).contains(&"E1207".to_string()));
+    let listed = "namespace n;\n\
+                  server { cors { origins = [\"https://app.example.com\"]; credentials = true; } }\n";
+    assert!(!codes(listed).contains(&"E1207".to_string()));
+}

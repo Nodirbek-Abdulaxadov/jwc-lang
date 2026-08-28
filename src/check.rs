@@ -1616,8 +1616,116 @@ impl<'a> Checker<'a> {
                 for a in args {
                     self.expr(a);
                 }
+                // The attributes decide whether a session cookie is
+                // readable by a script and whether it rides along on a
+                // cross-site request, so a misspelled key must not be a
+                // silent no-op. Until 0.9.939 the whole record was
+                // evaluated and discarded, which is the same failure with
+                // no way to notice it.
+                if let Some(opts) = args.get(2) {
+                    self.check_cookie_opts(opts);
+                }
                 t
             }
+        }
+    }
+
+    /// The `opts` record of `cookie(name, value, opts)` — routing.md §6.2.
+    ///
+    /// A record literal is the only shape worth reading here: a computed
+    /// record could carry anything, and refusing one would rule out
+    /// building attributes conditionally. So an expression that is not a
+    /// literal is left to the runtime, which reads the keys it knows.
+    fn check_cookie_opts(&mut self, e: &Expr) {
+        let ExprKind::Object(entries) = &*e.kind else {
+            return;
+        };
+        let mut same_site_none = false;
+        let mut secure_true = false;
+        for entry in entries {
+            let crate::ast::ObjEntry::Field { key, value, .. } = entry else {
+                continue;
+            };
+            if !crate::exec::COOKIE_OPT_KEYS.contains(&key.name.as_str()) {
+                self.err_note(
+                    key.span,
+                    "E0737",
+                    format!("`{}` is not a cookie attribute", key.name),
+                    format!(
+                        "the attributes are {}",
+                        crate::exec::COOKIE_OPT_KEYS.join(", ")
+                    ),
+                    "routing.md §6.2",
+                );
+                continue;
+            }
+            match key.name.as_str() {
+                "http_only" | "secure" => {
+                    if let ExprKind::Bool(b) = &*value.kind {
+                        if key.name == "secure" && *b {
+                            secure_true = true;
+                        }
+                    } else if !matches!(self.expr(value), Ty::Scalar(Scalar::Boolean) | Ty::Unknown)
+                    {
+                        self.err_note(
+                            value.span,
+                            "E0738",
+                            format!("`{}` is a boolean", key.name),
+                            "write `true` or `false`",
+                            "routing.md §6.2",
+                        );
+                    }
+                }
+                "max_age" => {
+                    let t = self.expr(value);
+                    if !matches!(
+                        t,
+                        Ty::Scalar(Scalar::Int)
+                            | Ty::Scalar(Scalar::Bigint)
+                            | Ty::Scalar(Scalar::Smallint)
+                            | Ty::Unknown
+                    ) {
+                        self.err_note(
+                            value.span,
+                            "E0738",
+                            "`max_age` is a number of seconds",
+                            "an absolute date is not accepted: `Max-Age` says the same thing \
+                             and has one spelling",
+                            "routing.md §6.2",
+                        );
+                    }
+                }
+                "same_site" => {
+                    if let ExprKind::Str(v) | ExprKind::RawStr(v) = &*value.kind {
+                        match crate::exec::same_site_value(v) {
+                            Some("None") => same_site_none = true,
+                            Some(_) => {}
+                            None => self.err_note(
+                                value.span,
+                                "E0738",
+                                format!("`same_site` is `Strict`, `Lax` or `None`, not {v:?}"),
+                                "`Lax` is the default and is what a session cookie wants",
+                                "routing.md §6.2",
+                            ),
+                        }
+                    }
+                }
+                _ => {
+                    self.expr(value);
+                }
+            }
+        }
+        // A browser refuses to store `SameSite=None` without `Secure`, so
+        // the pair is a cookie that is silently never set — a failure with
+        // no error at the only layer that could report one.
+        if same_site_none && !secure_true {
+            self.err_note(
+                e.span,
+                "E0739",
+                "`same_site: \"None\"` needs `secure: true`",
+                "every current browser refuses to store the cookie otherwise, and says nothing",
+                "routing.md §6.2",
+            );
         }
     }
 

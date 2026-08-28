@@ -145,7 +145,7 @@ impl<'a> Wiring<'a> {
             "shutdown_grace",
             "bind",
         ];
-        const GROUPS: [&str; 2] = ["cors", "tls"];
+        const GROUPS: [&str; 3] = ["cors", "tls", "headers"];
         const CORS: [&str; 5] = ["origins", "methods", "headers", "credentials", "max_age"];
         const TLS: [&str; 2] = ["cert", "key"];
 
@@ -175,15 +175,79 @@ impl<'a> Wiring<'a> {
                         unknown(self, &name.name, *span, "`server { }` block", &GROUPS);
                         continue;
                     }
-                    let known: &[&str] = if name.name == "cors" { &CORS } else { &TLS };
+                    let known: &[&str] = match name.name.as_str() {
+                        "cors" => &CORS,
+                        "tls" => &TLS,
+                        // config.md §3.7. The list lives beside the struct
+                        // it fills, so a key added there cannot be one this
+                        // block rejects.
+                        _ => crate::exec::SECURITY_HEADER_KEYS,
+                    };
                     let what = format!("`{}` key", name.name);
                     for a in entries {
                         if !known.contains(&a.key.name.as_str()) {
                             unknown(self, &a.key.name, a.key.span, &what, known);
                         }
                     }
+                    if name.name == "cors" {
+                        self.check_cors_credentials(fi, entries, *span);
+                    }
                 }
             }
+        }
+    }
+
+    /// `origins = ["*"]` together with `credentials = true` — config.md §3.4.
+    ///
+    /// This is the CORS misconfiguration that reads every authenticated
+    /// response back to any site on the internet. A browser refuses the
+    /// literal pair — `Access-Control-Allow-Origin: *` is invalid on a
+    /// credentialed request — but a server that answers `*` by *reflecting*
+    /// the caller's origin satisfies the browser and defeats the check, and
+    /// reflecting is what `jwc serve` did. Measured: a request carrying
+    /// `Origin: https://evil.example` came back with
+    /// `access-control-allow-origin: https://evil.example` and
+    /// `access-control-allow-credentials: true`, and `jwc check` said
+    /// nothing.
+    ///
+    /// A native binary already refused the same pair at boot, so the two
+    /// backends disagreed about whether the program was allowed to exist.
+    /// The compiler is where that belongs: an operator should not learn it
+    /// from a crash loop, and an author should not learn it from a report.
+    fn check_cors_credentials(
+        &mut self,
+        fi: usize,
+        entries: &[crate::ast::Assignment],
+        span: crate::token::Span,
+    ) {
+        let mut wildcard = false;
+        let mut credentials = false;
+        for a in entries {
+            match a.key.name.as_str() {
+                "origins" => {
+                    if let crate::ast::ExprKind::Array(items) = &*a.value.kind {
+                        wildcard |= items.iter().any(|i| {
+                            matches!(&*i.kind,
+                                crate::ast::ExprKind::Str(v) | crate::ast::ExprKind::RawStr(v)
+                                    if v.trim() == "*")
+                        });
+                    }
+                }
+                "credentials" => {
+                    credentials |= matches!(&*a.value.kind, crate::ast::ExprKind::Bool(true));
+                }
+                _ => {}
+            }
+        }
+        if wildcard && credentials {
+            self.err(
+                Loc { file: fi, span },
+                "E1207",
+                "`origins = [\"*\"]` cannot be combined with `credentials = true`",
+                "any site would be able to read this API's authenticated responses. \
+                 List the exact origins instead.",
+                "config.md §3.4",
+            );
         }
     }
 

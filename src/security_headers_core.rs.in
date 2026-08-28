@@ -1,0 +1,176 @@
+// The security headers on every response — config.md §3.7.
+//
+// `include!`d by `src/serve.rs` and pasted verbatim into the crate
+// `jwc build` generates, so a deployed binary and `jwc serve` send the same
+// set. That is not a nicety here: the header that is missing from one
+// backend is a control the production artefact ships without, while every
+// test and every local run has it.
+//
+// ## What is on by default, and why the rest is not
+//
+// Measured before this existed: a JSON route response carried
+// `content-type`, `x-request-id`, `content-length` and `date`, and nothing
+// else. Not one security header. A `static` mount sent `nosniff`; a route
+// did not.
+//
+// Three are on by default because there is no deployment they are wrong
+// for:
+//
+// * `X-Content-Type-Options: nosniff` — stops a browser from second-
+//   guessing the content type. There is no case where guessing is better.
+// * `X-Frame-Options: DENY` — clickjacking. JWC serves JSON APIs; a
+//   program that wants to be framed says so, and a program that does not
+//   want to be framed should not have had to know the header exists.
+// * `Referrer-Policy: strict-origin-when-cross-origin` — already the
+//   default in current browsers, so this changes nothing for them and
+//   fixes the older ones. It stops a path (with its ids) leaking to every
+//   third-party host the page reaches.
+//
+// Three are **off** until asked for, because a wrong value is worse than
+// no value:
+//
+// * `Strict-Transport-Security` — a max-age sent by mistake pins the
+//   domain to HTTPS in every browser that saw it, for that long, and there
+//   is no way to take it back. That is not a default anyone gets to choose
+//   for someone else's domain.
+// * `Content-Security-Policy` — there is no policy that is right for every
+//   page. A default that breaks a page teaches authors to delete the
+//   header rather than to write a policy.
+// * `Permissions-Policy` — same, and the feature list keeps moving.
+//
+// Every one of the six can be set, and any of them can be turned off, so
+// the defaults are a starting point rather than a rule.
+
+/// The `server { headers { … } }` block.
+#[derive(Clone, Debug)]
+pub struct SecurityHeaders {
+    pub nosniff: bool,
+    /// `DENY`, `SAMEORIGIN`, or empty to send nothing.
+    pub frame_options: String,
+    pub referrer_policy: String,
+    /// Empty means the header is not sent.
+    pub hsts: String,
+    pub content_security_policy: String,
+    pub permissions_policy: String,
+}
+
+impl Default for SecurityHeaders {
+    fn default() -> Self {
+        Self {
+            nosniff: true,
+            frame_options: "DENY".to_string(),
+            referrer_policy: "strict-origin-when-cross-origin".to_string(),
+            hsts: String::new(),
+            content_security_policy: String::new(),
+            permissions_policy: String::new(),
+        }
+    }
+}
+
+/// The keys the block accepts. `wiring` reports anything else as `E1206`,
+/// so a misspelled `frame-options` is a diagnostic rather than a header
+/// that was never sent.
+pub const SECURITY_HEADER_KEYS: &[&str] = &[
+    "nosniff",
+    "frame_options",
+    "referrer_policy",
+    "hsts",
+    "content_security_policy",
+    "permissions_policy",
+];
+
+impl SecurityHeaders {
+    /// The headers to add, in a fixed order.
+    ///
+    /// Fixed because the response is compared byte for byte between the two
+    /// backends, and a set that iterated a map would compare differently on
+    /// two runs of the same program.
+    ///
+    /// A value that is empty is a header that is not sent — that is how a
+    /// program turns one of the defaults off, without a second spelling for
+    /// "off".
+    pub fn to_headers(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = Vec::new();
+        if self.nosniff {
+            out.push(("x-content-type-options", "nosniff".to_string()));
+        }
+        if !self.frame_options.is_empty() {
+            out.push(("x-frame-options", self.frame_options.clone()));
+        }
+        if !self.referrer_policy.is_empty() {
+            out.push(("referrer-policy", self.referrer_policy.clone()));
+        }
+        if !self.hsts.is_empty() {
+            out.push(("strict-transport-security", self.hsts.clone()));
+        }
+        if !self.content_security_policy.is_empty() {
+            out.push(("content-security-policy", self.content_security_policy.clone()));
+        }
+        if !self.permissions_policy.is_empty() {
+            out.push(("permissions-policy", self.permissions_policy.clone()));
+        }
+        out
+    }
+}
+
+/// A header value that cannot split the response.
+///
+/// Refused rather than stripped, and checked at **boot** rather than per
+/// response: these values come from the program's own source, so a bad one
+/// is a mistake to report once, not a request to fail.
+pub fn header_value_ok(s: &str) -> bool {
+    s.bytes().all(|b| (0x20..0x7f).contains(&b))
+}
+
+#[cfg(test)]
+mod security_headers_core_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_set_is_the_three_that_are_always_right() {
+        let h = SecurityHeaders::default().to_headers();
+        let names: Vec<&str> = h.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            vec![
+                "x-content-type-options",
+                "x-frame-options",
+                "referrer-policy"
+            ],
+            "HSTS, CSP and Permissions-Policy must stay opt-in"
+        );
+    }
+
+    #[test]
+    fn an_empty_value_is_how_a_default_is_turned_off() {
+        let h = SecurityHeaders {
+            frame_options: String::new(),
+            nosniff: false,
+            ..SecurityHeaders::default()
+        };
+        let names: Vec<&str> = h.to_headers().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["referrer-policy"]);
+    }
+
+    #[test]
+    fn the_opt_in_three_appear_when_they_are_asked_for() {
+        let h = SecurityHeaders {
+            hsts: "max-age=31536000; includeSubDomains".to_string(),
+            content_security_policy: "default-src 'none'".to_string(),
+            permissions_policy: "camera=(), microphone=()".to_string(),
+            ..SecurityHeaders::default()
+        };
+        let names: Vec<&str> = h.to_headers().iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"strict-transport-security"));
+        assert!(names.contains(&"content-security-policy"));
+        assert!(names.contains(&"permissions-policy"));
+    }
+
+    #[test]
+    fn a_value_that_would_split_the_response_is_refused() {
+        assert!(header_value_ok("max-age=31536000; includeSubDomains"));
+        assert!(!header_value_ok("a\r\nX-Injected: yes"));
+        assert!(!header_value_ok("a\nb"));
+        assert!(!header_value_ok("a\u{7f}b"));
+    }
+}

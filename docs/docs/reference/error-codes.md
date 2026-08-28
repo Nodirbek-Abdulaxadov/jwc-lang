@@ -192,6 +192,9 @@ the same extraction, so neither can drift from it.
 | `E0734` | `response.status()` outside an `after` block | `routing.md` |
 | `E0735` | `content(...)` media type is not a string literal | `routing.md` |
 | `E0736` | `content(...)` body is not `text` | `routing.md` |
+| `E0737` | unknown key in a `cookie(...)` options record | `routing.md` |
+| `E0738` | a cookie attribute of the wrong type, or a `same_site` that is not `Strict` / `Lax` / `None` | `routing.md` |
+| `E0739` | `same_site: "None"` without `secure: true` | `routing.md` |
 | `E0740` | a `static` prefix is not a literal path beginning with `/` | `routing.md` |
 | `E0741` | a `static` root is missing, or is not a directory | `routing.md` |
 | `E0742` | two `static` mounts on one prefix | `routing.md` |
@@ -226,7 +229,8 @@ the same extraction, so neither can drift from it.
 | `E1203` | more than one `database` | `config.md` |
 | `E1204` | more than one `server` block | `config.md` |
 | `E1205` | `page` used with no `cursor_secret` | `config.md` |
-| `E1206` | unknown `server { }` key, or unknown key inside its `cors` / `tls` block | `config.md` |
+| `E1206` | unknown `server { }` key, or unknown key inside its `cors` / `tls` / `headers` block | `config.md` |
+| `E1207` | `cors { origins = ["*"] }` together with `credentials = true` | `config.md` |
 | `E1401` | `assert fails` without an error type | `testing.md` |
 | `E1402` | `with` on an `assert fails` whose message cannot be a literal | `testing.md` |
 | `E1501` | a package declares a schema object | `packages.md` |

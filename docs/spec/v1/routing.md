@@ -233,7 +233,45 @@ return json($x) with { "Cache-Control": "no-store" } cookie("sid", $sid, { http_
 ```
 
 `cookie(name, value, opts)` may be chained; each occurrence appends one
-`Set-Cookie`.
+`Set-Cookie`. `opts` is optional.
+
+#### The attributes
+
+| Key | Default | |
+|---|---|---|
+| `http_only` | **`true`** | the cookie is not readable from a script |
+| `secure` | `false` | sent over HTTPS only |
+| `same_site` | **`"Lax"`** | `Strict`, `Lax` or `None` |
+| `max_age` | — | seconds; absent is a session cookie |
+| `path` | `"/"` | |
+| `domain` | — | absent is host-only, which is the narrower scope |
+
+`http_only` and `same_site` default to the strict values, and an author who
+needs a cookie a script can read writes `http_only: false`. A default that
+is wrong is a defect in every program that did not think about it; an
+opt-out that is wrong is a defect in the one program that asked.
+
+`expires` is deliberately absent: `Max-Age` says the same thing in seconds,
+and an absolute date has one exact spelling (RFC 7231 §7.1.1.1) that a
+caller has no way to produce from JWC.
+
+An unknown key is `E0737` — a misspelled `httponly` must not be a cookie
+that quietly lost its `HttpOnly`. A `same_site` that is not one of the three
+is `E0738`. `same_site: "None"` without `secure: true` is `E0739`: every
+current browser refuses to store that cookie, and says nothing, so the
+failure has no layer that would otherwise report it.
+
+`same_site: "None"` implies `Secure` in the emitted header even when
+`secure` was not written, because the pair is what the browser requires.
+
+#### What cannot be sent
+
+A cookie name is a `token` and a value is `cookie-octet*` (RFC 6265
+§4.1.1). A name or value carrying a space, a comma, a semicolon, a quote, a
+backslash or a control character is a **fault** — 500, with a sentence in
+the log naming the cookie — rather than a header that splits the response.
+Nothing is encoded on the author's behalf: a value silently percent-encoded
+here is one the reader has to guess the encoding of.
 
 ### 6.3 Headers from `after`
 
@@ -500,6 +538,9 @@ run the same text.
 | `E0734` | `response.status()` outside an `after` block |
 | `E0735` | `content(...)` media type is not a string literal |
 | `E0736` | `content(...)` body is not `text` |
+| `E0737` | unknown key in a `cookie(...)` options record |
+| `E0738` | a cookie attribute of the wrong type, or a `same_site` that is not `Strict` / `Lax` / `None` |
+| `E0739` | `same_site: "None"` without `secure: true` |
 | `E0740` | a `static` prefix is not a literal path beginning with `/` |
 | `E0741` | a `static` root is missing, or is not a directory |
 | `E0742` | two `static` mounts on one prefix |

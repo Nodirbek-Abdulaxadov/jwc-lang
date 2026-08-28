@@ -934,6 +934,22 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         "const JWC_ROUTE_COUNT: usize = {};\n",
         routes.len()
     ));
+    // config.md §3.7 — the security headers, computed here by
+    // `SecurityHeaders::to_headers`, the same function `jwc serve` calls.
+    // Baked rather than recomputed: the values come from the program's own
+    // `server { headers { } }` block, so there is nothing left to decide at
+    // run time, and the ordering the interpreter produces is the ordering
+    // this table has.
+    {
+        let hs = server.headers.to_headers();
+        out.push_str("\n/// The security headers on every response (config.md §3.7).\n");
+        out.push_str("static JWC_SECURITY_HEADERS: &[(&str, &str)] = &[\n");
+        for (name, value) in &hs {
+            out.push_str(&format!("    ({name:?}, {value:?}),\n"));
+        }
+        out.push_str("];\n");
+    }
+
     out.push_str(if needs_jobs {
         "async fn jwc_op_metrics() -> String {\n\
          \x20   format!(\"{}{}{}\", jwc_metrics_body(), jwc_cache_metrics(), jwc_jobs_metrics().await)\n}\n"
@@ -1027,6 +1043,9 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // the base prelude and call into it, so it is not something a program
     // opts into by using a date.
     source.push_str(super::PRELUDE_INTERVAL_CORE);
+    // Unconditional for the same reason: `jwc_b_v1_cookie` lives in the v1
+    // prelude and calls into it.
+    source.push_str(super::PRELUDE_COOKIE_CORE);
     source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);
@@ -2119,7 +2138,27 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
             }
             format!("jwc_with_headers({v}, vec![{}])", parts.join(", "))
         }
-        ExprKind::Cookie { .. } => bail!("native build does not cover `cookie(...)` yet"),
+        // routing.md §6.2. The third argument is optional in the source, so
+        // an absent one becomes `V::Null` and the reader falls back to the
+        // defaults — which are `HttpOnly` and `SameSite=Lax`, not "none of
+        // the attributes the author wrote".
+        ExprKind::Cookie { value, args } => {
+            let v = emit_expr(value, ctx)?;
+            let name = match args.first() {
+                Some(a) => emit_expr(a, ctx)?,
+                None => "V::Null".to_string(),
+            };
+            let val = match args.get(1) {
+                Some(a) => emit_expr(a, ctx)?,
+                None => "V::Null".to_string(),
+            };
+            let opts = match args.get(2) {
+                Some(a) => emit_expr(a, ctx)?,
+                None => "V::Null".to_string(),
+            };
+            ctx.used.insert("jwc_b_v1_cookie".to_string());
+            format!("jwc_b_v1_cookie({v}, {name}, {val}, {opts})")
+        }
         // routing.md §5.2 — the cast is what validates.
         ExprKind::Cast { value: _, ty } => {
             ctx.uses_validation = true;

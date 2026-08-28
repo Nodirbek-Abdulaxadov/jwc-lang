@@ -1696,6 +1696,9 @@ use tokio::net::TcpListener;
 type RouteFn = fn() -> Pin<Box<dyn Future<Output = V> + Send>>;
 
 const HTTP_RESPONSE_MARKER: &str = "__http_response";
+/// Where `cookie(...)` keeps its lines on a response object. Not a header
+/// in the map, because `Set-Cookie` repeats and a map key does not.
+const HTTP_COOKIE_LIST: &str = "__jwc_set_cookies";
 
 /// Every JSON response the interpreter emits carries the charset
 /// (`exec.rs:228`, `exec_call.rs:631`, `Response::json`). One constant so
@@ -2590,13 +2593,22 @@ fn jwc_to_response(v: V) -> (u16, String, String, Vec<(String, String)>) {
                 _ => "text/plain; charset=utf-8".to_string(),
             };
             let _ = &ct;
-            let headers: Vec<(String, String)> = match m.get("headers") {
+            let mut headers: Vec<(String, String)> = match m.get("headers") {
                 Some(V::Object(hm)) => hm
                     .iter()
                     .map(|(k, v)| (k.clone(), body_string(v.clone())))
                     .collect(),
                 _ => Vec::new(),
             };
+            // `Set-Cookie` is the header that legitimately repeats, so it
+            // travels in its own list rather than in the map above — a map
+            // cannot hold two, and the version that tried lost every cookie
+            // but the last.
+            if let Some(V::Array(list)) = m.get(HTTP_COOKIE_LIST) {
+                for c in list.iter() {
+                    headers.push(("set-cookie".to_string(), body_string(c.clone())));
+                }
+            }
             return (status, body, ct, headers);
         }
     }
@@ -3370,8 +3382,23 @@ async fn jwc_dispatch(
     if !ct.is_empty() {
         builder = builder.header("content-type", ct.as_str());
     }
+    // config.md §3.7 — on every answer, including the ones no builder made:
+    // a 413 refused before the chain, a preflight, a 404, a fault. The set
+    // is baked by codegen from the program's `server { headers { } }`
+    // block, using the same `SecurityHeaders::to_headers` the interpreter
+    // calls, so the two backends send the same headers in the same order.
+    //
+    // A header the program set itself wins: an author who wrote
+    // `with { "X-Frame-Options": "SAMEORIGIN" }` meant that response.
+    let mut own: Vec<String> = Vec::with_capacity(extra_headers.len());
     for (k, v) in extra_headers {
+        own.push(k.to_ascii_lowercase());
         builder = jwc_push_header(builder, k, v);
+    }
+    for (name, value) in JWC_SECURITY_HEADERS {
+        if !own.iter().any(|k| k == name) {
+            builder = builder.header(*name, *value);
+        }
     }
     builder.body(body_str.into()).unwrap()
 }

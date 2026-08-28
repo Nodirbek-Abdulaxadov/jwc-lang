@@ -151,6 +151,11 @@ pub struct ServerConfig {
     /// declared route and the headers go on every response. When absent, no
     /// CORS header is emitted at all.
     pub cors: Option<CorsConfig>,
+    /// config.md §3.7 — the security headers on every response. Always
+    /// present: three of the six are on by default, because a program that
+    /// declared no `headers { }` block is exactly the one that should not
+    /// have had to know the headers exist.
+    pub headers: SecurityHeaders,
     /// config.md §3.5 — when present the listener is HTTPS. Absent means
     /// plain HTTP, which is correct behind a terminating proxy.
     pub tls: Option<TlsConfig>,
@@ -216,6 +221,7 @@ impl Default for ServerConfig {
             bind: "0.0.0.0".into(),
             trusted_proxies: Vec::new(),
             cors: None,
+            headers: SecurityHeaders::default(),
             tls: None,
             tls_declared: false,
             header_timeout: std::time::Duration::from_secs(10),
@@ -1135,10 +1141,15 @@ impl<'a> Vm<'a> {
                     parts.push(self.eval(a).await?);
                 }
                 if let (Some(name), Some(val)) = (parts.first(), parts.get(1)) {
-                    let cookie = (
-                        "set-cookie".to_string(),
-                        format!("{}={}; Path=/", value_text(name), value_text(val)),
-                    );
+                    // The third argument is the attributes, and until
+                    // 0.9.939 it was evaluated and dropped on the floor —
+                    // so `{ http_only: true }` produced a cookie a script
+                    // could read. `cookie_opts_from` reads it; the
+                    // formatter is shared with the native backend.
+                    let opts = cookie_opts_from(parts.get(2));
+                    let line = format_set_cookie(&value_text(name), &value_text(val), &opts)
+                        .map_err(fault)?;
+                    let cookie = ("set-cookie".to_string(), line);
                     match &mut v {
                         Value::Response { headers, .. } => headers.push(cookie),
                         _ => self.extra_headers.push(cookie),
@@ -1850,3 +1861,41 @@ fn last_tuple(keys: &str) -> Option<Vec<Option<String>>> {
 // arithmetic rather than two readings of types.md §12 (one of which was
 // blank).
 include!("interval_core.rs.in");
+
+/// The `opts` record of `cookie(name, value, opts)`, as attributes.
+///
+/// Anything absent keeps `CookieOpts::default()`, and anything the checker
+/// already refused (an unknown key, a `same_site` that is not one of the
+/// three) cannot arrive here — so this reads rather than validates.
+fn cookie_opts_from(v: Option<&Value>) -> CookieOpts {
+    let mut o = CookieOpts::default();
+    let Some(Value::Record(fields)) = v else {
+        return o;
+    };
+    for (k, val) in fields {
+        match k.as_str() {
+            "http_only" => o.http_only = matches!(val, Value::Bool(true)),
+            "secure" => o.secure = matches!(val, Value::Bool(true)),
+            "same_site" => {
+                if let Some(s) = same_site_value(&value_text(val)) {
+                    o.same_site = s;
+                }
+            }
+            "max_age" => o.max_age = val.as_i64(),
+            "path" => o.path = value_text(val),
+            "domain" => o.domain = Some(value_text(val)),
+            _ => {}
+        }
+    }
+    o
+}
+
+// `Set-Cookie` is assembled by a file the native backend pastes into the
+// crate it generates, so a cookie carries the same attributes from either
+// backend rather than from two readings of routing.md §6.2.
+include!("cookie_core.rs.in");
+
+// The security headers are computed by a file the native backend pastes
+// into the crate it generates, so a deployed binary and `jwc serve` send
+// the same set (config.md §3.7).
+include!("security_headers_core.rs.in");

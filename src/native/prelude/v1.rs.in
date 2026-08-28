@@ -329,24 +329,75 @@ fn jwc_b_v1_debug_dump(v: V) -> V {
 
 // ---- cookies (routing.md §6.3) ----------------------------------------------
 
-/// `<response> cookie(name, value)` — attaches to the response it decorates,
-/// so it survives being nested in `created(...)`.
-fn jwc_b_v1_cookie(resp: V, name: V, value: V) -> V {
-    let pair = format!("{}={}; Path=/", jwc_v1_text(&name), jwc_v1_text(&value));
+/// The `opts` record of `cookie(name, value, opts)`, as attributes.
+///
+/// Reads rather than validates: the checker has already refused an unknown
+/// key and a `same_site` that is not one of the three (E0737 / E0738).
+fn jwc_cookie_opts_from(v: Option<&V>) -> CookieOpts {
+    let mut o = CookieOpts::default();
+    let Some(v) = v else { return o };
+    if matches!(v, V::Null) {
+        return o;
+    }
+    // Through `jwc_get_field`, not by matching one variant: an object
+    // literal lowers to `V::Record` (ordered) and a computed one to
+    // `V::Object` (a map), and reading only the map is how the first
+    // version of this silently ignored every attribute an author wrote.
+    for key in COOKIE_OPT_KEYS {
+        let val = jwc_get_field(v, key);
+        if matches!(val, V::Null) {
+            continue;
+        }
+        match *key {
+            "http_only" => o.http_only = matches!(val, V::Bool(true)),
+            "secure" => o.secure = matches!(val, V::Bool(true)),
+            "same_site" => {
+                if let Some(s) = jwc_str_view(&val).and_then(same_site_value) {
+                    o.same_site = s;
+                }
+            }
+            "max_age" => o.max_age = jwc_to_int(&val),
+            "path" => o.path = jwc_v1_text(&val),
+            "domain" => o.domain = Some(jwc_v1_text(&val)),
+            _ => {}
+        }
+    }
+    o
+}
+
+/// `<response> cookie(name, value, opts)` — attaches to the response it
+/// decorates, so it survives being nested in `created(...)`.
+///
+/// The line is built by `format_set_cookie`, the same text `src/exec.rs`
+/// includes, so a cookie carries the same attributes from either backend.
+/// Two things here were wrong before 0.9.939 and neither could be seen from
+/// a test: codegen refused to compile `cookie(...)` at all, and this
+/// function put the header into the response's *map*, so a second
+/// `cookie(...)` in the same chain overwrote the first — while routing.md
+/// §6.2 says each occurrence appends one. Cookies now ride in their own
+/// list, which is the only shape that can hold two.
+fn jwc_b_v1_cookie(resp: V, name: V, value: V, opts: V) -> V {
+    let o = jwc_cookie_opts_from(Some(&opts));
+    let line = match format_set_cookie(&jwc_v1_text(&name), &jwc_v1_text(&value), &o) {
+        Ok(line) => line,
+        // A fault, matching the interpreter: the generic 500 envelope, and
+        // the sentence in the log beside the request id.
+        Err(e) => panic!("{e}"),
+    };
     let mut m = match resp {
         V::Object(o) if matches!(o.get(HTTP_RESPONSE_MARKER), Some(V::Bool(true))) => (*o).clone(),
-        // Not a response: the interpreter queues the header on the request
-        // instead, and the dispatcher merges it.
+        // Not a response: queue it on the request, the way the interpreter
+        // queues `extra_headers`, and let the dispatcher merge it.
         other => {
-            jwc_b_response_add_header(v_str("set-cookie"), v_str(pair));
+            jwc_b_response_add_header(v_str("set-cookie"), v_str(line));
             return other;
         }
     };
-    let mut headers = match m.get("headers") {
-        Some(V::Object(h)) => (**h).clone(),
-        _ => JwcObj::default(),
+    let mut list = match m.get(HTTP_COOKIE_LIST) {
+        Some(V::Array(a)) => (**a).clone(),
+        _ => Vec::new(),
     };
-    headers.insert("set-cookie".to_string(), v_str(pair));
-    m.insert("headers".to_string(), v_obj(headers));
+    list.push(v_str(line));
+    m.insert(HTTP_COOKIE_LIST.to_string(), V::Array(Arc::new(list)));
     v_obj(m)
 }

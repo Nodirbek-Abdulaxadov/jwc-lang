@@ -105,6 +105,9 @@ default.
 | `trusted_proxies` | `inet[]` | `[]` | see §3.3 |
 | `shutdown_grace` | duration | `20s` | drain window on SIGTERM |
 
+Three sub-blocks: `cors { }` (§3.4), `tls { }` (§3.5) and `headers { }`
+(§3.9).
+
 3.2.1 `bind` takes an IP address, not a hostname. The default answers on
 every interface, which is what a container publishing a port expects; a
 development machine that should not be answering its own network writes
@@ -135,6 +138,15 @@ guessing.
 3.4 `cors` — when present, `OPTIONS` is answered automatically for every
 declared route. When absent, no CORS headers are emitted at all.
 
+3.4a `origins = ["*"]` together with `credentials = true` is `E1207`.
+
+A browser refuses the literal pair — `Access-Control-Allow-Origin: *` is
+invalid on a credentialed request — but a server that answers `*` by
+*reflecting* the caller's origin satisfies the browser and defeats the
+check. Reflecting is what a wildcard means here, so the pair is refused at
+compile time: it would let any site on the internet read this API's
+authenticated responses. List the origins.
+
 3.5 `tls` — when present the listener is HTTPS. Absent means plain HTTP,
 which is correct behind a terminating proxy.
 
@@ -160,6 +172,56 @@ pool slot nobody is waiting on.
 3.8 `shutdown_grace` is the drain window on SIGTERM *and* on Ctrl-C. A
 server that handles only one of them drops in-flight requests on whichever
 it missed.
+
+3.9 **`headers { }` — the security headers on every response.**
+
+```jwc
+server {
+    headers {
+        hsts                    = "max-age=31536000; includeSubDomains";
+        content_security_policy = "default-src 'none'";
+        frame_options           = "SAMEORIGIN";
+    }
+}
+```
+
+| Key | Default | |
+|---|---|---|
+| `nosniff` | **`true`** | `X-Content-Type-Options: nosniff` |
+| `frame_options` | **`"DENY"`** | `X-Frame-Options` |
+| `referrer_policy` | **`"strict-origin-when-cross-origin"`** | `Referrer-Policy` |
+| `hsts` | `""` | `Strict-Transport-Security` |
+| `content_security_policy` | `""` | `Content-Security-Policy` |
+| `permissions_policy` | `""` | `Permissions-Policy` |
+
+An **empty string is how a default is turned off**, so there is no second
+spelling for "do not send this one". An unknown key is `E1206`.
+
+3.9.1 Three are on by default because there is no deployment they are wrong
+for. `nosniff` stops a browser second-guessing a content type, and guessing
+is never better. `X-Frame-Options: DENY` is clickjacking, and a program that
+wants to be framed can say so where one that does not should not have had to
+know the header exists. `Referrer-Policy` is already the current browser
+default, so setting it changes nothing for them and fixes the older ones.
+
+3.9.2 Three are **off** until asked for, because a wrong value is worse than
+no value. An HSTS `max-age` sent by mistake pins the domain to HTTPS in every
+browser that saw it, for that long, and cannot be withdrawn — that is not a
+default anyone gets to choose for someone else's domain. There is no CSP
+that is right for every page, and a default that breaks a page teaches
+authors to delete the header rather than to write a policy. `Permissions-Policy`
+is the same, and its feature list keeps moving.
+
+3.9.3 The headers go on **every** answer, including the ones no response
+builder made: a 413 refused before the chain, a preflight, a 404, a static
+asset, a fault. A header the program set itself — `with { … }`,
+`response.set_header` — **wins**: an author who wrote one meant that
+response, and a default that overwrote it would be one that cannot be
+escaped.
+
+3.9.4 Both backends send the same set in the same order. `jwc build` bakes
+the table by calling the same function `jwc serve` calls, so the two cannot
+grow separate opinions about what is on.
 
 ---
 
@@ -323,4 +385,5 @@ under `jwc serve` and could not be built.
 | `E1203` | more than one `database` |
 | `E1204` | more than one `server` block |
 | `E1205` | `page` used with no `cursor_secret` |
-| `E1206` | unknown `server { }` key, or unknown key inside its `cors` / `tls` block |
+| `E1206` | unknown `server { }` key, or unknown key inside its `cors` / `tls` / `headers` block |
+| `E1207` | `cors { origins = ["*"] }` together with `credentials = true` |

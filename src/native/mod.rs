@@ -69,6 +69,11 @@ pub const PRELUDE_ACCESS_LOG_CORE: &str = include_str!("../access_log_core.rs.in
 /// what "the last 24 hours" is. Before this the native `+` concatenated
 /// the two strings and `-` panicked (types.md §12).
 pub const PRELUDE_INTERVAL_CORE: &str = include_str!("../interval_core.rs.in");
+/// `Set-Cookie` and its attributes — the same text `src/exec.rs` includes,
+/// so a cookie's `HttpOnly`, `Secure` and `SameSite` do not depend on which
+/// backend answered. Before 0.9.939 the interpreter dropped the attributes
+/// and this backend refused to build a program that set a cookie at all.
+pub const PRELUDE_COOKIE_CORE: &str = include_str!("../cookie_core.rs.in");
 pub const PRELUDE_ASSETS: &str = include_str!("prelude/assets.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");
 pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");

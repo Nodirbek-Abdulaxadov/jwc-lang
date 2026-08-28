@@ -3,6 +3,59 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.939] — the cookie that carried none of its attributes — 2026-08-28
+
+A security pass, measured against a running server rather than read off
+the docs. Two things were badly wrong, one was a hole the compiler should
+have refused, and one whole class of header was simply absent.
+
+**`cookie(name, value, opts)` threw the options away.** routing.md §6.2
+has documented `{ http_only: true, max_age: 3600 }` since 1.0, and the
+interpreter evaluated that record and dropped it: every cookie was
+`name=value; Path=/`. No `HttpOnly`, so any script on the page could read
+a session; no `SameSite`, so the browser's own default was the only thing
+between the site and CSRF; no `Secure`. An author who read the page and
+wrote the safe thing got the unsafe cookie anyway, with nothing said.
+
+`jwc build` meanwhile refused the program outright — "native build does
+not cover `cookie(...)` yet" — so a service that sets a cookie could not
+be built at all; and the native path that would have run put `Set-Cookie`
+into a header **map**, where a second cookie overwrites the first.
+
+All of it now runs through `src/cookie_core.rs.in`, included by the
+interpreter and pasted into the generated crate. Defaults are `HttpOnly`
+and `SameSite=Lax`; `http_only: false` is the opt-out. A name or value
+that would split the response is a named fault with the cookie in the log
+rather than the opaque 500 hyper used to produce. Unknown attribute is
+`E0737`, a bad `same_site` is `E0738`, and `same_site: "None"` without
+`secure: true` is `E0739` — a cookie the browser silently refuses to
+store, which is the one failure no layer would otherwise report.
+
+**No route response carried a security header.** Measured: `content-type`,
+`x-request-id`, `content-length`, `date`. A `static` mount sent `nosniff`;
+a route did not. `server { headers { … } }` now sets six, three on by
+default (`nosniff`, `X-Frame-Options: DENY`,
+`Referrer-Policy: strict-origin-when-cross-origin`) and three opt-in
+(HSTS, CSP, Permissions-Policy) because a wrong value there is worse than
+none — an HSTS max-age sent by mistake cannot be withdrawn. They go on
+every answer, including the ones no builder made: a 413 refused before the
+chain, a preflight, a 404, a fault. A header the program set itself wins.
+
+**`origins = ["*"]` with `credentials = true` is now `E1207`.** A browser
+refuses the literal pair, but a server that answers `*` by *reflecting*
+the caller's origin satisfies the browser and defeats the check — and
+reflecting is what `jwc serve` did. Measured: `Origin: https://evil.example`
+came back allowed, with credentials, and `jwc check` said nothing. The
+native binary already refused the same pair at boot, so the two backends
+disagreed about whether the program could exist.
+
+What held up, tested by attacking a live server rather than by reading:
+SQL injection through a typed `where`, through `raw()`, through a path
+parameter and through a validated body field — tautology, statement
+stacking and `DROP TABLE` all stored or matched as literal text, the table
+intact, and the path parameter refused with a 400 before Postgres saw it.
+`max_body_bytes` refused a 4 MB body with 413.
+
 ## [0.9.938] — the language on one page — 2026-08-28
 
 `docs/docs/reference/language.md`: the whole language, in the order a
