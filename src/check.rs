@@ -968,6 +968,39 @@ impl<'a> Checker<'a> {
                         "middleware.md §5.3",
                     );
                 }
+                // middleware.md §4.2 lists three ways a middleware
+                // completes, and a bare `return;` is none of them. It
+                // stops the chain and answers **204**, which is a real
+                // response nobody wrote.
+                //
+                // Measured: `middleware RequireAuth { if (…) { return; } }`
+                // answered `204 No Content` to an unauthenticated caller,
+                // with `jwc check` reporting nothing. Two mistakes end
+                // here and neither is visible in the source. An author who
+                // meant "reject" gets a 204 instead of a 401 — the handler
+                // does not run, so it is not a hole, but the client is
+                // told the wrong thing. An author who meant "I am done,
+                // carry on" — which is what a bare `return` does in every
+                // language where middleware is a function — silently
+                // switches the endpoint off: the route body never runs and
+                // every caller gets 204.
+                //
+                // So it is an error rather than a warning. Both readings
+                // are writable, and the fix is one word: `noContent()` for
+                // the response, `throw` for the rejection, and deleting
+                // the `return` for the third.
+                if self.body == BodyKind::Middleware && value.is_none() {
+                    self.err_note(
+                        *span,
+                        "E0812",
+                        "bare `return;` in a middleware",
+                        "it stops the chain and answers 204. Write \
+                         `return noContent();` if that is what you meant, \
+                         `throw Unauthorized(\"…\")` to reject, or delete \
+                         the `return` to let the chain continue",
+                        "middleware.md §4.2",
+                    );
+                }
                 // routing.md §9.2 — the HTTP response for a socket was the
                 // 101 that got the connection here. A handler that returned
                 // one would build a response nothing sends, and the frame

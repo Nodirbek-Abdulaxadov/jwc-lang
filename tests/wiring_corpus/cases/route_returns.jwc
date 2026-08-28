@@ -62,3 +62,27 @@ middleware Redirects {
         return redirect(301, "/notes");
     }
 }
+
+-- middleware.md §4.2 — the fourth outcome, which the section does not
+-- list. A bare `return;` stops the chain and answers 204, so an author who
+-- meant "reject" sends the wrong status and one who meant "I am done,
+-- carry on" switches the endpoint off entirely.
+middleware BareReturn {
+    if (request.header("x-quiet") != null) {
+        return;                                -- expect: E0812
+    }
+}
+
+-- The same statement in an `after` block is how a block ends, and stays
+-- legal: an `after` has no response to produce (§5.3, E0810).
+middleware EndsItsAfter {
+    after {
+        if (response.status() == 204) {
+            return;
+        }
+        insert into App.s.Notes {
+            org_id = 1,
+            body = request.route()
+        } buffered;
+    }
+}

@@ -95,6 +95,21 @@ responses: a redirect, a `304`, a `202`. Errors use `throw` (errors §2.2,
 E14). A middleware that `return`s a 4xx/5xx builder is `W0801` pointing at
 the `throw` equivalent.
 
+A **bare** `return;` is `E0812`. It is none of the three outcomes: it stops
+the chain and answers `204`, which is a response nobody wrote. Both ways of
+arriving at it are mistakes and neither is visible in the source —
+`middleware RequireAuth { if (…) { return; } }` answered `204 No Content`
+to an unauthenticated caller instead of a `401`, and an author who wrote it
+meaning "I am done, carry on" — what a bare `return` does in every language
+where middleware is a function — switched the endpoint off, because the
+route body never ran and every caller got a `204`. The fix is one word:
+`return noContent();` for the response, `throw` for the rejection, and
+deleting the `return` for the third reading.
+
+A bare `return;` inside an `after` block (§5.3) or a socket handler
+(routing §9.2) is a different statement in a different body and stays
+legal — those bodies have no response to produce.
+
 ### 4.3 `after` blocks run in reverse
 
 Every middleware that **started** — including the one that short-circuited —
@@ -233,6 +248,7 @@ route and print this table.
 | `E0805` | `uses` names something that is not a declared middleware |
 | `E0810` | `return <expr>` inside `after` |
 | `E0811` | `after` block can raise |
+| `E0812` | bare `return;` in a middleware — it answers 204 |
 | `E0820` | `context.k` is not provided on every path |
 | `E0821` | `context.k = …` without a `provides` declaration |
 | `W0801` | middleware returns an error response instead of throwing |

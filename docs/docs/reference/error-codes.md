@@ -208,6 +208,7 @@ the same extraction, so neither can drift from it.
 | `E0805` | `uses` names something that is not a declared middleware | `middleware.md` |
 | `E0810` | `return <expr>` inside `after` | `middleware.md` |
 | `E0811` | `after` block can raise | `middleware.md` |
+| `E0812` | bare `return;` in a middleware — it answers 204 | `middleware.md` |
 | `E0813` | `break` or `continue` outside a `for` loop | `errors.md` |
 | `E0814` | `return <value>` inside a socket handler | `routing.md` |
 | `E0820` | `context.k` is not provided on every path | `middleware.md` |

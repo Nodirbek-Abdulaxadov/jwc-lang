@@ -1258,6 +1258,11 @@ async fn handle_inner(program: Arc<Program>, incoming: Incoming) -> Response {
                 outcome = Some(as_response(v));
                 break;
             }
+            // A bare `return;` is `E0812` since 0.9.942, so a checked
+            // program cannot reach this. It stays because the answer has
+            // to be *some* response, and 204 is the one the language has
+            // sent since the outcome existed — changing it here would put
+            // a second, silent rule behind the diagnostic.
             Ok(Flow::ReturnVoid) => {
                 outcome = Some(Response::empty(204));
                 break;

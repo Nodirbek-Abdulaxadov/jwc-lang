@@ -3,7 +3,7 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [0.9.942] — a `static` mount is not behind a catch-all — 2026-08-28
+## [0.9.942] — a mount is not behind a catch-all, and `return;` is not an outcome — 2026-08-28
 
 ### Fixed
 
@@ -24,6 +24,18 @@ All notable changes to JWC are documented here. This project adheres to
   reaches `/{code}` — and a `POST` a route declares is the route's, not
   the mount's 405. Both backends take the same `only_hits` flag through
   the same lookup, so a native binary cannot keep the old order.
+
+- **A bare `return;` in a middleware answered 204, silently.**
+  middleware.md §4.2 lists three ways a middleware completes and this is
+  none of them. Measured: `middleware RequireAuth { if (…) { return; } }`
+  answered `204 No Content` to an unauthenticated caller — not a 401 —
+  with `jwc check` reporting nothing. Two mistakes end there and neither
+  shows in the source: an author who meant "reject" sends the wrong
+  status, and one who meant "I am done, carry on" — what a bare `return`
+  does in every language where middleware is a function — switches the
+  endpoint off, because the route body never runs. Now `E0812`, naming
+  all three fixes. A bare `return;` in an `after` block or a socket
+  handler is a different body and stays legal.
 
 ### Changed
 

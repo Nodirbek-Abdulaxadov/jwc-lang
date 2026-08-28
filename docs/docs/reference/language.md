@@ -734,8 +734,10 @@ is `W0801`: `throw Unauthorized(…)` becomes a 401 in one place, and the
 error handler is where the shape of an error response is decided.
 
 Falling off the end is how a middleware lets the chain continue. A bare
-`return;` is **not** that — in the request phase it answers 204 and stops,
-which is a real trap: write the guard as an `if` around the work.
+`return;` is **not** that — it stops the chain and answers 204 — so since
+0.9.942 it is `E0812`. Write `return noContent();` if you meant the
+response, `throw` if you meant to reject, and an `if` around the work if
+you meant "carry on".
 
 An `after { … }` block runs on the way out, in reverse order, for **every**
 outcome. It sees `response.status()` and the duration, may add headers, and
@@ -1147,8 +1149,8 @@ somewhere else entirely.
 **Returning an error response from a middleware.** `throw` instead; the
 error model turns it into a status in one place.
 
-**A bare `return;` in a middleware's request phase.** That answers 204 and
-stops. Write the guard as an `if` around the work.
+**A bare `return;` in a middleware's request phase.** It answered 204 and
+stopped the chain, silently. `E0812` since 0.9.942.
 
 **Forgetting the binder.** `select O from App.s.T` — the `O` is required.
 
