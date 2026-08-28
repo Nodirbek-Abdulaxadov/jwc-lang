@@ -641,8 +641,27 @@ return redirect(302, $url);
 
 `with { … }` adds headers; a key the builder already set is *replaced*,
 not appended, because a repeated `Content-Type` is a malformed message that
-different clients resolve differently. `cookie(name, value, opts)` chains
-and may repeat.
+different clients resolve differently.
+
+`cookie(name, value, opts)` chains and may repeat. A cookie is `HttpOnly`
+and `SameSite=Lax` unless the author says otherwise, and `http_only: false`
+is the opt-out — a default that is wrong is a defect in every program that
+did not think about it.
+
+Every response also carries `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY` and `Referrer-Policy`; HSTS, a CSP and a
+Permissions-Policy are available and off until asked for:
+
+```jwc no-compile
+server {
+    headers {
+        hsts                    = "max-age=31536000; includeSubDomains";
+        content_security_policy = "default-src 'none'";
+    }
+}
+```
+
+An empty string turns one off. A header the route set itself wins.
 
 ### 9.2 Static files
 
@@ -927,7 +946,13 @@ Every built-in is namespaced except the coercions. The generated list is
 
 **Text** — `string.of`, `len`, `lower`, `upper`, `trim`, `replace`,
 `slice`, `split`, `split_csv`, `join`, `contains`, `starts_with`,
-`ends_with`, `strip_prefix`, `pad_left`, `pad_right`, `matches`.
+`ends_with`, `strip_prefix`, `pad_left`, `pad_right`, `matches`,
+`escape_html`, `escape_url`.
+
+`html(body)` sends its argument verbatim — that is what it is for — so
+`string.escape_html` is what makes a value safe to put in one. Nothing
+escapes automatically: there is no template engine here, and a builder that
+escaped on its own could not emit markup on purpose.
 
 **Arrays** — `array.len`, `is_empty`, `first`, `last`, `contains`,
 `pluck`, `sum`, `sum_product`, `min`, `max`, `sorted`. The field-taking

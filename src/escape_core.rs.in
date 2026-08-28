@@ -1,0 +1,140 @@
+// Escaping, for the three places a value is pasted into something that has
+// its own syntax — builtins.md §4a.
+//
+// `include!`d by `src/exec_call.rs` and pasted into the crate `jwc build`
+// generates, so an escaped string is the same string from either backend.
+//
+// ## Why these exist at all
+//
+// `html(body)` sends its argument verbatim as `text/html`, which is
+// correct — it is the one builder whose whole job is "these bytes, that
+// media type". What was missing was any way to make a value safe to put
+// *in* it. Measured: a route returning `html("<p>" + $v + "</p>")` with
+// `v=<script>alert(1)</script>` answered exactly that, as `text/html`.
+//
+// Every other language has an escaper. JWC did not, which left an author
+// building a page with a choice between writing one out of
+// `string.replace` chains — where getting the `&` ordering wrong silently
+// produces a hole — and not escaping at all.
+//
+// These are **not** a template engine and are not automatic: JWC has no
+// templates, and a builder that escaped on its own would be one that
+// cannot emit a `<b>` on purpose. They are the safe primitive, named so a
+// reviewer can see it is there.
+
+/// Text that can be pasted into HTML element content or a quoted
+/// attribute.
+///
+/// Five characters, and all five are needed. `&` must be first or it
+/// double-escapes the escapes that follow it. `<` and `>` close and open
+/// tags. `"` and `'` end an attribute — both, because an author writing
+/// `<a href='…'>` is as common as `"…"`, and an escaper that covered one
+/// quote style would be a hole that depends on the surrounding markup.
+///
+/// Not URL-safe and not JS-safe: a value inside `href="javascript:…"` or
+/// inside a `<script>` block is a different problem with a different
+/// answer, and this function would make it *look* handled.
+pub fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Text that can be pasted into a URL path segment or a query value —
+/// RFC 3986 percent-encoding.
+///
+/// The unreserved set (`A-Z a-z 0-9 - . _ ~`) passes through; everything
+/// else, including every non-ASCII byte of the UTF-8 encoding, becomes
+/// `%XX`. Space becomes `%20` and not `+`: `+` means space only in a
+/// `application/x-www-form-urlencoded` body, and a path that used it would
+/// be read back with a literal plus.
+pub fn escape_url(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len() + 16);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0xf) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod escape_core_tests {
+    use super::*;
+
+    #[test]
+    fn the_payload_that_used_to_come_straight_back() {
+        assert_eq!(
+            escape_html("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;"
+        );
+    }
+
+    /// `&` first, or the escapes escape each other.
+    #[test]
+    fn an_ampersand_is_escaped_once() {
+        assert_eq!(escape_html("&lt;"), "&amp;lt;");
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+    }
+
+    /// Both quote styles, because which one closes the attribute is a
+    /// property of the markup and not of the value.
+    #[test]
+    fn both_quotes_are_escaped() {
+        assert_eq!(
+            escape_html(r#"" onmouseover="alert(1)"#),
+            "&quot; onmouseover=&quot;alert(1)"
+        );
+        assert_eq!(
+            escape_html("' onmouseover='alert(1)"),
+            "&#39; onmouseover=&#39;alert(1)"
+        );
+    }
+
+    #[test]
+    fn ordinary_text_is_left_alone() {
+        assert_eq!(escape_html("salom, dunyo"), "salom, dunyo");
+        assert!(escape_html("o'zbekcha").contains("&#39;"));
+    }
+
+    #[test]
+    fn a_url_segment_keeps_only_the_unreserved_set() {
+        assert_eq!(escape_url("a b"), "a%20b");
+        assert_eq!(escape_url("a+b"), "a%2Bb");
+        assert_eq!(escape_url("../etc/passwd"), "..%2Fetc%2Fpasswd");
+        assert_eq!(escape_url("?q=1&r=2"), "%3Fq%3D1%26r%3D2");
+        assert_eq!(escape_url("aZ0-._~"), "aZ0-._~");
+    }
+
+    /// Every byte of the UTF-8 encoding, not the code point.
+    #[test]
+    fn non_ascii_is_percent_encoded_bytewise() {
+        assert_eq!(escape_url("ø"), "%C3%B8");
+        assert_eq!(escape_url("салом"), "%D1%81%D0%B0%D0%BB%D0%BE%D0%BC");
+    }
+
+    /// A round trip through the escaper must not change what the value
+    /// *is*, only how it is written — so escaping twice is visible rather
+    /// than silently idempotent.
+    #[test]
+    fn escaping_is_not_idempotent_and_that_is_the_point() {
+        assert_eq!(escape_html(&escape_html("<b>")), "&amp;lt;b&amp;gt;");
+    }
+}

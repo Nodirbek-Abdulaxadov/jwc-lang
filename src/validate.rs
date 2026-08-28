@@ -165,7 +165,7 @@ fn check_rules(
             "min" => numeric_value(value).is_none_or(|n| bound(args).is_none_or(|l| n >= l)),
             "max" => numeric_value(value).is_none_or(|n| bound(args).is_none_or(|l| n <= l)),
             "pattern" => match (args.first().and_then(literal_str), value.as_text()) {
-                (Some(p), Some(s)) => regex::Regex::new(&p).map(|r| r.is_match(s)).unwrap_or(true),
+                (Some(p), Some(s)) => jwc_regex_is_match(&p, s),
                 _ => true,
             },
             "transient" => true,
@@ -238,3 +238,8 @@ fn literal_str(e: &crate::ast::Expr) -> Option<String> {
         _ => None,
     }
 }
+
+// A compiled regex is kept rather than rebuilt per request. The cache is a
+// file the native backend pastes into the crate it generates, so both
+// backends compile a pattern the same number of times.
+include!("regex_cache_core.rs.in");

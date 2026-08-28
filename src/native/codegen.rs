@@ -194,6 +194,8 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "string.pad_left" => "jwc_b_v1_string_pad_left",
         "string.pad_right" => "jwc_b_v1_string_pad_right",
         "string.matches" => "jwc_b_v1_string_matches",
+        "string.escape_html" => "jwc_b_v1_string_escape_html",
+        "string.escape_url" => "jwc_b_v1_string_escape_url",
         "string.split_csv" => "jwc_b_v1_string_split_csv",
         "string.strip_prefix" => "jwc_b_v1_string_strip_prefix",
 
@@ -906,25 +908,17 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     }
     let needs_regex =
         (uses_regex && ctx.uses_validation) || ctx.used.contains("jwc_b_v1_string_matches");
-    out.push_str(if needs_regex {
-        "fn jwc_regex_is_match(pattern: &str, s: &str) -> bool {\n\
-         \x20   // A rule whose regex does not compile passes rather than\n\
-         \x20   // failing every request — `validate.rs` makes the same\n\
-         \x20   // choice, and the checker is where a bad pattern should\n\
-         \x20   // have been caught.\n\
-         \x20   regex::Regex::new(pattern).map(|r: regex::Regex| r.is_match(s)).unwrap_or(true)\n}\n"
+    // The two matchers and the cache behind them come from
+    // `regex_cache_core.rs.in`, the same text `src/validate.rs` includes —
+    // so a `pattern()` is compiled once here for the same reason it is
+    // compiled once there. A crate that needs no regex at all gets the
+    // stubs instead, and no `regex` dependency.
+    if needs_regex {
+        out.push_str(super::PRELUDE_REGEX_CACHE_CORE);
     } else {
-        "fn jwc_regex_is_match(_pattern: &str, _s: &str) -> bool { true }\n"
-    });
-    // `string.matches` is the caller's own argument, so a pattern that does
-    // not compile is `false` — where a `pattern()` rule the checker accepted
-    // passes rather than failing every request.
-    out.push_str(if needs_regex {
-        "fn jwc_regex_is_match_strict(pattern: &str, s: &str) -> bool {\n\
-         \x20   regex::Regex::new(pattern).map(|r: regex::Regex| r.is_match(s)).unwrap_or(false)\n}\n"
-    } else {
-        "fn jwc_regex_is_match_strict(_pattern: &str, _s: &str) -> bool { false }\n"
-    });
+        out.push_str("fn jwc_regex_is_match(_pattern: &str, _s: &str) -> bool { true }\n");
+        out.push_str("fn jwc_regex_is_match_strict(_pattern: &str, _s: &str) -> bool { false }\n");
+    }
     out.push_str(if needs_redis {
         "fn jwc_redis_metrics_hook() -> String { jwc_redis_metrics() }\n"
     } else {
@@ -934,6 +928,36 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         "const JWC_ROUTE_COUNT: usize = {};\n",
         routes.len()
     ));
+    // config.md §3.4 — the program's own `cors { }` block, baked so the
+    // binary enforces the policy the source wrote. Before this the native
+    // runtime read only `JWC_CORS_*`, so a declared block reached
+    // `jwc serve` and never reached the artefact anyone deployed.
+    //
+    // `None` keeps the environment in charge, which is what a program with
+    // no block has always meant here.
+    match &server.cors {
+        Some(c) => {
+            let origins: Vec<String> = c.origins.iter().map(|o| format!("{o:?}")).collect();
+            let methods: Vec<String> = c.methods.iter().map(|m| format!("{m:?}")).collect();
+            let headers: Vec<String> = c.headers.iter().map(|h| format!("{h:?}")).collect();
+            let max_age = c.max_age.map(|d| d.as_secs()).unwrap_or(86_400);
+            out.push_str(&format!(
+                "\n/// The program's `cors {{ }}` block (config.md §3.4):\n\
+                 /// `(origins, methods, headers, credentials, max_age_secs)`.\n\
+                 static JWC_CORS_DECLARED: Option<(&[&str], &[&str], &[&str], bool, u64)> =\n\
+                 \x20   Some((&[{}], &[{}], &[{}], {}, {}));\n",
+                origins.join(", "),
+                methods.join(", "),
+                headers.join(", "),
+                c.credentials,
+                max_age,
+            ));
+        }
+        None => out.push_str(
+            "\nstatic JWC_CORS_DECLARED: Option<(&[&str], &[&str], &[&str], bool, u64)> = None;\n",
+        ),
+    }
+
     // config.md §3.7 — the security headers, computed here by
     // `SecurityHeaders::to_headers`, the same function `jwc serve` calls.
     // Baked rather than recomputed: the values come from the program's own
@@ -1046,6 +1070,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
     // Unconditional for the same reason: `jwc_b_v1_cookie` lives in the v1
     // prelude and calls into it.
     source.push_str(super::PRELUDE_COOKIE_CORE);
+    source.push_str(super::PRELUDE_ESCAPE_CORE);
     source.push_str(super::PRELUDE_V1);
     if needs_db {
         source.push_str(super::PRELUDE_DB);

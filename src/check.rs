@@ -2734,6 +2734,14 @@ impl<'a> Checker<'a> {
                 arity(self, 2);
                 Ty::text()
             }
+            // builtins.md §4a — the safe primitive for pasting a value
+            // into markup or a URL. Not automatic: `html(body)` sends its
+            // argument verbatim on purpose, and a builder that escaped on
+            // its own could not emit a `<b>` deliberately.
+            "string.escape_html" | "string.escape_url" => {
+                arity(self, 1);
+                Ty::text()
+            }
 
             // --- array (builtins.md §5) — the lambda replacement
             "array.len" => {

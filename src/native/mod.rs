@@ -74,6 +74,14 @@ pub const PRELUDE_INTERVAL_CORE: &str = include_str!("../interval_core.rs.in");
 /// backend answered. Before 0.9.939 the interpreter dropped the attributes
 /// and this backend refused to build a program that set a cookie at all.
 pub const PRELUDE_COOKIE_CORE: &str = include_str!("../cookie_core.rs.in");
+/// `string.escape_html` / `string.escape_url` — the same text
+/// `src/exec_call.rs` includes.
+pub const PRELUDE_ESCAPE_CORE: &str = include_str!("../escape_core.rs.in");
+/// `pattern()` and `string.matches`, with the compiled regexes kept — the
+/// same text `src/validate.rs` includes. Pasted only when the program
+/// reaches for a regex at all, so a crate that does not carries neither
+/// the cache nor the `regex` dependency.
+pub const PRELUDE_REGEX_CACHE_CORE: &str = include_str!("../regex_cache_core.rs.in");
 pub const PRELUDE_ASSETS: &str = include_str!("prelude/assets.rs.in");
 pub const PRELUDE_DB: &str = include_str!("prelude/db.rs.in");
 pub const PRELUDE_CRYPTO: &str = include_str!("prelude/crypto.rs.in");

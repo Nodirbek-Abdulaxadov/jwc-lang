@@ -3,6 +3,56 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.940] — the rest of the security pass — 2026-08-28
+
+**`jwc build` dropped the program's `cors { }` block.** The native runtime
+read `JWC_CORS_*` and nothing else, so a policy written in the source was
+honoured by `jwc serve` and absent from the artefact anyone deploys.
+Measured: the interpreter allowed the one declared origin and refused the
+rest; the binary sent no CORS header at all. It failed closed, which is the
+better direction, but it also meant an operator "fixing" the missing header
+with `JWC_CORS_ORIGINS=*` would widen the policy past anything the program
+said. Codegen bakes the block now, and the environment configures only what
+the source left unsaid. Verified: both backends allow the same origin and
+refuse the same one, and `JWC_CORS_ORIGINS=*` no longer reaches a program
+that declared a block.
+
+**`string.escape_html` and `string.escape_url`.** `html(body)` sends its
+argument verbatim, which is right, and there was no way to make a value
+safe to put in one — no escaper, no template engine, nothing. An author had
+the choice between hand-rolling one out of `string.replace` chains, where
+getting the `&` ordering wrong is a silent hole, and not escaping. Both
+quote styles are covered, because which one closes an attribute is a
+property of the markup and not of the value.
+
+**`JWC_LOG_SQL=1` printed every bound parameter.** Switching the SQL log on
+in production wrote passwords, session tokens and personal data into a file
+that is collected and kept. A bind is positional and has no name, so it
+cannot be filtered by name the way a framework filters a params hash. `=1`
+now prints each parameter's **length**; `=values` prints the values and
+warns at the first statement that it is doing so.
+
+**A `pattern()` was compiled on every request**, on both backends, once per
+patterned field — regex compilation being far dearer than matching. Not
+ReDoS: the `regex` crate has no backtracking. Just waste that scales with
+request rate, which is a shape an attacker picks. Compiled patterns are
+kept now, behind a ceiling, because `string.matches` takes its pattern from
+an argument a program may build from a request.
+
+**security.md said CSRF was out of scope "because the API is
+token-authenticated, not cookie-authenticated".** The language has a cookie
+builder, so that was false, and a claim in a threat model that the language
+contradicts is worse than no claim. §6.4 now says what the language does —
+`HttpOnly` and `SameSite=Lax` by default, `same_site: "None"` requiring
+`secure`, `X-Frame-Options: DENY` — and what it does not: no token
+facility, no double-submit helper, no automatic `Origin` check. A gap,
+stated as one.
+
+Still open and reported rather than guessed at: `redirect(302, $url)`
+validates nothing, which is the product for a shortener and a hole for a
+login flow, and the language cannot tell them apart without the author
+saying which.
+
 ## [0.9.939] — the cookie that carried none of its attributes — 2026-08-28
 
 A security pass, measured against a running server rather than read off

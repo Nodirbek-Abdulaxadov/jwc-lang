@@ -93,7 +93,7 @@ does not have, or miss one it does.
 | `JWC_BIND_HOST` | — | Native builds only: override the listen address (`server { bind }` in the source). |
 | `JWC_DEV` | `false` | Development mode: `debug.dump` prints. Never in production — it prints request data. |
 | `JWC_HTTP_TIMEOUT_SECS` | `10` | Whole-request ceiling for outbound `http.*` calls. |
-| `JWC_LOG_SQL` | `false` | Print every SQL statement the program issues, with its parameters. |
+| `JWC_LOG_SQL` | — | `1` prints every SQL statement with its timing, row count and each parameter's length; `values` also prints the bound values, which include anything secret the program binds. |
 | `JWC_OTLP_ENDPOINT` | — | OTLP collector URL; empty disables tracing export. |
 | `JWC_SERVICE_NAME` | `jwc` | `service.name` on exported traces. |
 | `JWC_REGISTRY` | — | Package registry base URL; empty uses the default registry. |

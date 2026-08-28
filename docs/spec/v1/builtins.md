@@ -103,6 +103,37 @@ stripped the literal from the middle of a token.
 
 ---
 
+## 4a. Escaping
+
+| | |
+|---|---|
+| `string.escape_html(s)` | `text` — `&`, `<`, `>`, `"`, `'` |
+| `string.escape_url(s)` | `text` — RFC 3986 percent-encoding of everything outside `A-Za-z0-9-._~` |
+
+4a.1 Neither is applied automatically. `html(body)` and `content(mime, body)`
+send their argument verbatim, which is what they are for, and a builder that
+escaped on its own could not emit markup on purpose. There is no template
+engine in this language, so there is no layer that could escape by default —
+which is exactly why the primitive has to exist and has to be named.
+
+4a.2 `escape_html` covers **both** quote styles. Which one closes an
+attribute is a property of the surrounding markup and not of the value, and
+an escaper that handled one of them would be a hole that depends on how the
+page happens to be written. `&` is escaped first, or the escapes escape each
+other.
+
+4a.3 `escape_html` is for element content and quoted attribute values. It is
+**not** enough inside `href="javascript:…"`, inside a `<script>` block, or
+in a CSS or URL context — those are different grammars with different
+answers, and running this one over them would make the value *look*
+handled.
+
+4a.4 `escape_url` writes a space as `%20`, not `+`. `+` means space only in
+an `application/x-www-form-urlencoded` body, and a path that used it reads
+back with a literal plus.
+
+---
+
 ## 5. `array.*` — the lambda replacement (#22)
 
 Field names are passed as **string literals**, checked against the element

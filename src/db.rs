@@ -122,30 +122,72 @@ async fn run_on(
 /// path would cost more than the query on a cached plan.
 fn log_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("JWC_LOG_SQL").as_deref() == Ok("1"))
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("JWC_LOG_SQL").as_deref(),
+            Ok("1") | Ok("values")
+        )
+    })
 }
 
-/// One line per statement: duration, row count, the statement, then every
+/// `JWC_LOG_SQL=values` — the bound values themselves, not their shapes.
+///
+/// Off by default, and that is a change: `=1` used to print every bound
+/// parameter, so switching on the SQL log in production wrote passwords,
+/// session tokens and every piece of personal data the program had touched
+/// into a file that is collected, shipped and kept. There is no way to
+/// redact them by name the way a framework filters a params hash — a bind
+/// is positional and has no name — so the only honest default is not to
+/// print them.
+///
+/// `=1` still prints the statement, the timing, the row count and each
+/// parameter's **type and length**, which is what a slow query needs. When
+/// reproducing one genuinely needs the values, `=values` prints them and
+/// says so at the first statement.
+fn log_values_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("JWC_LOG_SQL").as_deref() == Ok("values");
+        if on {
+            eprintln!(
+                "[jwc] JWC_LOG_SQL=values — bound parameters are being written to the log, \
+                 including anything secret the program binds. Use JWC_LOG_SQL=1 outside \
+                 development."
+            );
+        }
+        on
+    })
+}
+
+/// One line per statement: duration, row count, the statement, then each
 /// bound parameter (tooling.md §2.1).
 ///
 /// All four, because each answers a different question and three of them are
 /// useless alone — a slow statement with no parameters cannot be reproduced,
 /// and a statement with no row count cannot be told from one that matched
 /// nothing.
+///
+/// The parameters are their **shapes** unless `JWC_LOG_SQL=values`. See
+/// `log_values_enabled`.
 fn log_sql(sql: &str, binds: &[Option<String>], started: std::time::Instant, rows: usize) {
     if !log_enabled() {
         return;
     }
     let ms = started.elapsed().as_secs_f64() * 1000.0;
     let flat = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    let values = log_values_enabled();
     let params = binds
         .iter()
         .enumerate()
         .map(|(i, b)| match b {
-            // `null` never as an empty string: the difference between the
-            // two is the whole subject of `==?` (queries.md §4.4).
+            // `null` never as an empty string, and never redacted: the
+            // difference between the two is the whole subject of `==?`
+            // (queries.md §4.4), and it is not a secret.
             None => format!("${}=null", i + 1),
-            Some(v) => format!("${}='{}'", i + 1, v.replace('\'', "''")),
+            Some(v) if values => format!("${}='{}'", i + 1, v.replace('\'', "''")),
+            // The length is what a slow query needs — a bind that is 2 MB
+            // of text explains a plan that a redacted value does not.
+            Some(v) => format!("${}=<{} chars>", i + 1, v.chars().count()),
         })
         .collect::<Vec<_>>()
         .join(" ");

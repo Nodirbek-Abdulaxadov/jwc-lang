@@ -60,6 +60,31 @@ where created_at > date.now() - date.hours(24)
 `string.replace`, which also strips the literal from the middle of a
 token.
 
+## Escaping
+
+| | |
+|---|---|
+| `string.escape_html(s)` | `&`, `<`, `>`, `"` and `'` |
+| `string.escape_url(s)` | percent-encoding; everything outside `A-Za-z0-9-._~` |
+
+Neither is automatic. `html(body)` and `content(mime, body)` send their
+argument verbatim — that is what they are for — and a builder that escaped
+on its own could not emit a `<b>` on purpose. There is no template engine
+here, so there is no layer that could escape by default, which is exactly
+why the primitive has to exist:
+
+```jwc no-compile
+return html("<p>" + string.escape_html($comment) + "</p>");
+```
+
+Both quote styles are escaped, because which one closes an attribute is a
+property of the markup and not of the value.
+
+`escape_html` is for element content and quoted attribute values. It is
+**not** enough inside `href="javascript:…"` or inside a `<script>` block —
+different grammars, different answers, and running this one over them would
+make the value look handled.
+
 ## Arrays
 
 `array.len`, `array.is_empty`, `array.first`, `array.last`,
@@ -129,7 +154,7 @@ site-wide "your credentials are invalid".
 `json`, `created`, `accepted`, `noContent`, `badRequest`, `unauthorized`,
 `forbidden`, `notFound`, `conflict`, `tooManyRequests`, `internalError`,
 `statusCode`, `redirect`, `content`, and the suffixes `with { … }` and
-`cookie(name, value)`.
+`cookie(name, value, opts)`.
 
 From inside an `after` block: `response.status()`,
 `response.duration_ms()`, `response.duration_us()`,

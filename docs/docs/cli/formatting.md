@@ -123,7 +123,7 @@ the file alone and says which:
 ```
 
 Move the comment above the enclosing statement and the file formats.
-Until 0.9.939 it was deleted and the run reported success.
+Until 0.9.940 it was deleted and the run reported success.
 
 ## In a pre-commit hook
 

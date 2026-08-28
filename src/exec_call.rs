@@ -679,10 +679,11 @@ impl<'a> Vm<'a> {
                 let len = n(2).max(0) as usize;
                 Value::Text(base.chars().skip(from).take(len).collect())
             }
-            "string.matches" => match regex::Regex::new(&s(1)) {
-                Ok(r) => Value::Bool(r.is_match(&s(0))),
-                Err(_) => Value::Bool(false),
-            },
+            "string.escape_html" => Value::Text(escape_html(&s(0))),
+            "string.escape_url" => Value::Text(escape_url(&s(0))),
+            "string.matches" => {
+                Value::Bool(crate::validate::jwc_regex_is_match_strict(&s(1), &s(0)))
+            }
             // The correct spelling of the sample's old `string.replace(h,
             // "Bearer ", "")`, which also stripped the literal from the
             // middle of a token.
@@ -1067,3 +1068,8 @@ mod raw_tests {
         );
     }
 }
+
+// The escapers are a file the native backend pastes into the crate it
+// generates, so an escaped string is the same string from either backend
+// (builtins.md §4a).
+include!("escape_core.rs.in");

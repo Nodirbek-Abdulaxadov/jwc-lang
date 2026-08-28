@@ -2860,6 +2860,43 @@ fn jwc_cors_norm(origin: &str) -> String {
 }
 
 impl JwcCors {
+    /// The program's `cors { }` block if it declared one, else the
+    /// environment.
+    ///
+    /// The source is the policy. Until 0.9.940 this backend read *only*
+    /// the environment, so a `cors { }` block was honoured by `jwc serve`
+    /// and dropped entirely by `jwc build` — measured: the interpreter
+    /// allowed the one declared origin and refused the rest, and the
+    /// binary sent no CORS header at all. Which failed closed, but it also
+    /// meant the deployed artefact did not enforce the policy the source
+    /// wrote, and that an operator "fixing" the missing header with
+    /// `JWC_CORS_ORIGINS=*` would have widened it past anything the
+    /// program said.
+    ///
+    /// So the environment now configures only what the source left unsaid.
+    /// A program with no `cors { }` block keeps the old behaviour, which is
+    /// what a deployment that has been setting those variables expects.
+    fn resolve() -> Self {
+        match JWC_CORS_DECLARED {
+            Some(c) => Self {
+                enabled: true,
+                any_origin: c.0.iter().any(|o| *o == "*"),
+                origins: c
+                    .0
+                    .iter()
+                    .filter(|o| **o != "*")
+                    .map(|o| jwc_cors_norm(o))
+                    .collect(),
+                methods: c.1.join(","),
+                headers: c.2.join(","),
+                expose: "x-request-id".to_string(),
+                credentials: c.3,
+                max_age: c.4.to_string(),
+            },
+            None => Self::from_env(),
+        }
+    }
+
     fn from_env() -> Self {
         let raw = jwc_cors_env("JWC_CORS_ORIGINS", "");
         let raw = raw.trim().to_string();
@@ -3001,9 +3038,10 @@ impl HttpServer {
         let mut app = axum::Router::new()
             .fallback(axum::routing::any(handle_axum_request))
             .with_state(self.router.clone());
-        // Same CORS contract as the interpreter: off unless
-        // `JWC_CORS_ORIGINS` is set, preflights answered before routing.
-        let cors = Arc::new(JwcCors::from_env());
+        // Same CORS contract as the interpreter: the program's `cors { }`
+        // block when it has one, else the environment; preflights answered
+        // before routing.
+        let cors = Arc::new(JwcCors::resolve());
         if let Err(e) = cors.validate() {
             eprintln!("[jwc] {}", e);
             std::process::exit(1);

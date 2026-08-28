@@ -39,6 +39,14 @@ compiler's output. `raw()` is the one hand-written path, its placeholders
 are counted (`E0610`), its SQL must be a literal, and `jwc explain` prints
 every occurrence with a count.
 
+2.4 `JWC_LOG_SQL=1` prints each bound parameter's **length**, not its
+value. `=values` prints the values and warns at the first statement that it
+is doing so. Until 0.9.940 `=1` printed them, so switching the SQL log on
+in production wrote passwords, session tokens and personal data into a file
+that is collected and kept. A bind is positional and has no name, so there
+is no way to filter by name the way a framework filters a params hash — the
+only honest default is not to print them.
+
 ---
 
 ## 3. Who the caller is
@@ -99,6 +107,20 @@ and `hash.hmac_verify` are constant time already.
 
 ## 6. Responses
 
+6.0 **Security headers.** Every response carries `X-Content-Type-Options:
+nosniff`, `X-Frame-Options: DENY` and
+`Referrer-Policy: strict-origin-when-cross-origin`; HSTS, a CSP and a
+Permissions-Policy are available and off until asked for (config §3.9).
+Until 0.9.940 a route response carried **none** of them and a `static`
+mount carried the first.
+
+6.0.1 `html(body)` and `content(mime, body)` send their argument verbatim,
+which is what they are for. `string.escape_html` and `string.escape_url`
+(builtins §4a) are the safe primitives for building one; they are not
+applied automatically, because a builder that escaped on its own could not
+emit markup on purpose. There is no template engine, so there is nothing
+that could escape by default.
+
 6.1 A `private` column is never in a response, and a local holding one is
 tracked so that returning it later is still refused (schema §3.1).
 
@@ -111,6 +133,38 @@ leaving it to be discovered in production.
 6.3 A fault's message never reaches the client. The response is
 `{"error": "internal_error"}` and the detail goes to the log with the
 request id.
+
+6.4 **Cookies, and what this does and does not do about CSRF.**
+
+This section used to say CSRF was out of scope because "the API is
+token-authenticated, not cookie-authenticated". That was not true of the
+language: `cookie(name, value, opts)` is a response builder (routing §6.2),
+so a program can and does set a session cookie, and a claim in a threat
+model that the language contradicts is worse than no claim.
+
+What the language does:
+
+* A cookie is `HttpOnly` and `SameSite=Lax` unless the author says
+  otherwise. `Lax` is the cross-site defence: a cookie set this way is not
+  sent on a cross-site `POST`, which is the shape a forged request takes.
+  Until 0.9.940 the attributes were documented and **discarded**, so every
+  cookie was `Path=/` and nothing else.
+* `same_site: "None"` — the setting that turns that defence off — requires
+  `secure: true` (`E0739`) and cannot be written by accident.
+* `X-Frame-Options: DENY` is on by default (config §3.9), so the
+  clickjacking route to the same end needs an explicit opt-out.
+
+What it does **not** do: there is no token facility, no double-submit
+helper, and no automatic `Origin` check on state-changing methods. A
+program that authenticates with a cookie **and** needs to defend a
+non-idempotent endpoint against a cross-site form post has to write that
+itself — the pieces are `request.header("Origin")`, `crypto.token` and
+`crypto.constant_time_eq`.
+
+That is a gap, stated as one. `SameSite=Lax` covers the common case and is
+the reason this is not urgent; it is not the same as a framework's
+antiforgery middleware, and calling it one would be the same mistake the
+old sentence made.
 
 ---
 
@@ -157,6 +211,6 @@ request, and refuses an archive entry whose path escapes its directory
 
 | | Status |
 |---|---|
-| CSRF tokens | out of scope: the API is token-authenticated, not cookie-authenticated |
+| a CSRF token facility | none is provided — see §6.4 for what is, and why |
 | a 24-hour soak | the harness runs and passes at 8 cycles / 480k requests (ROADMAP v0.29.0); the full 72-cycle run is `soak.yml`, on a runner that has the hours |
 | a third-party security review | ROADMAP v1.0.0-rc.1 |

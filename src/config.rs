@@ -314,9 +314,11 @@ pub const REGISTRY: &[EnvVar] = &[
     },
     EnvVar {
         name: "JWC_LOG_SQL",
-        parse_kind: ParseKind::Bool,
-        default: "false",
-        doc: "Print every SQL statement the program issues, with its parameters.",
+        parse_kind: ParseKind::Str,
+        default: "",
+        doc: "`1` prints every SQL statement with its timing, row count and each \
+              parameter's length; `values` also prints the bound values, which \
+              include anything secret the program binds.",
     },
     EnvVar {
         name: "JWC_OTLP_ENDPOINT",

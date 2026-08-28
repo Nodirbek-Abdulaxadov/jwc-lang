@@ -1,0 +1,150 @@
+// Compiled regexes, kept — builtins.md §4, types.md §4.2.
+//
+// `include!`d by `src/validate.rs` and pasted into the crate `jwc build`
+// generates, so both backends compile a pattern the same number of times.
+//
+// ## Why this is here
+//
+// `pattern(r"^[^@]+@[^@]+\.[^@]+$")` on a class field was compiled with
+// `Regex::new` on **every validated request**, on both backends, once per
+// patterned field. Compiling a regex is orders of magnitude dearer than
+// running one, so a class with four patterned fields paid four
+// compilations to check four short strings, on every POST.
+//
+// It is not ReDoS — the `regex` crate has no backtracking and runs in time
+// linear in the input, which is why a caller cannot choose a pattern that
+// hangs. It is straightforward waste, and it scales with request rate,
+// which is the shape an attacker can pick.
+//
+// ## The bound, and why the two callers differ
+//
+// A `pattern()` comes from the program's own source, so the set is finite
+// and small and caching every one of them is bounded by the program.
+//
+// `string.matches(s, p)` takes its pattern as an ordinary argument, and a
+// program may pass one built from a request. Caching that unbounded would
+// be a memory leak a caller fills for free — so the cache has a ceiling,
+// and past it a pattern is compiled and dropped rather than kept. The
+// ceiling is generous enough that no real program reaches it and small
+// enough that reaching it costs nothing.
+
+/// Compiled patterns, keyed by their source text.
+///
+/// A `Mutex` rather than a `RwLock`: the critical section is a hash lookup
+/// and an `Arc` clone, and every path that reaches here is about to do
+/// vastly more work than the lock costs.
+#[allow(clippy::type_complexity)]
+fn jwc_regex_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<regex::Regex>>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<regex::Regex>>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// How many distinct patterns are kept.
+///
+/// A program's own `pattern()` rules number in the tens. This is the bound
+/// on what a *caller* can add through `string.matches`.
+const JWC_REGEX_CACHE_MAX: usize = 512;
+
+/// The compiled form of `pattern`, from the cache when it is there.
+///
+/// `None` is a pattern that does not compile. The two callers disagree
+/// about what that means — a `pattern()` rule the checker accepted passes,
+/// and a caller-supplied `string.matches` fails — so this answers the fact
+/// and lets each decide.
+pub fn jwc_regex(pattern: &str) -> Option<std::sync::Arc<regex::Regex>> {
+    if let Ok(cache) = jwc_regex_cache().lock() {
+        if let Some(r) = cache.get(pattern) {
+            return Some(r.clone());
+        }
+    }
+    let compiled = std::sync::Arc::new(regex::Regex::new(pattern).ok()?);
+    if let Ok(mut cache) = jwc_regex_cache().lock() {
+        // Past the ceiling the pattern is still returned — it is only not
+        // kept. A request does not fail because the cache is full.
+        if cache.len() < JWC_REGEX_CACHE_MAX {
+            cache.insert(pattern.to_string(), compiled.clone());
+        }
+    }
+    Some(compiled)
+}
+
+/// A `pattern()` rule. A regex that does not compile **passes**: the
+/// checker is where a bad pattern should have been caught, and failing
+/// every request for it would turn a typo into an outage.
+pub fn jwc_regex_is_match(pattern: &str, s: &str) -> bool {
+    jwc_regex(pattern).is_none_or(|r| r.is_match(s))
+}
+
+/// `string.matches(s, p)`. The pattern is the caller's own argument, so one
+/// that does not compile is **false** rather than a silent pass.
+pub fn jwc_regex_is_match_strict(pattern: &str, s: &str) -> bool {
+    jwc_regex(pattern).is_some_and(|r| r.is_match(s))
+}
+
+#[cfg(test)]
+mod regex_cache_core_tests {
+    use super::*;
+
+    /// The cache is process-wide, so the test that fills it to the ceiling
+    /// and the test that checks a hit cannot run at the same time. They
+    /// take this and start from empty.
+    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(mut c) = jwc_regex_cache().lock() {
+            c.clear();
+        }
+        g
+    }
+
+    #[test]
+    fn the_same_pattern_compiles_once() {
+        let _g = exclusive();
+        let p = r"^jwc-cache-test-[0-9]+$";
+        let a = jwc_regex(p).expect("compiles");
+        let b = jwc_regex(p).expect("compiles");
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "the second call must return the cached compilation"
+        );
+    }
+
+    #[test]
+    fn the_two_callers_disagree_about_a_pattern_that_does_not_compile() {
+        let bad = "([unclosed";
+        assert!(jwc_regex(bad).is_none());
+        // A rule the checker let through passes rather than failing every
+        // request…
+        assert!(jwc_regex_is_match(bad, "anything"));
+        // …and a caller's own pattern does not.
+        assert!(!jwc_regex_is_match_strict(bad, "anything"));
+    }
+
+    #[test]
+    fn it_still_matches_what_it_should() {
+        assert!(jwc_regex_is_match(r"^https?://", "https://example.com"));
+        assert!(!jwc_regex_is_match(r"^https?://", "javascript:alert(1)"));
+        assert!(jwc_regex_is_match_strict(r"^\d{3}$", "123"));
+        assert!(!jwc_regex_is_match_strict(r"^\d{3}$", "12"));
+    }
+
+    /// A caller that can add patterns must not be able to grow the cache
+    /// without bound — past the ceiling a pattern is compiled, used and
+    /// dropped, and the request still answers.
+    #[test]
+    fn the_cache_has_a_ceiling_and_passing_it_is_not_a_failure() {
+        let _g = exclusive();
+        for i in 0..(JWC_REGEX_CACHE_MAX + 50) {
+            assert!(
+                jwc_regex_is_match_strict(&format!("^jwc-ceiling-{i}$"), &format!("jwc-ceiling-{i}")),
+                "a pattern past the ceiling must still match"
+            );
+        }
+        let len = jwc_regex_cache().lock().expect("lock").len();
+        assert!(len <= JWC_REGEX_CACHE_MAX, "cache grew to {len}");
+    }
+}

@@ -180,6 +180,16 @@ fn jwc_b_v1_string_pad_left(s: V, width: V, pad: V) -> V {
     v_str(format!("{}{}", out, base))
 }
 
+/// builtins.md §4a. The work is in `escape_core.rs.in`, which the
+/// interpreter includes too.
+fn jwc_b_v1_string_escape_html(s: V) -> V {
+    v_str(escape_html(&jwc_v1_text(&s)))
+}
+
+fn jwc_b_v1_string_escape_url(s: V) -> V {
+    v_str(escape_url(&jwc_v1_text(&s)))
+}
+
 fn jwc_b_v1_string_pad_right(s: V, width: V, pad: V) -> V {
     let mut out = jwc_v1_text(&s);
     let width = jwc_to_int(&width).unwrap_or(0).max(0) as usize;
