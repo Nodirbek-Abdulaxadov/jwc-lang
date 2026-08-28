@@ -181,6 +181,7 @@ pub fn load(ws: &Workspace) -> Result<Program> {
         error_handler,
         errors: error_defs,
         server,
+        open_sockets: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     })
 }
 
@@ -212,6 +213,11 @@ pub(crate) fn read_server_config(s: &ServerDecl) -> ServerConfig {
             }
         };
         match a.key.name.as_str() {
+            "max_sockets" => {
+                if let ExprKind::Int(n) = &*a.value.kind {
+                    c.max_sockets = n.parse().unwrap_or(c.max_sockets);
+                }
+            }
             "max_body_bytes" => {
                 if let ExprKind::Int(n) = &*a.value.kind {
                     c.max_body_bytes = n.parse().unwrap_or(c.max_body_bytes);
@@ -1022,6 +1028,21 @@ fn into_axum(r: Response) -> axum::response::Response {
     })
 }
 
+/// Returns one socket slot to `Program::open_sockets` however the
+/// connection ends.
+///
+/// A plain decrement at the end of `drive_socket` would leak a slot on any
+/// early return, and that function has several. Tying the release to a
+/// value the connection owns means the count is right even when the task
+/// is dropped rather than run to completion.
+struct SocketSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for SocketSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The upgrade, and then the connection.
 ///
 /// The middleware chain runs **first**, on the ordinary HTTP request. That
@@ -1046,6 +1067,47 @@ async fn socket_dispatch(
         id: format!("{:016x}", rand_id()),
     });
 
+    // config.md §3.1 — the cap, before the handshake.
+    //
+    // Refused here rather than inside the connection because a 503 a
+    // client can read is worth more than a 101 followed by an immediate
+    // close, and because the point is to not spend the descriptor at all.
+    //
+    // The reservation is taken with a compare-and-swap loop rather than a
+    // fetch_add followed by a check: two upgrades arriving together would
+    // both add, both see themselves over, and both back out, so the server
+    // would refuse a slot it actually had.
+    // `0` is the escape hatch, and it means the same thing it means for
+    // `max_body_bytes`: no limit. A config language where 0 means
+    // "unlimited" for one key and "none at all" for the next is a language
+    // that has to be memorised rather than read.
+    let cap = match program.server.max_sockets {
+        0 => usize::MAX,
+        n => n,
+    };
+    let counter = program.open_sockets.clone();
+    let mut open = counter.load(std::sync::atomic::Ordering::Relaxed);
+    let slot = loop {
+        if open >= cap {
+            break None;
+        }
+        match counter.compare_exchange_weak(
+            open,
+            open + 1,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => break Some(SocketSlot(counter.clone())),
+            Err(seen) => open = seen,
+        }
+    };
+    let Some(slot) = slot else {
+        return into_axum(with_security_headers(
+            &program,
+            Response::message(503, "too many websocket connections"),
+        ));
+    };
+
     let pre = match socket_preflight(&program, &incoming, request.clone()).await {
         Ok(p) => p,
         Err(r) => return into_axum(r),
@@ -1059,6 +1121,9 @@ async fn socket_dispatch(
     });
 
     upgrade.on_upgrade(move |socket| async move {
+        // `slot` moves into the connection task, so the count falls when
+        // the connection ends — including when the task is dropped.
+        let _slot = slot;
         drive_socket(program, request, pre, socket).await;
     })
 }
@@ -2064,6 +2129,7 @@ mod route_matching {
             error_handler: None,
             errors: HashMap::new(),
             server: ServerConfig::default(),
+            open_sockets: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 

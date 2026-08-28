@@ -18,7 +18,7 @@ install beside it.
 FROM debian:trixie-slim AS fetch
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates && rm -rf /var/lib/apt/lists/*
-ARG JWC_VERSION=0.9.945
+ARG JWC_VERSION=0.9.946
 RUN curl -fsSL https://github.com/just-web-code/jwc-lang/releases/download/v${JWC_VERSION}/jwc-v${JWC_VERSION}-x86_64-linux.tar.gz \
       | tar -xz -C /usr/local/bin \
     && chmod +x /usr/local/bin/jwc

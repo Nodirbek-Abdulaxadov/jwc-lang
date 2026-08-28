@@ -3026,12 +3026,16 @@ async fn jwc_cors_middleware(
 
 // --- HTTP server (axum-based, HTTP/1.1 + keep-alive) -------------------------
 
-/// Request body cap. Mirrors `server.rs::parse_max_body_bytes` exactly,
-/// including the axum-default 2 MiB when `JWC_MAX_BODY_BYTES` is unset
-/// and the `0` escape hatch for deployments behind a proxy that already
-/// enforces a size. `None` means "no limit".
-const JWC_DEFAULT_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-
+/// Request body cap, and the socket caps that follow it.
+///
+/// `JWC_MAX_BODY_BYTES` wins, because an operator has to be able to
+/// change a limit without a rebuild. Below it sits the number the source
+/// wrote in `server { max_body_bytes }`, emitted by codegen as
+/// `JWC_SOURCE_MAX_BODY_BYTES` — before 0.9.946 that fell through to a
+/// hardcoded 2 MiB instead, so `jwc build` ignored a limit `jwc serve`
+/// enforced, and a program that answered 413 in development answered 200
+/// in production. `0`, in either place, means no limit: the escape hatch
+/// for a deployment behind a proxy that enforces its own size.
 fn jwc_max_body_bytes() -> Option<usize> {
     match std::env::var("JWC_MAX_BODY_BYTES")
         .ok()
@@ -3039,7 +3043,57 @@ fn jwc_max_body_bytes() -> Option<usize> {
     {
         Some(0) => None,
         Some(n) => Some(n),
-        None => Some(JWC_DEFAULT_MAX_BODY_BYTES),
+        None => match JWC_SOURCE_MAX_BODY_BYTES {
+            0 => None,
+            n => Some(n),
+        },
+    }
+}
+
+/// How many WebSocket connections may be open at once, same precedence.
+fn jwc_max_sockets() -> usize {
+    std::env::var("JWC_MAX_SOCKETS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(JWC_SOURCE_MAX_SOCKETS)
+}
+
+/// Open WebSocket connections, against `jwc_max_sockets()`.
+static JWC_OPEN_SOCKETS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Returns a slot however the connection ends — see `serve.rs`'s
+/// `SocketSlot`, which this mirrors. A static is right here because the
+/// generated crate is one server per process by construction.
+struct JwcSocketSlot;
+
+impl Drop for JwcSocketSlot {
+    fn drop(&mut self) {
+        JWC_OPEN_SOCKETS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Reserve one slot, or `None` when the cap is reached.
+fn jwc_reserve_socket() -> Option<JwcSocketSlot> {
+    // `0` means no limit, as it does for `max_body_bytes`.
+    let cap = match jwc_max_sockets() {
+        0 => usize::MAX,
+        n => n,
+    };
+    let mut open = JWC_OPEN_SOCKETS.load(std::sync::atomic::Ordering::Relaxed);
+    loop {
+        if open >= cap {
+            return None;
+        }
+        match JWC_OPEN_SOCKETS.compare_exchange_weak(
+            open,
+            open + 1,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(JwcSocketSlot),
+            Err(seen) => open = seen,
+        }
     }
 }
 
@@ -3404,6 +3458,15 @@ async fn jwc_dispatch(
     // can read, and it can only be one while there is still a response to
     // put it in.
     if let Some((fns, up)) = socket_upgrade {
+        // config.md §3.1 — the cap, before the handshake, so the
+        // descriptor is never spent. Mirrors `serve.rs::socket_dispatch`.
+        let Some(slot) = jwc_reserve_socket() else {
+            return axum::response::Response::builder()
+                .status(503)
+                .header("content-type", JWC_JSON_CT)
+                .body("{\"error\":\"too many websocket connections\"}".into())
+                .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()));
+        };
         let refusal = CURRENT_REQUEST
             .scope(req.clone(), async move { handler().await })
             .await;
@@ -3423,7 +3486,14 @@ async fn jwc_dispatch(
                 .body(body_str.into())
                 .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()));
         }
-        return up.on_upgrade(move |socket| jwc_drive_socket(socket, fns, req));
+        return up.on_upgrade(move |socket| {
+            // `slot` rides the connection, so the count falls when it ends.
+            let slot = slot;
+            async move {
+                let _slot = slot;
+                jwc_drive_socket(socket, fns, req).await
+            }
+        });
     }
 
     // A panic is the native backend's `Abort::Fault`: the interpreter logs

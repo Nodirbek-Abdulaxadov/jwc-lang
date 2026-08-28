@@ -3,6 +3,70 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.946] — one host could take the whole server down — 2026-08-28
+
+### Fixed
+
+- **Nothing bounded how many WebSocket connections could be open**, and a
+  single host could use that to stop the server answering HTTP at all.
+
+  Measured, against a server whose descriptor limit was 200: an attacker
+  opened **190** connections, sent nothing on any of them, and every
+  ordinary HTTP request then failed to connect — not a 503, not a slow
+  answer, no connection at all. `/healthz` and `/readyz` are HTTP too, so
+  an orchestrator would see a dead pod, restart it, and hand the attacker
+  a fresh one to refill. Each connection cost about **14.7 kB** and
+  exactly one descriptor, 1000 of them were accepted without complaint,
+  and after fifteen idle seconds all 1000 were still open — nothing closes
+  a connection that says nothing, because `socket.recv()` waits with no
+  timeout.
+
+  `server { max_sockets }` now bounds it. Past the cap the upgrade is a
+  **503 answered before the handshake**, so the descriptor is never spent
+  and the client gets a status it can read rather than a 101 followed by a
+  close. The same 190 attempts now fill the cap, the rest are refused, and
+  HTTP keeps answering 200.
+
+  The default is **half the process's own descriptor limit, clamped to
+  [64, 4096]**, not a fixed number. A fixed 1024 would have been actively
+  wrong: 1024 is the common Linux soft limit, so the default would have
+  permitted sockets to take every descriptor the process had — the exact
+  failure the cap exists to stop.
+
+- **The native backend ignored `server { max_body_bytes }` entirely.**
+  Found while wiring the cap into both backends. Same source, same
+  program, no environment variable: `jwc serve` answered **413** to a
+  5000-byte body against a declared 1024-byte limit, and a `jwc build`
+  binary answered **200**. The prelude read only `JWC_MAX_BODY_BYTES` and
+  fell through to a hardcoded 2 MiB, so the number in the source reached
+  one backend and not the other.
+
+  Codegen now emits the source value into the generated crate and the
+  prelude falls back to it. The environment variable still wins, because
+  an operator has to be able to change a limit without a rebuild. This
+  also repairs 0.9.944's socket message cap on native builds, which was
+  reading the same env-only path.
+
+### Known limit, stated rather than implied
+
+The cap does **not** reclaim a connection that is open but dead. Without a
+server-initiated ping and a pong deadline there is no way to tell a quiet
+peer from a departed one, and 1.0 sends no ping. An attacker holding slots
+open still denies *sockets* to everyone else; what the cap guarantees is
+that **HTTP survives it**. routing.md §9.5 says so in those words.
+
+### Tests
+
+- `the_number_of_open_sockets_is_capped` drives a real server: exactly the
+  cap is admitted, everything past it is a readable 503, HTTP answers 200
+  throughout, and a closed connection returns its slot. Confirmed to fail
+  without the fix (24 admitted where 8 is the cap).
+- The connection counter moved from a process-wide `static` onto
+  `Program`, which is where it belongs — the cap is a property of a
+  server, not of a process. As a static it was also quietly wrong under
+  test: two servers in one binary shared a budget neither declared, and
+  the symptom was a cap that admitted one fewer than it said.
+
 ## [0.9.945] — the operational paths, stated — 2026-08-28
 
 ### Documented

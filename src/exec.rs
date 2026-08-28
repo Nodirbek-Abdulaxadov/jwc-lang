@@ -124,10 +124,27 @@ pub struct Program {
     pub error_handler: Option<ErrorHandlerDecl>,
     pub errors: HashMap<String, (u16, Option<String>, Vec<String>)>,
     pub server: ServerConfig,
+    /// WebSocket connections open right now, against
+    /// `server { max_sockets }`.
+    ///
+    /// On the `Program` rather than a process-wide static because the cap
+    /// is a property of *this* server. A process runs one program, so a
+    /// static would be right in production and wrong everywhere else — two
+    /// servers in one test binary would share a budget neither declared,
+    /// and the symptom is a cap that admits one fewer than it says.
+    pub open_sockets: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
+    /// How many WebSocket connections may be open at once (config §3.1).
+    ///
+    /// A cap exists because a connection costs a file descriptor and the
+    /// descriptor table is shared with HTTP. Measured before 0.9.946 on a
+    /// server whose limit was 200: 190 idle upgrades — opened and then
+    /// silent, never sending a byte — took every ordinary HTTP request to
+    /// a connection failure, health probes included.
+    pub max_sockets: usize,
     pub max_body_bytes: usize,
     /// Whole-request ceiling (config.md §3.2). Past it the answer is 504
     /// and the handler's task is dropped — a request that has already lost
@@ -209,9 +226,38 @@ impl CorsConfig {
     }
 }
 
+/// The socket cap when the source does not set one.
+///
+/// Derived from the process's own descriptor limit rather than fixed,
+/// because a fixed number is wrong at both ends: 1024 is the common Linux
+/// soft limit, so a default of 1024 would let sockets take every
+/// descriptor the process has and leave nothing for HTTP — which is the
+/// failure this cap exists to stop — while on a host tuned to 65536 the
+/// same number is needlessly small.
+///
+/// Half the soft limit, clamped to [64, 4096]. Half, so an equal share is
+/// left for HTTP, the pool and the listener; clamped low so a tiny limit
+/// still allows a handful of sockets, and clamped high because past a few
+/// thousand the memory per connection matters more than the descriptor.
+fn default_max_sockets() -> usize {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes into a struct we own and reads nothing
+    // else; the return value tells us whether it wrote at all.
+    let ok = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0;
+    if !ok {
+        return 512;
+    }
+    let soft = lim.rlim_cur as usize;
+    (soft / 2).clamp(64, 4096)
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            max_sockets: default_max_sockets(),
             max_body_bytes: 1_048_576,
             request_timeout: std::time::Duration::from_secs(30),
             shutdown_grace: std::time::Duration::from_secs(20),

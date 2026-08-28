@@ -220,6 +220,16 @@ and the database unreachable, `/readyz` answers
 password, host, port or database name appears. Keeping the three paths off
 the public listener is the operator's job, not the runtime's.
 
+8.5 A WebSocket connection costs a descriptor, and the descriptor table
+is shared with HTTP. Measured before 0.9.946 against a server whose limit
+was 200: **190** idle upgrades — opened and then silent — took every
+ordinary HTTP request to a connection failure, health probes included, so
+an orchestrator would restart the pod and hand the attacker a fresh one.
+`server { max_sockets }` now bounds it (routing §9.5), refusing past the
+cap with a 503 before the handshake. The guarantee is that HTTP survives;
+holding slots open still denies *sockets*, because 1.0 sends no keepalive
+ping and cannot tell a quiet peer from a gone one.
+
 ---
 
 ## 9. Outbound requests

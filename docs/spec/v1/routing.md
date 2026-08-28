@@ -465,7 +465,45 @@ bound on one message, not a memory budget. `0`, the escape hatch for a
 deployment behind a proxy that enforces its own size, leaves the library
 default in place here too.
 
-### 9.5 What is not here
+### 9.5 How many connections
+
+`server { max_sockets }` bounds how many WebSocket connections may be open
+at once. Past it the upgrade is **503**, answered before the handshake, so
+the descriptor is never spent and the client gets a status it can read
+rather than a 101 followed by a close.
+
+The default is half the process's own descriptor limit, clamped to
+[64, 4096], rather than a fixed number. A fixed number is wrong at both
+ends: 1024 is the common Linux soft limit, so defaulting to 1024 would let
+sockets take every descriptor the process has — the exact failure this cap
+exists to stop — while on a host tuned to 65536 the same number is
+needlessly small.
+
+`max_sockets = 0` means **no limit**, the same thing `0` means for
+`max_body_bytes` — the escape hatch for a deployment whose load balancer
+already bounds connections. It restores exactly the behaviour described
+below, so set it deliberately.
+
+Why the cap exists, measured before 0.9.946 on a server whose descriptor
+limit was 200: an attacker opened **190** connections, sent nothing on any
+of them, and every ordinary HTTP request then failed to connect at all.
+`/healthz` and `/readyz` are HTTP too, so an orchestrator would see a dead
+pod and restart it — handing the attacker a fresh one to refill. Each
+connection cost about 14.7 kB and exactly one descriptor, and nothing ever
+closed them.
+
+With the cap, the same 190 attempts fill the cap, the rest get 503, and
+HTTP keeps answering 200.
+
+What the cap does **not** do: it does not reclaim a connection that is
+open but dead. `socket.recv()` waits with no timeout, so a peer that has
+gone away silently holds its slot until the TCP connection breaks. A
+server-initiated ping with a pong deadline is what distinguishes "quiet"
+from "gone", and 1.0 does not send one — an attacker who holds slots open
+still denies *sockets* to everyone else, and the cap's guarantee is only
+that **HTTP survives it**. Set `max_sockets` with that in mind.
+
+### 9.6 What is not here
 
 `OpenAPI` cannot describe a WebSocket, so `jwc openapi` lists sockets
 under `x-jwc-sockets` rather than emitting the upgrade as a `GET` that

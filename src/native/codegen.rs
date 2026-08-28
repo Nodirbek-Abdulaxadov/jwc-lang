@@ -516,6 +516,22 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         "\nstatic JWC_SERVE_PORT: ::std::sync::atomic::AtomicU16 = \
          ::std::sync::atomic::AtomicU16::new(0);\n",
     );
+    // config.md §3.1 — the two limits the source can set, carried into the
+    // crate as constants.
+    //
+    // Measured before 0.9.946: a program declaring `max_body_bytes = 1024`
+    // answered **200** to a 5000-byte body when built with `jwc build`,
+    // and 413 under `jwc serve`. The prelude read only
+    // `JWC_MAX_BODY_BYTES`, so the number in the source reached one
+    // backend and not the other — the same program, two behaviours,
+    // depending on how it was started. The env var still wins at runtime,
+    // which is what an operator needs; the source value is now what it
+    // falls back to, instead of a constant nobody wrote.
+    out.push_str(&format!(
+        "\nconst JWC_SOURCE_MAX_BODY_BYTES: usize = {};\n\
+         const JWC_SOURCE_MAX_SOCKETS: usize = {};\n",
+        server.max_body_bytes, server.max_sockets
+    ));
     emit_constraint_messages(&mut out, &built.model);
     emit_cursor_secret(&mut out, ws);
     let uses_regex = emit_classes(&mut out, &symbols);

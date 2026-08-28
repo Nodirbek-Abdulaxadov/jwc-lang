@@ -134,7 +134,8 @@ impl<'a> Wiring<'a> {
     /// someone deliberately narrowed it.
     fn check_server_keys(&mut self, sv: &crate::ast::ServerDecl, fi: usize) {
         use crate::ast::ServerEntry;
-        const KEYS: [&str; 9] = [
+        const KEYS: [&str; 10] = [
+            "max_sockets",
             "max_body_bytes",
             "request_timeout",
             "header_timeout",

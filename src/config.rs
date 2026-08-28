@@ -225,6 +225,13 @@ pub const REGISTRY: &[EnvVar] = &[
         doc: "Request body cap (bytes); 0 disables.",
     },
     EnvVar {
+        name: "JWC_MAX_SOCKETS",
+        parse_kind: ParseKind::Usize,
+        default: "server { max_sockets }, else half the descriptor limit",
+        doc: "Concurrent WebSocket connections; 0 disables the cap. \
+              Native builds only — `jwc serve` reads `server { max_sockets }`.",
+    },
+    EnvVar {
         name: "JWC_SHUTDOWN_TIMEOUT",
         parse_kind: ParseKind::DurationSecs,
         default: "5",

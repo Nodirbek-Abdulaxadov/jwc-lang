@@ -95,6 +95,7 @@ default.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
+| `max_sockets` | `int` | half the process's descriptor limit, clamped to [64, 4096] | over → 503 before the handshake (routing §9.5) |
 | `max_body_bytes` | `int` | 1048576 | over → 413 before middleware (routing §5.1); also caps a socket message and frame (routing §9.4) |
 | `request_timeout` | duration | `30s` | whole request |
 | `header_timeout` | duration | `10s` | request line + headers |
