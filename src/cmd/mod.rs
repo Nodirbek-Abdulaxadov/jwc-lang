@@ -672,11 +672,27 @@ pub fn run(path: PathBuf, dev: bool, request_logging: bool) -> Result<()> {
             crate::engine::init_engine_from_env()?;
         }
         crate::redis_engine::init_from_env()?;
-        // `declared_port` is the one path that runs `main`. Its return
-        // value is a port this command has no use for — a program that
-        // called `serve(...)` has already blocked inside it and never
-        // reaches here.
-        crate::serve::declared_port(&program).await?;
+        // `declared_port` runs `main`, and `serve(n)` inside it records
+        // the port rather than blocking — it is a declaration, not a
+        // call that listens.
+        //
+        // So this used to run `main`, take the port, throw it away, and
+        // exit: `jwc run app.jwc` on a program whose `main` is
+        // `serve(8080)` printed nothing and returned 0. The help text
+        // beside this command has always said the opposite — "a `main`
+        // that calls `serve(...)` still starts a server, because that is
+        // what the call means" — and the comment that used to sit here
+        // claimed the program "has already blocked inside it and never
+        // reaches here". Neither was true, and the first thing a reader
+        // does with the hello-world is `jwc run` it.
+        //
+        // `main` deciding to serve is the difference between the two
+        // commands: `jwc run` starts a listener only when the program
+        // asked for one, and `jwc serve` starts one either way.
+        if let Some(port) = crate::serve::declared_port(&program).await? {
+            println!("{} routes", program.routes.len());
+            crate::serve::serve(program, port).await?;
+        }
         Ok(())
     })
 }
@@ -777,7 +793,7 @@ pub fn serve(
         // entirely, and a `main` that did anything besides call `serve`
         // did it or not depending on a flag about the port.
         let declared = crate::serve::declared_port(&program).await?;
-        let port = port.unwrap_or(declared);
+        let port = port.or(declared).unwrap_or(8080);
         println!("{} routes", program.routes.len());
         crate::serve::serve(program, port).await
     })

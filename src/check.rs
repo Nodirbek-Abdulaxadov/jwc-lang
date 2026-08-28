@@ -2194,6 +2194,22 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Unknown;
                 }
+                // The qualifier itself is unknown.
+                //
+                // This used to fall through to `Ty::Unknown` without a
+                // word, so `StatsService.summary()` — a service nobody
+                // declared — checked clean and failed at run time. A typo
+                // in the *function* was caught (`S.typo` above) and a
+                // typo in the *service* was not, in a language whose
+                // whole pitch is that the checker has the schema and the
+                // call graph in hand.
+                self.err_note(
+                    span,
+                    "E0204",
+                    format!("unknown `{head}` in `{path}`: no service, package or builtin namespace by that name"),
+                    "declare `service {head} { … }`, import the package that provides it, or check the spelling",
+                    "names.md §6.4",
+                );
                 return Ty::Unknown;
             }
             if path == "now" {

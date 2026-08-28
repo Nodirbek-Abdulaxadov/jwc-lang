@@ -632,7 +632,7 @@ async fn main_decides_the_port_it_listens_on() {
     );
     assert_eq!(
         jwc::serve::declared_port(&literal).await.expect("boot"),
-        3000
+        Some(3000)
     );
 
     // The argument is an expression, which is the whole reason `main` is
@@ -645,7 +645,7 @@ async fn main_decides_the_port_it_listens_on() {
     );
     assert_eq!(
         jwc::serve::declared_port(&from_env).await.expect("boot"),
-        4100
+        Some(4100)
     );
 
     // Unset: the `??` arm is taken, and that is still the program's answer
@@ -653,18 +653,19 @@ async fn main_decides_the_port_it_listens_on() {
     std::env::remove_var("JWC_TEST_PORT_VAR");
     assert_eq!(
         jwc::serve::declared_port(&from_env).await.expect("boot"),
-        8080
+        Some(8080)
     );
 
-    // No `main` at all — nothing to read, and the listener is not the place
-    // to refuse a program the checker already has an opinion about.
+    // No `main` at all — nothing to read. `None`, not a defaulted 8080:
+    // `jwc serve` supplies the default, and `jwc run` needs to know the
+    // program never asked for a listener.
     let headless = program(
         "namespace h;\n\
          routes \"/x\" { route GET \"\" { return json({ ok: true }); } }\n",
     );
     assert_eq!(
         jwc::serve::declared_port(&headless).await.expect("boot"),
-        8080
+        None
     );
 }
 
@@ -2548,4 +2549,111 @@ fn a_field_added_by_assignment_keeps_its_place_on_both_backends() {
         gbody.contains("fields.push("),
         "and the interpreter appends too"
     );
+}
+
+/// A typo in the *service* name is a compile error, like a typo in the
+/// function name already was.
+///
+/// `S.typo()` where `S` exists reported `E0204`, and a bare
+/// `unknown_name()` reported `E0204` — but `NoSuchService.anything()`
+/// checked clean and failed at run time. The checker looked the
+/// qualifier up, did not find it, and returned `Ty::Unknown` without a
+/// word. Found by writing a route against a service I had not written
+/// yet: `jwc check` said "ok — 7 files checked, 0 warnings".
+#[test]
+fn an_unknown_call_qualifier_is_reported() {
+    let codes = |src: &str| -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+        let built = jwc::model::build(&ws);
+        let sym = jwc::symbols::build(&ws, &built.model);
+        jwc::check::check(&ws, &sym, &built.model)
+            .diags
+            .iter()
+            .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+            .map(|(_, d)| d.code.to_string())
+            .collect()
+    };
+
+    let head = "namespace n;\nservice S { function known() { return 1; } }\n";
+
+    // The three that were already caught stay caught.
+    assert!(codes(&format!(
+        "{head}function main() {{ let a = S.typo(); console.writeln(\"x\"); }}\n"
+    ))
+    .contains(&"E0204".to_string()));
+    assert!(codes(&format!(
+        "{head}function main() {{ let a = nope(); console.writeln(\"x\"); }}\n"
+    ))
+    .contains(&"E0204".to_string()));
+
+    // The one that was not.
+    assert!(
+        codes(&format!(
+            "{head}function main() {{ let a = NoSuchService.anything(); console.writeln(\"x\"); }}\n"
+        ))
+        .contains(&"E0204".to_string()),
+        "an undeclared service must not check clean"
+    );
+
+    // And a real call still checks, so the rule did not become "every
+    // dotted call is an error".
+    assert!(codes(&format!(
+        "{head}function main() {{ let a = S.known(); console.writeln(string.of(date.now())); }}\n"
+    ))
+    .is_empty());
+}
+
+/// `jwc run` on a program whose `main` calls `serve(...)` starts the
+/// server.
+///
+/// `serve(n)` records the port; it does not block. So `declared_port`
+/// ran `main`, returned the port, and `cmd::run` threw it away —
+/// `jwc run app.jwc` on the hello-world printed nothing and exited 0,
+/// while the CLI help beside it said "a `main` that calls `serve(...)`
+/// still starts a server, because that is what the call means" and the
+/// comment in the code claimed the program "has already blocked inside it
+/// and never reaches here". Neither was true.
+///
+/// The distinction is now in the type: `Option<u16>` separates "asked for
+/// 8080" from "never asked", which is exactly what `jwc run` needs and
+/// what a defaulted `u16` threw away.
+#[tokio::test]
+async fn a_main_that_serves_is_distinguishable_from_one_that_does_not() {
+    let load = |src: &str| {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        std::sync::Arc::new(jwc::serve::load(&ws).unwrap_or_else(|e| panic!("{e}")))
+    };
+
+    let serving = load(
+        "namespace n;\n\
+         routes \"/\" { route GET \"\" { return json({ ok: true }); } }\n\
+         function main() { serve(8123); }\n",
+    );
+    assert_eq!(
+        jwc::serve::declared_port(&serving).await.expect("boot"),
+        Some(8123)
+    );
+
+    let quiet = load(
+        "namespace n;\n\
+         function main() { console.writeln(\"done\"); }\n",
+    );
+    assert_eq!(
+        jwc::serve::declared_port(&quiet).await.expect("boot"),
+        None,
+        "a `main` that never calls `serve` must not report a port"
+    );
+
+    // And no `main` at all is the same fact.
+    let bare = load("namespace n;\nroutes \"/\" { route GET \"\" { return json({}); } }\n");
+    assert_eq!(jwc::serve::declared_port(&bare).await.expect("boot"), None);
+
+    // `cmd::run` has to act on it, or the distinction is decorative.
+    let cmd = include_str!("../src/cmd/mod.rs");
+    assert!(cmd.contains("if let Some(port) = crate::serve::declared_port(&program).await?"));
 }

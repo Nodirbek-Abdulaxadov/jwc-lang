@@ -150,3 +150,88 @@ fn a_declared_raise_set_may_widen_but_not_narrow() {
     let out = check(dir.path());
     assert!(!out.contains("E1002"), "{out}");
 }
+
+/// `jwc add <name>` produces a project that checks.
+///
+/// It did not. `jwc install` vendors a dependency into
+/// `jwc_packages/<name>/`, and the source collector walks that directory
+/// — deliberately, because that is how a package's functions become
+/// callable. But the import check counted the namespace it declares as a
+/// **local** namespace, so the package collided with itself:
+///
+///     error[E0203]: `redis` is both a local namespace and a package
+///
+/// Every installed package hit it, which means the package system did not
+/// work end to end at all.
+#[test]
+fn a_vendored_package_does_not_collide_with_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    std::fs::write(
+        root.join("jwcproj.json"),
+        r#"{"name":"app","type":"app","version":"0.1.0","dependencies":{"greet":"^1.0.0"}}"#,
+    )
+    .expect("manifest");
+
+    // What `jwc install` writes.
+    let pkg = root.join("jwc_packages").join("greet");
+    std::fs::create_dir_all(&pkg).expect("mkdir");
+    std::fs::write(
+        pkg.join("greet.jwcproj"),
+        r#"{"name":"greet","type":"pkg","pkgVersion":"1.0.0"}"#,
+    )
+    .expect("pkg manifest");
+    std::fs::write(
+        pkg.join("main.jwc"),
+        // packages.md §3.1 — a `service` *is* the export boundary; there
+        // is no `public` marker.
+        "namespace greet;\n\
+         service Greet {\n\
+         \x20   function hello(who: text) {\n\
+         \x20       return \"salom, \" + $who;\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("pkg source");
+
+    std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+    std::fs::write(
+        root.join("src").join("app.jwc"),
+        "namespace app;\n\
+         import greet;\n\
+         function main() {\n\
+         \x20   console.writeln(Greet.hello(\"dunyo\"));\n\
+         }\n",
+    )
+    .expect("app source");
+
+    let ws = jwc::workspace::Workspace::load(root).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let checked = jwc::check::check(&ws, &sym, &built.model);
+    let mut diags = jwc::imports::check(&ws, &ws.packages);
+    diags.extend(jwc::imports::case_convention(&ws));
+
+    let errors: Vec<String> = built
+        .diags
+        .iter()
+        .chain(&sym.diags)
+        .chain(&checked.diags)
+        .chain(&diags)
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // And the package's own source still loads — skipping the directory
+    // outright would fix the collision by making the package's functions
+    // unreachable, which is not a fix.
+    assert!(
+        ws.files
+            .iter()
+            .any(|f| f.source.path.to_string_lossy().contains("jwc_packages")),
+        "the vendored source has to be in the workspace"
+    );
+}

@@ -1400,10 +1400,16 @@ fn percent_decode(s: &str) -> String {
 ///
 /// `main` is an ordinary body, so it runs on an ordinary Vm. A program with
 /// no `main`, or one whose `main` never reaches `serve`, keeps 8080.
-pub async fn declared_port(program: &Arc<Program>) -> Result<u16> {
-    const FALLBACK: u16 = 8080;
+/// The port `main` asked for, or `None` when it never called `serve(...)`.
+///
+/// `Option`, not a defaulted `u16`: "the program did not ask for a
+/// server" and "the program asked for 8080" are different facts, and
+/// `jwc run` needs to tell them apart — it starts a listener only for the
+/// first. Defaulting here is what made `jwc run` on a serving program
+/// exit silently.
+pub async fn declared_port(program: &Arc<Program>) -> Result<Option<u16>> {
     let Some(main) = program.functions.get("main") else {
-        return Ok(FALLBACK);
+        return Ok(None);
     };
 
     // `main` runs before any request exists. The synthetic one carries the
@@ -1435,7 +1441,7 @@ pub async fn declared_port(program: &Arc<Program>) -> Result<u16> {
         }
         crate::exec::Abort::Fault(f) => anyhow!("main() failed at boot: {f}"),
     })?;
-    Ok(vm.serve_port.unwrap_or(FALLBACK))
+    Ok(vm.serve_port)
 }
 
 /// `DbError` has no `Display`: it is a domain error the response mapper

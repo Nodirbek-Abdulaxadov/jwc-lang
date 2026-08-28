@@ -15,12 +15,33 @@ use crate::diag::Diagnostic;
 use crate::workspace::{Loc, Workspace};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Whether a source file came from `jwc_packages/` — a dependency
+/// `jwc install` put there, rather than something this project wrote.
+fn is_vendored(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .any(|c| c.as_os_str() == crate::registry::VENDOR_DIR)
+}
+
 /// Check a workspace's imports. `packages` are the keys of
 /// `jwcproj.json`'s `dependencies`.
 pub fn check(ws: &Workspace, packages: &BTreeSet<String>) -> Vec<(Loc, Diagnostic)> {
     let mut out = Vec::new();
 
     // Namespace per file, and the namespace each declaration lives in.
+    //
+    // A file under `jwc_packages/` is a **vendored dependency**, and the
+    // namespace it declares *is* the package — not a local namespace that
+    // happens to share the name. Counting it as local made every
+    // installed package collide with itself:
+    //
+    //     jwc add redis && jwc check
+    //     error[E0203]: `redis` is both a local namespace and a package
+    //
+    // which is to say `jwc add` produced a project that does not check.
+    // Its sources still load, because that is how a package's functions
+    // become callable; only the collision check has to know where they
+    // came from.
     let mut namespaces: BTreeSet<String> = BTreeSet::new();
     let mut file_ns: Vec<Option<String>> = Vec::with_capacity(ws.files.len());
     for file in &ws.files {
@@ -29,7 +50,9 @@ pub fn check(ws: &Workspace, packages: &BTreeSet<String>) -> Vec<(Loc, Diagnosti
             _ => None,
         });
         if let Some(n) = &ns {
-            namespaces.insert(n.clone());
+            if !is_vendored(&ws.root, &file.source.path) {
+                namespaces.insert(n.clone());
+            }
         }
         file_ns.push(ns);
     }
