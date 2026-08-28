@@ -119,6 +119,13 @@ impl<'a> Vm<'a> {
         let Some(f) = self.program.functions.get(path).cloned() else {
             return Err(fault(format!("unknown function `{path}`")));
         };
+        // The ceiling is here rather than on expression nesting because
+        // this is the recursion that runs out of machine stack: a JWC call
+        // frame is a chain of boxed futures, and polling it costs the
+        // whole chain's depth. Without this a recursive function did not
+        // report anything — it overflowed the thread's stack and aborted
+        // the process, taking every other in-flight request with it.
+        self.enter_call(path)?;
         let saved = self.enter_function();
         for (i, p) in f.params.iter().enumerate() {
             let v = args.get(i).cloned().unwrap_or(Value::Null);
@@ -126,6 +133,7 @@ impl<'a> Vm<'a> {
         }
         let r = Box::pin(self.run_body(&f.body)).await;
         self.leave_function(saved);
+        self.leave_call();
         match r? {
             Flow::Return(v) => Ok(v),
             _ => Ok(Value::Null),

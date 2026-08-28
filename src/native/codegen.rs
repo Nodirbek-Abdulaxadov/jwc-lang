@@ -377,6 +377,16 @@ struct Ctx<'a> {
     /// a binding the generated crate does not have.
     locals: Vec<std::collections::BTreeSet<String>>,
     mode: Mode,
+    /// Functions that can reach themselves through the call graph.
+    ///
+    /// A generated function is an `async fn`, and rustc refuses a directly
+    /// recursive one — `E0733: recursion in an async fn requires boxing`,
+    /// reported against `src/main.rs` of a crate the author never wrote.
+    /// So every JWC program with a recursive function failed `jwc build`
+    /// while running fine under `jwc serve`. Calls to anything in this set
+    /// are boxed, which breaks the cycle; every other call keeps the
+    /// direct path and its zero allocations.
+    recursive: std::collections::BTreeSet<String>,
     /// How many `transaction { }` blocks enclose the statement being
     /// emitted. Each one is an `async` block, so a `return` inside it has
     /// to travel out through every layer rather than exiting the closest.
@@ -490,6 +500,7 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         locals: vec![std::collections::BTreeSet::new()],
         mode: Mode::Value,
         tx_depth: 0,
+        recursive: recursive_functions(ws),
     };
     let mut out = String::new();
 
@@ -844,13 +855,33 @@ pub fn generate(ws: &Workspace) -> Result<Generated> {
         ""
     };
     out.push_str(&format!(
-        "\n#[tokio::main(flavor = \"multi_thread\")]\nasync fn main() {{\n\
+        "\nfn main() {{\n\
+         \x20   // Not `#[tokio::main]`: the attribute cannot set a stack size,\n\
+         \x20   // and tokio's default 2 MiB is under what a JWC call chain\n\
+         \x20   // needs — a recursion 20 deep aborted the process. `block_on`\n\
+         \x20   // would also poll on *this* thread, whose stack the linker\n\
+         \x20   // chose, so the work is spawned onto a worker.\n\
+         \x20   let rt = ::tokio::runtime::Builder::new_multi_thread()\n\
+         \x20       .thread_stack_size({stack})\n\
+         \x20       .enable_all()\n\
+         \x20       .build()\n\
+         \x20       .expect(\"tokio runtime\");\n\
+         \x20   rt.block_on(async {{ ::tokio::spawn(jwc_main_impl()).await.expect(\"main task\") }});\n\
+         }}\n\
+         \nasync fn jwc_main_impl() {{\n\
+         \x20   // A console program's `main` recurses on the same ceiling a\n\
+         \x20   // request does; without a scope here the counter would be a\n\
+         \x20   // no-op and only routes would be bounded.\n\
+         \x20   JWC_CALLS.scope(::std::cell::Cell::new(0), jwc_main_body()).await\n\
+         }}\n\
+         \nasync fn jwc_main_body() {{\n\
          \x20   jwc_install_panic_hook();\n\
          \x20   jwc_load_dotenv();\n\
          {user_main}\
          {db_boot}\
          {jobs_boot}\
-         {listen}}}\n"
+         {listen}}}\n",
+        stack = crate::cmd::WORKER_STACK_BYTES,
     ));
 
     // The three operational endpoints exist in every binary; the halves
@@ -1242,6 +1273,58 @@ fn emit_constraint_messages(out: &mut String, model: &SchemaModel) {
     out.push_str("];\n");
 }
 
+/// Every function that can reach itself through the call graph.
+///
+/// Direct recursion and mutual recursion alike. The edges come from
+/// `wiring::callees`, the same reader `explain --function` walks, so this
+/// cannot disagree with it about what calls what.
+///
+/// A transitive reachability walk rather than a proper SCC pass: a program
+/// has tens of functions, not thousands, and "can `f` reach `f`" is the
+/// whole question.
+fn recursive_functions(ws: &Workspace) -> std::collections::BTreeSet<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for file in &ws.files {
+        for decl in &file.program.decls {
+            match decl {
+                Decl::Function(f) => {
+                    edges.insert(f.name.name.clone(), crate::wiring::callees(&f.body));
+                }
+                Decl::Service(sv) => {
+                    for f in &sv.functions {
+                        edges.insert(
+                            format!("{}.{}", sv.name.name, f.name.name),
+                            crate::wiring::callees(&f.body),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = BTreeSet::new();
+    for start in edges.keys() {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut stack: Vec<&str> = edges[start].iter().map(String::as_str).collect();
+        while let Some(n) = stack.pop() {
+            if n == start.as_str() {
+                out.insert(start.clone());
+                break;
+            }
+            if !seen.insert(n) {
+                continue;
+            }
+            if let Some(next) = edges.get(n) {
+                stack.extend(next.iter().map(String::as_str));
+            }
+        }
+    }
+    out
+}
+
 fn emit_function(
     out: &mut String,
     name: &str,
@@ -1266,6 +1349,17 @@ fn emit_function(
         }
     }
     out.push_str(") -> JwcResult {\n");
+    // Only a function in a cycle can run away, and only those pay for the
+    // counter. The guard is a struct with a `Drop` so every path out of
+    // the body — `return`, `?` on a raise, a `catch` unwinding — leaves
+    // the frame, which an explicit decrement at the end would not.
+    if ctx.recursive.contains(name) {
+        out.push_str(&format!(
+            "    jwc_enter_call({:?}, {});\n    let _frame = JwcCallFrame;\n",
+            name,
+            crate::exec::MAX_CALL_DEPTH
+        ));
+    }
     emit_block(out, &f.body, 1, ctx)?;
     out.push_str("    Ok(V::Null)\n}\n");
     Ok(())
@@ -1650,19 +1744,28 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
             ..
         } => {
             let it = emit_expr(iterable, ctx)?;
+            out.push_str(&format!("{pad}{{\n{pad}    let mut __turns: u64 = 0;\n"));
             out.push_str(&format!(
-                "{pad}for {} in jwc_to_array({it}).iter().cloned() {{\n",
+                "{pad}    for {} in jwc_to_array({it}).iter().cloned() {{\n",
                 local(&binder.name)
+            ));
+            out.push_str(&format!(
+                "{pad}        __turns += 1;\n\
+                 {pad}        if __turns % {} == 0 {{ ::tokio::task::yield_now().await; }}\n",
+                crate::exec::TURNS_PER_YIELD
             ));
             ctx.push_scope();
             ctx.bind_local(&binder.name);
-            emit_block(out, body, indent + 1, ctx)?;
+            emit_block(out, body, indent + 2, ctx)?;
             ctx.pop_scope();
-            out.push_str(&format!("{pad}}}\n"));
+            out.push_str(&format!("{pad}    }}\n{pad}}}\n"));
         }
         // The turn ceiling is the interpreter's (`exec::MAX_WHILE_TURNS`),
         // emitted here too so a runaway loop fails the same way in a built
-        // binary as it does under `jwc serve` rather than hanging.
+        // binary as it does under `jwc serve` rather than hanging — and so
+        // is the yield, without which `request_timeout` cannot fire: every
+        // future this loop awaits is ready, and awaiting a ready future
+        // does not hand the scheduler a turn.
         Stmt::While { cond, body, .. } => {
             out.push_str(&format!("{pad}{{\n{pad}    let mut __turns: u64 = 0;\n"));
             out.push_str(&format!("{pad}    loop {{\n"));
@@ -1672,9 +1775,11 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, indent: usize, ctx: &mut Ctx) -> Res
                  {pad}        __turns += 1;\n\
                  {pad}        if __turns > {} {{\n\
                  {pad}            return Err(JwcThrown::new(\"internal_error\", 500, v_str(\"`while` ran {} times without its condition going false\".to_string())));\n\
-                 {pad}        }}\n",
+                 {pad}        }}\n\
+                 {pad}        if __turns % {} == 0 {{ ::tokio::task::yield_now().await; }}\n",
                 crate::exec::MAX_WHILE_TURNS,
                 crate::exec::MAX_WHILE_TURNS,
+                crate::exec::TURNS_PER_YIELD,
             ));
             ctx.push_scope();
             emit_block(out, body, indent + 2, ctx)?;
@@ -1987,7 +2092,13 @@ fn emit_expr(e: &Expr, ctx: &mut Ctx) -> Result<String> {
                 // is being emitted — which is the enclosing `async` block
                 // inside a `transaction`, and the transaction wrapper
                 // re-raises it. Same path the interpreter's `Abort` takes.
-                format!("{}({}).await?", user_fn(&name), parts.join(", "))
+                if ctx.recursive.contains(&name) {
+                    // The indirection rustc asks for, on the calls that
+                    // need it and no others.
+                    format!("Box::pin({}({})).await?", user_fn(&name), parts.join(", "))
+                } else {
+                    format!("{}({}).await?", user_fn(&name), parts.join(", "))
+                }
             }
         }
 

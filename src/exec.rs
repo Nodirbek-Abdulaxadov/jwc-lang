@@ -245,6 +245,41 @@ pub struct Request {
 /// running and far short of "wait forever".
 pub const MAX_WHILE_TURNS: u64 = 10_000_000;
 
+/// Turns between yields inside a loop.
+///
+/// A JWC loop body is a chain of `.await`s that are all *ready*, and
+/// awaiting a ready future does not yield to the scheduler. So a loop that
+/// never finishes never returns `Pending`, and `serve`'s
+/// `tokio::time::timeout` — which can only fire when the future it wraps
+/// yields — never gets a turn. Measured before this: `request_timeout =
+/// "3s"` around `while (true) { i += 1; }` did not fire at all, the client
+/// gave up at twenty seconds, and the worker thread stayed pegged at 100%
+/// after it disconnected, because nothing had cancelled the task.
+///
+/// Yielding on a schedule is what makes `request_timeout` a bound on
+/// *compute* and not only on I/O, and what stops one runaway request from
+/// owning a worker thread. 1024 is small enough that a 3-second timeout is
+/// accurate to well under a millisecond and large enough that the check
+/// costs nothing on an ordinary loop.
+pub const TURNS_PER_YIELD: u64 = 1024;
+
+/// How deep JWC function calls may nest.
+///
+/// This is a real ceiling, unlike `MAX_DEPTH` below, which counts
+/// expression nesting and never fired: a recursive function overflowed
+/// the *machine* stack first and aborted the process. Measured on the
+/// tokio worker's default 2 MiB stack, `jwc serve` survived a recursion
+/// 18 deep and died at 20 — `fatal runtime error: stack overflow,
+/// aborting`, which takes down every other request in flight with it.
+///
+/// So there are two halves to this and both are needed: the runtime gives
+/// its threads a stack big enough that this number is reachable
+/// (`cmd::WORKER_STACK_BYTES`), and this number is what a program hits
+/// first. `a_recursion_that_never_ends_is_an_error_not_a_crash` in
+/// `tests/hardening.rs` is the guarantee — it recurses past the ceiling
+/// with a deliberately fat frame and asserts an error comes back.
+pub const MAX_CALL_DEPTH: u32 = 128;
+
 /// Write `value` at `path` inside `root`, creating records on the way.
 ///
 /// A JWC record is a list of pairs, not a reference, so this rebuilds the
@@ -354,9 +389,18 @@ pub struct Vm<'a> {
     /// this is what it left behind.
     pub serve_port: Option<u16>,
     depth: u32,
+    calls: u32,
 }
 
-const MAX_DEPTH: u32 = 128;
+/// How deep one *expression* may nest.
+///
+/// Above `MAX_CALL_DEPTH` on purpose. A JWC call costs an expression level
+/// too, so with the two equal a runaway recursion reported "expression
+/// nesting is too deep" — true, useless, and not the fact the reader
+/// needs. Four times the call ceiling leaves the named error to win, and
+/// leaves hand-written nesting — `f(g(h(x)))`, a `??` chain, a nested
+/// ternary — far more room than anyone writes.
+const MAX_DEPTH: u32 = 512;
 
 impl<'a> Vm<'a> {
     pub fn new(program: &'a Program, request: Arc<Request>) -> Self {
@@ -372,6 +416,7 @@ impl<'a> Vm<'a> {
             extra_headers: Vec::new(),
             socket_out: None,
             depth: 0,
+            calls: 0,
         }
     }
 
@@ -407,6 +452,26 @@ impl<'a> Vm<'a> {
 
     pub(super) fn leave_function(&mut self, saved: Vec<HashMap<String, Value>>) {
         self.scopes = saved;
+    }
+
+    /// One more call frame, or the error that says which function is
+    /// recursing. Named, because "too deep" without a name means reading
+    /// the whole program to find the cycle.
+    pub(super) fn enter_call(&mut self, name: &str) -> Exec<()> {
+        self.calls += 1;
+        if self.calls > MAX_CALL_DEPTH {
+            self.calls -= 1;
+            return Err(fault(format!(
+                "`{name}` is {MAX_CALL_DEPTH} calls deep — a recursion with \
+                 no base case, or a depth this language does not have the \
+                 stack for"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) fn leave_call(&mut self) {
+        self.calls = self.calls.saturating_sub(1);
     }
 
     pub fn bind_param(&mut self, name: &str, v: Value) {
@@ -559,7 +624,16 @@ impl<'a> Vm<'a> {
                     Value::Null => Vec::new(),
                     _ => return Err(fault("`for` needs an array")),
                 };
+                // A `for` is bounded by its array, so it needs no turn
+                // ceiling — but a million-row array is still a million
+                // turns of compute, and the same yield is what keeps
+                // `request_timeout` able to end it.
+                let mut turns: u64 = 0;
                 for item in items {
+                    turns += 1;
+                    if turns.is_multiple_of(TURNS_PER_YIELD) {
+                        tokio::task::yield_now().await;
+                    }
                     self.push();
                     self.declare(&binder.name, item);
                     let r = Box::pin(self.run_stmts(body)).await;
@@ -592,6 +666,14 @@ impl<'a> Vm<'a> {
                             "`while` ran {MAX_WHILE_TURNS} times without its \
                              condition going false"
                         )));
+                    }
+                    // Hand the scheduler a turn. Everything this loop
+                    // awaits is ready, and awaiting a ready future does
+                    // not yield — so without this the task never returns
+                    // `Pending`, `request_timeout` never fires, and the
+                    // worker thread is gone until the ceiling above.
+                    if turns.is_multiple_of(TURNS_PER_YIELD) {
+                        tokio::task::yield_now().await;
                     }
                     self.push();
                     let r = Box::pin(self.run_stmts(body)).await;

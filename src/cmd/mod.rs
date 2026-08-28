@@ -55,17 +55,55 @@ mod jwc_v1_paths {
 ///
 /// The variable was registered, documented and printed in the boot table
 /// since the registry was written, and read by nothing.
+/// Stack per worker thread.
+///
+/// tokio's default is 2 MiB, and a JWC call frame is a chain of boxed
+/// futures whose poll costs the whole chain's depth — so on the default a
+/// recursion **18 deep** ran and **20 deep** printed `fatal runtime error:
+/// stack overflow, aborting`, which is a process abort: every other
+/// request on that server dies with it, from one request.
+///
+/// `exec::MAX_CALL_DEPTH` is the ceiling a program is supposed to hit
+/// instead. This is what makes that number reachable rather than
+/// aspirational. 64 MiB is address space, not memory — pages are committed
+/// as they are touched, so a server that never recurses pays nothing for
+/// it.
+pub const WORKER_STACK_BYTES: usize = 64 * 1024 * 1024;
+
 fn runtime() -> Result<tokio::runtime::Runtime> {
     let n = std::env::var("JWC_SERVER_WORKERS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n > 0);
-    match n {
-        Some(n) => Ok(tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(n)
-            .enable_all()
-            .build()?),
-        None => Ok(tokio::runtime::Runtime::new()?),
+    let mut b = tokio::runtime::Builder::new_multi_thread();
+    if let Some(n) = n {
+        b.worker_threads(n);
+    }
+    Ok(b.thread_stack_size(WORKER_STACK_BYTES)
+        .enable_all()
+        .build()?)
+}
+
+/// Run `f` on a worker thread rather than the caller's.
+///
+/// `block_on` polls the future on the *calling* thread, which for a CLI is
+/// the process's main thread and whatever stack the linker gave it — 8 MiB
+/// here, and not something this program chose. `jwc run` on a recursion
+/// 100 deep aborted there for the same reason `serve` did on a worker.
+/// Spawning first puts the work on a thread whose stack is
+/// `WORKER_STACK_BYTES`, so `run` and `serve` have the same ceiling.
+fn on_worker<F>(rt: &tokio::runtime::Runtime, f: F) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    rt.block_on(async move { rt_join(tokio::spawn(f).await) })
+}
+
+fn rt_join(j: std::result::Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
+    match j {
+        Ok(r) => r,
+        Err(e) if e.is_panic() => bail!("the program panicked: {e}"),
+        Err(e) => bail!("{e}"),
     }
 }
 
@@ -723,7 +761,11 @@ pub fn run(path: PathBuf, dev: bool, request_logging: bool) -> Result<()> {
     });
 
     let rt = runtime()?;
-    rt.block_on(async move {
+    // On a worker, not on the main thread: `block_on` polls on the caller,
+    // and the main thread's stack is whatever the linker chose (8 MiB
+    // here), not what this program configured. A recursion 100 deep
+    // aborted `jwc run` there. See `WORKER_STACK_BYTES`.
+    on_worker(&rt, async move {
         if needs_db {
             crate::engine::init_engine_from_env()?;
         }

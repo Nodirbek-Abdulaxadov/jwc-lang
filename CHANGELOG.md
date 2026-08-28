@@ -3,6 +3,48 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.937] — the loop ceiling, and the three limits behind it — 2026-08-28
+
+Asked to look at the interpreter's loop limit, measured all of them. Three
+were wrong, and two of the three were ways to take a server down from one
+request.
+
+**A recursion aborted the process.** `MAX_DEPTH` counted expression nesting
+and was set to 128, but a JWC call frame is a chain of boxed futures whose
+poll costs the whole chain's depth — so the *machine* stack ran out first.
+On tokio's default 2 MiB worker stack `jwc serve` answered a recursion 18
+deep and died at **20**: `fatal runtime error: stack overflow, aborting`.
+That is a process abort, so every other request in flight died with it.
+`jwc run` did the same at ~100 on the main thread.
+
+Two halves, both needed. The runtime now gives its threads a 64 MiB stack
+(address space, committed as touched) and runs `jwc run`'s program on a
+worker rather than on whatever stack the linker gave `main`; and a new
+`MAX_CALL_DEPTH` of 128 is what a program reaches first, as a fault naming
+the function. Measured after: 127 answers, 128 is a 500, 100 000 is a 500,
+and the server keeps serving.
+
+**`request_timeout` could not fire.** Everything a JWC loop body awaits is
+ready, and awaiting a ready future does not yield to the scheduler — so a
+loop that never finishes never returned `Pending` and the timeout never got
+a turn. Measured: `request_timeout = "3s"` around `while (true) { i += 1; }`
+did not fire at all, the client gave up at twenty seconds, and the worker
+stayed pegged at 100% after it had disconnected. Both loops now yield every
+1024 turns, on both backends. Measured after: **504 in 3.006s**, CPU
+released. `request_timeout` is a bound on compute now, not only on I/O.
+
+**A recursive function could not be built.** A generated `async fn` that
+calls itself is `E0733: recursion in an async fn requires boxing`, reported
+against `src/main.rs` of a crate the author never wrote. So every program
+with a recursive function ran under `jwc serve` and failed `jwc build`.
+Codegen finds the functions in a call cycle — direct and mutual — from the
+same `wiring::callees` reader `explain --function` walks, and boxes those
+calls and no others.
+
+`MAX_DEPTH` went 128 → 512 so a runaway recursion reports the call rather
+than the nesting. The ceilings are written down in config.md §6a, with the
+measurements.
+
 ## [0.9.936] — `jwc fmt` was deleting comments — 2026-08-28
 
 Running `jwc fmt` on `jwc-shortener` removed thirteen lines of comment

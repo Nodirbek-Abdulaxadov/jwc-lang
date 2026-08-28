@@ -516,8 +516,17 @@ service Loops {
 (`o.a.b = v`, which creates the key if absent), `const`, `transaction { }`,
 `dispatch`, `assert`.
 
-`while` is bounded at 10,000,000 turns on **both** backends — a runaway
-loop errors rather than hanging a request.
+Three ceilings, the same on both backends (config.md §6a):
+
+| | |
+|---|---|
+| 10 000 000 turns in one `while` | a runaway loop errors, naming the loop |
+| 128 JWC calls deep | a recursion with no base case errors, naming the function |
+| 512 levels of expression nesting | above the call ceiling, so a recursion reports the call |
+
+There is no ceiling on `for`: it is bounded by its array. Both loops hand
+the scheduler a turn every 1024 iterations, which is what makes
+`request_timeout` a bound on compute and not only on I/O.
 
 ---
 

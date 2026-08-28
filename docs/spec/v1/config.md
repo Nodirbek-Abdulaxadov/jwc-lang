@@ -263,6 +263,57 @@ the value.
 
 ---
 
+## 6a. Runtime ceilings
+
+Fixed numbers, not settings: a program that reaches one has a defect, and a
+knob would only move where the defect appears. Both backends carry the same
+values — `jwc build` emits the interpreter's constants rather than its own,
+so a binary and `jwc serve` fail at the same place.
+
+| | | |
+|---|---|---|
+| turns in one `while` | 10 000 000 | a loop whose condition never goes false; the error names the loop |
+| JWC calls on one stack | 128 | recursion with no base case; the error names the function |
+| nesting in one expression | 512 | four times the call ceiling, so a runaway recursion reports the call and not the nesting |
+| turns between yields | 1024 | not a ceiling — see below |
+
+### 6a.1 Why a loop yields
+
+Everything a JWC loop body awaits is **ready**, and awaiting a ready future
+does not hand the scheduler a turn. A loop that never finishes therefore
+never returns `Pending`, and `request_timeout` — a `tokio::time::timeout`
+around the handler — never gets to fire.
+
+Measured before this was fixed: `request_timeout = "3s"` around
+`while (true) { i += 1; }` did not fire at all, the client gave up at twenty
+seconds, and the worker thread stayed at 100% after it had disconnected,
+because nothing had cancelled the task. A handful of such requests is the
+whole server.
+
+Both loops yield every 1024 turns. `request_timeout` is a bound on
+**compute**, not only on I/O, and it is accurate to well under a
+millisecond.
+
+### 6a.2 Why there is a call ceiling
+
+A JWC call frame is a chain of boxed futures, and polling it costs the whole
+chain's depth in machine stack. Without a ceiling the *stack* ran out first:
+on tokio's default 2 MiB worker stack `jwc serve` answered a recursion 18
+deep and died at 20 with `fatal runtime error: stack overflow, aborting` —
+a process abort, which takes every other request in flight with it.
+
+So the runtime gives its threads a 64 MiB stack (address space, committed as
+touched) and 128 frames is what a program reaches first. Reaching it is a
+fault: 500, the generic envelope, and the function named in the log beside
+the request id.
+
+`jwc build` boxes the calls in a cycle, which is also what makes a recursive
+function compile at all — a generated `async fn` that calls itself is
+`E0733` in rustc, so before this every program with a recursive function ran
+under `jwc serve` and could not be built.
+
+---
+
 ## 7. Diagnostics introduced here
 
 | Code | Meaning |

@@ -1845,6 +1845,56 @@ tokio::task_local! {
     /// before dispatching into the user's route fn so built-ins can read it
     /// across `.await` points without explicit plumbing.
     static CURRENT_REQUEST: Arc<Request>;
+
+    /// JWC call frames on this task, against `exec::MAX_CALL_DEPTH`.
+    ///
+    /// A task-local and not a thread-local: a task moves between worker
+    /// threads at any `.await`, and a counter that stayed behind would be
+    /// wrong on both threads. Only functions codegen found in a call cycle
+    /// touch it, so a program with no recursion pays nothing.
+    static JWC_CALLS: std::cell::Cell<u32>;
+}
+
+/// Enter one JWC call frame, or answer with the error that names the
+/// function.
+///
+/// Outside a scope — a job worker, `main` before the listener — this is a
+/// no-op rather than a failure: the ceiling is a guard against a runaway,
+/// not a licence to refuse code that is running somewhere unexpected.
+fn jwc_enter_call(name: &str, max: u32) {
+    let over = JWC_CALLS
+        .try_with(|c| {
+            let n = c.get() + 1;
+            c.set(n);
+            n > max
+        })
+        .unwrap_or(false);
+    if over {
+        // A panic, not a `JwcThrown`: this is a fault, and the interpreter
+        // answers a fault with the generic envelope while writing the
+        // detail to the log. Returning it as a thrown value put the
+        // function name and the ceiling in the response body, which is a
+        // different answer from `jwc serve` for the same program and hands
+        // a caller the shape of the program's call graph.
+        panic!("`{name}` is {max} calls deep — a recursion with no base case, or a depth this language does not have the stack for");
+    }
+}
+
+fn jwc_leave_call() {
+    let _ = JWC_CALLS.try_with(|c| c.set(c.get().saturating_sub(1)));
+}
+
+/// Leaves the frame however the function returns.
+///
+/// A `Drop` guard rather than a decrement at the end of the body: a
+/// generated function leaves through `return`, through `?` on a raise and
+/// through a `catch` unwinding, and only two of those reach the last line.
+struct JwcCallFrame;
+
+impl Drop for JwcCallFrame {
+    fn drop(&mut self) {
+        jwc_leave_call();
+    }
 }
 
 fn with_current_request<F: FnOnce(&Request) -> V>(f: F) -> V {
@@ -3290,9 +3340,11 @@ async fn jwc_dispatch(
     // and the client got a dropped connection instead of a response — the
     // one failure mode a client cannot distinguish from the server being
     // gone.
-    let guarded = std::panic::AssertUnwindSafe(
-        CURRENT_REQUEST.scope(req, async move { handler().await }),
-    );
+    let guarded = std::panic::AssertUnwindSafe(CURRENT_REQUEST.scope(req, async move {
+        JWC_CALLS
+            .scope(std::cell::Cell::new(0), async move { handler().await })
+            .await
+    }));
     let result_v = match futures::FutureExt::catch_unwind(guarded).await {
         Ok(v) => v,
         Err(payload) => {

@@ -2901,3 +2901,176 @@ fn fmt_refuses_a_file_rather_than_drop_a_comment() {
         "fmt.rs must say which comments it cannot keep"
     );
 }
+
+/// A recursion that never ends is an error, and the process survives it.
+///
+/// It did not. `MAX_DEPTH` counted expression nesting and was set to 128,
+/// but a JWC call frame is a chain of boxed futures whose poll costs the
+/// whole chain's depth — so the *machine* stack ran out first. Measured on
+/// tokio's default 2 MiB worker stack, `jwc serve` answered a recursion 18
+/// deep and died at 20 with `fatal runtime error: stack overflow,
+/// aborting`. That is a process abort: every other request in flight dies
+/// with it, from one request. `jwc run` did the same at ~100 on the main
+/// thread's 8 MiB.
+///
+/// Two halves, and both are needed: the runtime gives its threads a stack
+/// big enough for `MAX_CALL_DEPTH` frames, and `MAX_CALL_DEPTH` is what a
+/// program reaches first.
+#[test]
+fn a_recursion_that_never_ends_is_an_error_not_a_crash() {
+    // The call ceiling has to sit under `MAX_DEPTH`, or a runaway recursion
+    // reports expression nesting and names no function; and it is only real
+    // if the stack can hold that many frames. Both are read off the crate
+    // rather than repeated here, so the run below is the check.
+
+    // Recursion with no base case, and a frame carrying enough locals that
+    // it is not the cheapest possible one — the ceiling has to hold for a
+    // realistic body, not only for `f(n - 1)`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("jwcproj.json"),
+        r#"{ "name": "deep", "type": "app", "version": "0.1.0" }"#,
+    )
+    .expect("manifest");
+    std::fs::write(
+        dir.path().join("app.jwc"),
+        "namespace deep;\n\
+         function down(n: int) -> int {\n\
+         \x20   let a = string.of($n) + \"-\" + string.of($n);\n\
+         \x20   let b = [$a, $a, $a, $a];\n\
+         \x20   let c = { one: $a, two: $b, three: $n };\n\
+         \x20   if (array.len($b) < 0) { return 0; }\n\
+         \x20   return down($n + 1) + string.len($c.one) - string.len($a);\n\
+         }\n\
+         function main() { console.writeln(string.of(down(0))); }\n",
+    )
+    .expect("write");
+
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let program = std::sync::Arc::new(jwc::serve::load(&ws).expect("load program"));
+
+    // On a worker with the runtime's stack, which is the whole point.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(jwc::cmd::WORKER_STACK_BYTES)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let err = rt
+        .block_on(async move {
+            tokio::spawn(async move { jwc::serve::declared_port(&program).await })
+                .await
+                .expect("the task must not abort the process")
+        })
+        .expect_err("a recursion with no base case must be an error");
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("down") && msg.contains(&jwc::exec::MAX_CALL_DEPTH.to_string()),
+        "the error must name the function and the ceiling, got: {msg}"
+    );
+}
+
+/// A loop that never finishes must not own a worker thread.
+///
+/// Every future a JWC loop body awaits is *ready*, and awaiting a ready
+/// future does not yield to the scheduler — so the task never returned
+/// `Pending`, and `serve`'s `tokio::time::timeout` never got a turn.
+/// Measured before this: `request_timeout = "3s"` around
+/// `while (true) { i += 1; }` did not fire at all, the client gave up at
+/// twenty seconds, and the worker stayed pegged at 100% after it
+/// disconnected. Afterwards: 504 at 3.006s, and the CPU released.
+///
+/// Both backends emit the yield, because a built binary hangs the same way.
+#[test]
+fn a_loop_hands_the_scheduler_a_turn() {
+    fn emit(src: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        jwc::native::codegen_for_test(&ws).expect("codegen")
+    }
+
+    let w = emit("namespace n;\nfunction main() { let i = 0; while (true) { i += 1; } }\n");
+    assert!(
+        w.contains("yield_now().await"),
+        "a generated `while` must yield"
+    );
+    let f = emit("namespace n;\nfunction main() { let t = 0; for (x in [1, 2, 3]) { t += 1; } }\n");
+    assert!(
+        f.contains("yield_now().await"),
+        "a generated `for` must yield — a million-row array is a million turns"
+    );
+
+    // And the interpreter must not have a second opinion about when.
+    let exec = include_str!("../src/exec.rs");
+    assert!(exec.contains("turns.is_multiple_of(TURNS_PER_YIELD)"));
+    assert!(
+        exec.matches("tokio::task::yield_now().await").count() >= 2,
+        "`while` and `for` both"
+    );
+}
+
+/// A recursive function has to *build*, and it did not.
+///
+/// A generated function is an `async fn`, and rustc refuses a directly
+/// recursive one: `E0733: recursion in an async fn requires boxing`,
+/// reported against `src/main.rs` of a crate the author never wrote. So
+/// every JWC program with a recursive function ran fine under `jwc serve`
+/// and could not be built at all — and the message named neither the JWC
+/// function nor the reason.
+#[test]
+fn a_recursive_function_compiles_natively() {
+    fn emit(src: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.jwc"), src).expect("write");
+        let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+        jwc::native::codegen_for_test(&ws).expect("codegen")
+    }
+
+    let direct = emit(
+        "namespace n;\n\
+         function down(k: int) -> int { if (k <= 0) { return 0; } return down($k - 1); }\n\
+         function main() { console.writeln(string.of(down(3))); }\n",
+    );
+    assert!(
+        direct.contains("Box::pin(jwc_fn_down("),
+        "a directly recursive call must be boxed"
+    );
+    assert!(
+        direct.contains("jwc_enter_call(\"down\""),
+        "and must count its frames"
+    );
+
+    // Mutual recursion is the same cycle by a longer path.
+    let mutual = emit(
+        "namespace n;\n\
+         function ping(k: int) -> int { if (k <= 0) { return 0; } return pong($k - 1); }\n\
+         function pong(k: int) -> int { return ping($k - 1); }\n\
+         function main() { console.writeln(string.of(ping(3))); }\n",
+    );
+    assert!(mutual.contains("Box::pin(jwc_fn_ping("));
+    assert!(mutual.contains("Box::pin(jwc_fn_pong("));
+
+    // A program with no cycle keeps the direct call and pays nothing.
+    let plain = emit(
+        "namespace n;\n\
+         function twice(k: int) -> int { return $k + $k; }\n\
+         function main() { console.writeln(string.of(twice(3))); }\n",
+    );
+    assert!(plain.contains("jwc_fn_twice("));
+    assert!(
+        !plain.contains("Box::pin(jwc_fn_twice("),
+        "a function that cannot recurse must not be boxed"
+    );
+    // The prelude *defines* `jwc_enter_call` in every crate; what a
+    // non-recursive function must not have is a call to it.
+    assert!(
+        !plain.contains("jwc_enter_call(\"twice\""),
+        "a function that cannot recurse must not pay for the frame counter"
+    );
+    assert!(
+        !plain.contains("let _frame = JwcCallFrame;"),
+        "nor carry the guard"
+    );
+}
