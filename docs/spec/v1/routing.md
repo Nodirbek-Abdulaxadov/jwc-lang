@@ -225,19 +225,19 @@ A key that the builder already set — `Content-Type` on any JSON response,
 Appending instead would send the header twice, which is a malformed message
 (RFC 9110 §8.3) and is resolved differently by different clients.
 
-Repeated headers (`Set-Cookie`) use a separate call — and `with { }`
-**appends** on that one name rather than replacing, because replacing
-would delete a cookie instead of overriding a value. Measured before
-0.9.947: `created(json({…}) cookie("sid","inner")) with { "Set-Cookie":
-"outer=1" }` answered with `outer=1` alone, and the validated
-`Path=/; SameSite=Lax; HttpOnly` session cookie was gone with no
-diagnostic anywhere. Every other header still replaces
+`Set-Cookie` is the exception: `with { }` **appends** on that one name
+rather than replacing, because it is the header HTTP expects to repeat,
+so replacing on it would delete a cookie instead of overriding a value.
+Every other header replaces.
 
 `__Host-` and `__Secure-` cookie names are checked against the rule the
 prefix promises (`E0746`): both need `secure: true`, and `__Host-` also
 needs `path: "/"` and no `domain`. A browser refuses a cookie that breaks
-it and says nothing, which is the same silent failure `E0739` exists for, because a JSON object
-cannot carry a duplicate key:
+the rule and says nothing, which is the same silent failure `E0739` exists
+for.
+
+A cookie is set with `cookie(...)` rather than through `with { }`, because
+a JSON object cannot carry a duplicate key:
 
 ```jwc
 return json($x) with { "Cache-Control": "no-store" } cookie("sid", $sid, { http_only: true, max_age: 3600 });
@@ -463,13 +463,12 @@ A socket message and a single frame are both capped at
 closes; the handler does not run.
 
 The cap is the body cap because a frame is a thing a peer sends, and
-`max_body_bytes` is the knob that says how large that may be. Until
-0.9.944 it stopped at the HTTP body and the upgrade carried no limit of
-its own, so the real ceiling was the WebSocket library's 64 MiB default
-whatever the config said. Measured against a server configured for 1024
-bytes: a **5,000,000** byte text frame was accepted and handled, about
-5000x the number in the file. An author who set the knob had not bought
-what it says.
+`max_body_bytes` is the knob that says how large that may be. An upgrade
+carrying no limit of its own would leave the real ceiling at the WebSocket
+library's 64 MiB default whatever the config said — measured against a
+server configured for 1024 bytes, a **5,000,000** byte text frame goes
+through, about 5000x the number in the file, and the author who set the
+knob has not bought what it says.
 
 The cap is per connection, so N peers still cost N x the cap — this is a
 bound on one message, not a memory budget. `0`, the escape hatch for a
@@ -495,16 +494,16 @@ needlessly small.
 already bounds connections. It restores exactly the behaviour described
 below, so set it deliberately.
 
-Why the cap exists, measured before 0.9.946 on a server whose descriptor
-limit was 200: an attacker opened **190** connections, sent nothing on any
-of them, and every ordinary HTTP request then failed to connect at all.
-`/healthz` and `/readyz` are HTTP too, so an orchestrator would see a dead
-pod and restart it — handing the attacker a fresh one to refill. Each
-connection cost about 14.7 kB and exactly one descriptor, and nothing ever
-closed them.
+Why the cap exists, measured on a server whose descriptor limit was 200:
+without one, an attacker opens **190** connections, sends nothing on any
+of them, and every ordinary HTTP request then fails to connect at all.
+`/healthz` and `/readyz` are HTTP too, so an orchestrator sees a dead pod
+and restarts it — handing the attacker a fresh one to refill. Each
+connection costs about 14.7 kB and exactly one descriptor, and nothing
+closes them.
 
-With the cap, the same 190 attempts fill the cap, the rest get 503, and
-HTTP keeps answering 200.
+With the cap, the same 190 attempts fill it, the rest get 503, and HTTP
+keeps answering 200.
 
 What the cap does **not** do: it does not reclaim a connection that is
 open but dead. `socket.recv()` waits with no timeout, so a peer that has
@@ -562,11 +561,11 @@ files happened to load in.
 Rows 3 and 4 are the same rule as §4.2, extended to mounts: §4.2 ranks
 candidates by **literal segments**, a file under a mount is all-literal and
 a `{slot}` route has none, so the mount is the more specific candidate.
-Until 0.9.942 every route came ahead of every mount, which meant a
-`/{code}` catch-all took `/robots.txt` and `/favicon.ico` away from the
-mount sitting next to `index.html` — and answered 404 in the shape of "no
-such link", which is a wrong answer rather than a missing one. A crawler
-asking for `/robots.txt` was told the link did not exist.
+Putting every route ahead of every mount instead would let a `/{code}`
+catch-all take `/robots.txt` and `/favicon.ico` away from the mount sitting
+next to `index.html`, and answer 404 in the shape of "no such link" — a
+wrong answer rather than a missing one, told to a crawler asking for
+`/robots.txt`.
 
 The mount only wins when it **has** the file: a miss under the mount falls
 through to the parameterised route, so `/abc123` still reaches `/{code}`.

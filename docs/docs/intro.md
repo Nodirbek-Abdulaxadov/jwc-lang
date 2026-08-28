@@ -133,15 +133,9 @@ the constraint. Routes do not build error responses by hand.
 | [Deployment](./deployment/index.md) | Docker, the native build, probes |
 | [Security](./security) | What the language enforces, and what it does not |
 | [The language](./reference/language) | The whole language on one page, with the reasons |
-| [Reference](./reference/removed) | The 0.9.x → 1.0 map, and what 1.0 does not have |
+| [What 1.0 does not have](./reference/not-in-1-0) | The dated omissions, and what to do instead |
 
 ## Status
-
-The 1.0 vocabulary is what this compiler implements. The 0.9.x language —
-`dbcontext`, `entity`, `dome`, `validate body` — was removed at the cutover
-and does not compile; every removed keyword has a diagnostic naming its
-replacement. If you are reading code written against it, see
-[what changed](./reference/removed).
 
 The normative specification lives in
 [`docs/spec/v1/`](https://github.com/just-web-code/jwc-lang/tree/main/docs/spec/v1)

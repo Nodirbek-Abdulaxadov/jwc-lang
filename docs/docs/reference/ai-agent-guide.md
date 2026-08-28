@@ -15,8 +15,7 @@ language](./language.md) is the same ground covered with the reasons, plus
 migrations, jobs, sockets, packages, tests and the runtime — one page, for
 a person and for an agent with room to spare.
 
-Written against **JWC 1.0** (`0.9.9xx` pre-releases). Check with
-`jwc --version`.
+Written against **JWC 1.0**. Check with `jwc --version`.
 
 Every ```` ```jwc ```` block below is compiled by the test suite. If an
 example here does not work, that is a bug in this page and it fails CI.

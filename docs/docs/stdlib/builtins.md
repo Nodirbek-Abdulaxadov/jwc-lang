@@ -169,8 +169,7 @@ From inside an `after` block: `response.status()`,
 
 ## HTTP
 
-Calling another service. Restored in 0.9.921 — the cutover deleted it, and
-a language for HTTP backends could not make an HTTP request.
+Calling another service.
 
 | | |
 |---|---|

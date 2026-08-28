@@ -216,11 +216,10 @@ is the same, and its feature list keeps moving.
 3.9.3 A duplicated request header is **joined**, not overwritten — with `; `
 for `Cookie`, which is what the cookie grammar puts between pairs, and
 `, ` for everything else (RFC 9110 §5.3). A byte that is not valid UTF-8
-is replaced rather than deleting the header. Both were measured as losses
-before 0.9.947: two `Cookie:` fields arrived as the second one alone, and
-one high byte made the whole header read as absent. Neither is exotic —
-RFC 9113 §8.2.3 lets an HTTP/2 client split the cookie list across
-fields, and browsers do.
+is replaced rather than deleting the header. Both rules exist because the
+losses are silent: overwriting drops a `Cookie:` field a client legitimately
+split — RFC 9113 §8.2.3 lets an HTTP/2 client do exactly that, and browsers
+do — and dropping the header on one high byte reads as no cookie at all.
 
 The headers go on **every** answer, including the ones no response
 builder made: a 413 refused before the chain, a preflight, a 404, a static
@@ -372,11 +371,10 @@ does not hand the scheduler a turn. A loop that never finishes therefore
 never returns `Pending`, and `request_timeout` — a `tokio::time::timeout`
 around the handler — never gets to fire.
 
-Measured before this was fixed: `request_timeout = "3s"` around
-`while (true) { i += 1; }` did not fire at all, the client gave up at twenty
-seconds, and the worker thread stayed at 100% after it had disconnected,
-because nothing had cancelled the task. A handful of such requests is the
-whole server.
+Measured: `request_timeout = "3s"` around `while (true) { i += 1; }` does
+not fire, the client gives up at twenty seconds, and the worker thread
+stays at 100% after it has disconnected, because nothing cancels the task.
+A handful of such requests is the whole server.
 
 Both loops yield every 1024 turns. `request_timeout` is a bound on
 **compute**, not only on I/O, and it is accurate to well under a

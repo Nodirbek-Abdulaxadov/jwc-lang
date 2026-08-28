@@ -72,9 +72,9 @@ program with no `main` is `jwc serve`'s job, and `run` says so.
 dependency on the compiler. It needs a Rust toolchain, because that is
 what it hands the generated crate to.
 
-It runs `jwc check` first and builds nothing if that fails. Until 0.9.941
-it did not: it tested only that the source parsed, so a program with type
-errors — one `jwc check` exits 1 on — compiled to a release binary and ran.
+It runs `jwc check` first and builds nothing if that fails — testing only
+that the source parses would let a program with type errors, one
+`jwc check` exits 1 on, compile to a release binary and run.
 
 The binary listens when the program is a server: it declares a `route` or
 a `socket`, or its `main` calls `serve(port)`. A program with neither is a

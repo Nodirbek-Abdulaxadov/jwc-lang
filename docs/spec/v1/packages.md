@@ -129,15 +129,15 @@ else; a registry is not the only thing that can serve a `.tar.gz` over a
 URL, and `jwc add` runs on a developer's machine and in CI.
 
 * An entry whose path is **absolute** or contains **`..`** is refused.
-* A **symlink** or a **hard link** is refused, by entry type. Until
-  0.9.943 only the rule above existed, and it does not see this: an
-  archive carrying a symlink `escape` pointing at another directory,
-  followed by an ordinary file `escape/hacked.txt`, wrote `hacked.txt`
-  into that other directory — measured. Neither entry's path is absolute
-  and neither contains `..`; the escape is in the *link*, not the name.
-  A package is source text and has no use for either kind of link, so
-  they are refused rather than resolved: resolving means agreeing with
-  the filesystem about every case fold and mount point.
+* A **symlink** or a **hard link** is refused, by entry type. The rule
+  above does not see this one: an archive carrying a symlink `escape`
+  pointing at another directory, followed by an ordinary file
+  `escape/hacked.txt`, writes `hacked.txt` into that other directory —
+  measured. Neither entry's path is absolute and neither contains `..`;
+  the escape is in the *link*, not the name. A package is source text and
+  has no use for either kind of link, so they are refused rather than
+  resolved: resolving means agreeing with the filesystem about every case
+  fold and mount point.
 * Any other entry type — a device node, a fifo — is refused for the same
   reason.
 * After the join, the parent directory is **canonicalised** and must be

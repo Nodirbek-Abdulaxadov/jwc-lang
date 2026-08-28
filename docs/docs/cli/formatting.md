@@ -105,10 +105,10 @@ above. Nothing is lost, but the comment moves.
 one clause per line, whatever you wrote, and a short one stays on one
 line however you broke it.
 
-Since 0.9.942 the same holds for the three constructs that grow — an
-array, a record literal and an argument list. Each is one line when it
-fits inside **92 columns** at its indent, and broken one item per line
-when it does not:
+The same holds for the three constructs that grow — an array, a record
+literal and an argument list. Each is one line when it fits inside
+**92 columns** at its indent, and broken one item per line when it does
+not:
 
 ```jwc no-compile
 return content("text/plain; charset=utf-8", string.join([
@@ -137,9 +137,10 @@ mixed chain, a long identifier chain, a single long string. Breaking one
 of those is a claim about which half matters, and the printer does not
 have an opinion to express.
 
-Until 0.9.942 there was no rule at all outside a query and an `insert`.
-jwc-shortener's `robots.txt` route was a `string.join` over 36 short
-strings and `jwc fmt` printed it as one **1608-column** line.
+Without a rule outside a query and an `insert`, a `string.join` over 36
+short strings — jwc-shortener's `robots.txt` route — prints as one
+**1608-column** line, and a formatter that makes a file less readable than
+the input is a formatter people stop running.
 
 **A comment written *inside* a record literal, a `server { }` body or an
 `insert` value list.** The AST carries a comment on a declaration or a
@@ -158,8 +159,8 @@ the file alone and says which:
     …
 ```
 
-Move the comment above the enclosing statement and the file formats.
-Until 0.9.941 it was deleted and the run reported success.
+Move the comment above the enclosing statement and the file formats. The
+run fails rather than dropping the comment and reporting success.
 
 ## In a pre-commit hook
 

@@ -41,11 +41,11 @@ every occurrence with a count.
 
 2.4 `JWC_LOG_SQL=1` prints each bound parameter's **length**, not its
 value. `=values` prints the values and warns at the first statement that it
-is doing so. Until 0.9.941 `=1` printed them, so switching the SQL log on
-in production wrote passwords, session tokens and personal data into a file
-that is collected and kept. A bind is positional and has no name, so there
-is no way to filter by name the way a framework filters a params hash — the
-only honest default is not to print them.
+is doing so. Printing values under `=1` would mean switching the SQL log on
+in production writes passwords, session tokens and personal data into a
+file that is collected and kept. A bind is positional and has no name, so
+there is no way to filter by name the way a framework filters a params
+hash — the only honest default is not to print them.
 
 ---
 
@@ -111,8 +111,8 @@ and `hash.hmac_verify` are constant time already.
 nosniff`, `X-Frame-Options: DENY` and
 `Referrer-Policy: strict-origin-when-cross-origin`; HSTS, a CSP and a
 Permissions-Policy are available and off until asked for (config §3.9).
-Until 0.9.941 a route response carried **none** of them and a `static`
-mount carried the first.
+Every answer carries them, a fault included — a header set on the happy
+path only is a header that is missing exactly when it matters.
 
 6.0.1 `html(body)` and `content(mime, body)` send their argument verbatim,
 which is what they are for. `string.escape_html` and `string.escape_url`
@@ -147,8 +147,9 @@ What the language does:
 * A cookie is `HttpOnly` and `SameSite=Lax` unless the author says
   otherwise. `Lax` is the cross-site defence: a cookie set this way is not
   sent on a cross-site `POST`, which is the shape a forged request takes.
-  Until 0.9.941 the attributes were documented and **discarded**, so every
-  cookie was `Path=/` and nothing else.
+  Attributes an author writes are the attributes that go on the wire; a
+  documented option that is silently discarded is worse than an absent
+  one.
 * `same_site: "None"` — the setting that turns that defence off — requires
   `secure: true` (`E0739`) and cannot be written by accident.
 * `X-Frame-Options: DENY` is on by default (config §3.9), so the
@@ -203,12 +204,11 @@ only in a comment.
 
 8.3 `jwc add` verifies a package against a checksum from a **separate**
 request, and refuses an archive entry that can write outside its directory
-(packages §4a.6–7). "Escapes its directory" means more than `..`: until
-0.9.943 an archive carrying a **symlink** and then an ordinary file
-*through* it wrote outside the destination, with no `..` and no absolute
-path anywhere in it. Links of both kinds are now refused by entry type,
-the destination is re-checked after canonicalisation, and the unpacked
-size is capped. This is an arbitrary file write from a package publisher
+(packages §4a.6–7). "Escapes its directory" means more than `..`: an archive carrying a
+**symlink** and then an ordinary file *through* it writes outside the
+destination with no `..` and no absolute path anywhere in it. Links of
+both kinds are refused by entry type, the destination is re-checked after
+canonicalisation, and the unpacked size is capped. This is an arbitrary file write from a package publisher
 to everyone who installs it, so it is stated rather than folded into a
 line about paths.
 
@@ -221,14 +221,14 @@ password, host, port or database name appears. Keeping the three paths off
 the public listener is the operator's job, not the runtime's.
 
 8.5 A WebSocket connection costs a descriptor, and the descriptor table
-is shared with HTTP. Measured before 0.9.946 against a server whose limit
-was 200: **190** idle upgrades — opened and then silent — took every
+is shared with HTTP. Measured against a server whose limit was 200:
+unbounded, **190** idle upgrades — opened and then silent — take every
 ordinary HTTP request to a connection failure, health probes included, so
-an orchestrator would restart the pod and hand the attacker a fresh one.
-`server { max_sockets }` now bounds it (routing §9.5), refusing past the
-cap with a 503 before the handshake. The guarantee is that HTTP survives;
-holding slots open still denies *sockets*, because 1.0 sends no keepalive
-ping and cannot tell a quiet peer from a gone one.
+an orchestrator restarts the pod and hands the attacker a fresh one.
+`server { max_sockets }` bounds it (routing §9.5), refusing past the cap
+with a 503 before the handshake. The guarantee is that HTTP survives;
+holding slots open still denies *sockets*, because there is no keepalive
+ping and so no way to tell a quiet peer from a gone one.
 
 ---
 
@@ -246,8 +246,8 @@ walks a caller to one that is not.
 it answers with. The refused set (builtins §7c.1) is deliberately wider
 than RFC 1918, because the addresses that matter are the ones a cloud puts
 credentials on — including `100.100.100.200`, Alibaba Cloud's metadata
-endpoint, which is inside carrier-grade NAT and which this refused nothing
-about until 0.9.943.
+endpoint, which is inside carrier-grade NAT and in no RFC 1918 range, so a
+list written from memory leaves it reachable.
 
 9.3 It is **off by default**. A JWC service talking to a sibling container
 by name is ordinary, and a default that refused it would be turned off

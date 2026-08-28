@@ -20,7 +20,7 @@ says what 1.0 does instead.
 
 ## What it does have
 
-The four things this page used to list as missing:
+Four capabilities people most often ask about, all present:
 
 | | |
 |---|---|

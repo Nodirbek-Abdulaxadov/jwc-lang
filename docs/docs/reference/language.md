@@ -15,7 +15,7 @@ tables, for pasting into a context window. This page is for the case in
 between: you want to **understand** the language, in order, in one sitting
 — and you want an agent to be able to read the same page and get it right.
 
-Written against **JWC 1.0** (`0.9.9xx` pre-releases); check with
+Written against **JWC 1.0**; check with
 `jwc --version`. Every ```` ```jwc ```` block here is compiled by the test
 suite, so an example that does not work is a failing build rather than a
 page you cannot trust. Blocks marked ```` ```jwc no-compile ```` are
@@ -734,8 +734,8 @@ is `W0801`: `throw Unauthorized(…)` becomes a 401 in one place, and the
 error handler is where the shape of an error response is decided.
 
 Falling off the end is how a middleware lets the chain continue. A bare
-`return;` is **not** that — it stops the chain and answers 204 — so since
-0.9.942 it is `E0812`. Write `return noContent();` if you meant the
+`return;` is **not** that — it would stop the chain and answer 204 — so it
+is `E0812`. Write `return noContent();` if you meant the
 response, `throw` if you meant to reject, and an `if` around the work if
 you meant "carry on".
 
@@ -1149,8 +1149,8 @@ somewhere else entirely.
 **Returning an error response from a middleware.** `throw` instead; the
 error model turns it into a status in one place.
 
-**A bare `return;` in a middleware's request phase.** It answered 204 and
-stopped the chain, silently. `E0812` since 0.9.942.
+**A bare `return;` in a middleware's request phase.** It would answer 204
+and stop the chain silently, so it is `E0812`.
 
 **Forgetting the binder.** `select O from App.s.T` — the `O` is required.
 

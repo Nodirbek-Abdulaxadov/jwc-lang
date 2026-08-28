@@ -179,10 +179,10 @@ argument that decides them, so a caller's own would be overwritten. A
 first argument that is not a record is `E0303` — `json.stringify(...)`
 mints a token carrying nothing.
 
-Until 0.9.943 only `sub` was signed and the rest was dropped without a
-word. Inside JWC that was invisible, because `jwt.verify` answers a fixed
-three-field record either way; a token exists to be read by something
-else, and every custom claim a service put in one was lost on the way out.
+Every claim in the record is signed, not just `sub`. A token exists to be
+read by something else, and a signer that kept one field and dropped the
+rest would lose every custom claim on the way out — invisibly from inside
+JWC, because `jwt.verify` answers a fixed three-field record either way.
 
 **`jwt.verify` and `jwt.verify_jwks` answer the same record**, so moving
 from a shared secret to an identity provider does not change the code that
@@ -332,7 +332,7 @@ that matter are the ones a cloud puts a credential endpoint on:
 |---|---|
 | `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16` | loopback and private |
 | `169.254.0.0/16` | AWS, GCP and Azure metadata at `169.254.169.254` |
-| `100.64.0.0/10` | carrier-grade NAT — **Alibaba Cloud metadata at `100.100.100.200`**, which is in no RFC 1918 range and was not refused before 0.9.943 |
+| `100.64.0.0/10` | carrier-grade NAT — **Alibaba Cloud metadata at `100.100.100.200`**, which is in no RFC 1918 range, so a check written from memory misses it |
 | `0.0.0.0/8` | `0.0.0.1` routes to the local host on Linux |
 | `192.0.0.0/24`, `198.18.0.0/15`, `240.0.0.0/4`, `255.255.255.255` | protocol assignments, benchmarking, reserved, broadcast |
 | multicast, and the v6 equivalents | `::1`, `fc00::/7`, `fe80::/10`, `ff00::/8` |
@@ -506,7 +506,7 @@ grouped query (`E0530`).
 |---|---|
 | `now()` | two clocks; write `date.now()` or `default now()` (types §2.4) |
 | `send_email` | I/O with a provider shape the language does not model. The package is §8's `mail.send(to, subject, body)`. `DEFERRED-10` |
-| `log_insert` | not a built-in, but the capability is not absent: it is `insert into … buffered` (writes §7). This row used to read "overlapped `insert into` for no benefit" — the benefit is the round trip an `after` block otherwise puts in front of every response, and it is measurable |
+| `log_insert` | not a built-in, but the capability is not absent: it is `insert into … buffered` (writes §7), which removes the round trip an `after` block otherwise puts in front of every response |
 | `random_token` | ambiguous strength. `crypto.token(n)` |
 | `verify_signature` | ambiguous algorithm. `hash.hmac_verify(payload, sig, secret)` |
 | `days(n)` | `date.days(n)` |
