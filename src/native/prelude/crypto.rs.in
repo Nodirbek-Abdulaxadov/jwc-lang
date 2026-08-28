@@ -757,18 +757,24 @@ fn jwc_hmac_sha256_hex(key: &str, msg: &str) -> String {
 /// `exec_call.rs`'s `"jwt.sign"` arm exactly, down to the `max(1)` on the
 /// TTL — a zero-minute token is a caller mistake, not a request for one
 /// that has already expired.
+/// builtins.md §6 — every claim the caller wrote, plus the two the
+/// builder owns.
+///
+/// Until 0.9.943 this signed `sub` and nothing else, exactly as the
+/// interpreter did, so the two agreed and both were wrong: a token exists
+/// to be read by something outside JWC, and a `role` or an `org_id` put in
+/// one never left the process. `iat` and `exp` are the builder's, because
+/// that is what `ttl_minutes` decides.
 fn jwc_b_v1_jwt_sign(claims: V, secret: V, ttl_minutes: V) -> V {
     let now = chrono::Utc::now().timestamp();
     let ttl = jwc_to_int(&ttl_minutes).unwrap_or(0).max(1);
-    let sub = jwc_str_view(&jwc_get_field(&claims, "sub"))
-        .unwrap_or("")
-        .to_string();
-    let payload = serde_json::json!({
-        "sub": sub,
-        "iat": now,
-        "exp": now + ttl * 60,
-    })
-    .to_string();
+    let mut payload = match serde_json::from_str::<serde_json::Value>(&jwc_to_json(&claims)) {
+        Ok(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    payload.insert("iat".into(), serde_json::json!(now));
+    payload.insert("exp".into(), serde_json::json!(now + ttl * 60));
+    let payload = serde_json::Value::Object(payload).to_string();
     let secret = jwc_str_view(&secret).unwrap_or("").to_string();
     match jwc_jwt_sign_hs256(&payload, &secret) {
         Ok(token) => v_str(token),

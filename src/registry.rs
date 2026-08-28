@@ -314,20 +314,109 @@ fn vendor(
         std::fs::remove_dir_all(&dest)?;
     }
     std::fs::create_dir_all(&dest)?;
-    let gz = flate2::read::GzDecoder::new(&bytes[..]);
+    unpack_into(&bytes, &dest)?;
+    Ok(dest)
+}
+
+/// How much a package may weigh unpacked.
+///
+/// gzip compresses a file of zeros about a thousand to one, so a 1 MB
+/// download can be a gigabyte on the disk. The registry's own upload limit
+/// bounds what it will serve; this bounds what `jwc add` will write, which
+/// is the number that matters on the machine doing the unpacking.
+const MAX_UNPACKED_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Unpack a `.tar.gz` into `dest`, refusing everything that could write
+/// outside it (packages.md §4a.7).
+///
+/// Three rules, and the middle one is the one that was missing.
+///
+/// 1. **No absolute path and no `..`.** The obvious form.
+///
+/// 2. **No symlink and no hard link.** Measured before 0.9.943: an archive
+///    carrying a symlink `escape` → some other directory, followed by an
+///    ordinary file `escape/hacked.txt`, wrote `hacked.txt` into that other
+///    directory. Neither entry's path is absolute and neither contains
+///    `..`, so rule 1 passed both — the escape is in the *link*, not in the
+///    name. A JWC package is source text and has no use for either kind of
+///    link, so they are refused by entry type rather than resolved.
+///
+/// 3. **A total size ceiling**, so a decompression bomb cannot fill the
+///    disk of whoever runs `jwc add`.
+///
+/// The path is also re-checked against the canonical destination after the
+/// join, which is the belt to rule 1's braces: it is the only check that
+/// does not depend on having enumerated the ways a name can be strange.
+fn unpack_into(bytes: &[u8], dest: &Path) -> Result<()> {
+    use tar::EntryType;
+
+    let root = dest
+        .canonicalize()
+        .with_context(|| format!("{} is not a directory", dest.display()))?;
+    let gz = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(gz);
+    let mut written: u64 = 0;
+
     for entry in archive.entries()? {
         let mut entry = entry?;
         let rel = entry.path()?.to_path_buf();
-        // A `..` or an absolute path in an archive is how an unpack writes
-        // outside its directory. The registry does not produce one; a
-        // registry is not the only thing that can serve a `.tar.gz`.
+
+        // Rule 1.
         if rel.is_absolute() || rel.components().any(|c| c.as_os_str() == "..") {
             bail!("the archive contains an unsafe path: {}", rel.display());
         }
-        entry.unpack(dest.join(&rel))?;
+
+        // Rule 2. `entry.unpack` writes a link exactly as the archive
+        // describes it, and the next entry can then be written *through*
+        // it. Refused rather than resolved: resolving means agreeing with
+        // the filesystem about every case fold and mount point.
+        match entry.header().entry_type() {
+            EntryType::Regular | EntryType::Directory | EntryType::GNUSparse => {}
+            EntryType::Symlink | EntryType::Link => bail!(
+                "the archive contains a {} at {}, which is how an unpack writes \
+                 outside its own directory. A JWC package is source text and \
+                 cannot contain one",
+                if entry.header().entry_type() == EntryType::Symlink {
+                    "symlink"
+                } else {
+                    "hard link"
+                },
+                rel.display()
+            ),
+            other => bail!(
+                "the archive contains an entry of type {other:?} at {}, which a \
+                 JWC package cannot contain",
+                rel.display()
+            ),
+        }
+
+        // Rule 3.
+        written = written.saturating_add(entry.header().size().unwrap_or(0));
+        if written > MAX_UNPACKED_BYTES {
+            bail!(
+                "the archive unpacks to more than {} MiB",
+                MAX_UNPACKED_BYTES / (1024 * 1024)
+            );
+        }
+
+        let target = dest.join(&rel);
+        // The belt. A parent that is already outside the root — which can
+        // only happen if something above got through — stops here.
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+            let canonical = parent
+                .canonicalize()
+                .with_context(|| format!("{} could not be resolved", parent.display()))?;
+            if !canonical.starts_with(&root) {
+                bail!(
+                    "the archive would write outside its directory: {}",
+                    rel.display()
+                );
+            }
+        }
+        entry.unpack(&target)?;
     }
-    Ok(dest)
+    Ok(())
 }
 
 /// The newest version satisfying `req`, from a newest-first list.
@@ -700,5 +789,123 @@ mod tests {
         let (_, a) = pack(root).expect("pack");
         let (_, b) = pack(root).expect("pack");
         assert_eq!(a, b, "two packs of the same tree differ");
+    }
+
+    /// The zip-slip that the `..` check does not see.
+    ///
+    /// Measured before 0.9.943, with the real `vendor` code: an archive
+    /// carrying a symlink `escape` pointing at a sibling directory,
+    /// followed by an ordinary file `escape/hacked.txt`, wrote
+    /// `hacked.txt` into that sibling. Neither entry's path is absolute
+    /// and neither contains `..`, so the guard passed both — the escape
+    /// was in the *link*, not in the name.
+    ///
+    /// `jwc add` runs on a developer's machine and in CI, and the archive
+    /// comes from whoever published the package, so this was an arbitrary
+    /// file write from a package publisher to everyone who installs it.
+    #[test]
+    fn an_archive_cannot_write_through_a_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+
+        let mut b = tar::Builder::new(Vec::new());
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_mode(0o777);
+        link.set_cksum();
+        b.append_link(&mut link, "escape", &outside).expect("link");
+        let body = b"pwned\n";
+        let mut file = tar::Header::new_gnu();
+        file.set_entry_type(tar::EntryType::Regular);
+        file.set_size(body.len() as u64);
+        file.set_mode(0o644);
+        file.set_cksum();
+        b.append_data(&mut file, "escape/hacked.txt", &body[..])
+            .expect("data");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, &b.into_inner().expect("tar")).expect("gz");
+        let bytes = gz.finish().expect("gz");
+
+        let err = unpack_into(&bytes, &dest).expect_err("a symlink must be refused");
+        assert!(
+            err.to_string().contains("symlink"),
+            "the refusal must name what it refused: {err}"
+        );
+        assert!(
+            !outside.join("hacked.txt").exists(),
+            "the file landed outside the destination"
+        );
+    }
+
+    /// The obvious form, still refused.
+    ///
+    /// `tar::Builder` will not *write* a `..` path, so the name is patched
+    /// into the header afterwards and the checksum recomputed — which is
+    /// what an attacker would do too. A guard tested only against archives
+    /// the friendly library agreed to produce is a guard tested against
+    /// nothing.
+    #[test]
+    fn an_archive_cannot_use_a_dotdot_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+
+        let mut b = tar::Builder::new(Vec::new());
+        let body = b"x";
+        let mut file = tar::Header::new_gnu();
+        file.set_entry_type(tar::EntryType::Regular);
+        file.set_size(body.len() as u64);
+        file.set_mode(0o644);
+        file.set_cksum();
+        // Same length as the name it becomes, so only the name field and
+        // the checksum change.
+        b.append_data(&mut file, "xx/escaped.txt", &body[..])
+            .expect("data");
+        let mut tarball = b.into_inner().expect("tar");
+
+        let want = b"xx/escaped.txt";
+        let at = tarball
+            .windows(want.len())
+            .position(|w| w == want)
+            .expect("the name is in the header");
+        tarball[at..at + want.len()].copy_from_slice(b"../escaped.txt");
+        // Recompute the header checksum: the unsigned sum of all 512
+        // bytes, with the checksum field itself read as spaces.
+        let h = &mut tarball[0..512];
+        h[148..156].fill(b' ');
+        let sum: u32 = h.iter().map(|b| *b as u32).sum();
+        let field = format!("{sum:06o}\0 ");
+        h[148..156].copy_from_slice(field.as_bytes());
+
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut gz, &tarball).expect("gz");
+        let bytes = gz.finish().expect("gz");
+
+        let err = unpack_into(&bytes, &dest).expect_err("`..` must be refused");
+        assert!(err.to_string().contains("unsafe path"), "{err}");
+        assert!(!dir.path().join("escaped.txt").exists());
+    }
+
+    /// An ordinary package still unpacks — the guard is a filter, not a
+    /// wall.
+    #[test]
+    fn an_ordinary_package_unpacks() {
+        let src = tempfile::tempdir().expect("tempdir");
+        std::fs::write(src.path().join("jwcproj.json"), "{\"name\":\"x\"}").expect("w");
+        std::fs::write(src.path().join("main.jwc"), "namespace x;\n").expect("w");
+        std::fs::create_dir_all(src.path().join("src")).expect("d");
+        std::fs::write(src.path().join("src/a.jwc"), "namespace x.a;\n").expect("w");
+        let (bytes, _) = pack(src.path()).expect("pack");
+
+        let out = tempfile::tempdir().expect("tempdir");
+        let dest = out.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("mkdir");
+        unpack_into(&bytes, &dest).expect("an ordinary package unpacks");
+        assert!(dest.join("main.jwc").exists());
+        assert!(dest.join("src/a.jwc").exists());
     }
 }

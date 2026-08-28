@@ -202,15 +202,56 @@ dev-dependency from a shipped one, so without this the distinction lives
 only in a comment.
 
 8.3 `jwc add` verifies a package against a checksum from a **separate**
-request, and refuses an archive entry whose path escapes its directory
-(packages §4a.6–7).
+request, and refuses an archive entry that can write outside its directory
+(packages §4a.6–7). "Escapes its directory" means more than `..`: until
+0.9.943 an archive carrying a **symlink** and then an ordinary file
+*through* it wrote outside the destination, with no `..` and no absolute
+path anywhere in it. Links of both kinds are now refused by entry type,
+the destination is re-checked after canonicalisation, and the unpacked
+size is capped. This is an arbitrary file write from a package publisher
+to everyone who installs it, so it is stated rather than folded into a
+line about paths.
 
 ---
 
-## 9. What is not covered
+## 9. Outbound requests
+
+9.1 `http.get`, `http.post`, `http.json` and `http.status` take a URL the
+program supplies, and a program may build one from a request. Two gates run
+**before** the socket opens, because a check that runs after it has already
+told the caller whether the host exists: the scheme must be `http` or
+`https`, and `JWC_HTTP_ALLOWLIST` — when set — is an exact host match.
+Redirects are not followed at all: a redirect is how an allowlisted host
+walks a caller to one that is not.
+
+9.2 `JWC_HTTP_BLOCK_PRIVATE` resolves the host and refuses every address
+it answers with. The refused set (builtins §7c.1) is deliberately wider
+than RFC 1918, because the addresses that matter are the ones a cloud puts
+credentials on — including `100.100.100.200`, Alibaba Cloud's metadata
+endpoint, which is inside carrier-grade NAT and which this refused nothing
+about until 0.9.943.
+
+9.3 It is **off by default**. A JWC service talking to a sibling container
+by name is ordinary, and a default that refused it would be turned off
+rather than configured. A deployment where a route builds a URL from
+request data should set it.
+
+9.4 **DNS rebinding is not stopped.** The host is resolved for the check
+in §9.2 and resolved again by the HTTP client when it connects; a
+short-TTL record can be public for the first and private for the second.
+Closing it means resolving once and dialling the address that was checked,
+which needs a custom resolver in the client. Stated as a gap rather than
+implied to be covered — with `JWC_HTTP_BLOCK_PRIVATE` off, which is the
+default, the question does not arise, and with it on this is the one way
+past it.
+
+---
+
+## 10. What is not covered
 
 | | Status |
 |---|---|
 | a CSRF token facility | none is provided — see §6.4 for what is, and why |
+| DNS rebinding on an outbound call | not stopped — §9.4 |
 | a 24-hour soak | the harness runs and passes at 8 cycles / 480k requests (ROADMAP v0.29.0); the full 72-cycle run is `soak.yml`, on a runner that has the hours |
 | a third-party security review | ROADMAP v1.0.0-rc.1 |

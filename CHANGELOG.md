@@ -3,6 +3,70 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.943] — the audit: what a package, a URL and a token can do — 2026-08-28
+
+### Fixed
+
+- **`jwc add` could be made to write outside its own directory.** The
+  unpack refused an absolute path and a `..`, which is the rule everyone
+  writes down, and it does not see the attack. Measured against the real
+  `vendor` code: an archive carrying a **symlink** `escape` pointing at
+  another directory, followed by an ordinary file `escape/hacked.txt`,
+  wrote `hacked.txt` into that other directory. Neither entry's path is
+  absolute and neither contains `..` — the escape is in the *link*, not
+  in the name. `jwc add` runs on a developer's machine and in CI and the
+  archive comes from whoever published the package, so this was an
+  arbitrary file write from a publisher to everyone who installs.
+
+  Symlinks and hard links are now refused **by entry type** rather than
+  resolved, along with every other exotic type; the parent is
+  canonicalised after the join and must be under the destination; and the
+  archive may not unpack to more than 64 MiB, so a gzip bomb cannot fill
+  the disk. Three tests, one of which hand-patches a `..` into a tar
+  header because `tar::Builder` will not write one — a guard tested only
+  against archives the friendly library agreed to produce is a guard
+  tested against nothing.
+
+- **`JWC_HTTP_BLOCK_PRIVATE` did not refuse `100.100.100.200`**, which is
+  Alibaba Cloud's metadata endpoint. It is inside carrier-grade NAT
+  (`100.64.0.0/10`) and in no RFC 1918 range, so a check written from
+  memory misses it. Also added: `0.0.0.0/8` (which routes to the local
+  host on Linux), `192.0.0.0/24`, `198.18.0.0/15`, `240.0.0.0/4`,
+  broadcast, multicast, and **IPv4-mapped IPv6** — `::ffff:127.0.0.1` is
+  a loopback address for which `Ipv6Addr::is_loopback` answers false.
+
+  Measured as holding, and now pinned by a test: `0x7f000001`,
+  `2130706433`, `0177.0.0.1` and `127.1` all normalise to `127.0.0.1`
+  before the check sees them, and `http://allowed.example@evil.example/`
+  has host `evil.example`.
+
+- **`jwt.sign` signed `sub` and threw the rest of the claims away.**
+  Measured: `jwt.sign({ sub: $id, role: "admin", org_id: 7 }, …)` minted
+  `{"sub":"1","iat":…,"exp":…}` with no diagnostic anywhere. Inside JWC
+  it was invisible, because `jwt.verify` answers a fixed three-field
+  record either way — but a token exists to be read by something else,
+  and every custom claim a service put in one was dropped on the way out.
+  Both backends had it and both agreed, which is why nothing caught it.
+
+  The whole record is signed now, with `iat` and `exp` supplied by the
+  builder because that is what `ttl_minutes` decides. A first argument
+  that is not a record is `E0303`; before this the rule was arity only,
+  so `jwt.sign("a string", 5, "x")` typechecked.
+
+### Verified, not changed
+
+- **The JWT verifier holds.** Attacked live with `alg: none` in three
+  spellings, a tampered payload, a payload re-signed with another secret,
+  an `alg` swapped to `RS256`, an expired token with a valid signature, a
+  future `nbf`, an empty signature and a two-segment token. Every one
+  answers null. Reading a claim off that null without a guard is `E0320`,
+  so there is no path from an unverified token to a claim.
+- **The keyset cursor holds.** MAC over the version *and* the payload,
+  constant-time compare, one answer for malformed and forged alike, and a
+  short cursor binds NULL rather than shifting the tuple.
+- The outbound guard refuses `file:`, refuses a URL with no host, and does
+  not follow redirects.
+
 ## [0.9.942] — three things the source said and the code did not — 2026-08-28
 
 ### Fixed

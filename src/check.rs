@@ -2882,8 +2882,25 @@ impl<'a> Checker<'a> {
                 arity(self, 1);
                 Ty::text()
             }
+            // The first argument is called `claims` and is signed as a
+            // whole (builtins.md §6), so a text — `json.stringify(...)`,
+            // say — mints a token carrying nothing but `iat` and `exp`.
+            // Nothing reported that before 0.9.943: the rule was arity
+            // only, so `jwt.sign("a string", 5, "x")` typechecked.
             "jwt.sign" => {
                 arity(self, 3);
+                if !matches!(
+                    a0.strip_opt(),
+                    Ty::Record(_) | Ty::Raw | Ty::Unknown | Ty::Class(_)
+                ) {
+                    self.err_note(
+                        exprs.first().map_or(span, |e| e.span),
+                        "E0303",
+                        format!("`jwt.sign` signs a record of claims, not `{a0}`"),
+                        "write the claims as a record: `jwt.sign({ sub: $id }, $secret, 60)`",
+                        "builtins.md §6",
+                    );
+                }
                 Ty::text()
             }
             // Same answer for both: `jwt.verify` is HS256 against a shared

@@ -789,16 +789,32 @@ impl<'a> Vm<'a> {
                 getrandom_fill(&mut bytes);
                 Value::Text(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
             }
+            // builtins.md §6 — the argument is called `claims`, and until
+            // 0.9.943 only `sub` of it was signed. Measured:
+            // `jwt.sign({ sub: $id, role: "admin" }, …)` minted
+            // `{"sub":"1","iat":…,"exp":…}` and the `role` was gone, with
+            // no diagnostic. Inside JWC that was invisible, because
+            // `jwt.verify` answers a fixed three-field record either way —
+            // but a token exists to be read by something else, and every
+            // custom claim a service put in one was silently dropped on the
+            // way out.
+            //
+            // `iat` and `exp` are the builder's, not the caller's: that is
+            // what `ttl_minutes` means, and a caller who wrote their own
+            // would be setting a lifetime the argument already decides.
             "jwt.sign" => {
                 let now = chrono::Utc::now().timestamp();
                 let ttl_minutes = n(2).max(1);
-                let sub = arg(0).field("sub").map(text).unwrap_or_default();
-                let payload = serde_json::json!({
-                    "sub": sub,
-                    "iat": now,
-                    "exp": now + ttl_minutes * 60,
-                })
-                .to_string();
+                let mut payload = match arg(0).to_json() {
+                    serde_json::Value::Object(m) => m,
+                    // A non-record `claims` still mints a token rather than
+                    // faulting, and the checker is where the shape is
+                    // reported (E0303).
+                    _ => serde_json::Map::new(),
+                };
+                payload.insert("iat".into(), serde_json::json!(now));
+                payload.insert("exp".into(), serde_json::json!(now + ttl_minutes * 60));
+                let payload = serde_json::Value::Object(payload).to_string();
                 Value::Text(
                     crate::jwt::sign_hs256(&payload, &s(1)).map_err(|e| fault(e.to_string()))?,
                 )

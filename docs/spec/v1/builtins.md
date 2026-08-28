@@ -173,10 +173,32 @@ Anything these do not cover is written as `for` plus an accumulator.
 | `jwt.verify(token, secret)` | `Record{sub: text, exp: bigint, iat: bigint}?` | HS256; null on invalid/expired |
 | `jwt.verify_jwks(token, jwks_url)` | `Record{sub: text, exp: bigint, iat: bigint}?` | RS256 against a published key set; null on invalid/expired |
 
-**`jwt.verify_jwks` answers the same record as `jwt.verify`**, so moving
+**`jwt.sign` signs the whole record.** Every field of `claims` becomes a
+claim, plus `iat` and `exp`, which are the builder's: `ttl_minutes` is the
+argument that decides them, so a caller's own would be overwritten. A
+first argument that is not a record is `E0303` — `json.stringify(...)`
+mints a token carrying nothing.
+
+Until 0.9.943 only `sub` was signed and the rest was dropped without a
+word. Inside JWC that was invisible, because `jwt.verify` answers a fixed
+three-field record either way; a token exists to be read by something
+else, and every custom claim a service put in one was lost on the way out.
+
+**`jwt.verify` and `jwt.verify_jwks` answer the same record**, so moving
 from a shared secret to an identity provider does not change the code that
-reads the claims. It selects the key by the token header's `kid`, fetches
-`jwks_url` and caches the result.
+reads the claims. That record is `sub`, `exp` and `iat` and nothing more —
+a claim a JWC service *mints* for an external consumer is not a claim it
+can read back. `verify_jwks` selects the key by the token header's `kid`,
+fetches `jwks_url` and caches the result.
+
+The answer is `T?`, and reading a field of it without a guard is `E0320`.
+That is what keeps an unverified token from being read: there is no path
+from `jwt.verify` to a claim that does not pass a null check first.
+
+Measured against `alg: none` (three spellings), a tampered payload, a
+payload re-signed with another secret, an `alg` swapped to `RS256`, an
+expired token with a valid signature, a future `nbf`, an empty signature
+and a two-segment token: every one answers null.
 
 The `kid` comes from the token header, which is *unauthenticated*. An
 implementation that refetched on every unknown `kid` would be a
@@ -298,10 +320,32 @@ touches the network.
 |---|---|
 | scheme | only `http` and `https`. `file:` is refused by name |
 | `JWC_HTTP_ALLOWLIST` | comma-separated hosts. Empty means no restriction |
-| `JWC_HTTP_BLOCK_PRIVATE` | resolves the host and refuses loopback, private, link-local and unspecified addresses — including `169.254.169.254`, which is the reason it exists. Off by default, because talking to a sibling container by name is ordinary |
+| `JWC_HTTP_BLOCK_PRIVATE` | resolves the host and refuses every address it answers with, from the list below. Off by default, because talking to a sibling container by name is ordinary |
 | redirects | **not followed**. A redirect is how an allowlisted host walks you to one that is not |
 
 `JWC_HTTP_TIMEOUT_SECS` bounds the whole request; default 10.
+
+The refused set is longer than the RFC 1918 three, because the addresses
+that matter are the ones a cloud puts a credential endpoint on:
+
+| Range | Why |
+|---|---|
+| `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16` | loopback and private |
+| `169.254.0.0/16` | AWS, GCP and Azure metadata at `169.254.169.254` |
+| `100.64.0.0/10` | carrier-grade NAT — **Alibaba Cloud metadata at `100.100.100.200`**, which is in no RFC 1918 range and was not refused before 0.9.943 |
+| `0.0.0.0/8` | `0.0.0.1` routes to the local host on Linux |
+| `192.0.0.0/24`, `198.18.0.0/15`, `240.0.0.0/4`, `255.255.255.255` | protocol assignments, benchmarking, reserved, broadcast |
+| multicast, and the v6 equivalents | `::1`, `fc00::/7`, `fe80::/10`, `ff00::/8` |
+| an IPv4-mapped v6 address | `::ffff:127.0.0.1` is the v4 address in a v6 spelling, and gets the v4 rules |
+
+The alternative spellings of an address — `0x7f000001`, `2130706433`,
+`0177.0.0.1`, `127.1` — are normalised to dotted-quad by WHATWG URL
+parsing before the check sees them, and `http://allowed.example@evil.example/`
+has host `evil.example`. Both are pinned by tests rather than assumed.
+
+**Not covered: DNS rebinding.** The name is resolved for the check and
+resolved again when the client connects, and a short-TTL record can change
+between the two. See security.md §9.4.
 
 ---
 
