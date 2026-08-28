@@ -505,6 +505,18 @@ impl<'a> Vm<'a> {
                 body: s(1),
                 headers: vec![("content-type".into(), crate::check::normalize_media(&s(0)))],
             },
+            "text" | "html" => Value::Response {
+                status: 200,
+                body: s(0),
+                headers: vec![(
+                    "content-type".into(),
+                    crate::check::normalize_media(if path == "text" {
+                        "text/plain; charset=utf-8"
+                    } else {
+                        "text/html; charset=utf-8"
+                    }),
+                )],
+            },
 
             // The program's own statement of where it listens. `main` is
             // evaluated at boot precisely so this runs — the argument is an
@@ -689,6 +701,8 @@ impl<'a> Vm<'a> {
                 Value::Bool(crate::password::verify_password(&s(0), &s(1)).unwrap_or(false))
             }
             "hash.sha256" => Value::Text(crate::hash::sha256_hex(&s(0))),
+            "hash.sha1" => Value::Text(crate::hash::sha1_hex(&s(0))),
+            "hash.md5" => Value::Text(crate::hash::md5_hex(&s(0))),
             "hash.hmac_sha256" => Value::Text(crate::hash::hmac_sha256_hex(&s(1), &s(0))),
             "hash.hmac_verify" => {
                 // (payload, signature, secret) — `hmac_sha256_hex` takes

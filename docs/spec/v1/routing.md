@@ -203,6 +203,8 @@ is a self-DoS. `W0602` warns on `request.path()` in a rate-limit key.
 | `internalError()` | 500 | `{"error":"internal_error"}` |
 | `statusCode(n, v)` | `n` | `v` |
 | `content(mime, body)` | 200 | `body`, verbatim, as `mime` (§6.5) |
+| `text(body)` | 200 | `body`, verbatim, as `text/plain; charset=utf-8` |
+| `html(body)` | 200 | `body`, verbatim, as `text/html; charset=utf-8` |
 
 A builder taking a message always produces `{"error": <message>}` with
 `application/json`. Every builder in this table except `content` JSON-encodes
@@ -239,7 +241,7 @@ return json($x) with { "Cache-Control": "no-store" } cookie("sid", $sid, { http_
 `response.status()` are legal only inside an `after` block
 (middleware §5).
 
-### 6.5 `content(mime, body)` — the non-JSON body
+### 6.5 `content(mime, body)`, `text(body)`, `html(body)` — the non-JSON body
 
 ```jwc
 namespace pages;

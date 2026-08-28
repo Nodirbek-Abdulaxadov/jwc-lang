@@ -3,6 +3,41 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.930] — four names for code that was already here — 2026-08-28
+
+```jwc
+route GET "" { return text("Hello, World!"); }
+```
+
+That is the program the owner wrote first, and `text` was not a name. Nor
+was `html`, nor `hash.sha1`, nor `hash.md5`.
+
+None of the four needed implementing. `src/hash.rs` computed sha1 and md5
+already; the native prelude already defined `jwc_b_text`, `jwc_b_html`,
+`jwc_b_sha1` and `jwc_b_md5` — I found out by *duplicating* two of them and
+watching the generated crate refuse to compile with "defined multiple
+times". What was missing was the name: an arm in the checker, an arm in the
+interpreter, a row in codegen's mapping table.
+
+That is the third time this shape has turned up in this series — the HTTP
+prelude in 0.9.922, `src/jwks.rs`, and now these — so it is worth naming:
+**code that ships, compiles, and cannot be called from the language.** The
+cutover moved a front-end and left the runtime behind it whole, and nothing
+checks that the two agree on what exists.
+
+`text(s)` and `html(s)` are `content(mime, s)` with the media type filled
+in, which is correct and three times as long to write for the two bodies
+people actually send. A record body is `E0736`, the same code `content`
+already used for the same mistake.
+
+`hash.sha1` and `hash.md5` are for reading a checksum someone else
+produced. Neither is what a password goes through — `hash.password` is —
+and the docs row says so.
+
+Checked on both backends: `Hello, World! [text/plain; charset=utf-8]`,
+`<h1>salom</h1> [text/html; charset=utf-8]`, and the known-answer digests
+for `"abc"`, identical from `jwc serve` and from the compiled binary.
+
 ## [0.9.929] — `const`, and writing a field — 2026-08-28
 
 The last two of the four the grammar diff turned up.

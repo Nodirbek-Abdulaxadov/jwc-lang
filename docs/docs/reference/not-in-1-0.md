@@ -40,7 +40,9 @@ The four things this page used to list as missing:
 | **In-process cache** | `cache.get` / `cache.set` / `cache.del`, bounded with eviction and `/metrics` counters. Behind more than one replica use `redis.*` instead: each replica has its own in-process cache, so a rate limiter built on one admits N times the limit |
 | **Outbound email** | `mail.send(to, subject, html)` over SMTP, configured with `JWC_SMTP_*`. It raises when unconfigured rather than pretending to send |
 
-Also present, and sometimes assumed missing: `redis.*`, `insert … buffered`
+Also present, and sometimes assumed missing: `while` and `x += 1`, `const`,
+writing a field (`o.a = 1`), `text(...)` / `html(...)`, `hash.sha1` /
+`hash.md5`, `redis.*`, `insert … buffered`
 for writes a request should not wait for, `static "/assets" from "public"`
 for a directory of files — which `jwc build` puts *inside* the binary, so
 there is nothing to ship beside it — and the native AOT backend

@@ -1709,3 +1709,68 @@ fn a_const_and_a_field_assignment_check_and_are_refused_when_wrong() {
         "an unknown base should be E0211"
     );
 }
+
+/// `text`, `html`, `hash.sha1` and `hash.md5` — four names whose
+/// implementations were already in the tree and reachable from nothing.
+///
+/// `src/hash.rs` computed sha1 and md5, the native prelude defined
+/// `jwc_b_text`, `jwc_b_html`, `jwc_b_sha1` and `jwc_b_md5`, and no name in
+/// the language reached any of them. That is the same shape as `src/jwks.rs`
+/// and as the HTTP prelude before 0.9.922: code that ships, is compiled, and
+/// cannot be called.
+#[test]
+fn the_four_builtins_whose_implementations_were_already_here_are_reachable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         routes \"/\" {\n\
+         \x20   route GET \"t\" { return text(\"hi\"); }\n\
+         \x20   route GET \"h\" { return html(\"<b>x</b>\"); }\n\
+         \x20   route GET \"d\" { return json({ a: hash.md5(\"abc\"), b: hash.sha1(\"abc\") }); }\n\
+         }\n\
+         function main() { serve(8080); }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    assert!(!ws.has_parse_errors(), "{}", ws.parse_errors().join(""));
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    let errors: Vec<String> = jwc::check::check(&ws, &sym, &built.model)
+        .diags
+        .iter()
+        .filter(|(_, d)| d.severity == jwc::diag::Severity::Error)
+        .map(|(_, d)| format!("{}: {}", d.code, d.message))
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // And the native backend reaches the same four, by the names the
+    // prelude already defined.
+    let rust = jwc::native::codegen_for_test(&ws).expect("codegen");
+    for f in ["jwc_b_text", "jwc_b_html", "jwc_b_md5", "jwc_b_sha1"] {
+        assert!(rust.contains(f), "the generated crate never calls `{f}`");
+    }
+}
+
+/// A non-text body in `text(...)` is the same mistake `content(...)` already
+/// reports, and gets the same code.
+#[test]
+fn text_of_a_record_is_refused_the_way_content_is() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("a.jwc"),
+        "namespace n;\n\
+         routes \"/\" { route GET \"\" { return text({ a: 1 }); } }\n",
+    )
+    .expect("write");
+    let ws = jwc::workspace::Workspace::load(dir.path()).expect("load");
+    let built = jwc::model::build(&ws);
+    let sym = jwc::symbols::build(&ws, &built.model);
+    assert!(
+        jwc::check::check(&ws, &sym, &built.model)
+            .diags
+            .iter()
+            .any(|(_, d)| d.code == "E0736"),
+        "a record body should be E0736"
+    );
+}

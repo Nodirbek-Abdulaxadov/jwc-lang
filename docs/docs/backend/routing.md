@@ -82,6 +82,8 @@ at startup rather than a coin flip at run time.
 | `statusCode(n, v)` | any |
 | `redirect(n, url)` | any 3xx, with `Location` |
 | `content(mime, body)` | 200, body verbatim |
+| `text(body)` | 200, `text/plain; charset=utf-8` |
+| `html(body)` | 200, `text/html; charset=utf-8` |
 
 A builder applied to something that is **already** a response replaces its
 status and keeps its body — so `created(json(row))` is 201 with that

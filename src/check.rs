@@ -2415,6 +2415,31 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Response
             }
+            // `text(s)` and `html(s)` — `content(mime, s)` with the media
+            // type filled in. 0.9 had both and the cutover kept only the
+            // general form, which is correct and three times as long to
+            // write for the two bodies people actually send.
+            "text" | "html" => {
+                arity(self, 1);
+                let body = args.first().cloned().unwrap_or(Ty::Unknown);
+                if !matches!(body, Ty::Unknown) && !matches!(body, Ty::Scalar(sc) if sc.is_text()) {
+                    self.err_note(
+                        exprs.first().map(|e| e.span).unwrap_or(span),
+                        "E0736",
+                        format!("`{path}(...)` body is `{body}`, not `text`"),
+                        "the body is sent verbatim: build the string first, or \
+                         use `json(...)` for a structured body",
+                        "routing.md §6.5",
+                    );
+                }
+                let mime = if path == "text" {
+                    "text/plain; charset=utf-8"
+                } else {
+                    "text/html; charset=utf-8"
+                };
+                self.record_response_as(200, Ty::text(), Some(normalize_media(mime)));
+                Ty::Response
+            }
             "cookie" => Ty::Response,
             "serve" => {
                 arity(self, 1);
@@ -2621,6 +2646,14 @@ impl<'a> Checker<'a> {
             }
             "hash.verify" | "hash.hmac_verify" => Ty::boolean(),
             "hash.sha256" => {
+                arity(self, 1);
+                Ty::text()
+            }
+            // Legacy digests. 0.9 had both and `src/hash.rs` still computes
+            // them; only the name was missing. They are here for reading a
+            // checksum someone else produced — `hash.password` is what a
+            // password goes through, and neither of these is that.
+            "hash.sha1" | "hash.md5" => {
                 arity(self, 1);
                 Ty::text()
             }

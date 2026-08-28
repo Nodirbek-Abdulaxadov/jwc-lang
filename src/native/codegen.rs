@@ -122,6 +122,8 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         "tooManyRequests" => "jwc_b_too_many_requests",
         "redirect" => "jwc_b_redirect",
         "content" => "jwc_b_content",
+        "text" => "jwc_b_text",
+        "html" => "jwc_b_html",
 
         // Text — builtins.md §4.
         "string.lower" => "jwc_b_lower",
@@ -144,6 +146,8 @@ fn prelude_fn(name: &str) -> Option<&'static str> {
         // Hashing and tokens — builtins.md §6.
         "hash.password" => "jwc_b_hash_password",
         "hash.sha256" => "jwc_b_sha256",
+        "hash.sha1" => "jwc_b_sha1",
+        "hash.md5" => "jwc_b_md5",
         "hash.hmac_sha256" => "jwc_b_hmac_sha256",
         "jwt.sign" => "jwc_b_v1_jwt_sign",
         "jwt.verify" => "jwc_b_jwt_verify",

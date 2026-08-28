@@ -80,6 +80,8 @@ Most of the time the answer is that the aggregate belongs in the query.
 | `hash.password(p)` | Argon2id, salted |
 | `hash.verify(p, stored)` | against the stored PHC string |
 | `hash.sha256(s)` | hex |
+| `hash.sha1(s)` | hex — for reading a checksum someone else produced, not for passwords |
+| `hash.md5(s)` | hex — same caveat |
 | `hash.hmac_sha256(msg, key)` | hex |
 | `hash.hmac_verify(msg, sig, key)` | constant-time |
 | `crypto.token(n)` | `n` CSPRNG bytes, base64url |
