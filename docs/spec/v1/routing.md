@@ -445,7 +445,27 @@ that handler returns, which is why `socket.close()` followed by
 `socket.send(...)` drops the send: the close came first. A handler that
 panics therefore cannot leave a half-written frame on the wire either.
 
-### 9.4 What is not here
+### 9.4 Message size
+
+A socket message and a single frame are both capped at
+`server { max_body_bytes }` (config §3.1). Over the cap the connection
+closes; the handler does not run.
+
+The cap is the body cap because a frame is a thing a peer sends, and
+`max_body_bytes` is the knob that says how large that may be. Until
+0.9.944 it stopped at the HTTP body and the upgrade carried no limit of
+its own, so the real ceiling was the WebSocket library's 64 MiB default
+whatever the config said. Measured against a server configured for 1024
+bytes: a **5,000,000** byte text frame was accepted and handled, about
+5000x the number in the file. An author who set the knob had not bought
+what it says.
+
+The cap is per connection, so N peers still cost N x the cap — this is a
+bound on one message, not a memory budget. `0`, the escape hatch for a
+deployment behind a proxy that enforces its own size, leaves the library
+default in place here too.
+
+### 9.5 What is not here
 
 `OpenAPI` cannot describe a WebSocket, so `jwc openapi` lists sockets
 under `x-jwc-sockets` rather than emitting the upgrade as a `GET` that

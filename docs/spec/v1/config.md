@@ -95,7 +95,7 @@ default.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `max_body_bytes` | `int` | 1048576 | over → 413 before middleware (routing §5.1) |
+| `max_body_bytes` | `int` | 1048576 | over → 413 before middleware (routing §5.1); also caps a socket message and frame (routing §9.4) |
 | `request_timeout` | duration | `30s` | whole request |
 | `header_timeout` | duration | `10s` | request line + headers |
 | `max_page_size` | `int` | 100 | ceiling for `page … size` (queries §9.2) |

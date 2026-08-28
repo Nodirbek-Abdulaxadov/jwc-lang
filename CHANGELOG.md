@@ -3,6 +3,39 @@
 All notable changes to JWC are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.944] — `max_body_bytes` now covers the socket — 2026-08-28
+
+### Fixed
+
+- **A WebSocket message ignored `server { max_body_bytes }`.** The cap is
+  documented as the largest thing a peer may send, and it stopped at the
+  HTTP body: the upgrade carried no limit of its own, so the real ceiling
+  was the WebSocket library's 64 MiB default whatever the config said.
+
+  Measured against a server configured for `max_body_bytes = 1024`: a
+  **5,000,000** byte text frame was accepted, handled, and echoed —
+  roughly 5000x the number in the file — and 64 MiB was where the
+  connection finally died. An author who set the knob had not bought what
+  it says.
+
+  Both backends now apply it to the message *and* the frame. At 1024 the
+  message is still delivered; at 1025 the connection closes and the
+  handler does not run. The `0` escape hatch, for a deployment behind a
+  proxy that enforces its own size, leaves the library default in place
+  here too, exactly as it does for a body.
+
+  The cap is per connection, so N peers still cost N x the cap. This is a
+  bound on one message, not a memory budget, and §9.4 says so rather than
+  leaving the reader to assume the stronger claim.
+
+### Tests
+
+- `tests/socket_limits.rs` drives a real server over a real socket and
+  hand-rolls the frame, because the frame this test needs is one a client
+  library would refuse to build. Confirmed to fail without the fix
+  (`Echoed("len=1025")` where `Refused` is required) rather than only
+  passing with it.
+
 ## [0.9.943] — the audit: what a package, a URL and a token can do — 2026-08-28
 
 ### Fixed

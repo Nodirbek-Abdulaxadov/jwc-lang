@@ -1750,6 +1750,18 @@ pub async fn serve(program: Arc<Program>, port: u16) -> Result<()> {
         if let Some(upgrade) = upgrade {
             let is_socket = match_route(&program, "GET", uri.path()).is_some_and(|(r, _)| r.socket);
             if is_socket {
+                // `max_body_bytes` is the cap on the largest thing a peer
+                // may send, and until 0.9.944 it stopped at the HTTP body.
+                // Measured with `max_body_bytes = 1024`: a **5,000,000**
+                // byte text frame was accepted and handled, ~5000x the
+                // configured limit, because the upgrade carried no limit
+                // of its own and tungstenite's default is 64 MiB. An
+                // author who set the knob had not bought what it says.
+                //
+                // Per connection, so N peers still cost N x the cap; the
+                // point is that the number is now the one in the config.
+                let cap = program.server.max_body_bytes;
+                let upgrade = upgrade.max_message_size(cap).max_frame_size(cap);
                 return socket_dispatch(
                     program,
                     upgrade,

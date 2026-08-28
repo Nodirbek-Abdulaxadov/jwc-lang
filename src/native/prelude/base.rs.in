@@ -3347,7 +3347,19 @@ async fn jwc_dispatch(
     // it is an ordinary GET at a path that has no HTTP handler, which is a
     // 400 rather than a 404: the path exists, the request is wrong.
     let socket_upgrade = match (kind, socket_fns, upgrade) {
-        (RouteKind::Ws, Some(fns), Some(up)) => Some((fns, up)),
+        // The socket message cap is the body cap: `max_body_bytes` is the
+        // largest thing a peer may send, and a frame is a thing a peer
+        // sends. Without this the limit is tungstenite's 64 MiB default,
+        // whatever the config said — measured at 5 MB through a server
+        // configured for 1 KiB. `None` (the `0` escape hatch) leaves the
+        // library default alone, same as it does for a body.
+        (RouteKind::Ws, Some(fns), Some(up)) => Some((
+            fns,
+            match jwc_max_body_bytes() {
+                Some(cap) => up.max_message_size(cap).max_frame_size(cap),
+                None => up,
+            },
+        )),
         (RouteKind::Ws, _, None) => {
             return axum::response::Response::builder()
                 .status(400)
